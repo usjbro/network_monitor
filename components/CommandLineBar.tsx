@@ -76,7 +76,6 @@ export const CommandLineBar: React.FC<CommandLineBarProps> = ({
             <div><strong className="text-emerald-400">scenario [web|video|ddos]</strong>: Trigger simulation scenario</div>
             <div><strong className="text-emerald-400">theme [sophisticated|macos_pro|matrix]</strong>: Switch visual theme</div>
             <div><strong className="text-emerald-400">pause / resume</strong>: Pause or resume real-time metrics</div>
-            <div><strong className="text-emerald-400">ai &lt;question&gt;</strong>: Run Gemini AI protocol diagnosis</div>
           </div>
         </div>
       )}

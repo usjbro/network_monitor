@@ -2,16 +2,10 @@
 
 import React, { useState } from 'react';
 import {
-  Activity,
-  ArrowDownRight,
-  ArrowUpRight,
   Filter,
   Lock,
   Network,
   Search,
-  Server,
-  Shield,
-  Zap,
 } from 'lucide-react';
 import { NetworkConnection, ThemeConfig } from '@/lib/types';
 import { formatSpeed, formatBytes } from '@/lib/osi-engine';

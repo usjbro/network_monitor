@@ -2,12 +2,7 @@
 
 import React from 'react';
 import {
-  AlertTriangle,
-  Globe,
-  Radio,
-  ShieldAlert,
   Sliders,
-  Sparkles,
   Zap,
 } from 'lucide-react';
 import { TrafficScenario, ThemeConfig } from '@/lib/types';

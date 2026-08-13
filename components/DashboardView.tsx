@@ -6,14 +6,10 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   ChevronRight,
-  Cpu,
   Layers,
   Network,
-  Radio,
-  Server,
   ShieldCheck,
   ShieldAlert,
-  Zap,
 } from 'lucide-react';
 import { OSILayerInfo, SystemStats, ThemeConfig, OSILayerNumber } from '@/lib/types';
 import { formatBytes, formatSpeed } from '@/lib/osi-engine';
@@ -227,9 +223,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   {/* Speeds & Packet Rate */}
                   <div className="flex items-center space-x-4 text-[11px]">
                     <div className="text-right">
-                      <span className="text-emerald-400 font-bold">â {formatSpeed(layer.rxSpeed)}</span>
+                      <span className="text-emerald-400 font-bold">↓ {formatSpeed(layer.rxSpeed)}</span>
                       <span className="opacity-40 mx-1">|</span>
-                      <span className="text-sky-400 font-bold">â1 {formatSpeed(layer.txSpeed)}</span>
+                      <span className="text-sky-400 font-bold">↑ {formatSpeed(layer.txSpeed)}</span>
                     </div>
 
                     <div className="hidden sm:block text-slate-400 text-[10px] w-24 text-right">

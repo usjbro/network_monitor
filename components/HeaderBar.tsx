@@ -8,13 +8,9 @@ import {
   Pause,
   Play,
   RotateCcw,
-  Sparkles,
   Terminal,
   Tv,
-  Zap,
   Globe,
-  SlidersHorizontal,
-  Download,
   Apple,
 } from 'lucide-react';
 import { SystemStats, TerminalTheme, ThemeConfig, TrafficScenario } from '@/lib/types';

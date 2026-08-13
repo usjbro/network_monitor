@@ -4,15 +4,7 @@ import React, { useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
-  Cpu,
-  Database,
-  Globe,
   Layers,
-  Lock,
-  Network,
-  Radio,
-  Server,
-  Zap,
 } from 'lucide-react';
 import { OSILayerInfo, ThemeConfig, OSILayerNumber } from '@/lib/types';
 import { formatSpeed } from '@/lib/osi-engine';

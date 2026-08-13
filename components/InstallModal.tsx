@@ -13,7 +13,6 @@ import {
   CheckCircle2,
   ExternalLink,
   ShieldCheck,
-  Zap,
 } from 'lucide-react';
 import { ThemeConfig } from '@/lib/types';
 
@@ -25,7 +24,7 @@ interface InstallModalProps {
 
 export const InstallModal: React.FC<InstallModalProps> = ({ isOpen, onClose, theme }) => {
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  const [activeTab, setActiveTab] = useState<'cli' | 'pwa' | 'brew'>('cli');
+  const [activeTab, setActiveTab] = useState<'cli' | 'pwa'>('cli');
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isInstalled, setIsInstalled] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -64,16 +63,6 @@ export const InstallModal: React.FC<InstallModalProps> = ({ isOpen, onClose, the
       title: 'macOS Terminal One-Liner (cURL)',
       desc: 'Installs osi-mon binary to ~/.local/bin in seconds',
       code: `curl -sSL ${installScriptUrl} | bash`,
-    },
-    {
-      title: 'Homebrew (macOS)',
-      desc: 'Install via Homebrew package manager',
-      code: `brew tap osi-mon/tools && brew install osi-mon`,
-    },
-    {
-      title: 'npm Global Package',
-      desc: 'Install globally via Node.js / npm',
-      code: `npm install -g osi-mon-cli`,
     },
     {
       title: 'macOS Zsh / Bash Shell Alias',
@@ -168,17 +157,6 @@ exec $SHELL
           >
             <Laptop className="h-3.5 w-3.5" />
             <span>macOS Desktop App (PWA)</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('brew')}
-            className={`flex items-center space-x-1.5 px-3 py-2 rounded-t border-t border-x transition ${
-              activeTab === 'brew'
-                ? 'bg-slate-900 border-slate-700 text-amber-400 font-bold'
-                : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Apple className="h-3.5 w-3.5" />
-            <span>Homebrew & Config</span>
           </button>
         </div>
 
@@ -291,39 +269,6 @@ exec $SHELL
                   <li>
                     <strong className="text-slate-200">Arc Browser:</strong> Open command bar (<kbd className="bg-slate-800 px-1 rounded">⌘T</kbd>) and type <span className="text-sky-400">Save as App</span>.
                   </li>
-                </ul>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'brew' && (
-            <div className="space-y-4">
-              <div className="p-3 rounded bg-amber-950/40 border border-amber-800/80 text-amber-200 flex items-start space-x-3">
-                <Zap className="h-5 w-5 text-amber-400 shrink-0 mt-0.5" />
-                <div>
-                  <h4 className="font-bold text-sm text-amber-300">Homebrew Tap & macOS Shell Integration</h4>
-                  <p className="text-amber-300/80 text-[11px] mt-0.5">
-                    Integrate directly into your macOS zsh/bash startup scripts and iTerm2 profiles.
-                  </p>
-                </div>
-              </div>
-
-              <div className="bg-slate-950 border border-slate-800 p-3 rounded space-y-2">
-                <div className="font-bold text-slate-200">Quick zsh alias function (~/.zshrc):</div>
-                <pre className="bg-slate-900 p-2.5 rounded text-emerald-400 text-[11px] border border-slate-800 overflow-x-auto">
-{`# OSI NetStriker macOS Terminal function
-function osimon() {
-  curl -sSL ${installScriptUrl} | bash
-}`}
-                </pre>
-              </div>
-
-              <div className="bg-slate-950 border border-slate-800 p-3 rounded space-y-2">
-                <div className="font-bold text-slate-200">Recommended macOS Terminal Settings:</div>
-                <ul className="text-slate-400 space-y-1 text-[11px]">
-                  <li>• <strong className="text-slate-200">Font:</strong> SF Mono, MenLo, or JetBrains Mono (12pt - 14pt)</li>
-                  <li>• <strong className="text-slate-200">Color Profile:</strong> Pro, Homebrew, or Snazzy (built into OSI NetStriker theme menu)</li>
-                  <li>• <strong className="text-slate-200">Keymap Shortcuts:</strong> <kbd className="bg-slate-800 px-1 rounded">⌘+K</kbd> (Clear), <kbd className="bg-slate-800 px-1 rounded">⌘+P</kbd> (Pause/Play), <kbd className="bg-slate-800 px-1 rounded">⌘+1-7</kbd> (Jump to Layer)</li>
                 </ul>
               </div>
             </div>

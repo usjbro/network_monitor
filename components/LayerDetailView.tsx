@@ -6,13 +6,7 @@ import {
   Activity,
   CheckCircle2,
   Cpu,
-  HelpCircle,
   Layers,
-  Radio,
-  Server,
-  ShieldCheck,
-  Sparkles,
-  Zap,
 } from 'lucide-react';
 import { OSILayerInfo, ThemeConfig, OSILayerNumber } from '@/lib/types';
 import { formatSpeed, formatBytes } from '@/lib/osi-engine';

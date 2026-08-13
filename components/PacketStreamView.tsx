@@ -2,15 +2,10 @@
 
 import React, { useState } from 'react';
 import {
-  Activity,
   Code,
-  FileText,
-  Filter,
-  Layers,
   Pause,
   Play,
   Search,
-  Shield,
   Trash2,
 } from 'lucide-react';
 import { PacketFrame, ThemeConfig, OSILayerNumber } from '@/lib/types';
@@ -144,7 +139,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
 
                   {/* Packet summary */}
                   <div className="flex-1 min-w-0 truncate text-slate-200">
-                    <span className="text-slate-400">{pkt.src} â†’ {pkt.dst}:</span> {pkt.summary}
+                    <span className="text-slate-400">{pkt.src} → {pkt.dst}:</span> {pkt.summary}
                   </div>
 
                   {/* Length */}
@@ -180,7 +175,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                 {/* Layer 7 */}
                 {selectedPacket.headerBreakdown.layer7 && (
                   <div className="p-2 rounded bg-slate-950 border border-emerald-800/60 space-y-1">
-                    <div className="font-bold text-emerald-400 text-[10px]">â–¶ Layer 7 (Application): {selectedPacket.headerBreakdown.layer7.app}</div>
+                    <div className="font-bold text-emerald-400 text-[10px]">▶ Layer 7 (Application): {selectedPacket.headerBreakdown.layer7.app}</div>
                     <div className="text-[10px] text-slate-300">
                       Method: {selectedPacket.headerBreakdown.layer7.methodOrType} | Path: {selectedPacket.headerBreakdown.layer7.pathOrQuery}
                     </div>
@@ -190,7 +185,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                 {/* Layer 6 */}
                 {selectedPacket.headerBreakdown.layer6 && (
                   <div className="p-2 rounded bg-slate-950 border border-cyan-800/60 space-y-1">
-                    <div className="font-bold text-cyan-400 text-[10px]">â–¶ Layer 6 (Presentation): {selectedPacket.headerBreakdown.layer6.tlsVersion}</div>
+                    <div className="font-bold text-cyan-400 text-[10px]">▶ Layer 6 (Presentation): {selectedPacket.headerBreakdown.layer6.tlsVersion}</div>
                     <div className="text-[10px] text-slate-300">
                       Cipher: {selectedPacket.headerBreakdown.layer6.cipherSuite}
                     </div>
@@ -200,9 +195,9 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                 {/* Layer 4 */}
                 {selectedPacket.headerBreakdown.layer4 && (
                   <div className="p-2 rounded bg-slate-950 border border-amber-800/60 space-y-1">
-                    <div className="font-bold text-amber-400 text-[10px]">â–¶ Layer 4 (Transport): {selectedPacket.headerBreakdown.layer4.transport}</div>
+                    <div className="font-bold text-amber-400 text-[10px]">▶ Layer 4 (Transport): {selectedPacket.headerBreakdown.layer4.transport}</div>
                     <div className="text-[10px] text-slate-300">
-                      Ports: {selectedPacket.headerBreakdown.layer4.srcPort} â†’ {selectedPacket.headerBreakdown.layer4.dstPort} | Flags: {selectedPacket.headerBreakdown.layer4.flags}
+                      Ports: {selectedPacket.headerBreakdown.layer4.srcPort} → {selectedPacket.headerBreakdown.layer4.dstPort} | Flags: {selectedPacket.headerBreakdown.layer4.flags}
                     </div>
                   </div>
                 )}
@@ -210,7 +205,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                 {/* Layer 3 */}
                 {selectedPacket.headerBreakdown.layer3 && (
                   <div className="p-2 rounded bg-slate-950 border border-rose-800/60 space-y-1">
-                    <div className="font-bold text-rose-400 text-[10px]">â–¶ Layer 3 (Network): {selectedPacket.headerBreakdown.layer3.ipVersion}</div>
+                    <div className="font-bold text-rose-400 text-[10px]">▶ Layer 3 (Network): {selectedPacket.headerBreakdown.layer3.ipVersion}</div>
                     <div className="text-[10px] text-slate-300">
                       Src IP: {selectedPacket.headerBreakdown.layer3.srcIp} | Dst IP: {selectedPacket.headerBreakdown.layer3.dstIp} | TTL: {selectedPacket.headerBreakdown.layer3.ttl}
                     </div>
@@ -220,9 +215,9 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                 {/* Layer 2 */}
                 {selectedPacket.headerBreakdown.layer2 && (
                   <div className="p-2 rounded bg-slate-950 border border-purple-800/60 space-y-1">
-                    <div className="font-bold text-purple-400 text-[10px]">â–¶ Layer 2 (Data Link): Ethernet II</div>
+                    <div className="font-bold text-purple-400 text-[10px]">▶ Layer 2 (Data Link): Ethernet II</div>
                     <div className="text-[10px] text-slate-300">
-                      MAC: {selectedPacket.headerBreakdown.layer2.srcMac} â†’ {selectedPacket.headerBreakdown.layer2.dstMac}
+                      MAC: {selectedPacket.headerBreakdown.layer2.srcMac} → {selectedPacket.headerBreakdown.layer2.dstMac}
                     </div>
                   </div>
                 )}
