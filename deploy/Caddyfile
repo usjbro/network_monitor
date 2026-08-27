@@ -1,0 +1,28 @@
+{
+	auto_https off
+}
+
+# Defaults to a loopback-only test port so nothing here is LAN-reachable
+# until you deliberately change CADDY_LISTEN_ADDR to ":443" (see
+# deploy/README.md step 5). Never hardcode ":443" here directly.
+#
+# Uses the hostname "localhost", not the bare IP "127.0.0.1": Caddy
+# auto-enables strict SNI-Host enforcement whenever client_auth is
+# configured, and most TLS clients (confirmed: curl on macOS) don't send
+# an SNI value when connecting to a literal IP address -- every request
+# then gets rejected with HTTP 421 Misdirected Request regardless of
+# whether a client cert is presented, before cert verification even
+# happens. Reproduced and confirmed while writing this plan: swapping to
+# a hostname target (with a server cert SAN that includes it, already
+# true here since deploy/setup-ca.sh's SANs include "localhost") fixes
+# it. Keep this as a hostname if you ever change the default port/host.
+{$CADDY_LISTEN_ADDR:localhost:8443} {
+	tls {$CADDY_CERT_DIR:deploy/certs}/server.pem {$CADDY_CERT_DIR:deploy/certs}/server-key.pem {
+		client_auth {
+			mode require_and_verify
+			trusted_ca_cert_file {$CADDY_CERT_DIR:deploy/certs}/ca-root.pem
+		}
+	}
+
+	reverse_proxy 127.0.0.1:3000
+}
