@@ -33,11 +33,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 }) => {
   const maxRxTx = Math.max(...historyRx, ...historyTx, 1);
 
-  // Total active sockets across layers
-  const totalSockets = layers.reduce((acc, l) => acc + l.activeSockets, 0);
+  // Active sockets: the agent reports the SAME activeSockets count for both
+  // L3 and L4 (every established flow is simultaneously "L3 active" and "L4
+  // active"), plus a separate L7 count for flows with a recognized app
+  // protocol — summing across layers would double/triple-count every
+  // connection. Layer 4 (transport) is the natural "how many active
+  // connections" metric.
+  const totalSockets = layers.find((l) => l.layer === 4)?.activeSockets ?? 0;
 
-  // Overall system health status
-  const avgError = layers.reduce((acc, l) => acc + l.errorRate, 0) / layers.length;
+  // Overall system health status. Only layers 3, 4, and 7 carry a measured
+  // error rate — layers 1/2/5/6 aren't independently observable from
+  // captured packets and always report 0, so averaging over all 7 layers
+  // dilutes the real value. Average only over the layers this agent
+  // actually measures.
+  const MEASURED_ERROR_LAYERS = [3, 4, 7];
+  const measuredLayers = layers.filter((l) => MEASURED_ERROR_LAYERS.includes(l.layer));
+  const avgError =
+    measuredLayers.length > 0
+      ? measuredLayers.reduce((acc, l) => acc + l.errorRate, 0) / measuredLayers.length
+      : 0;
   const isHealthy = avgError < 0.2;
 
   return (
@@ -51,7 +65,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <ArrowDownRight className="h-3.5 w-3.5 text-emerald-400" />
               <span>INBOUND (RX)</span>
             </span>
-            <span className="text-[10px] text-emerald-400 bg-emerald-950/60 px-1 rounded">LIVE</span>
           </div>
           <div className="text-lg font-bold text-emerald-400 tracking-tight">
             {formatSpeed(stats.rxTotalMbps * 1024 * 1024)}
@@ -69,7 +82,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <ArrowUpRight className="h-3.5 w-3.5 text-sky-400" />
               <span>OUTBOUND (TX)</span>
             </span>
-            <span className="text-[10px] text-sky-400 bg-sky-950/60 px-1 rounded">LIVE</span>
           </div>
           <div className="text-lg font-bold text-sky-400 tracking-tight">
             {formatSpeed(stats.txTotalMbps * 1024 * 1024)}
@@ -87,7 +99,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Network className="h-3.5 w-3.5 text-indigo-400" />
               <span>ACTIVE SOCKETS</span>
             </span>
-            <span className="text-[10px] text-indigo-400 bg-indigo-950/60 px-1 rounded">L4/L5/L7</span>
+            <span className="text-[10px] text-indigo-400 bg-indigo-950/60 px-1 rounded">L4</span>
           </div>
           <div className="text-lg font-bold text-indigo-300 tracking-tight">
             {totalSockets} <span className="text-xs font-normal opacity-70">open streams</span>

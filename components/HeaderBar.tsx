@@ -10,10 +10,9 @@ import {
   RotateCcw,
   Terminal,
   Tv,
-  Globe,
   Apple,
 } from 'lucide-react';
-import { SystemStats, TerminalTheme, ThemeConfig, TrafficScenario } from '@/lib/types';
+import { SystemStats, TerminalTheme, ThemeConfig } from '@/lib/types';
 import { THEMES, formatSpeed } from '@/lib/osi-engine';
 
 interface HeaderBarProps {
@@ -23,13 +22,9 @@ interface HeaderBarProps {
   isPaused: boolean;
   onTogglePause: () => void;
   onReset: () => void;
-  scenario: TrafficScenario;
-  onSelectScenario: (scen: TrafficScenario) => void;
   crtEnabled: boolean;
   onToggleCrt: () => void;
   onOpenInstall: () => void;
-  speedMultiplier: number;
-  onChangeSpeedMultiplier: (mult: number) => void;
 }
 
 export const HeaderBar: React.FC<HeaderBarProps> = ({
@@ -39,13 +34,9 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   isPaused,
   onTogglePause,
   onReset,
-  scenario,
-  onSelectScenario,
   crtEnabled,
   onToggleCrt,
   onOpenInstall,
-  speedMultiplier,
-  onChangeSpeedMultiplier,
 }) => {
   const formatUptime = (sec: number) => {
     const hrs = Math.floor(sec / 3600);
@@ -132,36 +123,6 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
           >
             <RotateCcw className="h-3.5 w-3.5" />
           </button>
-
-          {/* Speed Multiplier */}
-          <select
-            value={speedMultiplier}
-            onChange={(e) => onChangeSpeedMultiplier(Number(e.target.value))}
-            className="bg-slate-900 border border-slate-700 text-slate-200 text-[11px] rounded px-1.5 py-1 focus:outline-none"
-            title="Traffic Tick Speed"
-          >
-            <option value={0.5}>0.5x Tick</option>
-            <option value={1}>1.0x Normal</option>
-            <option value={2}>2.0x Fast</option>
-            <option value={5}>5.0x Turbo</option>
-          </select>
-
-          {/* Traffic Scenario Picker */}
-          <div className="hidden sm:flex items-center space-x-1 bg-slate-900/90 border border-slate-700 rounded px-2 py-0.5">
-            <Globe className="h-3 w-3 opacity-60" />
-            <select
-              value={scenario}
-              onChange={(e) => onSelectScenario(e.target.value as TrafficScenario)}
-              className="bg-transparent text-slate-200 text-[11px] focus:outline-none font-mono"
-            >
-              <option value="normal" className="bg-slate-900">Scenario: Normal Mix</option>
-              <option value="web_heavy" className="bg-slate-900">Scenario: Web Browsing</option>
-              <option value="video_stream" className="bg-slate-900">Scenario: Video Streaming</option>
-              <option value="syn_flood" className="bg-slate-900 text-rose-400 font-bold">Scenario: SYN Flood (DDoS)</option>
-              <option value="iot_mesh" className="bg-slate-900">Scenario: IoT Swarm</option>
-              <option value="dns_storm" className="bg-slate-900">Scenario: DNS Query Storm</option>
-            </select>
-          </div>
 
           {/* CRT Toggle */}
           <button

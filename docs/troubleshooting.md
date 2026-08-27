@@ -1,0 +1,60 @@
+# Troubleshooting
+
+## "capture agent not connected" banner won't go away
+
+1. Is the agent actually running? Check Terminal 1 for `capture-agent: listening on 127.0.0.1:9990`. If it crashed or was never started, `cd capture-agent && cargo run --release`.
+2. Is anything else listening on port 9990? `lsof -i :9990` should show exactly one `capture-agent` process. If something else is bound to that port, the agent will fail to start.
+3. Restart the web app (`npm run dev`) if you started the agent *after* the web app and the banner doesn't clear within a few seconds on its own — this shouldn't normally be necessary (the relay reconnects automatically), but is a reasonable first thing to try if something seems stuck.
+
+## Wrong interface detected
+
+The agent auto-detects the interface carrying your default route. Check the startup log:
+
+```
+capture-agent: using interface en0
+```
+
+If it says something else — `ap1`, `awdl0`, `lo0`, `utun0`, etc. — that's the wrong interface and you won't see real traffic. Verify what your actual default-route interface is:
+
+```bash
+route -n get default
+```
+
+Look at the `interface:` line. The agent runs the same command internally and cross-references it against available capture devices (`pcap::Device::list()`), falling back to `pcap::Device::lookup()`'s own guess only if that fails. If your `route -n get default` output doesn't show a usable interface name (e.g. you're on a VPN with an unusual routing setup), the agent has no way to guess correctly — there's currently no manual override flag; this would be a reasonable small feature to add if you hit it.
+
+## No packets/connections appear at all, even though the agent says it's listening
+
+- **Confirm real traffic is happening**: open a new website in a browser tab while watching the Connections view.
+- **Confirm the agent can actually see packets**, independent of this app, using `tcpdump` as a baseline:
+  ```bash
+  sudo tcpdump -i en0 -c 5
+  ```
+  (substitute your real interface name). If this shows nothing either, the problem is your network/permissions setup, not this app.
+- **Check `access_bpf` group membership** — see [getting-started.md](getting-started.md#one-time-setup).
+- If you're running the agent inside some kind of sandboxed/virtualized shell environment (a container, a restricted CI runner, certain remote dev environments), raw packet capture may be blocked at that layer regardless of `access_bpf` — this app needs genuine, unsandboxed access to the network interface and to `/dev/bpf*`.
+
+## What does "Retransmit Anomaly" mean?
+
+The Dashboard's "Protocol Health" card shows "Retransmit Anomaly" when the average retransmission-based error rate across layers 3/4/7 crosses 0.2%. **This is a heuristic, not a precise TCP-loss measurement**, and it's normal to see it flicker on, especially on Wi-Fi. Two real reasons this happens even when nothing is actually wrong:
+
+1. **Small sample sizes**: a short-lived connection with only a handful of captured segments turns "1 retransmit" into a large percentage instantly. A flow with 5 segments and 1 flagged retransmit reports 20% loss — that's not a meaningful signal on its own.
+2. **Wi-Fi link-layer retries**: Wi-Fi retries frames at the radio layer, below TCP, before TCP ever notices anything was lost. Passive packet capture can see both the original transmission and its Wi-Fi-layer retry as two copies of the same logical segment — the detector (correctly, given what it can observe) counts the second copy as a retransmit, even though the actual TCP stack never experienced loss. This is a well-known limitation of capture-based retransmission detection on Wi-Fi versus wired Ethernet, not a bug specific to this app.
+
+**What to do about it:** generally, nothing — it's informational, not an alarm. If you want to investigate a specific spike, check the Connections view for which flow(s) are driving it; local Apple-services traffic (device sync, push notifications) on short-lived connections is a common, harmless source of high-percentage-but-low-count spikes. If the noise bothers you, the threshold (`0.2%` in `components/DashboardView.tsx`) and the lack of a minimum-segment-count filter are both easy, contained changes — not made by default, since the current behavior is an honest (if noisy) reflection of what was actually captured.
+
+## Build / dependency issues
+
+- **`cargo: command not found`**: your shell's `PATH` doesn't include `~/.cargo/bin`. Either restart your shell after installing Rust (rustup normally handles this), or run `export PATH="$HOME/.cargo/bin:$PATH"` for the current session.
+- **npm install fails or behaves unexpectedly**: use `npm ci` instead of `npm install` where possible (matches the committed lockfile exactly), and check you're not running with `ignore-scripts` disabled unexpectedly if a native-dependency build step is failing.
+- **`npx tsc --noEmit` or `npm run build` fails after pulling changes**: run `npm install` again — a dependency may have changed.
+
+## The Rust agent panics or crashes
+
+This should not happen under normal operation — the parser is specifically hardened (every function returns `Option`/`Result`, never panics on malformed packet bytes, and is exercised by a `cargo-fuzz` target) because it processes untrusted, attacker-reachable network data. If you do hit a panic:
+
+1. Note the exact panic message and, if possible, what traffic was happening at the time.
+2. Please [open an issue](https://github.com/usjbro/network_monitor/issues/new) with the panic output — a genuine agent crash is a real bug (of exactly the kind the fuzz target exists to catch), not expected behavior.
+
+## Numbers seem inflated or too fast
+
+If speeds look wildly unrealistic (many multiples of what your actual connection could sustain), you may be running a build from before the "shared clock" fix — `capture-agent/src/main.rs`'s periodic emitter previously computed elapsed time incorrectly, inflating speed metrics by roughly 1000x. Make sure you're on a current build (`git pull && cd capture-agent && cargo build --release`).

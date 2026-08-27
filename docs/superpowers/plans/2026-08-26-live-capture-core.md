@@ -75,7 +75,7 @@ edition = "2021"
 [dependencies]
 pcap = "2.5"
 etherparse = "0.20"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -605,6 +605,15 @@ mod tests {
     use crate::l7::L7Info;
 
     fn tcp_packet(local_is_src: bool, flags: TcpFlags, len: u16) -> ParsedPacket {
+        tcp_packet_with_payload(local_is_src, flags, len, vec![])
+    }
+
+    fn tcp_packet_with_payload(
+        local_is_src: bool,
+        flags: TcpFlags,
+        len: u16,
+        payload: Vec<u8>,
+    ) -> ParsedPacket {
         let (src_ip, dst_ip, src_port, dst_port) = if local_is_src {
             ("192.168.1.10".to_string(), "93.184.216.34".to_string(), 51000u16, 443u16)
         } else {
@@ -622,7 +631,7 @@ mod tests {
             seq: Some(1000),
             ttl: 64,
             total_len: len,
-            payload: vec![],
+            payload,
         }
     }
 
@@ -656,6 +665,75 @@ mod tests {
         let snap = table.snapshot(1000);
         assert_eq!(snap[0].tx_bytes_total, 100);
         assert_eq!(snap[0].rx_bytes_total, 250);
+    }
+
+    #[test]
+    fn first_segment_in_each_direction_is_never_a_false_retransmit() {
+        // Regression test: the first inbound segment of a flow must not be
+        // flagged as a retransmit just because outbound segments were already
+        // observed — retransmission detection is scoped per-direction.
+        // Retransmit detection only considers segments with payload (pure
+        // ACKs are exempt), so these packets carry a non-empty payload —
+        // otherwise none of them would count as a "segment" at all and this
+        // test wouldn't exercise the retransmit path.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let out1 = tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]);
+        let out2 = tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]);
+        let inb1 = tcp_packet_with_payload(false, TcpFlags::default(), 60, vec![4, 5, 6]);
+        table.observe(&out1, &L7Info::None, 0);
+        table.observe(&out2, &L7Info::None, 1);
+        table.observe(&inb1, &L7Info::None, 2);
+
+        let snap = table.snapshot(1000);
+        // All three share seq=1000 in this fixture (tcp_packet always sets seq
+        // 1000), so the *outbound* direction legitimately sees a repeat
+        // (out2 after out1) — but the inbound direction's first-ever segment
+        // must not count as a second retransmit on top of that.
+        assert_eq!(snap[0].packet_loss, (1.0 / 3.0) * 100.0);
+    }
+
+    #[test]
+    fn pure_acks_are_never_counted_as_retransmits() {
+        // Regression test for the "misfires on every plain ACK" finding:
+        // zero-payload segments reusing the previous sequence number (which
+        // is how real ACKs behave) must not inflate packet_loss at all.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 60);
+        let data = tcp_packet_with_payload(true, TcpFlags::default(), 100, vec![1, 2, 3]);
+        let ack1 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        let ack2 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        table.observe(&syn, &L7Info::None, 0);
+        table.observe(&data, &L7Info::None, 1);
+        table.observe(&ack1, &L7Info::None, 2);
+        table.observe(&ack2, &L7Info::None, 3);
+
+        let snap = table.snapshot(1000);
+        assert_eq!(snap[0].packet_loss, 0.0);
+    }
+
+    #[test]
+    fn udp_flows_report_established_not_a_tcp_closing_state() {
+        // Regression test: a flow with no tcp_flags (UDP, e.g. DNS) must not
+        // default to "CLOSE_WAIT" — that names a TCP state it never entered.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let udp_packet = ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: "192.168.1.10".to_string(),
+            dst_ip: "8.8.8.8".to_string(),
+            protocol: TransportProtocol::Udp,
+            src_port: Some(60123),
+            dst_port: Some(53),
+            tcp_flags: None,
+            seq: None,
+            ttl: 64,
+            total_len: 40,
+            payload: vec![],
+        };
+        table.observe(&udp_packet, &L7Info::None, 0);
+
+        let snap = table.snapshot(1000);
+        assert_eq!(snap[0].status, "ESTABLISHED");
     }
 }
 ```
@@ -838,13 +916,32 @@ impl FlowTable {
                 state.established = false;
             }
 
+            // Only segments that carry payload participate in retransmit
+            // detection. A pure ACK (no payload) legitimately reuses the
+            // previous sequence number constantly in healthy TCP flows
+            // (delayed ACKs, window updates, ACKing a large inbound
+            // response) — counting those as retransmits would flag nearly
+            // every ordinary connection as lossy.
             if let Some(seq) = packet.seq {
-                state.segments += 1;
-                let max_seen = state.max_seq_seen.entry(is_outbound).or_insert(seq);
-                if seq <= *max_seen && state.segments > 1 {
-                    state.retransmits += 1;
-                } else {
-                    *max_seen = seq;
+                if !packet.payload.is_empty() {
+                    state.segments += 1;
+                    // Per-direction: the first data segment ever seen in a
+                    // direction has nothing to compare against, so it is never
+                    // a retransmit. Using the flow's combined segment count
+                    // here (instead of a per-direction one) would flag the
+                    // first segment of the *second* direction as a
+                    // false-positive retransmit as soon as any segment had
+                    // already been seen in the other direction — this must
+                    // stay scoped per-direction.
+                    let is_retransmit = match state.max_seq_seen.get(&is_outbound) {
+                        Some(&max_seen) => seq <= max_seen,
+                        None => false,
+                    };
+                    if is_retransmit {
+                        state.retransmits += 1;
+                    } else {
+                        state.max_seq_seen.insert(is_outbound, seq);
+                    }
                 }
             }
         }
@@ -862,6 +959,11 @@ impl FlowTable {
                 "ESTABLISHED"
             } else if state.syn_sent_at_ms.is_some() {
                 "SYN_SENT"
+            } else if key.protocol != TransportProtocol::Tcp {
+                // Non-TCP flows (UDP, ICMP) are connectionless — there is no
+                // TCP-style closing state to report for them. An observed
+                // non-TCP flow is simply active.
+                "ESTABLISHED"
             } else {
                 "CLOSE_WAIT"
             };
@@ -1272,8 +1374,8 @@ git commit -m "feat(agent): add cargo-fuzz target for the packet parser"
 - Modify: `capture-agent/src/main.rs`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–7
-- Produces: the complete running agent — no further Rust interfaces are exposed beyond the wire protocol already defined in Task 6, which is what Task 10 (TypeScript) consumes.
+- Consumes: everything from Tasks 1–7 — in particular, this task's code uses `capture_agent::{...}` module paths and requires `capture-agent/src/lib.rs` and the `[lib]`/`[[bin]]` split in `Cargo.toml` from Task 7 to already exist. **Task 7 must be complete before this task starts.**
+- Produces: the complete running agent, emitting all three event types Task 6 defines (`ConnectionUpdate` per flow per tick, `Packet` per captured packet, `LayerUpdate` per tick) — no further Rust interfaces are exposed beyond the wire protocol already defined in Task 6, which is what Task 10 (TypeScript) consumes.
 
 - [ ] **Step 1: Replace `main.rs` with the full wiring**
 
@@ -1309,6 +1411,11 @@ async fn main() -> std::io::Result<()> {
     let local_addrs = local_addrs_for(&device);
     println!("capture-agent: using interface {interface_name}");
 
+    // Shared clock: both the capture thread and the periodic emitter need
+    // `now_ms` to mean "milliseconds since agent start" on the SAME clock —
+    // creating a fresh Instant and immediately reading its own elapsed time
+    // (`Instant::now().elapsed()`) always returns ~0, not time-since-start.
+    let start = Instant::now();
     let paused = Arc::new(AtomicBool::new(false));
     let flow_table = Arc::new(Mutex::new(FlowTable::new(local_addrs)));
     let process_map = Arc::new(Mutex::new(process_lookup::refresh()));
@@ -1330,6 +1437,8 @@ async fn main() -> std::io::Result<()> {
         let flow_table = flow_table.clone();
         let paused = paused.clone();
         let device = device.clone();
+        let tx = tx.clone();
+        let start = start;
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
                 .and_then(|c| c.promisc(true).snaplen(65535).timeout(1000).open())
@@ -1340,7 +1449,6 @@ async fn main() -> std::io::Result<()> {
                     return;
                 }
             };
-            let start = Instant::now();
             loop {
                 if paused.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(200));
@@ -1352,6 +1460,38 @@ async fn main() -> std::io::Result<()> {
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
                         flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+
+                        // Emit a Packet event for the packet stream view. hex_dump is
+                        // capped to the first 64 bytes of payload — plenty for display,
+                        // avoids sending huge lines for large payloads.
+                        let epoch_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let packet_json = wire::PacketJson {
+                            id: format!("pkt-{epoch_ms}-{now_ms}"),
+                            timestamp: epoch_ms.to_string(),
+                            relative_time_ms: now_ms,
+                            layer: 4,
+                            protocol: format!("{:?}", parsed.protocol).to_uppercase(),
+                            src: format!("{}:{}", parsed.src_ip, parsed.src_port.unwrap_or(0)),
+                            dst: format!("{}:{}", parsed.dst_ip, parsed.dst_port.unwrap_or(0)),
+                            length: parsed.total_len as u32,
+                            summary: format!(
+                                "{:?} {} -> {}",
+                                parsed.protocol, parsed.src_ip, parsed.dst_ip
+                            ),
+                            hex_dump: parsed
+                                .payload
+                                .iter()
+                                .take(64)
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        };
+                        let _ = tx.send(wire::encode_event(&wire::AgentEvent::Packet {
+                            packet: packet_json,
+                        }));
                     }
                     Err(pcap::Error::TimeoutExpired) => continue,
                     Err(e) => {
@@ -1368,14 +1508,48 @@ async fn main() -> std::io::Result<()> {
         let flow_table = flow_table.clone();
         let process_map = process_map.clone();
         let tx = tx.clone();
+        let start = start;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                let now_ms = Instant::now().elapsed().as_millis() as u64;
+                let now_ms = start.elapsed().as_millis() as u64;
                 let snapshots = flow_table.lock().unwrap().snapshot(now_ms);
                 let processes = process_map.lock().unwrap();
+
+                // Per-layer aggregates for the layer_update event, accumulated
+                // alongside the per-connection events below. This agent only
+                // independently observes IP (L3) and TCP/UDP (L4) traffic, plus
+                // L7 for flows with a recognized application protocol — L1/L2/L5/L6
+                // aren't separately measurable from captured packets, so those
+                // layers report zero activity rather than a fabricated number.
+                let mut l3_l4_rx = 0.0_f64;
+                let mut l3_l4_tx = 0.0_f64;
+                let mut l3_l4_bytes = 0u64;
+                let mut l3_l4_active = 0u32;
+                let mut l7_rx = 0.0_f64;
+                let mut l7_tx = 0.0_f64;
+                let mut l7_bytes = 0u64;
+                let mut l7_active = 0u32;
+                let mut loss_sum = 0.0_f64;
+                let mut loss_count = 0u32;
+
                 for snap in snapshots {
+                    l3_l4_rx += snap.rx_speed;
+                    l3_l4_tx += snap.tx_speed;
+                    l3_l4_bytes += snap.rx_bytes_total + snap.tx_bytes_total;
+                    if snap.status == "ESTABLISHED" {
+                        l3_l4_active += 1;
+                    }
+                    if snap.app_layer_protocol != "Unknown" {
+                        l7_rx += snap.rx_speed;
+                        l7_tx += snap.tx_speed;
+                        l7_bytes += snap.rx_bytes_total + snap.tx_bytes_total;
+                        l7_active += 1;
+                    }
+                    loss_sum += snap.packet_loss;
+                    loss_count += 1;
+
                     let proc_info = processes.get(&snap.key.local_port);
                     let connection = wire::ConnectionJson {
                         id: format!(
@@ -1412,6 +1586,48 @@ async fn main() -> std::io::Result<()> {
                     let event = wire::AgentEvent::ConnectionUpdate { connection };
                     let _ = tx.send(wire::encode_event(&event));
                 }
+
+                let avg_loss = if loss_count > 0 {
+                    loss_sum / loss_count as f64
+                } else {
+                    0.0
+                };
+                let layers = vec![
+                    wire::LayerStatsJson {
+                        layer: 3,
+                        rx_speed: l3_l4_rx,
+                        tx_speed: l3_l4_tx,
+                        rx_packets_per_sec: 0.0,
+                        tx_packets_per_sec: 0.0,
+                        total_bytes: l3_l4_bytes,
+                        error_rate: avg_loss,
+                        active_sockets: l3_l4_active,
+                        sparkline: vec![],
+                    },
+                    wire::LayerStatsJson {
+                        layer: 4,
+                        rx_speed: l3_l4_rx,
+                        tx_speed: l3_l4_tx,
+                        rx_packets_per_sec: 0.0,
+                        tx_packets_per_sec: 0.0,
+                        total_bytes: l3_l4_bytes,
+                        error_rate: avg_loss,
+                        active_sockets: l3_l4_active,
+                        sparkline: vec![],
+                    },
+                    wire::LayerStatsJson {
+                        layer: 7,
+                        rx_speed: l7_rx,
+                        tx_speed: l7_tx,
+                        rx_packets_per_sec: 0.0,
+                        tx_packets_per_sec: 0.0,
+                        total_bytes: l7_bytes,
+                        error_rate: avg_loss,
+                        active_sockets: l7_active,
+                        sparkline: vec![],
+                    },
+                ];
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::LayerUpdate { layers }));
             }
         });
     }
@@ -1463,8 +1679,8 @@ async fn main() -> std::io::Result<()> {
 Run: `cd capture-agent && cargo build --release`
 Expected: builds successfully (adjust any `pcap`/`etherparse` API mismatches per Global Constraints).
 
-Run: `cargo run --release`, then in another terminal: `nc 127.0.0.1 9990 | head -5`
-Expected: after a few seconds of real network activity on the Mac, `nc` prints newline-delimited JSON `connection_update` events with real local traffic (visit a website in a browser to generate some).
+Run: `cargo run --release`, then in another terminal: `nc 127.0.0.1 9990 | head -20`
+Expected: after a few seconds of real network activity on the Mac, `nc` prints newline-delimited JSON — a mix of `connection_update`, `packet`, and (about once a second) `layer_update` events — with real local traffic (visit a website in a browser to generate some).
 
 - [ ] **Step 3: Verify pause/resume**
 
@@ -1925,12 +2141,21 @@ export async function GET() {
   const client = getAgentClient();
   const encoder = new TextEncoder();
 
+  // Hoisted so `cancel()` can remove the exact same listener references
+  // `start()` registered. Without this, every browser connect/disconnect
+  // (including the reconnects this app's "agent not connected" banner
+  // relies on) leaks a pair of listeners on the shared AgentClient
+  // singleton — it's shared across every browser talking to this server,
+  // not per-request, so this isn't a theoretical leak.
+  let onEvent: ((event: unknown) => void) | null = null;
+  let onStatus: ((status: { connected: boolean }) => void) | null = null;
+
   const stream = new ReadableStream({
     start(controller) {
-      const onEvent = (event: unknown) => {
+      onEvent = (event: unknown) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
       };
-      const onStatus = (status: { connected: boolean }) => {
+      onStatus = (status: { connected: boolean }) => {
         controller.enqueue(
           encoder.encode(`data: ${JSON.stringify({ type: 'connection_status', ...status })}\n\n`)
         );
@@ -1941,6 +2166,10 @@ export async function GET() {
       // Replay current connection status immediately so a fresh client
       // doesn't wait for the next status change to know the agent's state.
       onStatus({ connected: client['socket'] !== null });
+    },
+    cancel() {
+      if (onEvent) client.off('event', onEvent);
+      if (onStatus) client.off('status', onStatus);
     },
   });
 
@@ -2018,12 +2247,15 @@ In `app/page.tsx`, delete:
 
 - [ ] **Step 2: Add live-stream state and an agent-connection banner**
 
-Add near the top of the component, replacing the removed simulation state:
+Add near the top of the component, replacing the removed simulation state and the old `layers` `useState`:
 
 ```typescript
 const [agentConnected, setAgentConnected] = useState(false);
 const [liveLayers, setLiveLayers] = useState<Record<OSILayerNumber, Partial<OSILayerInfo>>>({} as never);
+const layers = useMemo(() => mergeLayerStats(liveLayers), [liveLayers]);
 ```
+
+`layers` is now derived from `liveLayers` via `useMemo` rather than its own `useState` — computing it inside the `layer_update` handler below and calling a separate `setLayers` would read `liveLayers` from a stale closure (the `setLiveLayers` update hasn't applied yet in the same tick), producing a one-event-behind display. Deriving it removes that bug class entirely: `layers` always reflects the latest `liveLayers`. Add `useMemo` to the `react` import if it isn't already there, and remove the old `const [layers, setLayers] = useState<OSILayerInfo[]>(INITIAL_OSI_LAYERS);` line along with its now-unused `INITIAL_OSI_LAYERS` import.
 
 Add a new `useEffect` replacing the removed simulation loop:
 
@@ -2059,7 +2291,6 @@ useEffect(() => {
         }
         return next;
       });
-      setLayers(mergeLayerStats({ ...liveLayers }));
     }
   };
 

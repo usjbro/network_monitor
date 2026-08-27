@@ -1,17 +1,12 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
-  Activity,
   BarChart2,
   Globe,
   Layers,
   Network,
   Radio,
-  Server,
-  Terminal,
-  Tv,
-  Zap,
 } from 'lucide-react';
 import {
   OSILayerInfo,
@@ -20,35 +15,30 @@ import {
   SystemStats,
   TerminalTheme,
   ThemeConfig,
-  TrafficScenario,
   OSILayerNumber,
 } from '@/lib/types';
-import {
-  THEMES,
-  INITIAL_OSI_LAYERS,
-  INITIAL_CONNECTIONS,
-  generateRandomPacket,
-} from '@/lib/osi-engine';
+import { THEMES } from '@/lib/osi-engine';
+import { mapConnectionEvent, mapPacketEvent, mergeLayerStats } from '@/lib/agent-mapping';
 import { HeaderBar } from '@/components/HeaderBar';
 import { DashboardView } from '@/components/DashboardView';
 import { LayerDetailView } from '@/components/LayerDetailView';
 import { ConnectionsView } from '@/components/ConnectionsView';
 import { PacketStreamView } from '@/components/PacketStreamView';
 import { ProtocolMatrixView } from '@/components/ProtocolMatrixView';
-import { ScenarioLabView } from '@/components/ScenarioLabView';
 import { InstallModal } from '@/components/InstallModal';
 import { CommandLineBar } from '@/components/CommandLineBar';
 
 export default function TerminalApp() {
   // Application State
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'layer' | 'connections' | 'packets' | 'topology' | 'scenario'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'layer' | 'connections' | 'packets' | 'topology'>('dashboard');
   const [selectedLayerNum, setSelectedLayerNum] = useState<OSILayerNumber>(7);
   const [selectedTheme, setSelectedTheme] = useState<TerminalTheme>('sophisticated');
-  const [scenario, setScenario] = useState<TrafficScenario>('normal');
   const [isPaused, setIsPaused] = useState(false);
   const [crtEnabled, setCrtEnabled] = useState(false);
-  const [speedMultiplier, setSpeedMultiplier] = useState(1);
   const [isInstallOpen, setIsInstallOpen] = useState(false);
+  const [agentConnected, setAgentConnected] = useState(false);
+  const [liveLayers, setLiveLayers] = useState<Record<OSILayerNumber, Partial<OSILayerInfo>>>({} as never);
+  const layers = useMemo(() => mergeLayerStats(liveLayers), [liveLayers]);
 
   // System Stats State
   const [stats, setStats] = useState<SystemStats>({
@@ -61,128 +51,68 @@ export default function TerminalApp() {
     cpuUsagePct: 14.2,
     memUsagePct: 38.5,
     uptimeSeconds: 84920,
-    rxTotalMbps: 480.5,
-    txTotalMbps: 210.2,
+    // No wire event currently carries system-level throughput stats (that's
+    // tracked separately as future work) — seed at zero rather than
+    // fabricating a "live" number.
+    rxTotalMbps: 0,
+    txTotalMbps: 0,
     rxPpsTotal: 1480,
     txPpsTotal: 740,
     totalPacketsCaptured: 184200,
   });
 
-  // Layers & Connections State
-  const [layers, setLayers] = useState<OSILayerInfo[]>(INITIAL_OSI_LAYERS);
-  const [connections, setConnections] = useState<NetworkConnection[]>(INITIAL_CONNECTIONS);
-  const [packets, setPackets] = useState<PacketFrame[]>(() => {
-    const seed: PacketFrame[] = [];
-    for (let i = 0; i < 20; i++) {
-      seed.push(generateRandomPacket(i, 'normal'));
-    }
-    return seed;
-  });
-  const [historyRx, setHistoryRx] = useState<number[]>(Array(30).fill(480));
-  const [historyTx, setHistoryTx] = useState<number[]>(Array(30).fill(210));
+  // Connections & Packets State (populated from the live capture stream)
+  const [connections, setConnections] = useState<NetworkConnection[]>([]);
+  const [packets, setPackets] = useState<PacketFrame[]>([]);
+  const [historyRx, setHistoryRx] = useState<number[]>([]);
+  const [historyTx, setHistoryTx] = useState<number[]>([]);
 
-  const packetCounterRef = useRef(100);
-
-  // Main High-Frequency Real-time Network Simulation Loop
+  // Live Capture Stream — replaces the old simulation loop
   useEffect(() => {
-    if (isPaused) return;
+    const source = new EventSource('/api/stream');
 
-    const intervalMs = Math.max(100, 600 / speedMultiplier);
-
-    const timer = setInterval(() => {
-      packetCounterRef.current += 1;
-
-      // Calculate scenario multipliers
-      let rxMult = 1;
-      let txMult = 1;
-      let errorBoost = 0;
-
-      if (scenario === 'web_heavy') {
-        rxMult = 2.4;
-        txMult = 1.8;
-      } else if (scenario === 'video_stream') {
-        rxMult = 4.8;
-        txMult = 1.2;
-      } else if (scenario === 'syn_flood') {
-        rxMult = 8.5;
-        txMult = 6.2;
-        errorBoost = 12.4; // spike in drops / retransmits
-      } else if (scenario === 'iot_mesh') {
-        rxMult = 0.8;
-        txMult = 2.2;
-      } else if (scenario === 'dns_storm') {
-        rxMult = 3.2;
-        txMult = 3.2;
-        errorBoost = 4.2;
+    source.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.type === 'connection_status') {
+        setAgentConnected(data.connected);
+        return;
       }
+      if (data.type === 'connection_update') {
+        const connection = mapConnectionEvent(data.connection);
+        setConnections((prev) => {
+          const idx = prev.findIndex((c) => c.id === connection.id);
+          if (idx === -1) return [connection, ...prev].slice(0, 200);
+          const next = [...prev];
+          next[idx] = connection;
+          return next;
+        });
+      }
+      if (data.type === 'packet') {
+        const packet = mapPacketEvent(data.packet);
+        setPackets((prev) => [packet, ...prev.slice(0, 100)]);
+      }
+      if (data.type === 'layer_update') {
+        setLiveLayers((prev) => {
+          const next = { ...prev };
+          for (const layer of data.layers) {
+            next[layer.layer as OSILayerNumber] = layer;
+          }
+          return next;
+        });
+      }
+    };
 
-      // Update System Stats
-      setStats((prev) => {
-        const cpuBase = scenario === 'syn_flood' ? 78 : 15;
-        const newCpu = Math.min(99, Math.max(5, cpuBase + (Math.random() * 12 - 6)));
-        const newMem = Math.min(95, Math.max(20, prev.memUsagePct + (Math.random() * 0.4 - 0.2)));
-        const newRx = Math.max(10, (480 + (Math.random() * 80 - 40)) * rxMult);
-        const newTx = Math.max(10, (210 + (Math.random() * 40 - 20)) * txMult);
+    return () => source.close();
+  }, []);
 
-        return {
-          ...prev,
-          cpuUsagePct: newCpu,
-          memUsagePct: newMem,
-          uptimeSeconds: prev.uptimeSeconds + 1,
-          rxTotalMbps: newRx,
-          txTotalMbps: newTx,
-          rxPpsTotal: Math.floor(newRx * 3.1),
-          txPpsTotal: Math.floor(newTx * 3.1),
-          totalPacketsCaptured: prev.totalPacketsCaptured + 1,
-        };
-      });
-
-      // Update History Arrays
-      setHistoryRx((prev) => [...prev.slice(1), Math.max(10, (480 + (Math.random() * 80 - 40)) * rxMult)]);
-      setHistoryTx((prev) => [...prev.slice(1), Math.max(10, (210 + (Math.random() * 40 - 20)) * txMult)]);
-
-      // Update OSI Layers
-      setLayers((prevLayers) =>
-        prevLayers.map((l) => {
-          const deltaRx = Math.max(1000, (l.rxSpeed + (Math.random() * 40000 - 20000)) * rxMult);
-          const deltaTx = Math.max(1000, (l.txSpeed + (Math.random() * 20000 - 10000)) * txMult);
-          const newSparkline = [...l.sparkline.slice(1), Math.floor((deltaRx + deltaTx) / 10000)];
-
-          return {
-            ...l,
-            rxSpeed: deltaRx,
-            txSpeed: deltaTx,
-            totalBytes: l.totalBytes + deltaRx + deltaTx,
-            errorRate: Math.min(100, Math.max(0, l.errorRate + (Math.random() * 0.04 - 0.02) + errorBoost)),
-            sparkline: newSparkline,
-          };
-        })
-      );
-
-      // Update Connections Speeds
-      setConnections((prevConns) =>
-        prevConns.map((c) => {
-          const newRx = Math.max(100, c.rxSpeed + (Math.random() * 10000 - 5000) * rxMult);
-          const newTx = Math.max(100, c.txSpeed + (Math.random() * 4000 - 2000) * txMult);
-
-          return {
-            ...c,
-            rxSpeed: newRx,
-            txSpeed: newTx,
-            rxBytesTotal: c.rxBytesTotal + newRx,
-            txBytesTotal: c.txBytesTotal + newTx,
-            latencyMs: Math.min(500, Math.max(1, c.latencyMs + (Math.random() * 2 - 1))),
-          };
-        })
-      );
-
-      // Append new random packet
-      const newPkt = generateRandomPacket(packetCounterRef.current, scenario);
-      setPackets((prev) => [newPkt, ...prev.slice(0, 100)]);
-    }, intervalMs);
-
-    return () => clearInterval(timer);
-  }, [isPaused, scenario, speedMultiplier]);
+  // Sends a pause/resume control message to the capture agent via the relay.
+  const sendControl = (type: 'pause' | 'resume') => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type }),
+    });
+  };
 
   // Command Line Handler
   const handleExecuteCommand = (cmdStr: string) => {
@@ -204,21 +134,16 @@ export default function TerminalApp() {
       setActiveTab('packets');
     } else if (mainCmd === 'matrix' || mainCmd === 'topology') {
       setActiveTab('topology');
-    } else if (mainCmd === 'lab' || mainCmd === 'scenario') {
-      setActiveTab('scenario');
-      if (arg1 && ['normal', 'web_heavy', 'video_stream', 'syn_flood', 'iot_mesh', 'dns_storm'].includes(arg1)) {
-        setScenario(arg1 as TrafficScenario);
-      }
     } else if (mainCmd === 'theme' && arg1) {
       if (THEMES[arg1 as TerminalTheme]) {
         setSelectedTheme(arg1 as TerminalTheme);
       }
     } else if (mainCmd === 'pause') {
-      setIsPaused(true);
+      sendControl('pause');
     } else if (mainCmd === 'resume') {
-      setIsPaused(false);
+      sendControl('resume');
     } else if (mainCmd === 'reset') {
-      setStats((prev) => ({ ...prev, totalPacketsCaptured: 0 }));
+      setConnections([]);
       setPackets([]);
     } else if (['install', 'macos', 'brew', 'curl', 'sw_vers'].includes(mainCmd)) {
       setIsInstallOpen(true);
@@ -230,6 +155,12 @@ export default function TerminalApp() {
 
   return (
     <div className={`min-h-screen ${themeConfig.bg} ${themeConfig.text} font-mono flex flex-col justify-between overflow-x-hidden relative select-none transition-colors duration-300`}>
+      {!agentConnected && (
+        <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2">
+          capture agent not connected — run <code>./capture-agent</code> in <code>capture-agent/</code> (see capture-agent/README.md)
+        </div>
+      )}
+
       {/* CRT Scanline Overlay Effect */}
       {crtEnabled && <div className="pointer-events-none fixed inset-0 z-50 crt-scanlines opacity-40"></div>}
 
@@ -240,18 +171,18 @@ export default function TerminalApp() {
           theme={themeConfig}
           onSelectTheme={setSelectedTheme}
           isPaused={isPaused}
-          onTogglePause={() => setIsPaused(!isPaused)}
+          onTogglePause={() => {
+            const next = !isPaused;
+            setIsPaused(next);
+            sendControl(next ? 'pause' : 'resume');
+          }}
           onReset={() => {
-            setStats((prev) => ({ ...prev, totalPacketsCaptured: 0 }));
+            setConnections([]);
             setPackets([]);
           }}
-          scenario={scenario}
-          onSelectScenario={setScenario}
           crtEnabled={crtEnabled}
           onToggleCrt={() => setCrtEnabled(!crtEnabled)}
           onOpenInstall={() => setIsInstallOpen(true)}
-          speedMultiplier={speedMultiplier}
-          onChangeSpeedMultiplier={setSpeedMultiplier}
         />
 
         {/* View Navigation Tabs Bar (F1-F6) */}
@@ -316,17 +247,6 @@ export default function TerminalApp() {
             <span>F5: TOPOLOGY</span>
           </button>
 
-          <button
-            onClick={() => setActiveTab('scenario')}
-            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded transition font-bold ${
-              activeTab === 'scenario'
-                ? themeConfig.highlight
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
-            }`}
-          >
-            <Zap className="h-3.5 w-3.5" />
-            <span>F6: SIMULATOR LAB</span>
-          </button>
         </nav>
 
         {/* Active View Container */}
@@ -373,20 +293,6 @@ export default function TerminalApp() {
               onSelectLayer={(num) => {
                 setSelectedLayerNum(num);
                 setActiveTab('layer');
-              }}
-            />
-          )}
-
-          {activeTab === 'scenario' && (
-            <ScenarioLabView
-              currentScenario={scenario}
-              onSelectScenario={setScenario}
-              theme={themeConfig}
-              onInjectPacket={(proto) => {
-                const pkt = generateRandomPacket(packetCounterRef.current++, scenario);
-                pkt.protocol = proto;
-                pkt.summary = `MANUAL INJECTION: ${proto} frame burst injected into stack`;
-                setPackets((prev) => [pkt, ...prev]);
               }}
             />
           )}
