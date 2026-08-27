@@ -29,6 +29,13 @@ func makeSecureEnclaveKey(tag: String) throws -> SecKey {
         kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
         kSecAttrKeySizeInBits as String: 256,
         kSecAttrTokenID as String: kSecAttrTokenIDSecureEnclave,
+        // SE/token-backed keys with an access control live in the
+        // data-protection keychain, not the legacy file-based one -- without
+        // this flag, this key and the cert imported alongside it in
+        // ClientCertStore.importCertificate would target different stores,
+        // and SecIdentity formation in findExistingIdentity would silently
+        // never succeed.
+        kSecUseDataProtectionKeychain as String: true,
         kSecPrivateKeyAttrs as String: [
             kSecAttrIsPermanent as String: true,
             kSecAttrApplicationTag as String: Data(tag.utf8),
@@ -58,7 +65,16 @@ struct ClientCertStore {
             return existing
         }
 
-        let privateKey = try makeSecureEnclaveKey(tag: keyTag)
+        // Reuse an already-generated SE key under this tag if one exists --
+        // "key created, identity absent" (e.g. a prior run that generated
+        // the key but failed before/during CSR signing or cert import) is a
+        // realistic first-run outcome, and unconditionally calling
+        // makeSecureEnclaveKey again would either hit errSecDuplicateItem
+        // or, if a colliding tag isn't already firmly rejected, silently
+        // accumulate orphaned SE keys. makeSecureEnclaveKey's own doc
+        // comment flags exactly this: "callers should check
+        // SecItemCopyMatching first in real use."
+        let privateKey = try findExistingKey() ?? (try makeSecureEnclaveKey(tag: keyTag))
         let csrPEM = try buildCSR(privateKey: privateKey, commonName: commonName)
         let certPEM = try signCSR(csrPEM: csrPEM, caCertPath: caCertPath, caKeyPath: caKeyPath)
         try importCertificate(pem: certPEM)
@@ -73,12 +89,27 @@ struct ClientCertStore {
         let query: [String: Any] = [
             kSecClass as String: kSecClassIdentity,
             kSecAttrApplicationTag as String: Data(keyTag.utf8),
+            kSecUseDataProtectionKeychain as String: true,
             kSecReturnRef as String: true,
         ]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let identity = result else { return nil }
         return (identity as! SecIdentity)
+    }
+
+    private func findExistingKey() throws -> SecKey? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassKey,
+            kSecAttrApplicationTag as String: Data(keyTag.utf8),
+            kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecReturnRef as String: true,
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let key = result else { return nil }
+        return (key as! SecKey)
     }
 
     /// Builds a PKCS#10 CertificationRequest (RFC 2986) by hand: this is
@@ -202,10 +233,20 @@ struct ClientCertStore {
             "-extfile", extURL.path,
             "-out", certURL.path,
         ]
+        // Capture stderr so a failure (including e.g. a sandboxed build
+        // being unable to read caKeyPath -- see the App Sandbox note on
+        // ClientCertStore.loadOrCreateIdentity's callers) surfaces openssl's
+        // actual message instead of collapsing to an opaque exit status.
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
         try process.run()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
-            throw ClientCertStoreError.keyGenerationFailed("openssl CSR signing failed with status \(process.terminationStatus)")
+            let stderrOutput = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw ClientCertStoreError.keyGenerationFailed(
+                "openssl CSR signing failed with status \(process.terminationStatus): \(stderrOutput)"
+            )
         }
         return try String(contentsOf: certURL, encoding: .utf8)
     }
@@ -226,6 +267,7 @@ struct ClientCertStore {
         let addQuery: [String: Any] = [
             kSecClass as String: kSecClassCertificate,
             kSecValueRef as String: certificate,
+            kSecUseDataProtectionKeychain as String: true,
         ]
         let status = SecItemAdd(addQuery as CFDictionary, nil)
         guard status == errSecSuccess || status == errSecDuplicateItem else {

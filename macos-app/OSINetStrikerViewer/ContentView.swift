@@ -6,20 +6,36 @@ struct TrustedWebView: NSViewRepresentable {
 
     func makeCoordinator() -> NavigationLockDelegate {
         let delegate = NavigationLockDelegate(trustedOrigin: trustedURL.host ?? "")
-        do {
-            let store = ClientCertStore(
-                keyTag: "com.osinetstriker.viewer.client-key",
-                commonName: ProcessInfo.processInfo.hostName
-            )
-            delegate.clientIdentity = try store.loadOrCreateIdentity(
-                caCertPath: Self.caCertPath,
-                caKeyPath: Self.caKeyPath
-            )
-        } catch {
-            // Not fatal -- the app still launches; the WKWebView's own
-            // TLS-failure UI communicates the problem instead of crashing,
-            // and this print gives a debugging trail for why.
-            print("ClientCertStore.loadOrCreateIdentity failed: \(error)")
+        let keyTag = "com.osinetstriker.viewer.client-key"
+        let hostName = ProcessInfo.processInfo.hostName
+        let caCertPath = Self.caCertPath
+        let caKeyPath = Self.caKeyPath
+        // ClientCertStore.loadOrCreateIdentity can block on a
+        // .biometryCurrentSet-gated SecKeyCreateSignature (a Touch
+        // ID/password prompt) plus a synchronous Process.waitUntilExit() --
+        // both unsafe to run on the main thread makeCoordinator executes on
+        // during SwiftUI view construction (risks a UI deadlock). Run it on
+        // a background queue and assign clientIdentity back on the main
+        // queue once it completes; the challenge handler above already
+        // tolerates a nil clientIdentity by falling through to
+        // .performDefaultHandling, so nothing needs to block waiting for
+        // this to finish.
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let store = ClientCertStore(keyTag: keyTag, commonName: hostName)
+                let identity = try store.loadOrCreateIdentity(
+                    caCertPath: caCertPath,
+                    caKeyPath: caKeyPath
+                )
+                DispatchQueue.main.async {
+                    delegate.clientIdentity = identity
+                }
+            } catch {
+                // Not fatal -- the app still launches; the WKWebView's own
+                // TLS-failure UI communicates the problem instead of
+                // crashing, and this print gives a debugging trail for why.
+                print("ClientCertStore.loadOrCreateIdentity failed: \(error)")
+            }
         }
         return delegate
     }
