@@ -25,8 +25,6 @@ interface HeaderBarProps {
   crtEnabled: boolean;
   onToggleCrt: () => void;
   onOpenInstall: () => void;
-  speedMultiplier: number;
-  onChangeSpeedMultiplier: (mult: number) => void;
 }
 
 export const HeaderBar: React.FC<HeaderBarProps> = ({
@@ -39,8 +37,6 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   crtEnabled,
   onToggleCrt,
   onOpenInstall,
-  speedMultiplier,
-  onChangeSpeedMultiplier,
 }) => {
   const formatUptime = (sec: number) => {
     const hrs = Math.floor(sec / 3600);
@@ -127,19 +123,6 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
           >
             <RotateCcw className="h-3.5 w-3.5" />
           </button>
-
-          {/* Speed Multiplier */}
-          <select
-            value={speedMultiplier}
-            onChange={(e) => onChangeSpeedMultiplier(Number(e.target.value))}
-            className="bg-slate-900 border border-slate-700 text-slate-200 text-[11px] rounded px-1.5 py-1 focus:outline-none"
-            title="Traffic Tick Speed"
-          >
-            <option value={0.5}>0.5x Tick</option>
-            <option value={1}>1.0x Normal</option>
-            <option value={2}>2.0x Fast</option>
-            <option value={5}>5.0x Turbo</option>
-          </select>
 
           {/* CRT Toggle */}
           <button

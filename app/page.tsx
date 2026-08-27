@@ -35,7 +35,6 @@ export default function TerminalApp() {
   const [selectedTheme, setSelectedTheme] = useState<TerminalTheme>('sophisticated');
   const [isPaused, setIsPaused] = useState(false);
   const [crtEnabled, setCrtEnabled] = useState(false);
-  const [speedMultiplier, setSpeedMultiplier] = useState(1);
   const [isInstallOpen, setIsInstallOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
   const [liveLayers, setLiveLayers] = useState<Record<OSILayerNumber, Partial<OSILayerInfo>>>({} as never);
@@ -104,6 +103,15 @@ export default function TerminalApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Sends a pause/resume control message to the capture agent via the relay.
+  const sendControl = (type: 'pause' | 'resume') => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type }),
+    });
+  };
+
   // Command Line Handler
   const handleExecuteCommand = (cmdStr: string) => {
     const parts = cmdStr.toLowerCase().split(' ');
@@ -129,17 +137,9 @@ export default function TerminalApp() {
         setSelectedTheme(arg1 as TerminalTheme);
       }
     } else if (mainCmd === 'pause') {
-      fetch('/api/control', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'pause' }),
-      });
+      sendControl('pause');
     } else if (mainCmd === 'resume') {
-      fetch('/api/control', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'resume' }),
-      });
+      sendControl('resume');
     } else if (mainCmd === 'reset') {
       setConnections([]);
       setPackets([]);
@@ -169,7 +169,11 @@ export default function TerminalApp() {
           theme={themeConfig}
           onSelectTheme={setSelectedTheme}
           isPaused={isPaused}
-          onTogglePause={() => setIsPaused(!isPaused)}
+          onTogglePause={() => {
+            const next = !isPaused;
+            setIsPaused(next);
+            sendControl(next ? 'pause' : 'resume');
+          }}
           onReset={() => {
             setConnections([]);
             setPackets([]);
@@ -177,8 +181,6 @@ export default function TerminalApp() {
           crtEnabled={crtEnabled}
           onToggleCrt={() => setCrtEnabled(!crtEnabled)}
           onOpenInstall={() => setIsInstallOpen(true)}
-          speedMultiplier={speedMultiplier}
-          onChangeSpeedMultiplier={setSpeedMultiplier}
         />
 
         {/* View Navigation Tabs Bar (F1-F6) */}
