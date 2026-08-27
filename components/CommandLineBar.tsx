@@ -73,9 +73,8 @@ export const CommandLineBar: React.FC<CommandLineBarProps> = ({
             <div><strong className="text-emerald-400">pcap / packets</strong>: View live Wireshark-style packet capture</div>
             <div><strong className="text-emerald-400">matrix / topology</strong>: Open 7-Layer OSI data flow topology</div>
             <div><strong className="text-emerald-400">install / macos / brew</strong>: Open macOS Terminal installer & PWA</div>
-            <div><strong className="text-emerald-400">scenario [web|video|ddos]</strong>: Trigger simulation scenario</div>
             <div><strong className="text-emerald-400">theme [sophisticated|macos_pro|matrix]</strong>: Switch visual theme</div>
-            <div><strong className="text-emerald-400">pause / resume</strong>: Pause or resume real-time metrics</div>
+            <div><strong className="text-emerald-400">pause / resume</strong>: Pause or resume the capture agent</div>
           </div>
         </div>
       )}
@@ -98,7 +97,7 @@ export const CommandLineBar: React.FC<CommandLineBarProps> = ({
           value={command}
           onChange={(e) => setCommand(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Type CLI command (e.g. 'layer 4', 'conn', 'scenario ddos', 'theme matrix', 'help')..."
+          placeholder="Type CLI command (e.g. 'layer 4', 'conn', 'pause', 'theme matrix', 'help')..."
           className="flex-1 bg-transparent text-slate-100 placeholder-slate-600 focus:outline-none text-xs font-mono"
         />
 
