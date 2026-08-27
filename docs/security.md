@@ -22,10 +22,11 @@ This tool captures and displays real, sensitive data about your own device: ever
 
 ## Dependency hygiene
 
-Given active, ongoing npm supply-chain attacks (compromised popular packages, credential-stealing worms propagating through maintainer accounts) are a real and current threat as of this writing, this repo follows:
+Given active, ongoing npm supply-chain attacks (compromised popular packages, credential-stealing worms propagating through maintainer accounts) are a real and current threat as of this writing, this repo enforces:
 
-- `npm ci`, not `npm install`, in any automated/CI context — always installs exactly what the lockfile specifies.
-- Exact version pinning where practical, rather than broad `^`/`~` ranges, for anything security- or auth-adjacent.
+- `ignore-scripts=true` in `.npmrc` — disables all lifecycle scripts (`preinstall`, `postinstall`, etc.) during `npm ci`/`npm install`, reducing the attack surface of compromised dependencies that try to run arbitrary code at install time.
+- `save-exact=true` in `.npmrc` — ensures all new dependencies are pinned to exact versions, not broad `^`/`~` ranges.
+- Always use `npm ci` (not `npm install`) in any automated/CI context — always installs exactly what the lockfile specifies.
 - No new dependency should be added for something you can reasonably build with what's already in the tree, especially anything touching auth, crypto, or credential storage — fewer dependencies is fewer places a supply-chain compromise can hide.
 - If you add a dependency and something in your editor/IDE config changes that you didn't make (tasks, extensions, settings files), treat that as a signal to investigate before dismissing it — implanted editor config has been an observed persistence mechanism in real npm worm campaigns.
 
