@@ -14,6 +14,8 @@ pub struct TcpFlags {
     pub ack: bool,
     pub fin: bool,
     pub rst: bool,
+    pub window_size: u16,
+    pub ack_number: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +32,11 @@ pub struct ParsedPacket {
     pub ttl: u8,
     pub total_len: u16,
     pub payload: Vec<u8>,
+    /// 4 or 6, from the IP header actually parsed.
+    pub ip_version: u8,
+    /// IPv4 header checksum. Always `None` for IPv6, which has no header
+    /// checksum field — that is a protocol fact, not a gap.
+    pub ip_checksum: Option<u16>,
 }
 
 fn mac_to_string(mac: [u8; 6]) -> String {
@@ -52,16 +59,20 @@ pub fn parse_packet(data: &[u8]) -> Option<ParsedPacket> {
         _ => return None,
     };
 
-    let (src_ip, dst_ip, ttl) = match &sliced.net {
+    let (src_ip, dst_ip, ttl, ip_version, ip_checksum) = match &sliced.net {
         Some(NetSlice::Ipv4(ipv4)) => (
             ipv4.header().source_addr().to_string(),
             ipv4.header().destination_addr().to_string(),
             ipv4.header().ttl(),
+            4u8,
+            Some(ipv4.header().header_checksum()),
         ),
         Some(NetSlice::Ipv6(ipv6)) => (
             ipv6.header().source_addr().to_string(),
             ipv6.header().destination_addr().to_string(),
             ipv6.header().hop_limit(),
+            6u8,
+            None,
         ),
         None => return None,
         _ => return None,
@@ -77,6 +88,8 @@ pub fn parse_packet(data: &[u8]) -> Option<ParsedPacket> {
                 ack: tcp.ack(),
                 fin: tcp.fin(),
                 rst: tcp.rst(),
+                window_size: tcp.window_size(),
+                ack_number: tcp.acknowledgment_number(),
             }),
             Some(tcp.sequence_number()),
             tcp.payload().to_vec(),
@@ -108,6 +121,8 @@ pub fn parse_packet(data: &[u8]) -> Option<ParsedPacket> {
         ttl,
         total_len: data.len() as u16,
         payload,
+        ip_version,
+        ip_checksum,
     })
 }
 
@@ -133,8 +148,13 @@ mod tests {
         assert_eq!(parsed.protocol, TransportProtocol::Tcp);
         assert_eq!(parsed.src_port, Some(51000));
         assert_eq!(parsed.dst_port, Some(443));
-        assert!(parsed.tcp_flags.unwrap().syn);
+        let flags = parsed.tcp_flags.unwrap();
+        assert!(flags.syn);
+        assert_eq!(flags.window_size, 65535);
+        assert_eq!(flags.ack_number, 0);
         assert_eq!(parsed.ttl, 64);
+        assert_eq!(parsed.ip_version, 4);
+        assert!(parsed.ip_checksum.is_some());
     }
 
     #[test]

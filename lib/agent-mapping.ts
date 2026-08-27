@@ -52,7 +52,7 @@ export function mapPacketEvent(json: unknown): PacketFrame {
     length: requireField(w, 'length'),
     summary: requireField(w, 'summary'),
     hexDump: requireField(w, 'hexDump'),
-    headerBreakdown: (w.headerBreakdown as PacketFrame['headerBreakdown']) ?? {},
+    headerBreakdown: requireField<PacketFrame['headerBreakdown']>(w, 'headerBreakdown'),
   };
 }
 

@@ -139,6 +139,7 @@ async fn main() -> std::io::Result<()> {
                             .map(|d| d.as_millis())
                             .unwrap_or(0);
                         let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
+                        let header_breakdown = wire::build_header_breakdown(&parsed, &l7_info);
                         let packet_json = wire::PacketJson {
                             id: format!("pkt-{epoch_ms}-{seq}"),
                             timestamp: epoch_ms.to_string(),
@@ -159,6 +160,7 @@ async fn main() -> std::io::Result<()> {
                                 .map(|b| format!("{b:02x}"))
                                 .collect::<Vec<_>>()
                                 .join(" "),
+                            header_breakdown,
                         };
                         let _ = tx.send(wire::encode_event(&wire::AgentEvent::Packet {
                             packet: packet_json,

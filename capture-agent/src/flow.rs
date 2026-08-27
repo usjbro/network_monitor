@@ -321,6 +321,8 @@ mod tests {
             ttl: 64,
             total_len: len,
             payload,
+            ip_version: 4,
+            ip_checksum: Some(0),
         }
     }
 
@@ -328,14 +330,14 @@ mod tests {
     fn derives_syn_sent_then_established() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
 
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 60);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
         table.observe(&syn, &L7Info::None, 0);
         let snap = table.snapshot(0);
         assert_eq!(snap[0].status, "SYN_SENT");
 
-        let synack = tcp_packet(false, TcpFlags { syn: true, ack: true, fin: false, rst: false }, 60);
+        let synack = tcp_packet(false, TcpFlags { syn: true, ack: true, fin: false, rst: false, ..Default::default() }, 60);
         table.observe(&synack, &L7Info::None, 20);
-        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
         table.observe(&ack, &L7Info::None, 25);
 
         let snap = table.snapshot(25);
@@ -387,10 +389,10 @@ mod tests {
         // zero-payload segments reusing the previous sequence number (which
         // is how real ACKs behave) must not inflate packet_loss at all.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 60);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
         let data = tcp_packet_with_payload(true, TcpFlags::default(), 100, vec![1, 2, 3]);
-        let ack1 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
-        let ack2 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        let ack1 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
+        let ack2 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
         table.observe(&syn, &L7Info::None, 0);
         table.observe(&data, &L7Info::None, 1);
         table.observe(&ack1, &L7Info::None, 2);
@@ -422,13 +424,15 @@ mod tests {
             ttl: 64,
             total_len: 60,
             payload: vec![],
+            ip_version: 4,
+            ip_checksum: Some(0),
         }
     }
 
     #[test]
     fn evicts_time_wait_flow_after_two_minutes_idle() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false }, 60);
+        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false, ..Default::default() }, 60);
         table.observe(&fin, &L7Info::None, 0);
 
         // idle = 120_001ms > the 120_000ms TIME_WAIT/CLOSE_WAIT threshold.
@@ -440,7 +444,7 @@ mod tests {
     #[test]
     fn does_not_evict_time_wait_flow_before_threshold() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false }, 60);
+        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false, ..Default::default() }, 60);
         table.observe(&fin, &L7Info::None, 0);
 
         // idle = exactly 120_000ms, not yet past the threshold.
@@ -452,8 +456,8 @@ mod tests {
     #[test]
     fn evicts_established_flow_past_ceiling_even_though_status_is_active() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 60);
-        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
+        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
         table.observe(&syn, &L7Info::None, 0);
         table.observe(&ack, &L7Info::None, 5);
 
@@ -467,8 +471,8 @@ mod tests {
     #[test]
     fn does_not_evict_established_flow_under_ceiling() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 60);
-        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
+        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
         table.observe(&syn, &L7Info::None, 0);
         table.observe(&ack, &L7Info::None, 5);
 
@@ -485,12 +489,12 @@ mod tests {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
 
         // Stale flow: FIN'd long ago on remote port 443.
-        let fin = tcp_packet_to(true, TcpFlags { syn: false, ack: false, fin: true, rst: false }, 443);
+        let fin = tcp_packet_to(true, TcpFlags { syn: false, ack: false, fin: true, rst: false, ..Default::default() }, 443);
         table.observe(&fin, &L7Info::None, 0);
 
         // Fresh flow: established just now on a different remote port.
-        let syn = tcp_packet_to(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 8443);
-        let ack = tcp_packet_to(true, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 8443);
+        let syn = tcp_packet_to(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 8443);
+        let ack = tcp_packet_to(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 8443);
         table.observe(&syn, &L7Info::None, 130_000);
         table.observe(&ack, &L7Info::None, 130_005);
 
@@ -522,6 +526,8 @@ mod tests {
             ttl: 64,
             total_len: 40,
             payload: vec![],
+            ip_version: 4,
+            ip_checksum: Some(0),
         };
         table.observe(&udp_packet, &L7Info::None, 0);
 
