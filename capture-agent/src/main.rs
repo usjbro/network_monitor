@@ -1,3 +1,5 @@
+mod parse;
+
 use tokio::net::TcpListener;
 
 fn detect_interface() -> String {
