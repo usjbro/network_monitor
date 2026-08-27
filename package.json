@@ -6,7 +6,7 @@
     "dev": "next dev -H 127.0.0.1",
     "build": "next build",
     "start": "next start -H 127.0.0.1",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0",
     "clean": "next clean",
     "test": "vitest run"
   },

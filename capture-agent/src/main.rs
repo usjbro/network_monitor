@@ -88,7 +88,6 @@ async fn main() -> std::io::Result<()> {
         let paused = paused.clone();
         let device = device.clone();
         let tx = tx.clone();
-        let start = start;
         let packet_seq = packet_seq.clone();
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
@@ -171,7 +170,6 @@ async fn main() -> std::io::Result<()> {
         let flow_table = flow_table.clone();
         let process_map = process_map.clone();
         let tx = tx.clone();
-        let start = start;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {

@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(parsed.protocol, TransportProtocol::Tcp);
         assert_eq!(parsed.src_port, Some(51000));
         assert_eq!(parsed.dst_port, Some(443));
-        assert_eq!(parsed.tcp_flags.unwrap().syn, true);
+        assert!(parsed.tcp_flags.unwrap().syn);
         assert_eq!(parsed.ttl, 64);
     }
 

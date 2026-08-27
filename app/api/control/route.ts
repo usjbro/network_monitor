@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { AgentClient } from '@/lib/agent-client';
 
 declare global {
-  // eslint-disable-next-line no-var
   var __agentClient: AgentClient | undefined;
 }
 

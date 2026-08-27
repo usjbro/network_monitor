@@ -103,7 +103,6 @@ export default function TerminalApp() {
     };
 
     return () => source.close();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Sends a pause/resume control message to the capture agent via the relay.
