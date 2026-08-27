@@ -2,6 +2,7 @@ mod parse;
 mod l7;
 mod flow;
 mod process_lookup;
+mod wire;
 
 use tokio::net::TcpListener;
 
