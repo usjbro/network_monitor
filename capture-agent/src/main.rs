@@ -184,7 +184,14 @@ async fn main() -> std::io::Result<()> {
             loop {
                 interval.tick().await;
                 let now_ms = start.elapsed().as_millis() as u64;
-                let snapshots = flow_table.lock().unwrap().snapshot(now_ms);
+                // Evict first so a flow that goes stale this tick emits only
+                // a ConnectionClosed event, not also a now-stale
+                // connection_update in the same pass.
+                let (evicted, snapshots) = {
+                    let mut ft = flow_table.lock().unwrap();
+                    let evicted = ft.evict_stale(now_ms);
+                    (evicted, ft.snapshot(now_ms))
+                };
                 let processes = process_map.lock().unwrap();
 
                 // Per-layer aggregates for the layer_update event, accumulated
@@ -222,14 +229,7 @@ async fn main() -> std::io::Result<()> {
 
                     let proc_info = processes.get(&snap.key.local_port);
                     let connection = wire::ConnectionJson {
-                        id: format!(
-                            "{:?}-{}:{}-{}:{}",
-                            snap.key.protocol,
-                            snap.key.local_addr,
-                            snap.key.local_port,
-                            snap.key.remote_addr,
-                            snap.key.remote_port
-                        ),
+                        id: snap.key.connection_id(),
                         protocol: snap.app_layer_protocol.clone(),
                         app_layer_protocol: snap.app_layer_protocol,
                         transport_protocol: format!("{:?}", snap.key.protocol).to_uppercase(),
@@ -255,6 +255,12 @@ async fn main() -> std::io::Result<()> {
                     };
                     let event = wire::AgentEvent::ConnectionUpdate { connection };
                     let _ = tx.send(wire::encode_event(&event));
+                }
+
+                for key in evicted {
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
+                        id: key.connection_id(),
+                    }));
                 }
 
                 let avg_loss = if loss_count > 0 {

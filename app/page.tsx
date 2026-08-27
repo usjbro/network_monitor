@@ -18,7 +18,7 @@ import {
   OSILayerNumber,
 } from '@/lib/types';
 import { THEMES } from '@/lib/osi-engine';
-import { mapConnectionEvent, mapPacketEvent, mergeLayerStats } from '@/lib/agent-mapping';
+import { mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mergeLayerStats } from '@/lib/agent-mapping';
 import { HeaderBar } from '@/components/HeaderBar';
 import { DashboardView } from '@/components/DashboardView';
 import { LayerDetailView } from '@/components/LayerDetailView';
@@ -86,6 +86,10 @@ export default function TerminalApp() {
           next[idx] = connection;
           return next;
         });
+      }
+      if (data.type === 'connection_closed') {
+        const id = mapConnectionClosedEvent(data);
+        setConnections((prev) => prev.filter((c) => c.id !== id));
       }
       if (data.type === 'packet') {
         const packet = mapPacketEvent(data.packet);

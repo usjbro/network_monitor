@@ -34,6 +34,11 @@ export function mapConnectionEvent(json: unknown): NetworkConnection {
   };
 }
 
+export function mapConnectionClosedEvent(json: unknown): string {
+  const w = json as Record<string, unknown>;
+  return requireField(w, 'id');
+}
+
 export function mapPacketEvent(json: unknown): PacketFrame {
   const w = json as Record<string, unknown>;
   return {

@@ -58,6 +58,7 @@ pub struct PacketJson {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     ConnectionUpdate { connection: ConnectionJson },
+    ConnectionClosed { id: String },
     Packet { packet: PacketJson },
     LayerUpdate { layers: Vec<LayerStatsJson> },
     AgentStatus { interface: String, capturing: bool },
@@ -115,6 +116,17 @@ mod tests {
         assert!(line.contains("\"appLayerProtocol\":\"HTTPS/TLS\""));
         assert!(line.contains("\"processName\":\"Safari\""));
         assert!(line.contains("\"type\":\"connection_update\""));
+    }
+
+    #[test]
+    fn encodes_connection_closed_event() {
+        let event = AgentEvent::ConnectionClosed {
+            id: "Tcp-192.168.1.10:51000-93.184.216.34:443".to_string(),
+        };
+        let line = encode_event(&event);
+        assert!(line.ends_with('\n'));
+        assert!(line.contains("\"type\":\"connection_closed\""));
+        assert!(line.contains("\"id\":\"Tcp-192.168.1.10:51000-93.184.216.34:443\""));
     }
 
     #[test]

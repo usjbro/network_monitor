@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapConnectionEvent, mapPacketEvent } from '../agent-mapping';
+import { mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent } from '../agent-mapping';
 
 describe('mapConnectionEvent', () => {
   it('maps agent wire JSON to a NetworkConnection', () => {
@@ -37,6 +37,18 @@ describe('mapConnectionEvent', () => {
 
   it('throws on a malformed event rather than silently producing garbage', () => {
     expect(() => mapConnectionEvent({ id: 'incomplete' })).toThrow();
+  });
+});
+
+describe('mapConnectionClosedEvent', () => {
+  it('extracts the id of the closed connection', () => {
+    const wire = { type: 'connection_closed', id: 'Tcp-192.168.1.10:51000-93.184.216.34:443' };
+
+    expect(mapConnectionClosedEvent(wire)).toBe(wire.id);
+  });
+
+  it('throws on a malformed event rather than silently producing garbage', () => {
+    expect(() => mapConnectionClosedEvent({ type: 'connection_closed' })).toThrow();
   });
 });
 

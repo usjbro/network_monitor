@@ -11,6 +11,18 @@ pub struct FlowKey {
     pub remote_port: u16,
 }
 
+impl FlowKey {
+    /// The single canonical id format for this flow, shared by
+    /// `ConnectionJson.id` and the `ConnectionClosed` event's `id` so the two
+    /// can never diverge.
+    pub fn connection_id(&self) -> String {
+        format!(
+            "{:?}-{}:{}-{}:{}",
+            self.protocol, self.local_addr, self.local_port, self.remote_addr, self.remote_port
+        )
+    }
+}
+
 struct FlowState {
     app_layer_protocol: String,
     encryption: String,
@@ -25,6 +37,7 @@ struct FlowState {
     max_seq_seen: HashMap<bool /* local_is_sender */, u32>,
     retransmits: u64,
     segments: u64,
+    last_seen_ms: u64,
 }
 
 impl Default for FlowState {
@@ -43,6 +56,7 @@ impl Default for FlowState {
             max_seq_seen: HashMap::new(),
             retransmits: 0,
             segments: 0,
+            last_seen_ms: 0,
         }
     }
 }
@@ -73,6 +87,26 @@ fn well_known_protocol(port: u16) -> Option<&'static str> {
         53 => Some("DNS"),
         22 => Some("SSH"),
         _ => None,
+    }
+}
+
+/// Derives the display status for a flow. Shared by `snapshot()` and
+/// `evict_stale()` so the two can never drift on what counts as
+/// "TIME_WAIT"/"CLOSE_WAIT" vs. still-active.
+fn status_for(state: &FlowState, protocol: TransportProtocol) -> &'static str {
+    if state.fin_seen {
+        "TIME_WAIT"
+    } else if state.established {
+        "ESTABLISHED"
+    } else if state.syn_sent_at_ms.is_some() {
+        "SYN_SENT"
+    } else if protocol != TransportProtocol::Tcp {
+        // Non-TCP flows (UDP, ICMP) are connectionless — there is no
+        // TCP-style closing state to report for them. An observed
+        // non-TCP flow is simply active.
+        "ESTABLISHED"
+    } else {
+        "CLOSE_WAIT"
     }
 }
 
@@ -124,6 +158,7 @@ impl FlowTable {
         let Some((key, is_outbound)) = self.key_for(packet) else { return };
         let remote_port = key.remote_port;
         let state = self.flows.entry(key).or_default();
+        state.last_seen_ms = now_ms;
 
         if is_outbound {
             state.tx_bytes_total += packet.total_len as u64;
@@ -205,20 +240,7 @@ impl FlowTable {
 
         let mut result = Vec::with_capacity(self.flows.len());
         for (key, state) in self.flows.iter_mut() {
-            let status = if state.fin_seen {
-                "TIME_WAIT"
-            } else if state.established {
-                "ESTABLISHED"
-            } else if state.syn_sent_at_ms.is_some() {
-                "SYN_SENT"
-            } else if key.protocol != TransportProtocol::Tcp {
-                // Non-TCP flows (UDP, ICMP) are connectionless — there is no
-                // TCP-style closing state to report for them. An observed
-                // non-TCP flow is simply active.
-                "ESTABLISHED"
-            } else {
-                "CLOSE_WAIT"
-            };
+            let status = status_for(state, key.protocol);
 
             let packet_loss = if state.segments > 0 {
                 (state.retransmits as f64 / state.segments as f64) * 100.0
@@ -243,6 +265,25 @@ impl FlowTable {
             state.tx_bytes_this_tick = 0;
         }
         result
+    }
+
+    /// Removes flows that have gone idle past a status-appropriate threshold
+    /// and returns the keys of everything evicted, so the caller can emit an
+    /// explicit close event per removed flow.
+    pub fn evict_stale(&mut self, now_ms: u64) -> Vec<FlowKey> {
+        const CLOSING_IDLE_MS: u64 = 120_000; // TIME_WAIT/CLOSE_WAIT
+        const MAX_IDLE_MS: u64 = 1_800_000; // ceiling, any status
+        let mut evicted = Vec::new();
+        self.flows.retain(|key, state| {
+            let idle = now_ms.saturating_sub(state.last_seen_ms);
+            let closing = matches!(status_for(state, key.protocol), "TIME_WAIT" | "CLOSE_WAIT");
+            let stale = (closing && idle > CLOSING_IDLE_MS) || idle > MAX_IDLE_MS;
+            if stale {
+                evicted.push(key.clone());
+            }
+            !stale
+        });
+        evicted
     }
 }
 
@@ -357,6 +398,110 @@ mod tests {
 
         let snap = table.snapshot(1000);
         assert_eq!(snap[0].packet_loss, 0.0);
+    }
+
+    /// Builds a bare TCP packet like `tcp_packet`, but lets the caller choose
+    /// the remote port so distinct-flow tests can produce two separate
+    /// `FlowKey`s instead of colliding on the fixture's hardcoded remote.
+    fn tcp_packet_to(local_is_src: bool, flags: TcpFlags, remote_port: u16) -> ParsedPacket {
+        let (src_ip, dst_ip, src_port, dst_port) = if local_is_src {
+            ("192.168.1.10".to_string(), "93.184.216.34".to_string(), 51000u16, remote_port)
+        } else {
+            ("93.184.216.34".to_string(), "192.168.1.10".to_string(), remote_port, 51000u16)
+        };
+        ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip,
+            dst_ip,
+            protocol: TransportProtocol::Tcp,
+            src_port: Some(src_port),
+            dst_port: Some(dst_port),
+            tcp_flags: Some(flags),
+            seq: Some(1000),
+            ttl: 64,
+            total_len: 60,
+            payload: vec![],
+        }
+    }
+
+    #[test]
+    fn evicts_time_wait_flow_after_two_minutes_idle() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false }, 60);
+        table.observe(&fin, &L7Info::None, 0);
+
+        // idle = 120_001ms > the 120_000ms TIME_WAIT/CLOSE_WAIT threshold.
+        let evicted = table.evict_stale(120_001);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(table.snapshot(120_001).len(), 0);
+    }
+
+    #[test]
+    fn does_not_evict_time_wait_flow_before_threshold() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false }, 60);
+        table.observe(&fin, &L7Info::None, 0);
+
+        // idle = exactly 120_000ms, not yet past the threshold.
+        let evicted = table.evict_stale(120_000);
+        assert!(evicted.is_empty());
+        assert_eq!(table.snapshot(120_000).len(), 1);
+    }
+
+    #[test]
+    fn evicts_established_flow_past_ceiling_even_though_status_is_active() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 60);
+        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        table.observe(&syn, &L7Info::None, 0);
+        table.observe(&ack, &L7Info::None, 5);
+
+        // idle = 1_800_001ms > the 1_800_000ms ceiling — ESTABLISHED isn't
+        // exempt from the ceiling just because it's not a closing status.
+        let evicted = table.evict_stale(5 + 1_800_001);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(table.snapshot(5 + 1_800_001).len(), 0);
+    }
+
+    #[test]
+    fn does_not_evict_established_flow_under_ceiling() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 60);
+        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        table.observe(&syn, &L7Info::None, 0);
+        table.observe(&ack, &L7Info::None, 5);
+
+        // idle = 1_800_000ms, exactly at the ceiling — not yet past it. An
+        // idle-but-alive long-lived connection (e.g. an idle SSH session)
+        // must survive under the ceiling.
+        let evicted = table.evict_stale(5 + 1_800_000);
+        assert!(evicted.is_empty());
+        assert_eq!(table.snapshot(5 + 1_800_000).len(), 1);
+    }
+
+    #[test]
+    fn evict_stale_leaves_other_flows_in_table() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+
+        // Stale flow: FIN'd long ago on remote port 443.
+        let fin = tcp_packet_to(true, TcpFlags { syn: false, ack: false, fin: true, rst: false }, 443);
+        table.observe(&fin, &L7Info::None, 0);
+
+        // Fresh flow: established just now on a different remote port.
+        let syn = tcp_packet_to(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 8443);
+        let ack = tcp_packet_to(true, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 8443);
+        table.observe(&syn, &L7Info::None, 130_000);
+        table.observe(&ack, &L7Info::None, 130_005);
+
+        let now = 130_005 + 1; // stale flow idle ~130_006ms (> 120_000ms), fresh flow idle ~1ms
+        let evicted = table.evict_stale(now);
+        assert_eq!(evicted.len(), 1);
+        assert_eq!(evicted[0].remote_port, 443);
+
+        let remaining = table.snapshot(now);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].key.remote_port, 8443);
     }
 
     #[test]
