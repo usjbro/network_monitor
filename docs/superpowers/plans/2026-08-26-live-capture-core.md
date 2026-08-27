@@ -657,6 +657,27 @@ mod tests {
         assert_eq!(snap[0].tx_bytes_total, 100);
         assert_eq!(snap[0].rx_bytes_total, 250);
     }
+
+    #[test]
+    fn first_segment_in_each_direction_is_never_a_false_retransmit() {
+        // Regression test: the first inbound segment of a flow must not be
+        // flagged as a retransmit just because outbound segments were already
+        // observed — retransmission detection is scoped per-direction.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let out1 = tcp_packet(true, TcpFlags::default(), 60);
+        let out2 = tcp_packet(true, TcpFlags::default(), 60);
+        let inb1 = tcp_packet(false, TcpFlags::default(), 60);
+        table.observe(&out1, &L7Info::None, 0);
+        table.observe(&out2, &L7Info::None, 1);
+        table.observe(&inb1, &L7Info::None, 2);
+
+        let snap = table.snapshot(1000);
+        // All three share seq=1000 in this fixture (tcp_packet always sets seq
+        // 1000), so the *outbound* direction legitimately sees a repeat
+        // (out2 after out1) — but the inbound direction's first-ever segment
+        // must not count as a second retransmit on top of that.
+        assert_eq!(snap[0].packet_loss, (1.0 / 3.0) * 100.0);
+    }
 }
 ```
 
@@ -840,11 +861,20 @@ impl FlowTable {
 
             if let Some(seq) = packet.seq {
                 state.segments += 1;
-                let max_seen = state.max_seq_seen.entry(is_outbound).or_insert(seq);
-                if seq <= *max_seen && state.segments > 1 {
+                // Per-direction: the first segment ever seen in a direction has
+                // nothing to compare against, so it is never a retransmit. Using
+                // the flow's combined segment count here (instead of a per-direction
+                // one) would flag the first segment of the *second* direction as a
+                // false-positive retransmit as soon as any segment had already been
+                // seen in the other direction — this must stay scoped per-direction.
+                let is_retransmit = match state.max_seq_seen.get(&is_outbound) {
+                    Some(&max_seen) => seq <= max_seen,
+                    None => false,
+                };
+                if is_retransmit {
                     state.retransmits += 1;
                 } else {
-                    *max_seen = seq;
+                    state.max_seq_seen.insert(is_outbound, seq);
                 }
             }
         }
@@ -1272,8 +1302,8 @@ git commit -m "feat(agent): add cargo-fuzz target for the packet parser"
 - Modify: `capture-agent/src/main.rs`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1–7
-- Produces: the complete running agent — no further Rust interfaces are exposed beyond the wire protocol already defined in Task 6, which is what Task 10 (TypeScript) consumes.
+- Consumes: everything from Tasks 1–7 — in particular, this task's code uses `capture_agent::{...}` module paths and requires `capture-agent/src/lib.rs` and the `[lib]`/`[[bin]]` split in `Cargo.toml` from Task 7 to already exist. **Task 7 must be complete before this task starts.**
+- Produces: the complete running agent, emitting all three event types Task 6 defines (`ConnectionUpdate` per flow per tick, `Packet` per captured packet, `LayerUpdate` per tick) — no further Rust interfaces are exposed beyond the wire protocol already defined in Task 6, which is what Task 10 (TypeScript) consumes.
 
 - [ ] **Step 1: Replace `main.rs` with the full wiring**
 
@@ -1330,6 +1360,7 @@ async fn main() -> std::io::Result<()> {
         let flow_table = flow_table.clone();
         let paused = paused.clone();
         let device = device.clone();
+        let tx = tx.clone();
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
                 .and_then(|c| c.promisc(true).snaplen(65535).timeout(1000).open())
@@ -1352,6 +1383,38 @@ async fn main() -> std::io::Result<()> {
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
                         flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+
+                        // Emit a Packet event for the packet stream view. hex_dump is
+                        // capped to the first 64 bytes of payload — plenty for display,
+                        // avoids sending huge lines for large payloads.
+                        let epoch_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0);
+                        let packet_json = wire::PacketJson {
+                            id: format!("pkt-{epoch_ms}-{now_ms}"),
+                            timestamp: epoch_ms.to_string(),
+                            relative_time_ms: now_ms,
+                            layer: 4,
+                            protocol: format!("{:?}", parsed.protocol).to_uppercase(),
+                            src: format!("{}:{}", parsed.src_ip, parsed.src_port.unwrap_or(0)),
+                            dst: format!("{}:{}", parsed.dst_ip, parsed.dst_port.unwrap_or(0)),
+                            length: parsed.total_len as u32,
+                            summary: format!(
+                                "{:?} {} -> {}",
+                                parsed.protocol, parsed.src_ip, parsed.dst_ip
+                            ),
+                            hex_dump: parsed
+                                .payload
+                                .iter()
+                                .take(64)
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        };
+                        let _ = tx.send(wire::encode_event(&wire::AgentEvent::Packet {
+                            packet: packet_json,
+                        }));
                     }
                     Err(pcap::Error::TimeoutExpired) => continue,
                     Err(e) => {
@@ -1375,7 +1438,40 @@ async fn main() -> std::io::Result<()> {
                 let now_ms = Instant::now().elapsed().as_millis() as u64;
                 let snapshots = flow_table.lock().unwrap().snapshot(now_ms);
                 let processes = process_map.lock().unwrap();
+
+                // Per-layer aggregates for the layer_update event, accumulated
+                // alongside the per-connection events below. This agent only
+                // independently observes IP (L3) and TCP/UDP (L4) traffic, plus
+                // L7 for flows with a recognized application protocol — L1/L2/L5/L6
+                // aren't separately measurable from captured packets, so those
+                // layers report zero activity rather than a fabricated number.
+                let mut l3_l4_rx = 0.0_f64;
+                let mut l3_l4_tx = 0.0_f64;
+                let mut l3_l4_bytes = 0u64;
+                let mut l3_l4_active = 0u32;
+                let mut l7_rx = 0.0_f64;
+                let mut l7_tx = 0.0_f64;
+                let mut l7_bytes = 0u64;
+                let mut l7_active = 0u32;
+                let mut loss_sum = 0.0_f64;
+                let mut loss_count = 0u32;
+
                 for snap in snapshots {
+                    l3_l4_rx += snap.rx_speed;
+                    l3_l4_tx += snap.tx_speed;
+                    l3_l4_bytes += snap.rx_bytes_total + snap.tx_bytes_total;
+                    if snap.status == "ESTABLISHED" {
+                        l3_l4_active += 1;
+                    }
+                    if snap.app_layer_protocol != "Unknown" {
+                        l7_rx += snap.rx_speed;
+                        l7_tx += snap.tx_speed;
+                        l7_bytes += snap.rx_bytes_total + snap.tx_bytes_total;
+                        l7_active += 1;
+                    }
+                    loss_sum += snap.packet_loss;
+                    loss_count += 1;
+
                     let proc_info = processes.get(&snap.key.local_port);
                     let connection = wire::ConnectionJson {
                         id: format!(
@@ -1412,6 +1508,48 @@ async fn main() -> std::io::Result<()> {
                     let event = wire::AgentEvent::ConnectionUpdate { connection };
                     let _ = tx.send(wire::encode_event(&event));
                 }
+
+                let avg_loss = if loss_count > 0 {
+                    loss_sum / loss_count as f64
+                } else {
+                    0.0
+                };
+                let layers = vec![
+                    wire::LayerStatsJson {
+                        layer: 3,
+                        rx_speed: l3_l4_rx,
+                        tx_speed: l3_l4_tx,
+                        rx_packets_per_sec: 0.0,
+                        tx_packets_per_sec: 0.0,
+                        total_bytes: l3_l4_bytes,
+                        error_rate: avg_loss,
+                        active_sockets: l3_l4_active,
+                        sparkline: vec![],
+                    },
+                    wire::LayerStatsJson {
+                        layer: 4,
+                        rx_speed: l3_l4_rx,
+                        tx_speed: l3_l4_tx,
+                        rx_packets_per_sec: 0.0,
+                        tx_packets_per_sec: 0.0,
+                        total_bytes: l3_l4_bytes,
+                        error_rate: avg_loss,
+                        active_sockets: l3_l4_active,
+                        sparkline: vec![],
+                    },
+                    wire::LayerStatsJson {
+                        layer: 7,
+                        rx_speed: l7_rx,
+                        tx_speed: l7_tx,
+                        rx_packets_per_sec: 0.0,
+                        tx_packets_per_sec: 0.0,
+                        total_bytes: l7_bytes,
+                        error_rate: avg_loss,
+                        active_sockets: l7_active,
+                        sparkline: vec![],
+                    },
+                ];
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::LayerUpdate { layers }));
             }
         });
     }
@@ -1463,8 +1601,8 @@ async fn main() -> std::io::Result<()> {
 Run: `cd capture-agent && cargo build --release`
 Expected: builds successfully (adjust any `pcap`/`etherparse` API mismatches per Global Constraints).
 
-Run: `cargo run --release`, then in another terminal: `nc 127.0.0.1 9990 | head -5`
-Expected: after a few seconds of real network activity on the Mac, `nc` prints newline-delimited JSON `connection_update` events with real local traffic (visit a website in a browser to generate some).
+Run: `cargo run --release`, then in another terminal: `nc 127.0.0.1 9990 | head -20`
+Expected: after a few seconds of real network activity on the Mac, `nc` prints newline-delimited JSON — a mix of `connection_update`, `packet`, and (about once a second) `layer_update` events — with real local traffic (visit a website in a browser to generate some).
 
 - [ ] **Step 3: Verify pause/resume**
 
@@ -2018,12 +2156,15 @@ In `app/page.tsx`, delete:
 
 - [ ] **Step 2: Add live-stream state and an agent-connection banner**
 
-Add near the top of the component, replacing the removed simulation state:
+Add near the top of the component, replacing the removed simulation state and the old `layers` `useState`:
 
 ```typescript
 const [agentConnected, setAgentConnected] = useState(false);
 const [liveLayers, setLiveLayers] = useState<Record<OSILayerNumber, Partial<OSILayerInfo>>>({} as never);
+const layers = useMemo(() => mergeLayerStats(liveLayers), [liveLayers]);
 ```
+
+`layers` is now derived from `liveLayers` via `useMemo` rather than its own `useState` — computing it inside the `layer_update` handler below and calling a separate `setLayers` would read `liveLayers` from a stale closure (the `setLiveLayers` update hasn't applied yet in the same tick), producing a one-event-behind display. Deriving it removes that bug class entirely: `layers` always reflects the latest `liveLayers`. Add `useMemo` to the `react` import if it isn't already there, and remove the old `const [layers, setLayers] = useState<OSILayerInfo[]>(INITIAL_OSI_LAYERS);` line along with its now-unused `INITIAL_OSI_LAYERS` import.
 
 Add a new `useEffect` replacing the removed simulation loop:
 
@@ -2059,7 +2200,6 @@ useEffect(() => {
         }
         return next;
       });
-      setLayers(mergeLayerStats({ ...liveLayers }));
     }
   };
 
