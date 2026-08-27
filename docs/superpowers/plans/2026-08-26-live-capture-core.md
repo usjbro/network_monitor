@@ -75,7 +75,7 @@ edition = "2021"
 [dependencies]
 pcap = "2.5"
 etherparse = "0.20"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -1411,6 +1411,11 @@ async fn main() -> std::io::Result<()> {
     let local_addrs = local_addrs_for(&device);
     println!("capture-agent: using interface {interface_name}");
 
+    // Shared clock: both the capture thread and the periodic emitter need
+    // `now_ms` to mean "milliseconds since agent start" on the SAME clock —
+    // creating a fresh Instant and immediately reading its own elapsed time
+    // (`Instant::now().elapsed()`) always returns ~0, not time-since-start.
+    let start = Instant::now();
     let paused = Arc::new(AtomicBool::new(false));
     let flow_table = Arc::new(Mutex::new(FlowTable::new(local_addrs)));
     let process_map = Arc::new(Mutex::new(process_lookup::refresh()));
@@ -1433,6 +1438,7 @@ async fn main() -> std::io::Result<()> {
         let paused = paused.clone();
         let device = device.clone();
         let tx = tx.clone();
+        let start = start;
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
                 .and_then(|c| c.promisc(true).snaplen(65535).timeout(1000).open())
@@ -1443,7 +1449,6 @@ async fn main() -> std::io::Result<()> {
                     return;
                 }
             };
-            let start = Instant::now();
             loop {
                 if paused.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(200));
@@ -1503,11 +1508,12 @@ async fn main() -> std::io::Result<()> {
         let flow_table = flow_table.clone();
         let process_map = process_map.clone();
         let tx = tx.clone();
+        let start = start;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
                 interval.tick().await;
-                let now_ms = Instant::now().elapsed().as_millis() as u64;
+                let now_ms = start.elapsed().as_millis() as u64;
                 let snapshots = flow_table.lock().unwrap().snapshot(now_ms);
                 let processes = process_map.lock().unwrap();
 
