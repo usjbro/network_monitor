@@ -5,16 +5,20 @@
 The app has three pieces, split by trust level: a privileged capture agent, an unprivileged relay, and a browser UI. Nothing in the web tier ever needs elevated permissions — only the agent does, and it's a small, narrowly-scoped process.
 
 ```
-┌─────────────────────────┐        ┌──────────────────────────┐        ┌────────────────┐
-│  capture-agent (Rust)    │        │  Next.js app              │        │  Browser         │
-│  ─────────────────────   │        │  ───────────────────      │        │  ─────────────    │
-│  opens en0 via pcap,      │  TCP   │  lib/agent-client.ts       │  SSE   │  app/page.tsx     │
-│  parses every packet      │◄──────►│  (reconnecting client)     │◄──────►│  EventSource(...)  │
-│  itself, tracks flow      │ :9990  │  app/api/stream/route.ts   │        │  React state →     │
-│  state, streams NDJSON    │ loop-  │  app/api/control/route.ts  │        │  components/       │
-│  back only                │ back   │  loopback only             │        │                 │
-└─────────────────────────┘        └──────────────────────────┘        └────────────────┘
+┌───────────────────────┐             ┌────────────────────────┐             ┌─────────────────┐
+│  capture-agent (Rust)   │             │  Next.js app             │             │  Browser          │
+│  ────────────────────   │             │  ──────────────────      │             │  app/page.tsx      │
+│  opens en0 via pcap,     │   TCP       │  lib/agent-client.ts      │   SSE       │  EventSource(...)   │
+│  parses every packet     │◄──────────►│  (reconnecting client)    │────────────►│  React state →       │
+│  itself, tracks flow     │  :9990      │                            │  GET /api/  │  components/         │
+│  state, streams NDJSON   │  loopback   │  app/api/stream/route.ts  │  stream     │                      │
+│  back only               │  only       │  app/api/control/route.ts │◄────────────│  fetch() POST for    │
+│                          │             │  loopback only            │  POST /api/ │  pause/resume, NOT   │
+└───────────────────────┘             │                            │  control    │  part of the SSE conn │
+                                        └────────────────────────┘             └─────────────────┘
 ```
+
+The SSE connection is one-way, server → browser only. `pause`/`resume` from the browser go over a separate plain `fetch('/api/control', ...)` POST request, not back over the SSE stream.
 
 Both the agent and the Next.js server bind to `127.0.0.1` only — this is the localhost-only increment of the project. Nothing here is reachable from your LAN. Securing LAN access (mTLS, a reverse proxy, a native macOS app) is tracked as separate future work (GitHub epic #22), not yet implemented.
 
@@ -49,10 +53,10 @@ Both routes share one `AgentClient` singleton (`global.__agentClient`) — there
 |---|---|
 | `connection_status` | drives the "agent not connected" banner |
 | `connection_update` | upserts into the `connections` list |
-| `packet` | prepends into a capped `packets` buffer (last 100) |
+| `packet` | prepends into a capped `packets` buffer (keeps the newest ~100: `[packet, ...prev.slice(0, 100)]`) |
 | `layer_update` | merges into `liveLayers`; `layers` is *derived* from it via `useMemo` |
 
-There is no simulation code anywhere in this path — every number displayed originates from the capture agent. `components/` holds one file per view (`DashboardView`, `LayerDetailView`, `ConnectionsView`, `PacketStreamView`, `ProtocolMatrixView`), plus chrome (`HeaderBar`, `CommandLineBar`, `InstallModal`). All are presentational — they receive `theme` and view-specific data as props; there's no separate client-side data-fetching layer.
+There is no simulation code anywhere in this path — but that's not quite the same as "every number displayed originates from the capture agent": the header bar's CPU%, memory%, hostname, and uptime are still static invented values from the original scaffold, not wired to anything (see "Known, deliberate gaps" below). `components/` holds one file per view (`DashboardView`, `LayerDetailView`, `ConnectionsView`, `PacketStreamView`, `ProtocolMatrixView`), plus chrome (`HeaderBar`, `CommandLineBar`, `InstallModal`). All are presentational — they receive `theme` and view-specific data as props; there's no separate client-side data-fetching layer.
 
 ## Supporting files
 
@@ -70,7 +74,7 @@ There is no simulation code anywhere in this path — every number displayed ori
 
 These aren't oversights — they're scoped out of the current increment and tracked as GitHub issues in [usjbro/network_monitor](https://github.com/usjbro/network_monitor):
 
-- **`SystemStats`** (hostname, CPU/mem, aggregate interface throughput) has no wire event yet — shown as placeholder/zero, not fabricated.
+- **`SystemStats`** (hostname, CPU/mem, aggregate interface throughput) has no wire event yet. Only `rxTotalMbps`/`txTotalMbps` and the RX/TX history arrays were zeroed out (and the dashboard's "LIVE" badge removed for that section) as a deliberate honesty fix — the rest of `SystemStats` (`hostname`, `cpuUsagePct`, `memUsagePct`, `uptimeSeconds`, MAC/IP, `totalPacketsCaptured`, etc., seeded in `app/page.tsx`) is still the original scaffold's hardcoded fake values, not yet touched. Don't trust anything in the header bar's stats beyond throughput as real.
 - **`headerBreakdown`** (per-layer packet detail: MACs, TLS SNI, HTTP method/path, DNS query name) is parsed by the agent but never reaches the wire — issue #29.
 - **The packet-event stream is uncapped** — no sampling/rate limit yet, issue #27.
 - **Flows never expire** — the flow table grows unbounded for the life of the process, issue #28.

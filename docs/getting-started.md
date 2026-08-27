@@ -44,6 +44,8 @@ cd capture-agent
 cargo run --release
 ```
 
+(`capture-agent/README.md` covers the same one-time setup and running steps if you want the source-of-truth version — the in-app "agent not connected" banner links there too.)
+
 You should see:
 
 ```

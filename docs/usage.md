@@ -44,6 +44,7 @@ Type a command and press enter. Available commands:
 | `pause` | Tell the agent to pause capture (also available as a button in the header) |
 | `resume` | Tell the agent to resume capture |
 | `reset` | Clear the local connections/packets buffers (does not affect the agent) |
+| `install` / `macos` / `brew` / `curl` / `sw_vers` | Open the Install modal (see below) |
 
 ## Themes
 

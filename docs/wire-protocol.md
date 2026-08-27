@@ -75,7 +75,7 @@ Sent once per captured packet, immediately (not batched).
 }
 ```
 
-Maps to `PacketFrame` via `mapPacketEvent`. `headerBreakdown` always arrives as `{}` currently ([issue #29](https://github.com/usjbro/network_monitor/issues/29) — the agent parses this data internally but doesn't put it on the wire yet). `timestamp` is epoch milliseconds as a string, not ISO-8601.
+Maps to `PacketFrame` via `mapPacketEvent`. Note `PacketJson` (`capture-agent/src/wire.rs`) has **no `header_breakdown` field at all** — it isn't sent on the wire in any form, empty or otherwise. The `{}` you see on the TypeScript side is `mapPacketEvent`'s own fallback (`lib/agent-mapping.ts`, `?? {}`) for a key that's simply absent from the JSON. The underlying per-layer detail (parsed MACs/TTL/flags in `parse.rs`, TLS SNI/HTTP method+path/DNS query name in `l7.rs`) does exist transiently inside the agent's capture loop, but is discarded before `PacketJson` gets constructed — nothing currently threads it through. See [issue #29](https://github.com/usjbro/network_monitor/issues/29). `timestamp` is epoch milliseconds as a string, not ISO-8601.
 
 **No rate limiting yet** — every captured packet gets its own event ([issue #27](https://github.com/usjbro/network_monitor/issues/27)). On a busy interface this can mean thousands of these per second.
 
