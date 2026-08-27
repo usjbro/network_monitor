@@ -1,5 +1,5 @@
 use capture_agent::{flow::FlowTable, l7, parse, process_lookup, wire};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -37,6 +37,11 @@ async fn main() -> std::io::Result<()> {
     let paused = Arc::new(AtomicBool::new(false));
     let flow_table = Arc::new(Mutex::new(FlowTable::new(local_addrs)));
     let process_map = Arc::new(Mutex::new(process_lookup::refresh()));
+    // Monotonic counter appended to packet IDs. epoch_ms/now_ms are both
+    // millisecond-resolution clocks, so two packets captured within the same
+    // millisecond would otherwise get identical IDs — and the TS side uses
+    // pkt.id as a React list key, so a collision causes a rendering bug.
+    let packet_seq = Arc::new(AtomicU64::new(0));
 
     let (tx, _rx) = broadcast::channel::<String>(1024);
 
@@ -57,6 +62,7 @@ async fn main() -> std::io::Result<()> {
         let device = device.clone();
         let tx = tx.clone();
         let start = start;
+        let packet_seq = packet_seq.clone();
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
                 .and_then(|c| c.promisc(true).snaplen(65535).timeout(1000).open())
@@ -86,8 +92,9 @@ async fn main() -> std::io::Result<()> {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis())
                             .unwrap_or(0);
+                        let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
                         let packet_json = wire::PacketJson {
-                            id: format!("pkt-{epoch_ms}-{now_ms}"),
+                            id: format!("pkt-{epoch_ms}-{seq}"),
                             timestamp: epoch_ms.to_string(),
                             relative_time_ms: now_ms,
                             layer: 4,
@@ -254,7 +261,13 @@ async fn main() -> std::io::Result<()> {
     println!("capture-agent: listening on 127.0.0.1:9990");
 
     loop {
-        let (socket, _addr) = listener.accept().await?;
+        let (socket, _addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("capture-agent: accept error (continuing): {e}");
+                continue;
+            }
+        };
         let mut rx = tx.subscribe();
         let paused = paused.clone();
         tokio::spawn(async move {
