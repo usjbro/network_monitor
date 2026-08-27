@@ -36,7 +36,7 @@ for the full design and threat model.
 
 5. **Only after step 4 passes**, and only when you actually want LAN
    access: edit `deploy/Caddyfile` and change its listen address from
-   `127.0.0.1:8443` to `:443` (see the comment in that file). This is a
+   `localhost:8443` to `:443` (see the comment in that file). This is a
    deliberate manual step, not automated by this repo -- until you make
    this change, Caddy only ever binds to loopback and nothing here is
    reachable from your LAN.
