@@ -18,7 +18,7 @@
 - **OCSP is intentionally not used.** Revocation is handled by short-lived, periodically-reissued client certs, per the spec. Don't add OCSP-checking code.
 - **mTLS enforcement must be explicitly verified, never assumed.** "Caddy started" is not evidence it's enforcing client certs — Task 3's script is the required check, and Task 3 itself proves the check can fail (a negative-control run) before it's trusted as a gate.
 - The capture agent (`127.0.0.1:9990`) and Next.js app (`127.0.0.1:3000`) are unchanged by this plan — still loopback-only, unauthenticated on their own, and now reachable from the LAN *only* through Caddy's verified proxy path.
-- **Native app single-origin lock applies to main-frame navigation, subframe navigation, and `window.open`/new-window requests** — all three are covered by tests in Tasks 6–7, not just documented.
+- **Native app single-origin lock applies to main-frame navigation, subframe navigation, and `window.open`/new-window requests** — all three are covered by tests in Task 7 (Task 6 is scaffolding only, no navigation-lock code), not just documented.
 - **Client certificate private key must be Secure-Enclave-backed** (P-256 EC), non-extractable, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (no iCloud Keychain sync), with biometric confirmation required per signing use (Task 8).
 - **New dependency called out explicitly:** Task 8 adds Apple's `swift-asn1` SPM package for structural (not cryptographic) CSR encoding — see Task 8 Step 5 for why the higher-level `swift-certificates` package doesn't fit (it can't be backed by an opaque Secure Enclave key). This repo's stated security posture (`docs/security.md`) prefers "well-audited, widely-used libraries for anything security-critical... over rolling your own"; the actual cryptographic signature in Task 8 comes from `SecKeyCreateSignature` (Apple's own Secure-Enclave-backed implementation), with `swift-asn1` only assembling the surrounding ASN.1 structure.
 - Exact `mkcert`/Caddy/`swift-asn1` API/CLI surfaces should be checked against what's actually installed if a step doesn't work as written — versions may have shifted since this plan was written (mkcert, Caddy, and `swift-asn1`'s package resolution were not available/exercised on the reference machine when this plan was authored; the `xcodegen`/`WKWebView`/Security-framework/XCTest code in Tasks 6–8 *was* compiled and unit-tested against Xcode 26.6 / Swift 6.3.3 while writing this plan, and Task 8's CSR-building code has its own `openssl req -text` structural verification step precisely because it's the one piece that wasn't). The TDD steps (`build`/`test`/the verification scripts) are how any drift gets caught.
@@ -773,7 +773,22 @@ struct ContentView: View {
     // Matches deploy/setup-ca.sh's server cert SAN (<hostname>.local) --
     // update if you changed CADDY_LISTEN_ADDR away from the ":443"
     // production default from deploy/README.md step 5.
-    let trustedURL = URL(string: "https://\(ProcessInfo.processInfo.hostName).local")!
+    //
+    // ProcessInfo.processInfo.hostName is backed by gethostname(), which
+    // on stock macOS typically already returns the Bonjour-qualified
+    // "<hostname>.local" form (the same string `scutil --get
+    // LocalHostName` + ".local" produces, which is what
+    // deploy/setup-ca.sh's SAN is built from) -- but that's not
+    // guaranteed on every configuration, so this checks rather than
+    // blindly appending ".local" a second time (verify against your
+    // actual cert's SAN with `openssl x509 -in deploy/certs/server.pem
+    // -noout -text | grep -A2 "Subject Alternative Name"` if the
+    // navigation lock rejects its own trusted origin on first run).
+    let trustedURL: URL = {
+        let host = ProcessInfo.processInfo.hostName
+        let qualifiedHost = host.hasSuffix(".local") ? host : "\(host).local"
+        return URL(string: "https://\(qualifiedHost)")!
+    }()
 
     var body: some View {
         TrustedWebView(trustedURL: trustedURL)
@@ -875,10 +890,11 @@ git commit -m "Add WKWebView single-origin navigation lock (#20)"
 - Create: `macos-app/OSINetStrikerViewer/ClientCertStore.swift`
 - Create: `macos-app/OSINetStrikerViewerTests/ClientCertStoreTests.swift`
 - Modify: `macos-app/project.yml` (add the `swift-asn1` package dependency)
-- Modify: `macos-app/OSINetStrikerViewer/ContentView.swift` (present the client cert on the mTLS challenge)
+- Modify: `macos-app/OSINetStrikerViewer/NavigationLockDelegate.swift` (the `WKWebView` client-cert challenge handler — this is where the identity actually gets presented, see Step 8)
+- Modify: `macos-app/OSINetStrikerViewer/ContentView.swift` (provisions the identity in `makeCoordinator` and hands it to `NavigationLockDelegate`)
 
 **Interfaces:**
-- Produces: `makeSecureEnclaveKey(tag:) throws -> SecKey`, `ClientCertStore.loadOrCreateIdentity(caCertPath:caKeyPath:) throws -> SecIdentity` (generates the SE key + CSR on first run, has it signed by the local CA from Task 1, imports the resulting cert into the Keychain, and returns a `SecIdentity` pairing the two), and a `URLSessionDelegate` conformance that presents that identity on a `URLAuthenticationChallenge` of type `NSURLAuthenticationMethodClientCertificate`.
+- Produces: `makeSecureEnclaveKey(tag:) throws -> SecKey`, `ClientCertStore.loadOrCreateIdentity(caCertPath:caKeyPath:) throws -> SecIdentity` (generates the SE key + CSR on first run, has it signed by the local CA from Task 1, imports the resulting cert into the Keychain, and returns a `SecIdentity` pairing the two), and a `NavigationLockDelegate.clientIdentity` property + `WKNavigationDelegate.didReceive challenge:` conformance that presents that identity on a `URLAuthenticationChallenge` of type `NSURLAuthenticationMethodClientCertificate`.
 - Consumes: `deploy/certs/ca-root.pem` + the CA's private key location (`$(mkcert -CAROOT)/rootCA-key.pem`) from Task 1, to sign the CSR this task generates — this is the one piece of the client identity that comes from `openssl`, not Apple's Security framework, since Secure Enclave keys can only produce a CSR, not a self-signed leaf cert that a CA elsewhere trusts.
 
 - [ ] **Step 1: Write the failing test for Secure Enclave key generation**
@@ -1126,11 +1142,20 @@ struct ClientCertStore {
         let tempDir = FileManager.default.temporaryDirectory
         let csrURL = tempDir.appendingPathComponent("\(UUID().uuidString).csr")
         let certURL = tempDir.appendingPathComponent("\(UUID().uuidString).pem")
+        let extURL = tempDir.appendingPathComponent("\(UUID().uuidString).ext")
         defer {
             try? FileManager.default.removeItem(at: csrURL)
             try? FileManager.default.removeItem(at: certURL)
+            try? FileManager.default.removeItem(at: extURL)
         }
         try csrPEM.write(to: csrURL, atomically: true, encoding: .utf8)
+        // Without an explicit clientAuth Extended Key Usage, some mTLS
+        // stacks (not necessarily Caddy's require_and_verify today, but
+        // this shouldn't rely on that) may accept a cert that isn't
+        // actually scoped to client authentication -- cheap to be
+        // explicit here rather than relying on the absence of an EKU
+        // extension being interpreted permissively everywhere.
+        try "extendedKeyUsage = clientAuth\n".write(to: extURL, atomically: true, encoding: .utf8)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
@@ -1141,6 +1166,7 @@ struct ClientCertStore {
             "-CAkey", caKeyPath,
             "-CAcreateserial",
             "-days", "90",
+            "-extfile", extURL.path,
             "-out", certURL.path,
         ]
         try process.run()
@@ -1186,37 +1212,25 @@ openssl req -in /tmp/test.csr -noout -text
 ```
 Expected: `openssl` parses it without error and prints a `Certificate Request` block showing `Public Key Algorithm: id-ecPublicKey`, `Public-Key: (256 bit)`, `NIST CURVE: P-256`, `Subject: CN = <commonName>`, and `Signature Algorithm: ecdsa-with-SHA256`, with the final line confirming `Signature Value` bytes are present. If `openssl` instead reports a parse error (`unable to load X509 request`, ASN.1 errors, etc.), the DER structure in Step 6 has a bug — check node ordering (SEQUENCE/SET/context-tag nesting must exactly match the RFC 2986 grammar in Step 6's comments) and re-run this check before moving on. Remove the temporary debug code once this passes.
 
-- [ ] **Step 8: Wire client-cert presentation into `ContentView`'s `URLSession` handling**
-
-```swift
-// In ContentView.swift, add:
-
-final class ClientCertChallengeHandler: NSObject, URLSessionDelegate {
-    let identity: SecIdentity
-
-    init(identity: SecIdentity) {
-        self.identity = identity
-    }
-
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodClientCertificate else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        let credential = URLCredential(identity: identity, certificates: nil, persistence: .forSession)
-        completionHandler(.useCredential, credential)
-    }
-}
+Also sign that CSR with `signCSR` (or run the equivalent `openssl x509 -req ... -extfile` command from Step 6 by hand against `deploy/certs/ca-root.pem`/mkcert's `rootCA-key.pem`) and check the **resulting certificate**, not just the CSR:
+```bash
+openssl x509 -in /tmp/test-signed.pem -noout -text | grep -A1 "Extended Key Usage"
 ```
+Expected: `TLS Web Client Authentication` is present. This confirms the `-extfile` flag in Step 6's `signCSR` actually took effect — an easy thing to get silently wrong (a typo'd `-extfile` path fails open on some OpenSSL/LibreSSL builds rather than erroring).
 
-`WKWebView` uses `WKNavigationDelegate`'s own `didReceive challenge:` (not `URLSessionDelegate`) for the client-cert prompt during page loads — add the equivalent method to `NavigationLockDelegate` from Task 7, constructed with the `SecIdentity` from `ClientCertStore.loadOrCreateIdentity`:
+- [ ] **Step 8: Wire client-cert presentation into `NavigationLockDelegate`'s `WKWebView` challenge handling**
+
+`WKWebView` uses `WKNavigationDelegate`'s own `didReceive challenge:` for the client-cert prompt during page loads (there is no separate `URLSession` in this app to configure — the webview handles its own networking) — add that method, and a settable identity, to `NavigationLockDelegate` from Task 7:
 
 ```swift
-// Add to NavigationLockDelegate (Task 7's file):
+// Add to NavigationLockDelegate.swift (Task 7's file):
+
+// Set by ContentView.makeCoordinator after ClientCertStore
+// provisions/loads the mTLS client identity. Nil means default
+// handling below (no client cert presented) -- Caddy's
+// require_and_verify then rejects the connection, surfaced as a
+// visible TLS failure rather than silently missing data.
+var clientIdentity: SecIdentity?
 
 func webView(
     _ webView: WKWebView,
@@ -1232,7 +1246,46 @@ func webView(
 }
 ```
 
-This requires adding a `clientIdentity: SecIdentity?` stored property to `NavigationLockDelegate`, set from `ContentView` after calling `ClientCertStore(keyTag: "com.osinetstriker.viewer.client-key", commonName: ProcessInfo.processInfo.hostName).loadOrCreateIdentity(caCertPath: ..., caKeyPath: ...)` (the CA paths point at the `deploy/certs/ca-root.pem` / mkcert `rootCA-key.pem` from Task 1 — bundle or otherwise make these reachable from the app; a hardcoded absolute path is fine for this single-Mac, single-user tool, matching how `deploy/setup-ca.sh` already assumes a fixed local layout).
+Then provision that identity from `ContentView.makeCoordinator` (Task 7's file), pointing at mkcert's own default `CAROOT` location so nothing here needs to duplicate what `deploy/setup-ca.sh` (Task 1) already established:
+
+```swift
+// Modify ContentView.swift's makeCoordinator (Task 7's file):
+
+func makeCoordinator() -> NavigationLockDelegate {
+    let delegate = NavigationLockDelegate(trustedOrigin: trustedURL.host ?? "")
+    do {
+        let store = ClientCertStore(
+            keyTag: "com.osinetstriker.viewer.client-key",
+            commonName: ProcessInfo.processInfo.hostName
+        )
+        delegate.clientIdentity = try store.loadOrCreateIdentity(
+            caCertPath: Self.caCertPath,
+            caKeyPath: Self.caKeyPath
+        )
+    } catch {
+        // Not fatal -- the app still launches; the WKWebView's own
+        // TLS-failure UI communicates the problem instead of crashing,
+        // and this print gives a debugging trail for why.
+        print("ClientCertStore.loadOrCreateIdentity failed: \(error)")
+    }
+    return delegate
+}
+
+// mkcert's default CAROOT on macOS -- matches `$(mkcert -CAROOT)` from
+// deploy/setup-ca.sh (Task 1). Override via these env vars (Xcode
+// scheme > Run > Arguments) if `mkcert -CAROOT` reports something
+// different on your machine (e.g. a global CAROOT env var override).
+private static var caCertPath: String {
+    ProcessInfo.processInfo.environment["OSINETSTRIKER_CA_CERT"]
+        ?? "\(NSHomeDirectory())/Library/Application Support/mkcert/rootCA.pem"
+}
+private static var caKeyPath: String {
+    ProcessInfo.processInfo.environment["OSINETSTRIKER_CA_KEY"]
+        ?? "\(NSHomeDirectory())/Library/Application Support/mkcert/rootCA-key.pem"
+}
+```
+
+**Known open edge, flagged rather than silently assumed away:** Task 6 enables App Sandbox with only the `network.client` entitlement — a fully sandboxed build cannot read arbitrary paths under `~/Library/Application Support/mkcert/` without either an additional entitlement (e.g. a security-scoped bookmark from a one-time user file-picker grant) or relaxing the sandbox for this specific need. This matters only for the CA **key** path (needed once, to sign the CSR on first launch); after that, `findExistingIdentity()` only touches the Keychain, which sandboxing handles separately via keychain-access-group entitlements, not file-system entitlements. Resolve this when implementing — e.g. by adding a narrowly-scoped file-read entitlement for that one path, or by moving the one-time CSR-signing step into `deploy/setup-ca.sh` itself (outside the sandbox) and having the app only ever call the Keychain-lookup half of `loadOrCreateIdentity` — rather than by disabling App Sandbox.
 
 - [ ] **Step 9: Verify the full app builds and all tests pass**
 
