@@ -1,9 +1,4 @@
-mod parse;
-mod l7;
-mod flow;
-mod process_lookup;
-mod wire;
-
+use capture_agent::{parse, l7, flow, process_lookup, wire};
 use tokio::net::TcpListener;
 
 fn detect_interface() -> String {
