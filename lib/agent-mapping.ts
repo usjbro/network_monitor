@@ -34,6 +34,11 @@ export function mapConnectionEvent(json: unknown): NetworkConnection {
   };
 }
 
+export function mapConnectionClosedEvent(json: unknown): string {
+  const w = json as Record<string, unknown>;
+  return requireField(w, 'id');
+}
+
 export function mapPacketEvent(json: unknown): PacketFrame {
   const w = json as Record<string, unknown>;
   return {
@@ -47,7 +52,7 @@ export function mapPacketEvent(json: unknown): PacketFrame {
     length: requireField(w, 'length'),
     summary: requireField(w, 'summary'),
     hexDump: requireField(w, 'hexDump'),
-    headerBreakdown: (w.headerBreakdown as PacketFrame['headerBreakdown']) ?? {},
+    headerBreakdown: requireField<PacketFrame['headerBreakdown']>(w, 'headerBreakdown'),
   };
 }
 

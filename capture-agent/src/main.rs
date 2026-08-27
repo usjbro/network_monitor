@@ -1,4 +1,4 @@
-use capture_agent::{flow::FlowTable, l7, parse, process_lookup, wire};
+use capture_agent::{flow::FlowTable, l7, parse, process_lookup, rate_limit::PacketEventLimiter, wire};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -110,6 +110,12 @@ async fn main() -> std::io::Result<()> {
                     return;
                 }
             };
+            // Caps discrete Packet events to the browser at 100/sec — the UI
+            // only keeps the last 100 anyway (app/page.tsx's
+            // `prev.slice(0, 100)`), so anything above that is pure waste.
+            // Connection/layer aggregates below are unaffected: `observe()`
+            // runs on every packet regardless of this limiter.
+            let mut packet_event_limiter = PacketEventLimiter::new(100, 1000);
             loop {
                 if paused.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(200));
@@ -121,6 +127,9 @@ async fn main() -> std::io::Result<()> {
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
                         flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+                        if !packet_event_limiter.allow(now_ms) {
+                            continue; // stats already recorded; just skip the discrete event
+                        }
 
                         // Emit a Packet event for the packet stream view. hex_dump is
                         // capped to the first 64 bytes of payload — plenty for display,
@@ -130,6 +139,7 @@ async fn main() -> std::io::Result<()> {
                             .map(|d| d.as_millis())
                             .unwrap_or(0);
                         let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
+                        let header_breakdown = wire::build_header_breakdown(&parsed, &l7_info);
                         let packet_json = wire::PacketJson {
                             id: format!("pkt-{epoch_ms}-{seq}"),
                             timestamp: epoch_ms.to_string(),
@@ -150,9 +160,10 @@ async fn main() -> std::io::Result<()> {
                                 .map(|b| format!("{b:02x}"))
                                 .collect::<Vec<_>>()
                                 .join(" "),
+                            header_breakdown,
                         };
                         let _ = tx.send(wire::encode_event(&wire::AgentEvent::Packet {
-                            packet: packet_json,
+                            packet: Box::new(packet_json),
                         }));
                     }
                     Err(pcap::Error::TimeoutExpired) => continue,
@@ -175,7 +186,14 @@ async fn main() -> std::io::Result<()> {
             loop {
                 interval.tick().await;
                 let now_ms = start.elapsed().as_millis() as u64;
-                let snapshots = flow_table.lock().unwrap().snapshot(now_ms);
+                // Evict first so a flow that goes stale this tick emits only
+                // a ConnectionClosed event, not also a now-stale
+                // connection_update in the same pass.
+                let (evicted, snapshots) = {
+                    let mut ft = flow_table.lock().unwrap();
+                    let evicted = ft.evict_stale(now_ms);
+                    (evicted, ft.snapshot(now_ms))
+                };
                 let processes = process_map.lock().unwrap();
 
                 // Per-layer aggregates for the layer_update event, accumulated
@@ -213,14 +231,7 @@ async fn main() -> std::io::Result<()> {
 
                     let proc_info = processes.get(&snap.key.local_port);
                     let connection = wire::ConnectionJson {
-                        id: format!(
-                            "{:?}-{}:{}-{}:{}",
-                            snap.key.protocol,
-                            snap.key.local_addr,
-                            snap.key.local_port,
-                            snap.key.remote_addr,
-                            snap.key.remote_port
-                        ),
+                        id: snap.key.connection_id(),
                         protocol: snap.app_layer_protocol.clone(),
                         app_layer_protocol: snap.app_layer_protocol,
                         transport_protocol: format!("{:?}", snap.key.protocol).to_uppercase(),
@@ -244,8 +255,16 @@ async fn main() -> std::io::Result<()> {
                         encryption: snap.encryption,
                         sparkline: vec![],
                     };
-                    let event = wire::AgentEvent::ConnectionUpdate { connection };
+                    let event = wire::AgentEvent::ConnectionUpdate {
+                        connection: Box::new(connection),
+                    };
                     let _ = tx.send(wire::encode_event(&event));
+                }
+
+                for key in evicted {
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
+                        id: key.connection_id(),
+                    }));
                 }
 
                 let avg_loss = if loss_count > 0 {
@@ -331,11 +350,46 @@ async fn main() -> std::io::Result<()> {
                                     break;
                                 }
                             }
-                            Err(_) => break,
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                eprintln!("capture-agent: client lagged, dropped {skipped} events");
+                                continue;
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::broadcast;
+
+    /// Proves the Lagged branch is reachable and recoverable: a slow
+    /// receiver that falls behind a broadcast channel's capacity gets
+    /// `Err(RecvError::Lagged(_))` on its next `recv()`, not a fatal error —
+    /// and a subsequent `recv()` succeeds normally afterward. Drives the
+    /// broadcast channel directly rather than extracting the relay loop, so
+    /// this needs no sockets/pcap.
+    #[tokio::test]
+    async fn lagged_receiver_recovers_instead_of_erroring_fatally() {
+        let (tx, mut rx) = broadcast::channel::<String>(2);
+
+        for i in 0..5 {
+            let _ = tx.send(format!("event-{i}"));
+        }
+
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                assert!(skipped > 0, "expected a nonzero skipped count");
+            }
+            other => panic!("expected Lagged, got {other:?}"),
+        }
+
+        // The channel should be usable again after Lagged, not stuck.
+        let next = rx.recv().await;
+        assert!(next.is_ok(), "recv after Lagged should succeed, got {next:?}");
     }
 }
