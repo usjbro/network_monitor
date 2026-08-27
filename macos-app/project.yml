@@ -1,0 +1,25 @@
+name: OSINetStrikerViewer
+options:
+  bundleIdPrefix: com.osinetstriker
+settings:
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+  SWIFT_VERSION: "6.0"
+targets:
+  OSINetStrikerViewer:
+    type: application
+    platform: macOS
+    sources:
+      - path: OSINetStrikerViewer
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.osinetstriker.viewer
+      INFOPLIST_FILE: OSINetStrikerViewer/Info.plist
+      CODE_SIGN_ENTITLEMENTS: OSINetStrikerViewer/OSINetStrikerViewer.entitlements
+      CODE_SIGN_STYLE: Automatic
+      ENABLE_HARDENED_RUNTIME: YES
+  OSINetStrikerViewerTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: OSINetStrikerViewerTests
+    dependencies:
+      - target: OSINetStrikerViewer
