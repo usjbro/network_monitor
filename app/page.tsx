@@ -72,37 +72,47 @@ export default function TerminalApp() {
     const source = new EventSource('/api/stream');
 
     source.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'connection_status') {
-        setAgentConnected(data.connected);
-        return;
-      }
-      if (data.type === 'connection_update') {
-        const connection = mapConnectionEvent(data.connection);
-        setConnections((prev) => {
-          const idx = prev.findIndex((c) => c.id === connection.id);
-          if (idx === -1) return [connection, ...prev].slice(0, 200);
-          const next = [...prev];
-          next[idx] = connection;
-          return next;
-        });
-      }
-      if (data.type === 'connection_closed') {
-        const id = mapConnectionClosedEvent(data);
-        setConnections((prev) => prev.filter((c) => c.id !== id));
-      }
-      if (data.type === 'packet') {
-        const packet = mapPacketEvent(data.packet);
-        setPackets((prev) => [packet, ...prev.slice(0, 100)]);
-      }
-      if (data.type === 'layer_update') {
-        setLiveLayers((prev) => {
-          const next = { ...prev };
-          for (const layer of data.layers) {
-            next[layer.layer as OSILayerNumber] = layer;
-          }
-          return next;
-        });
+      // A single malformed/unexpected event (e.g. an agent binary built
+      // before this UI, sending a payload missing a field the mappers now
+      // require) must not take down the whole SSE handler — without this
+      // guard, one throw here silently and permanently stops all future
+      // events from ever being processed, since EventSource keeps calling
+      // the same onmessage handler.
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'connection_status') {
+          setAgentConnected(data.connected);
+          return;
+        }
+        if (data.type === 'connection_update') {
+          const connection = mapConnectionEvent(data.connection);
+          setConnections((prev) => {
+            const idx = prev.findIndex((c) => c.id === connection.id);
+            if (idx === -1) return [connection, ...prev].slice(0, 200);
+            const next = [...prev];
+            next[idx] = connection;
+            return next;
+          });
+        }
+        if (data.type === 'connection_closed') {
+          const id = mapConnectionClosedEvent(data);
+          setConnections((prev) => prev.filter((c) => c.id !== id));
+        }
+        if (data.type === 'packet') {
+          const packet = mapPacketEvent(data.packet);
+          setPackets((prev) => [packet, ...prev.slice(0, 100)]);
+        }
+        if (data.type === 'layer_update') {
+          setLiveLayers((prev) => {
+            const next = { ...prev };
+            for (const layer of data.layers) {
+              next[layer.layer as OSILayerNumber] = layer;
+            }
+            return next;
+          });
+        }
+      } catch (err) {
+        console.error('capture-agent: failed to process stream event', err, event.data);
       }
     };
 

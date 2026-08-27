@@ -163,7 +163,7 @@ async fn main() -> std::io::Result<()> {
                             header_breakdown,
                         };
                         let _ = tx.send(wire::encode_event(&wire::AgentEvent::Packet {
-                            packet: packet_json,
+                            packet: Box::new(packet_json),
                         }));
                     }
                     Err(pcap::Error::TimeoutExpired) => continue,
@@ -255,7 +255,9 @@ async fn main() -> std::io::Result<()> {
                         encryption: snap.encryption,
                         sparkline: vec![],
                     };
-                    let event = wire::AgentEvent::ConnectionUpdate { connection };
+                    let event = wire::AgentEvent::ConnectionUpdate {
+                        connection: Box::new(connection),
+                    };
                     let _ = tx.send(wire::encode_event(&event));
                 }
 

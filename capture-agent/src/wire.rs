@@ -220,9 +220,18 @@ pub fn build_header_breakdown(parsed: &ParsedPacket, l7: &L7Info) -> HeaderBreak
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    ConnectionUpdate { connection: ConnectionJson },
+    // Boxed alongside `Packet` below: `ConnectionJson` (~320B, mostly its
+    // nine `String` fields) is otherwise by far the largest variant once
+    // `Packet` is boxed, and every `AgentEvent` gets cloned into a
+    // 1024-slot broadcast channel — every slot would pay that worst case
+    // regardless of which variant it actually holds. Also what keeps
+    // `clippy::large_enum_variant` (`-D warnings` in CI) satisfied.
+    ConnectionUpdate { connection: Box<ConnectionJson> },
     ConnectionClosed { id: String },
-    Packet { packet: PacketJson },
+    // Boxed because `PacketJson` (with `header_breakdown`) is by far the
+    // largest variant here (568B) — see the `ConnectionUpdate` comment
+    // above for why boxing matters for this broadcast-cloned enum.
+    Packet { packet: Box<PacketJson> },
     LayerUpdate { layers: Vec<LayerStatsJson> },
     AgentStatus { interface: String, capturing: bool },
 }
@@ -251,7 +260,7 @@ mod tests {
     #[test]
     fn encodes_connection_update_as_one_json_line_camel_case() {
         let event = AgentEvent::ConnectionUpdate {
-            connection: ConnectionJson {
+            connection: Box::new(ConnectionJson {
                 id: "tcp-192.168.1.10:51000-93.184.216.34:443".to_string(),
                 protocol: "TCP".to_string(),
                 app_layer_protocol: "HTTPS/TLS".to_string(),
@@ -272,7 +281,7 @@ mod tests {
                 status: "ESTABLISHED".to_string(),
                 encryption: "TLS".to_string(),
                 sparkline: vec![1, 2, 3],
-            },
+            }),
         };
         let line = encode_event(&event);
         assert!(line.ends_with('\n'));
@@ -404,7 +413,7 @@ mod tests {
         let header_breakdown = build_header_breakdown(&parsed, &l7);
 
         let event = AgentEvent::Packet {
-            packet: PacketJson {
+            packet: Box::new(PacketJson {
                 id: "pkt-1".to_string(),
                 timestamp: "1000".to_string(),
                 relative_time_ms: 1,
@@ -416,7 +425,7 @@ mod tests {
                 summary: "TCP 192.168.1.10 -> 93.184.216.34".to_string(),
                 hex_dump: "00 01".to_string(),
                 header_breakdown,
-            },
+            }),
         };
 
         let line = encode_event(&event);
