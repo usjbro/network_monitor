@@ -19,23 +19,37 @@ Built with Next.js 15 (App Router), React 19, and Tailwind v4 on the frontend, a
 
 System-level stats (hostname, CPU/memory, aggregate interface throughput) aren't wired to real data yet — that's tracked as separate follow-up work and shown as placeholder/zero values in the meantime, not "LIVE".
 
-## Run Locally
-
-**Prerequisites:** Node.js, Rust (for the capture agent), and macOS `access_bpf` group membership (see `capture-agent/README.md`).
-
-Run the capture agent and the web app in two terminals:
+## Quick Start
 
 ```bash
-cd capture-agent
-cargo run --release      # listens on 127.0.0.1:9990
-```
-
-```bash
+git clone https://github.com/usjbro/network_monitor.git
+cd network_monitor
 npm install
-npm run dev               # binds to 127.0.0.1 only; open the printed local URL
+cd capture-agent && cargo build --release && cd ..
 ```
 
-Without the agent running, the app still loads and shows an "agent not connected" banner instead of live data.
+Then, in two terminals:
+
+```bash
+cd capture-agent && cargo run --release      # listens on 127.0.0.1:9990
+```
+```bash
+npm run dev                                   # binds to 127.0.0.1 only
+```
+
+Open **http://127.0.0.1:3000**. Without the agent running, the app still loads and shows an "agent not connected" banner instead of live data.
+
+First time? You likely need a one-time macOS permission step first — see **[docs/getting-started.md](docs/getting-started.md)**.
+
+## Documentation
+
+- **[Getting Started](docs/getting-started.md)** — prerequisites, one-time setup, running it, verifying it's really live
+- **[Usage](docs/usage.md)** — every view, the command bar, themes
+- **[Architecture](docs/architecture.md)** — how the capture agent, relay, and UI fit together
+- **[Wire Protocol](docs/wire-protocol.md)** — the JSON contract between the Rust agent and the TypeScript relay
+- **[Troubleshooting](docs/troubleshooting.md)** — agent not connecting, wrong interface detected, what "Retransmit Anomaly" actually means
+- **[Security](docs/security.md)** — current posture, what's explicitly not done yet, dependency hygiene
+- **[Contributing](CONTRIBUTING.md)** — project structure, tests, the design-spec-then-plan workflow, roadmap
 
 ## Other Commands
 

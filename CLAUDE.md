@@ -43,3 +43,7 @@ On the client:
 - Theming: `TerminalTheme` (10 variants defined in `THEMES`) drives Tailwind class strings passed down as a `theme` prop — there's no CSS-in-JS or theme context, just plain prop drilling.
 - `next.config.ts` has `eslint.ignoreDuringBuilds: true` and a webpack tweak that disables file watching when `DISABLE_HMR=true` (used by the AI Studio agent environment to avoid flicker during automated edits) — don't rely on lint failing the build, and don't "fix" the watchOptions block.
 - `npm run dev`/`npm run start` bind Next.js to `127.0.0.1` only (`-H 127.0.0.1`), matching the capture agent's loopback-only bind — don't remove that flag, it's a deliberate security boundary until the separate mTLS/Caddy LAN-access plan lands.
+
+## Further documentation
+
+User-facing docs live under `docs/`: [architecture.md](docs/architecture.md), [getting-started.md](docs/getting-started.md), [usage.md](docs/usage.md), [wire-protocol.md](docs/wire-protocol.md) (the full agent↔relay JSON contract — read this before touching `capture-agent/src/wire.rs` or `lib/agent-mapping.ts`), [troubleshooting.md](docs/troubleshooting.md), [security.md](docs/security.md). Design specs and implementation plans for each sub-project live under `docs/superpowers/specs/` and `docs/superpowers/plans/` — read the relevant spec before extending a sub-project, and follow that same spec-then-plan process for new architectural work (see `CONTRIBUTING.md`).

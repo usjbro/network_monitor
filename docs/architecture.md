@@ -1,0 +1,79 @@
+# Architecture
+
+## Overview
+
+The app has three pieces, split by trust level: a privileged capture agent, an unprivileged relay, and a browser UI. Nothing in the web tier ever needs elevated permissions — only the agent does, and it's a small, narrowly-scoped process.
+
+```
+┌─────────────────────────┐        ┌──────────────────────────┐        ┌────────────────┐
+│  capture-agent (Rust)    │        │  Next.js app              │        │  Browser         │
+│  ─────────────────────   │        │  ───────────────────      │        │  ─────────────    │
+│  opens en0 via pcap,      │  TCP   │  lib/agent-client.ts       │  SSE   │  app/page.tsx     │
+│  parses every packet      │◄──────►│  (reconnecting client)     │◄──────►│  EventSource(...)  │
+│  itself, tracks flow      │ :9990  │  app/api/stream/route.ts   │        │  React state →     │
+│  state, streams NDJSON    │ loop-  │  app/api/control/route.ts  │        │  components/       │
+│  back only                │ back   │  loopback only             │        │                 │
+└─────────────────────────┘        └──────────────────────────┘        └────────────────┘
+```
+
+Both the agent and the Next.js server bind to `127.0.0.1` only — this is the localhost-only increment of the project. Nothing here is reachable from your LAN. Securing LAN access (mTLS, a reverse proxy, a native macOS app) is tracked as separate future work (GitHub epic #22), not yet implemented.
+
+## The three pieces
+
+### 1. `capture-agent/` — the privileged process
+
+A standalone Rust binary, run separately from the web app. It:
+
+- Detects the interface actually carrying your default route (`route -n get default`, cross-referenced against `pcap::Device::list()` — not just `pcap::Device::lookup()`, which on macOS can pick a near-idle virtual interface like `ap1` instead of your real Wi-Fi/Ethernet interface)
+- Opens that interface via `pcap` in promiscuous + immediate mode
+- Parses every packet itself — Ethernet/IP/TCP/UDP headers (`src/parse.rs`), plaintext HTTP/DNS/TLS-SNI (`src/l7.rs`) — never trusting a black-box dissector, and never panicking on malformed bytes (fuzzed via `cargo-fuzz`, since this code runs on untrusted, attacker-reachable network data)
+- Aggregates packets into a flow table (`src/flow.rs`): byte counters, TCP-state-derived status, RTT (SYN→SYN-ACK timing), and a retransmission-based loss estimate
+- Attributes each flow to a local process name/PID via `lsof` (`src/process_lookup.rs`)
+- Streams the result as newline-delimited JSON (`src/wire.rs`) over a TCP socket bound to `127.0.0.1:9990`
+
+**Privilege model:** the agent runs as your normal user, in the macOS `access_bpf` group (one-time setup, see `capture-agent/README.md`) — never `sudo`, never root, at runtime.
+
+### 2. The Next.js relay — unprivileged
+
+- `lib/agent-client.ts` — a Node `net.Socket` client that connects to the agent, parses its NDJSON stream (handling TCP chunk boundaries splitting a JSON object across reads), and re-emits `'event'`/`'status'` on an `EventEmitter`. Reconnects automatically if the agent isn't running or drops, with a guard against the classic "both `error` and `close` fire, doubling reconnect attempts" bug.
+- `app/api/stream/route.ts` — a Server-Sent Events route. The browser opens one `EventSource` connection here; every agent event gets forwarded as an SSE `data:` line.
+- `app/api/control/route.ts` — a POST endpoint the browser uses to send `pause`/`resume` back to the agent.
+
+Both routes share one `AgentClient` singleton (`global.__agentClient`) — there's one TCP connection to the agent regardless of how many browser tabs are watching.
+
+### 3. `app/page.tsx` and `components/` — the browser UI
+
+`app/page.tsx` is the entire application (one client component). It opens `new EventSource('/api/stream')` in a `useEffect` and folds incoming events into React state:
+
+| Event type | Effect |
+|---|---|
+| `connection_status` | drives the "agent not connected" banner |
+| `connection_update` | upserts into the `connections` list |
+| `packet` | prepends into a capped `packets` buffer (last 100) |
+| `layer_update` | merges into `liveLayers`; `layers` is *derived* from it via `useMemo` |
+
+There is no simulation code anywhere in this path — every number displayed originates from the capture agent. `components/` holds one file per view (`DashboardView`, `LayerDetailView`, `ConnectionsView`, `PacketStreamView`, `ProtocolMatrixView`), plus chrome (`HeaderBar`, `CommandLineBar`, `InstallModal`). All are presentational — they receive `theme` and view-specific data as props; there's no separate client-side data-fetching layer.
+
+## Supporting files
+
+- `lib/agent-mapping.ts` — pure functions (`mapConnectionEvent`, `mapPacketEvent`, `mergeLayerStats`) translating the agent's wire JSON into the app's domain types. This is the one place that has to agree field-for-field with `capture-agent/src/wire.rs` — see [wire-protocol.md](wire-protocol.md).
+- `lib/types.ts` — all domain types (`OSILayerInfo`, `NetworkConnection`, `PacketFrame`, `SystemStats`, `ThemeConfig`).
+- `lib/osi-engine.ts` — `THEMES` (10 color schemes), `STATIC_LAYER_INFO` (per-layer *descriptive* metadata — name, PDU, protocol list, badge colors; not live values), and formatting helpers (`formatSpeed`, `formatBytes`).
+
+## Why this shape
+
+- **Privilege isolation**: only the agent touches raw sockets; a bug in the (much larger, much more frequently changed) web tier can't escalate to packet-capture privilege.
+- **One clock, one source of truth**: the agent computes all derived metrics (speed, RTT, loss, per-layer aggregates) once, server-side; the relay and UI just forward and render.
+- **No polling**: SSE + a persistent agent connection means the UI updates as events happen, not on a fixed interval.
+
+## Known, deliberate gaps
+
+These aren't oversights — they're scoped out of the current increment and tracked as GitHub issues in [usjbro/network_monitor](https://github.com/usjbro/network_monitor):
+
+- **`SystemStats`** (hostname, CPU/mem, aggregate interface throughput) has no wire event yet — shown as placeholder/zero, not fabricated.
+- **`headerBreakdown`** (per-layer packet detail: MACs, TLS SNI, HTTP method/path, DNS query name) is parsed by the agent but never reaches the wire — issue #29.
+- **The packet-event stream is uncapped** — no sampling/rate limit yet, issue #27.
+- **Flows never expire** — the flow table grows unbounded for the life of the process, issue #28.
+- **LAN access is unsecured by design** at this stage — both processes are loopback-only; mTLS/reverse-proxy/native-app work is epic #22, not yet planned in detail.
+
+See [troubleshooting.md](troubleshooting.md) for what these look like in practice, and [security.md](security.md) for the full security posture.
