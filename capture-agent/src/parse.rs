@@ -1,6 +1,6 @@
 use etherparse::{SlicedPacket, NetSlice, TransportSlice};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportProtocol {
     Tcp,
     Udp,
