@@ -77,8 +77,6 @@ export interface PacketFrame {
 
 export type TerminalTheme = 'sophisticated' | 'macos_pro' | 'macos_homebrew' | 'iterm_snazzy' | 'matrix' | 'dracula' | 'amber' | 'cyberpunk' | 'catppuccin' | 'nord';
 
-export type TrafficScenario = 'normal' | 'web_heavy' | 'video_stream' | 'syn_flood' | 'iot_mesh' | 'dns_storm';
-
 export interface ThemeConfig {
   id: TerminalTheme;
   name: string;
