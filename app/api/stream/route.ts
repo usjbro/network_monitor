@@ -29,12 +29,27 @@ export async function GET() {
   const stream = new ReadableStream({
     start(controller) {
       onEvent = (event: unknown) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        // controller.enqueue() throws if the stream has already closed/errored
+        // (e.g. the browser tab navigated away between the emit and this
+        // callback running). These callbacks run synchronously inside
+        // AgentClient's EventEmitter.emit(), so an uncaught throw here would
+        // both surface as an unhandled exception from an I/O callback AND stop
+        // emit() from notifying any other listener (other browser tabs) for
+        // this same event. There's nothing meaningful to do but ignore it.
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          // stream already closed/closing — ignore
+        }
       };
       onStatus = (status: { connected: boolean }) => {
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify({ type: 'connection_status', ...status })}\n\n`)
-        );
+        try {
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify({ type: 'connection_status', ...status })}\n\n`)
+          );
+        } catch {
+          // stream already closed/closing — ignore
+        }
       };
       client.on('event', onEvent);
       client.on('status', onStatus);

@@ -51,8 +51,11 @@ export default function TerminalApp() {
     cpuUsagePct: 14.2,
     memUsagePct: 38.5,
     uptimeSeconds: 84920,
-    rxTotalMbps: 480.5,
-    txTotalMbps: 210.2,
+    // No wire event currently carries system-level throughput stats (that's
+    // tracked separately as future work) — seed at zero rather than
+    // fabricating a "live" number.
+    rxTotalMbps: 0,
+    txTotalMbps: 0,
     rxPpsTotal: 1480,
     txPpsTotal: 740,
     totalPacketsCaptured: 184200,
@@ -61,8 +64,8 @@ export default function TerminalApp() {
   // Connections & Packets State (populated from the live capture stream)
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
   const [packets, setPackets] = useState<PacketFrame[]>([]);
-  const [historyRx, setHistoryRx] = useState<number[]>(Array(30).fill(480));
-  const [historyTx, setHistoryTx] = useState<number[]>(Array(30).fill(210));
+  const [historyRx, setHistoryRx] = useState<number[]>([]);
+  const [historyTx, setHistoryTx] = useState<number[]>([]);
 
   // Live Capture Stream — replaces the old simulation loop
   useEffect(() => {

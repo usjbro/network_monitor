@@ -60,32 +60,39 @@ function healthStatusFor(errorRate: number): 'OPTIMAL' | 'WARNING' | 'CRITICAL' 
 export function mergeLayerStats(
   liveLayers: Record<OSILayerNumber, Partial<OSILayerInfo>>
 ): OSILayerInfo[] {
-  return (Object.keys(STATIC_LAYER_INFO) as unknown as OSILayerNumber[]).map((layer) => {
-    const staticInfo = STATIC_LAYER_INFO[layer];
-    const live = liveLayers[layer] ?? {};
-    const rxSpeed = live.rxSpeed ?? 0;
-    const txSpeed = live.txSpeed ?? 0;
-    const errorRate = live.errorRate ?? 0;
-    return {
-      ...staticInfo,
-      rxSpeed,
-      txSpeed,
-      rxPacketsPerSec: live.rxPacketsPerSec ?? 0,
-      txPacketsPerSec: live.txPacketsPerSec ?? 0,
-      totalBytes: live.totalBytes ?? 0,
-      errorRate,
-      activeSockets: live.activeSockets ?? 0,
-      sparkline: live.sparkline ?? [],
-      details: {
-        primaryMetric: 'Throughput',
-        primaryValue: `${Math.round(rxSpeed + txSpeed)} B/s`,
-        secondaryMetric: 'Active Sockets',
-        secondaryValue: String(live.activeSockets ?? 0),
-        tertiaryMetric: 'Error Rate',
-        tertiaryValue: `${errorRate.toFixed(2)}%`,
-        healthStatus: healthStatusFor(errorRate),
-        keyMetrics: {},
-      },
-    };
-  });
+  // Object.keys() always enumerates integer-like keys in ascending numeric
+  // order (1..7) regardless of declaration order, which is the reverse of
+  // the display order the layer stack expects (7..1, Application-to-Physical)
+  // and relies on via its own `.reverse()` calls. Sort explicitly rather than
+  // depending on key-enumeration order to produce it incidentally.
+  return (Object.keys(STATIC_LAYER_INFO) as unknown as OSILayerNumber[])
+    .map((layer) => {
+      const staticInfo = STATIC_LAYER_INFO[layer];
+      const live = liveLayers[layer] ?? {};
+      const rxSpeed = live.rxSpeed ?? 0;
+      const txSpeed = live.txSpeed ?? 0;
+      const errorRate = live.errorRate ?? 0;
+      return {
+        ...staticInfo,
+        rxSpeed,
+        txSpeed,
+        rxPacketsPerSec: live.rxPacketsPerSec ?? 0,
+        txPacketsPerSec: live.txPacketsPerSec ?? 0,
+        totalBytes: live.totalBytes ?? 0,
+        errorRate,
+        activeSockets: live.activeSockets ?? 0,
+        sparkline: live.sparkline ?? [],
+        details: {
+          primaryMetric: 'Throughput',
+          primaryValue: `${Math.round(rxSpeed + txSpeed)} B/s`,
+          secondaryMetric: 'Active Sockets',
+          secondaryValue: String(live.activeSockets ?? 0),
+          tertiaryMetric: 'Error Rate',
+          tertiaryValue: `${errorRate.toFixed(2)}%`,
+          healthStatus: healthStatusFor(errorRate),
+          keyMetrics: {},
+        },
+      };
+    })
+    .sort((a, b) => b.layer - a.layer);
 }
