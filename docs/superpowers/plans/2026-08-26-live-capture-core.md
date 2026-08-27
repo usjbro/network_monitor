@@ -605,6 +605,15 @@ mod tests {
     use crate::l7::L7Info;
 
     fn tcp_packet(local_is_src: bool, flags: TcpFlags, len: u16) -> ParsedPacket {
+        tcp_packet_with_payload(local_is_src, flags, len, vec![])
+    }
+
+    fn tcp_packet_with_payload(
+        local_is_src: bool,
+        flags: TcpFlags,
+        len: u16,
+        payload: Vec<u8>,
+    ) -> ParsedPacket {
         let (src_ip, dst_ip, src_port, dst_port) = if local_is_src {
             ("192.168.1.10".to_string(), "93.184.216.34".to_string(), 51000u16, 443u16)
         } else {
@@ -622,7 +631,7 @@ mod tests {
             seq: Some(1000),
             ttl: 64,
             total_len: len,
-            payload: vec![],
+            payload,
         }
     }
 
@@ -663,10 +672,14 @@ mod tests {
         // Regression test: the first inbound segment of a flow must not be
         // flagged as a retransmit just because outbound segments were already
         // observed — retransmission detection is scoped per-direction.
+        // Retransmit detection only considers segments with payload (pure
+        // ACKs are exempt), so these packets carry a non-empty payload —
+        // otherwise none of them would count as a "segment" at all and this
+        // test wouldn't exercise the retransmit path.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let out1 = tcp_packet(true, TcpFlags::default(), 60);
-        let out2 = tcp_packet(true, TcpFlags::default(), 60);
-        let inb1 = tcp_packet(false, TcpFlags::default(), 60);
+        let out1 = tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]);
+        let out2 = tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]);
+        let inb1 = tcp_packet_with_payload(false, TcpFlags::default(), 60, vec![4, 5, 6]);
         table.observe(&out1, &L7Info::None, 0);
         table.observe(&out2, &L7Info::None, 1);
         table.observe(&inb1, &L7Info::None, 2);
@@ -677,6 +690,50 @@ mod tests {
         // (out2 after out1) — but the inbound direction's first-ever segment
         // must not count as a second retransmit on top of that.
         assert_eq!(snap[0].packet_loss, (1.0 / 3.0) * 100.0);
+    }
+
+    #[test]
+    fn pure_acks_are_never_counted_as_retransmits() {
+        // Regression test for the "misfires on every plain ACK" finding:
+        // zero-payload segments reusing the previous sequence number (which
+        // is how real ACKs behave) must not inflate packet_loss at all.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false }, 60);
+        let data = tcp_packet_with_payload(true, TcpFlags::default(), 100, vec![1, 2, 3]);
+        let ack1 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        let ack2 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false }, 60);
+        table.observe(&syn, &L7Info::None, 0);
+        table.observe(&data, &L7Info::None, 1);
+        table.observe(&ack1, &L7Info::None, 2);
+        table.observe(&ack2, &L7Info::None, 3);
+
+        let snap = table.snapshot(1000);
+        assert_eq!(snap[0].packet_loss, 0.0);
+    }
+
+    #[test]
+    fn udp_flows_report_established_not_a_tcp_closing_state() {
+        // Regression test: a flow with no tcp_flags (UDP, e.g. DNS) must not
+        // default to "CLOSE_WAIT" — that names a TCP state it never entered.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let udp_packet = ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: "192.168.1.10".to_string(),
+            dst_ip: "8.8.8.8".to_string(),
+            protocol: TransportProtocol::Udp,
+            src_port: Some(60123),
+            dst_port: Some(53),
+            tcp_flags: None,
+            seq: None,
+            ttl: 64,
+            total_len: 40,
+            payload: vec![],
+        };
+        table.observe(&udp_packet, &L7Info::None, 0);
+
+        let snap = table.snapshot(1000);
+        assert_eq!(snap[0].status, "ESTABLISHED");
     }
 }
 ```
@@ -859,22 +916,32 @@ impl FlowTable {
                 state.established = false;
             }
 
+            // Only segments that carry payload participate in retransmit
+            // detection. A pure ACK (no payload) legitimately reuses the
+            // previous sequence number constantly in healthy TCP flows
+            // (delayed ACKs, window updates, ACKing a large inbound
+            // response) — counting those as retransmits would flag nearly
+            // every ordinary connection as lossy.
             if let Some(seq) = packet.seq {
-                state.segments += 1;
-                // Per-direction: the first segment ever seen in a direction has
-                // nothing to compare against, so it is never a retransmit. Using
-                // the flow's combined segment count here (instead of a per-direction
-                // one) would flag the first segment of the *second* direction as a
-                // false-positive retransmit as soon as any segment had already been
-                // seen in the other direction — this must stay scoped per-direction.
-                let is_retransmit = match state.max_seq_seen.get(&is_outbound) {
-                    Some(&max_seen) => seq <= max_seen,
-                    None => false,
-                };
-                if is_retransmit {
-                    state.retransmits += 1;
-                } else {
-                    state.max_seq_seen.insert(is_outbound, seq);
+                if !packet.payload.is_empty() {
+                    state.segments += 1;
+                    // Per-direction: the first data segment ever seen in a
+                    // direction has nothing to compare against, so it is never
+                    // a retransmit. Using the flow's combined segment count
+                    // here (instead of a per-direction one) would flag the
+                    // first segment of the *second* direction as a
+                    // false-positive retransmit as soon as any segment had
+                    // already been seen in the other direction — this must
+                    // stay scoped per-direction.
+                    let is_retransmit = match state.max_seq_seen.get(&is_outbound) {
+                        Some(&max_seen) => seq <= max_seen,
+                        None => false,
+                    };
+                    if is_retransmit {
+                        state.retransmits += 1;
+                    } else {
+                        state.max_seq_seen.insert(is_outbound, seq);
+                    }
                 }
             }
         }
@@ -892,6 +959,11 @@ impl FlowTable {
                 "ESTABLISHED"
             } else if state.syn_sent_at_ms.is_some() {
                 "SYN_SENT"
+            } else if key.protocol != TransportProtocol::Tcp {
+                // Non-TCP flows (UDP, ICMP) are connectionless — there is no
+                // TCP-style closing state to report for them. An observed
+                // non-TCP flow is simply active.
+                "ESTABLISHED"
             } else {
                 "CLOSE_WAIT"
             };
