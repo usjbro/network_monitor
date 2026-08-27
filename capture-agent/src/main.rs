@@ -6,7 +6,34 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
+/// The interface name carrying the OS's default route (e.g. "en0"), read via
+/// `route -n get default` and parsed from its "interface: <name>" line.
+/// `pcap::Device::lookup()` alone is not reliable for this: on macOS it can
+/// return a virtual/link-local interface (e.g. AWDL's "ap1") that is up but
+/// carries near-zero real traffic, rather than the interface actually
+/// carrying the user's internet traffic.
+fn default_route_interface_name() -> Option<String> {
+    let output = std::process::Command::new("route")
+        .args(["-n", "get", "default"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("interface: "))
+        .map(|name| name.to_string())
+}
+
 fn detect_interface() -> pcap::Device {
+    if let Some(name) = default_route_interface_name() {
+        if let Ok(devices) = pcap::Device::list() {
+            if let Some(device) = devices.into_iter().find(|d| d.name == name) {
+                return device;
+            }
+        }
+    }
+
+    // Fall back to pcap's own default-device heuristic if the OS route
+    // lookup fails or doesn't match any capturable device (e.g. non-macOS).
     match pcap::Device::lookup() {
         Ok(Some(device)) => device,
         Ok(None) => panic!("no capture-capable network interface found"),
@@ -65,7 +92,18 @@ async fn main() -> std::io::Result<()> {
         let packet_seq = packet_seq.clone();
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
-                .and_then(|c| c.promisc(true).snaplen(65535).timeout(1000).open())
+                .and_then(|c| {
+                    c.promisc(true)
+                        .snaplen(65535)
+                        .timeout(1000)
+                        // Without this, macOS BPF only flushes its buffer to
+                        // userspace once it's full, which on a normal-traffic
+                        // interface can mean no packets are delivered for a
+                        // very long time. Immediate mode delivers each packet
+                        // as soon as it arrives instead.
+                        .immediate_mode(true)
+                        .open()
+                })
             {
                 Ok(cap) => cap,
                 Err(e) => {
