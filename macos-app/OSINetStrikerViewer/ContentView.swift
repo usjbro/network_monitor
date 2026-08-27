@@ -5,7 +5,36 @@ struct TrustedWebView: NSViewRepresentable {
     let trustedURL: URL
 
     func makeCoordinator() -> NavigationLockDelegate {
-        NavigationLockDelegate(trustedOrigin: trustedURL.host ?? "")
+        let delegate = NavigationLockDelegate(trustedOrigin: trustedURL.host ?? "")
+        do {
+            let store = ClientCertStore(
+                keyTag: "com.osinetstriker.viewer.client-key",
+                commonName: ProcessInfo.processInfo.hostName
+            )
+            delegate.clientIdentity = try store.loadOrCreateIdentity(
+                caCertPath: Self.caCertPath,
+                caKeyPath: Self.caKeyPath
+            )
+        } catch {
+            // Not fatal -- the app still launches; the WKWebView's own
+            // TLS-failure UI communicates the problem instead of crashing,
+            // and this print gives a debugging trail for why.
+            print("ClientCertStore.loadOrCreateIdentity failed: \(error)")
+        }
+        return delegate
+    }
+
+    // mkcert's default CAROOT on macOS -- matches `$(mkcert -CAROOT)` from
+    // deploy/setup-ca.sh (Task 1). Override via these env vars (Xcode
+    // scheme > Run > Arguments) if `mkcert -CAROOT` reports something
+    // different on your machine (e.g. a global CAROOT env var override).
+    private static var caCertPath: String {
+        ProcessInfo.processInfo.environment["OSINETSTRIKER_CA_CERT"]
+            ?? "\(NSHomeDirectory())/Library/Application Support/mkcert/rootCA.pem"
+    }
+    private static var caKeyPath: String {
+        ProcessInfo.processInfo.environment["OSINETSTRIKER_CA_KEY"]
+            ?? "\(NSHomeDirectory())/Library/Application Support/mkcert/rootCA-key.pem"
     }
 
     func makeNSView(context: Context) -> WKWebView {

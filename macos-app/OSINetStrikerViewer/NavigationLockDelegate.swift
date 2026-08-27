@@ -1,3 +1,4 @@
+import Security
 import WebKit
 
 /// Enforces the single-origin lock described in the design spec: this
@@ -6,6 +7,13 @@ import WebKit
 /// render one origin you author yourself has nothing else to visit.
 final class NavigationLockDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
     let trustedOrigin: String
+
+    // Set by ContentView.makeCoordinator after ClientCertStore
+    // provisions/loads the mTLS client identity. Nil means default
+    // handling below (no client cert presented) -- Caddy's
+    // require_and_verify then rejects the connection, surfaced as a
+    // visible TLS failure rather than silently missing data.
+    var clientIdentity: SecIdentity?
 
     init(trustedOrigin: String) {
         self.trustedOrigin = trustedOrigin
@@ -44,5 +52,18 @@ final class NavigationLockDelegate: NSObject, WKNavigationDelegate, WKUIDelegate
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
         return decideNewWindow()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodClientCertificate,
+              let identity = clientIdentity else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(identity: identity, certificates: nil, persistence: .forSession))
     }
 }

@@ -16,6 +16,9 @@ targets:
       CODE_SIGN_ENTITLEMENTS: OSINetStrikerViewer/OSINetStrikerViewer.entitlements
       CODE_SIGN_STYLE: Automatic
       ENABLE_HARDENED_RUNTIME: YES
+    dependencies:
+      - package: swift-asn1
+        product: SwiftASN1
   OSINetStrikerViewerTests:
     type: bundle.unit-test
     platform: macOS
@@ -23,3 +26,7 @@ targets:
       - path: OSINetStrikerViewerTests
     dependencies:
       - target: OSINetStrikerViewer
+packages:
+  swift-asn1:
+    url: https://github.com/apple/swift-asn1.git
+    from: 1.0.0
