@@ -24,7 +24,7 @@ cargo run --release      # run it (listens on 127.0.0.1:9990)
 
 ## Architecture
 
-This is a Next.js 15 (App Router) + React 19 + Tailwind v4 terminal-style UI ("OSI NetStriker") that visualizes **real** network traffic captured on the local machine, broken down across the 7 OSI layers. It was originally scaffolded via Google AI Studio (see `metadata.json`, `README.md`) as a client-side simulation and was later converted to a real live-capture pipeline; some Google AI Studio scaffolding artifacts (e.g. `GEMINI_API_KEY` in `.env.example`, `majorCapabilities` in `metadata.json`, an empty `app/api/gemini/analyze/` directory) are leftover and not wired to anything — there is no Gemini API call anywhere in the code.
+This is a Next.js 16 (App Router) + React 19 + Tailwind v4 terminal-style UI ("OSI NetStriker") that visualizes **real** network traffic captured on the local machine, broken down across the 7 OSI layers. It was originally scaffolded via Google AI Studio (see `metadata.json`, `README.md`) as a client-side simulation and was later converted to a real live-capture pipeline; some Google AI Studio scaffolding artifacts (e.g. `GEMINI_API_KEY` in `.env.example`, `majorCapabilities` in `metadata.json`, an empty `app/api/gemini/analyze/` directory) are leftover and not wired to anything — there is no Gemini API call anywhere in the code.
 
 Real traffic flows through three pieces:
 
@@ -41,7 +41,7 @@ On the client:
 - `components/` — one component per view/tab (`DashboardView`, `LayerDetailView`, `ConnectionsView`, `PacketStreamView`, `ProtocolMatrixView`), plus chrome (`HeaderBar`, `CommandLineBar`, `InstallModal`). All are presentational — they receive `theme: ThemeConfig` plus view-specific data as props from `app/page.tsx`; there's no separate client-side data fetching or state management library. (The old `ScenarioLabView` was removed along with the simulation it drove.)
 - `app/api/install/route.ts` — a single API route that serves a generated bash installer script (`GET`), which itself writes a standalone Node CLI script to the user's machine mimicking the terminal UI. Self-contained; not connected to the rest of the app.
 - Theming: `TerminalTheme` (10 variants defined in `THEMES`) drives Tailwind class strings passed down as a `theme` prop — there's no CSS-in-JS or theme context, just plain prop drilling.
-- `next.config.ts` has `eslint.ignoreDuringBuilds: true` and a webpack tweak that disables file watching when `DISABLE_HMR=true` (used by the AI Studio agent environment to avoid flicker during automated edits) — don't rely on lint failing the build, and don't "fix" the watchOptions block.
+- `next.config.ts` has a webpack tweak that disables file watching when `DISABLE_HMR=true` (used by the AI Studio agent environment to avoid flicker during automated edits) — don't "fix" the watchOptions block. Since Next.js 16 defaults to Turbopack, `dev`/`build` in `package.json` pass `--webpack` explicitly so that hook still applies; don't drop that flag. (The old `eslint.ignoreDuringBuilds` config key was removed in the Next 16 upgrade — it's no longer a recognized option, and `next build` doesn't run ESLint regardless; `npm run lint` — plain `eslint .` — remains the actual lint gate, unaffected.)
 - `npm run dev`/`npm run start` bind Next.js to `127.0.0.1` only (`-H 127.0.0.1`), matching the capture agent's loopback-only bind — don't remove that flag, it's a deliberate security boundary until the separate mTLS/Caddy LAN-access plan lands.
 
 ## Further documentation
