@@ -1,4 +1,4 @@
-use capture_agent::{flow::FlowTable, l7, parse, process_lookup, wire};
+use capture_agent::{flow::FlowTable, l7, parse, process_lookup, rate_limit::PacketEventLimiter, wire};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -110,6 +110,12 @@ async fn main() -> std::io::Result<()> {
                     return;
                 }
             };
+            // Caps discrete Packet events to the browser at 100/sec — the UI
+            // only keeps the last 100 anyway (app/page.tsx's
+            // `prev.slice(0, 100)`), so anything above that is pure waste.
+            // Connection/layer aggregates below are unaffected: `observe()`
+            // runs on every packet regardless of this limiter.
+            let mut packet_event_limiter = PacketEventLimiter::new(100, 1000);
             loop {
                 if paused.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(200));
@@ -121,6 +127,9 @@ async fn main() -> std::io::Result<()> {
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
                         flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+                        if !packet_event_limiter.allow(now_ms) {
+                            continue; // stats already recorded; just skip the discrete event
+                        }
 
                         // Emit a Packet event for the packet stream view. hex_dump is
                         // capped to the first 64 bytes of payload — plenty for display,
@@ -331,11 +340,46 @@ async fn main() -> std::io::Result<()> {
                                     break;
                                 }
                             }
-                            Err(_) => break,
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                eprintln!("capture-agent: client lagged, dropped {skipped} events");
+                                continue;
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
                         }
                     }
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::broadcast;
+
+    /// Proves the Lagged branch is reachable and recoverable: a slow
+    /// receiver that falls behind a broadcast channel's capacity gets
+    /// `Err(RecvError::Lagged(_))` on its next `recv()`, not a fatal error —
+    /// and a subsequent `recv()` succeeds normally afterward. Drives the
+    /// broadcast channel directly rather than extracting the relay loop, so
+    /// this needs no sockets/pcap.
+    #[tokio::test]
+    async fn lagged_receiver_recovers_instead_of_erroring_fatally() {
+        let (tx, mut rx) = broadcast::channel::<String>(2);
+
+        for i in 0..5 {
+            let _ = tx.send(format!("event-{i}"));
+        }
+
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                assert!(skipped > 0, "expected a nonzero skipped count");
+            }
+            other => panic!("expected Lagged, got {other:?}"),
+        }
+
+        // The channel should be usable again after Lagged, not stuck.
+        let next = rx.recv().await;
+        assert!(next.is_ok(), "recv after Lagged should succeed, got {next:?}");
     }
 }
