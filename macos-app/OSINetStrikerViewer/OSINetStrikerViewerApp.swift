@@ -4,7 +4,7 @@ import SwiftUI
 struct OSINetStrikerViewerApp: App {
     var body: some Scene {
         WindowGroup {
-            Text("OSI NetStriker Viewer")
+            ContentView()
         }
     }
 }

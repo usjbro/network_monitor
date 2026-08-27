@@ -1,0 +1,48 @@
+import WebKit
+
+/// Enforces the single-origin lock described in the design spec: this
+/// webview may only ever navigate to `trustedOrigin`, in the main frame,
+/// any subframe, or a new-window request. A shell that can only ever
+/// render one origin you author yourself has nothing else to visit.
+final class NavigationLockDelegate: NSObject, WKNavigationDelegate, WKUIDelegate {
+    let trustedOrigin: String
+
+    init(trustedOrigin: String) {
+        self.trustedOrigin = trustedOrigin
+    }
+
+    /// Exact host match only -- NOT a substring/prefix check, which would
+    /// wrongly allow e.g. "trustedOrigin.evil.com".
+    func isAllowed(url: URL) -> Bool {
+        return url.host == trustedOrigin
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        guard let url = navigationAction.request.url, isAllowed(url: url) else {
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    /// Pulled out of createWebViewWith so it's directly unit-testable
+    /// (WKWebViewConfiguration/WKNavigationAction have no public
+    /// initializers, so the delegate method itself can't be called from a
+    /// test -- this wrapper carries the actual decision).
+    func decideNewWindow() -> WKWebView? {
+        return nil
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        createWebViewWith configuration: WKWebViewConfiguration,
+        for navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures
+    ) -> WKWebView? {
+        return decideNewWindow()
+    }
+}
