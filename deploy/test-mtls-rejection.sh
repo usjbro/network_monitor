@@ -18,9 +18,11 @@ CLIENT_CERT="$(ls "$CERTS_DIR"/client-*.pem 2>/dev/null | grep -v -- '-key.pem' 
 CLIENT_KEY="${CLIENT_CERT%.pem}-key.pem"
 
 echo "2/2: connecting WITH a valid client certificate (must succeed)..."
-STATUS="$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' \
+if ! STATUS="$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' \
   --cert "$CLIENT_CERT" --key "$CLIENT_KEY" \
-  "https://$ADDR/")"
+  "https://$ADDR/")"; then
+  fail "connection WITH a valid client cert failed at the transport/TLS layer"
+fi
 [ "$STATUS" = "200" ] || fail "connection WITH a valid client cert returned HTTP $STATUS, expected 200"
 echo "  OK: accepted as expected (HTTP 200)"
 
