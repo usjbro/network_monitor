@@ -42,6 +42,13 @@ private func deleteKey(tag: String) {
     let query: [String: Any] = [
         kSecClass as String: kSecClassKey,
         kSecAttrApplicationTag as String: Data(tag.utf8),
+        // makeSecureEnclaveKey creates the key in the data-protection
+        // keychain (kSecUseDataProtectionKeychain, added in fix #1 of the
+        // review round) -- without this flag here too, this query targets
+        // the legacy file-based keychain instead, never matches the key
+        // it's supposed to delete, and leaks a permanent Secure Enclave
+        // key under a fresh UUID tag on every test run.
+        kSecUseDataProtectionKeychain as String: true,
     ]
     SecItemDelete(query as CFDictionary)
 }

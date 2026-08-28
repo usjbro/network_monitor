@@ -15,6 +15,17 @@ final class NavigationLockDelegate: NSObject, WKNavigationDelegate, WKUIDelegate
     // visible TLS failure rather than silently missing data.
     var clientIdentity: SecIdentity?
 
+    // Set by TrustedWebView.makeNSView right after creating the webview.
+    // Identity provisioning runs on a background queue and can take
+    // seconds (Secure Enclave key gen + biometric prompt + an openssl
+    // subprocess), so the very first page load can race ahead of it with
+    // no client cert to present. Weak because the webview owns/outlives
+    // this delegate via the NSViewRepresentable Coordinator machinery, not
+    // the other way around -- holding it weakly avoids a retain cycle.
+    // ContentView's provisioning completion handler calls webView.reload()
+    // through this reference once a real identity becomes available.
+    weak var webView: WKWebView?
+
     init(trustedOrigin: String) {
         self.trustedOrigin = trustedOrigin
     }

@@ -29,6 +29,16 @@ struct TrustedWebView: NSViewRepresentable {
                 )
                 DispatchQueue.main.async {
                     delegate.clientIdentity = identity
+                    // The very first page load (triggered synchronously in
+                    // makeNSView, below) can race ahead of provisioning and
+                    // fail its TLS handshake with no client cert to present
+                    // -- nothing else would ever retry it, since trustedURL
+                    // is a constant (no state change to re-trigger
+                    // updateNSView) and the delegate previously held no
+                    // reference back to the webview. Reloading here, now
+                    // that a real identity exists, picks up exactly that
+                    // case.
+                    delegate.webView?.reload()
                 }
             } catch {
                 // Not fatal -- the app still launches; the WKWebView's own
@@ -58,6 +68,11 @@ struct TrustedWebView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
+        // Gives the delegate a way to reload this webview once identity
+        // provisioning (still running in the background at this point --
+        // see makeCoordinator) finishes, in case this first load races
+        // ahead of it.
+        context.coordinator.webView = webView
         webView.load(URLRequest(url: trustedURL))
         return webView
     }
