@@ -1,0 +1,46 @@
+{
+	auto_https off
+}
+
+# Defaults to a loopback-only test setup so nothing here is LAN-reachable
+# until you deliberately opt in (see deploy/README.md step 5). Never
+# hardcode ":443" here directly.
+#
+# TWO separate knobs control that, and BOTH matter:
+#
+#   1. The site address below is the name Caddy matches requests against
+#      (SNI + Host). It is NOT what Caddy binds to.
+#   2. The `bind` directive is what actually chooses the network
+#      interface. Without it Caddy binds the wildcard address (verified:
+#      `lsof -nP -iTCP:8443 -sTCP:LISTEN` reports "*:8443"), so a site
+#      address of "localhost:8443" alone still accepts connections
+#      arriving on your LAN IP as long as they send SNI/Host
+#      "localhost". mTLS still rejects those without a CA-signed client
+#      cert -- but "only loopback is listening" would simply not be
+#      true, so `bind` is what makes it true.
+#
+# Site address uses the hostname "localhost", not the bare IP
+# "127.0.0.1": Caddy auto-enables strict SNI-Host enforcement whenever
+# client_auth is configured, and most TLS clients (confirmed: curl on
+# macOS) don't send an SNI value when connecting to a literal IP address.
+# Such a connection is then rejected outright -- observed as a TLS-level
+# "tlsv1 alert internal error" during the handshake, i.e. before client
+# cert verification even happens -- regardless of whether a valid client
+# cert is presented. Using a hostname target (with a server cert SAN that
+# includes it, already true here since deploy/setup-ca.sh's SANs include
+# "localhost") avoids that. Keep this a hostname, never a bare IP, if you
+# change the default. A bare PORT (":443", step 5) is fine and different:
+# it matches any Host, and real devices connecting by real hostname do
+# send real SNI -- the problem was only ever bare IPs.
+{$CADDY_LISTEN_ADDR:localhost:8443} {
+	bind {$CADDY_BIND_ADDR:127.0.0.1}
+
+	tls {$CADDY_CERT_DIR:deploy/certs}/server.pem {$CADDY_CERT_DIR:deploy/certs}/server-key.pem {
+		client_auth {
+			mode require_and_verify
+			trusted_ca_cert_file {$CADDY_CERT_DIR:deploy/certs}/ca-root.pem
+		}
+	}
+
+	reverse_proxy 127.0.0.1:3000
+}
