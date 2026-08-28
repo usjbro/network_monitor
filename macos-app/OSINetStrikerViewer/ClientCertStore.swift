@@ -96,18 +96,6 @@ struct ClientCertStore {
             return existing
         }
 
-        // Reuse an already-generated SE key under this tag if one exists --
-        // "key created, identity absent" (e.g. a prior run that generated
-        // the key but hasn't been signed yet) is the expected steady state
-        // while waiting on the external signing script, and unconditionally
-        // calling makeSecureEnclaveKey again would either hit
-        // errSecDuplicateItem or, if a colliding tag isn't already firmly
-        // rejected, silently accumulate orphaned SE keys. makeSecureEnclaveKey's
-        // own doc comment flags exactly this: "callers should check
-        // SecItemCopyMatching first in real use."
-        let privateKey = try findExistingKey() ?? (try makeSecureEnclaveKey(tag: keyTag))
-        let csrPEM = try buildCSR(privateKey: privateKey, commonName: commonName)
-
         try FileManager.default.createDirectory(at: Self.containerSupportDirectory, withIntermediateDirectories: true)
 
         if let signedPEM = try? String(contentsOf: Self.signedCertURL, encoding: .utf8) {
@@ -123,6 +111,24 @@ struct ClientCertStore {
             return identity
         }
 
+        // A CSR from an earlier call is still sitting on disk, waiting on
+        // deploy/sign-native-app-csr.sh -- reuse it as-is rather than
+        // rebuilding. buildCSR signs with the SE key below, which is gated
+        // behind .biometryCurrentSet; the caller (ContentView) retries this
+        // function every 3s while waiting, and re-signing on every retry
+        // would re-prompt Touch ID/password every 3s right along with it.
+        if FileManager.default.fileExists(atPath: Self.csrURL.path) {
+            throw ClientCertStoreError.awaitingExternalSigning(csrPath: Self.csrURL.path)
+        }
+
+        // Reuse an already-generated SE key under this tag if one exists --
+        // unconditionally calling makeSecureEnclaveKey again would either
+        // hit errSecDuplicateItem or, if a colliding tag isn't already
+        // firmly rejected, silently accumulate orphaned SE keys.
+        // makeSecureEnclaveKey's own doc comment flags exactly this:
+        // "callers should check SecItemCopyMatching first in real use."
+        let privateKey = try findExistingKey() ?? (try makeSecureEnclaveKey(tag: keyTag))
+        let csrPEM = try buildCSR(privateKey: privateKey, commonName: commonName)
         try csrPEM.write(to: Self.csrURL, atomically: true, encoding: .utf8)
         throw ClientCertStoreError.awaitingExternalSigning(csrPath: Self.csrURL.path)
     }
