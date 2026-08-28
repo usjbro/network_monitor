@@ -18,6 +18,12 @@ mkcert -install
 HOSTNAME="$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
 LOCAL_IP="$(ipconfig getifaddr en0 2>/dev/null || true)"
 
+# The IP entries are belt-and-braces only -- they make the certificate
+# valid for those addresses, but you still cannot reach Caddy by a bare
+# IP: client_auth turns on strict SNI-Host enforcement, and TLS clients
+# don't send SNI for an IP literal, so the handshake is rejected before
+# the cert is examined. Always connect by hostname. See deploy/README.md
+# ("Running") and the comment in deploy/Caddyfile.
 SERVER_NAMES=("$HOSTNAME.local" "localhost" "127.0.0.1")
 if [ -n "$LOCAL_IP" ]; then
   SERVER_NAMES+=("$LOCAL_IP")

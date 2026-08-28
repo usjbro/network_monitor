@@ -31,15 +31,33 @@ for the full design and threat model.
        caddy run --config deploy/Caddyfile &
        ./deploy/test-mtls-rejection.sh
 
+   Three checks must all pass: a connection with **no** client cert is
+   rejected, a connection with a **valid** one is accepted (HTTP 200),
+   and a connection with an **untrusted** self-signed one is rejected.
+   That third check is the one that distinguishes `mode
+   require_and_verify` from a `mode require` misconfiguration, which
+   would demand a certificate but accept any self-signed cert an
+   attacker minted for themselves.
+
    Both processes can be stopped afterward (`kill %1 %2`, or `Ctrl+C`
-   each). See `deploy/test-mtls-rejection.sh` for what this checks.
+   each).
 
 5. **Only after step 4 passes**, and only when you actually want LAN
-   access: edit `deploy/Caddyfile` and change its listen address from
-   `localhost:8443` to `:443` (see the comment in that file). This is a
-   deliberate manual step, not automated by this repo -- until you make
-   this change, Caddy only ever binds to loopback and nothing here is
-   reachable from your LAN.
+   access: edit `deploy/Caddyfile` and make **both** of these changes
+   (see the comments in that file):
+
+   - change the site address from `localhost:8443` to `:443`
+   - change `bind {$CADDY_BIND_ADDR:127.0.0.1}` to bind all interfaces
+     (`bind 0.0.0.0`), or just delete the `bind` line
+
+   Both are needed and they do different jobs: the site address is the
+   name Caddy *matches* requests against, while `bind` is what chooses
+   the network *interface*. Until you change `bind`, Caddy listens on
+   loopback only (verify with `lsof -nP -iTCP:8443 -sTCP:LISTEN` --
+   `127.0.0.1:8443` means loopback-only, `*:8443` means every
+   interface). This is a deliberate manual step, not automated by this
+   repo. Binding `:443` also needs elevated privileges, since it's a
+   privileged port.
 
 ## Running (each session, once set up)
 
@@ -47,8 +65,20 @@ for the full design and threat model.
     npm run start &                                    # or npm run dev
     caddy run --config deploy/Caddyfile &
 
-Browse to `https://<mac-hostname>.local` (or the LAN IP) from a device
-with an installed, trusted client certificate.
+From a device with an installed, trusted client certificate, browse to:
+
+- **after step 5** (`:443`): `https://<mac-hostname>.local`
+- **before step 5** (the loopback-only default): `https://localhost:8443`,
+  from this Mac only
+
+Connect **by hostname, never by bare IP address**. Caddy turns on strict
+SNI-Host enforcement automatically whenever `client_auth` is configured,
+and most TLS clients (confirmed: curl on macOS) send no SNI at all when
+you point them at a literal IP -- so the handshake is rejected outright
+(observed: `tlsv1 alert internal error`) before your client certificate
+is ever looked at. `deploy/setup-ca.sh` does put this Mac's LAN IP in the
+server certificate's SAN list, but that only makes the *certificate*
+valid for the IP; it does not make an IP-literal connection work.
 
 ## Reissuing certificates
 
