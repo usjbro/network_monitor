@@ -8,25 +8,47 @@ struct TrustedWebView: NSViewRepresentable {
         let delegate = NavigationLockDelegate(trustedURL: trustedURL)
         let keyTag = "com.osinetstriker.viewer.client-key"
         let hostName = ProcessInfo.processInfo.hostName
-        let caCertPath = Self.caCertPath
-        let caKeyPath = Self.caKeyPath
-        // ClientCertStore.loadOrCreateIdentity can block on a
-        // .biometryCurrentSet-gated SecKeyCreateSignature (a Touch
-        // ID/password prompt) plus a synchronous Process.waitUntilExit() --
-        // both unsafe to run on the main thread makeCoordinator executes on
-        // during SwiftUI view construction (risks a UI deadlock). Run it on
-        // a background queue and assign clientIdentity back on the main
-        // queue once it completes; the challenge handler above already
-        // tolerates a nil clientIdentity by falling through to
-        // .performDefaultHandling, so nothing needs to block waiting for
-        // this to finish.
+        let store = ClientCertStore(keyTag: keyTag, commonName: hostName)
+        Self.provisionIdentity(using: store, into: delegate)
+        return delegate
+    }
+
+    /// ClientCertStore.loadOrCreateIdentity can block on a
+    /// .biometryCurrentSet-gated SecKeyCreateSignature (a Touch ID/password
+    /// prompt), so this always runs on a background queue -- unsafe on the
+    /// main thread makeCoordinator executes on during SwiftUI view
+    /// construction (risks a UI deadlock). The challenge handler tolerates
+    /// a nil clientIdentity by falling through to .performDefaultHandling,
+    /// so nothing needs to block waiting for this to finish.
+    ///
+    /// On first launch this normally throws .awaitingExternalSigning: the
+    /// SE key + CSR are ready, but the CA-signing step happens outside App
+    /// Sandbox entirely (see ClientCertStore's doc comment) via
+    /// `deploy/sign-native-app-csr.sh`, run manually from Terminal. Rather
+    /// than surface that as a dead end, this polls every 3s for the signed
+    /// certificate to appear -- once you run that script, the app picks it
+    /// up on its own within a few seconds, no relaunch needed.
+    ///
+    /// Explicitly `nonisolated`: `TrustedWebView: NSViewRepresentable`
+    /// otherwise infers this whole type's members as @MainActor (the
+    /// protocol's own requirements are MainActor-isolated), but this
+    /// function is deliberately designed to run entirely off the main
+    /// thread via plain GCD dispatch queues -- it only ever touches
+    /// `delegate` back on the main queue explicitly, inside the
+    /// `DispatchQueue.main.async` block below, never via Swift
+    /// concurrency's actor hopping. Without `nonisolated` here, calling
+    /// this recursively from the `DispatchQueue.global().asyncAfter`
+    /// retry below is flagged: "call to main actor-isolated static method
+    /// ... in a synchronous nonisolated context" -- exactly the same
+    /// *class* of actor-isolation mismatch that made NavigationLockDelegate's
+    /// WKNavigationDelegate methods silently never get called elsewhere in
+    /// this app (see that file's own @MainActor closure-parameter fix) --
+    /// so this was verified with a clean build showing the warning is
+    /// actually gone, not just silenced.
+    private nonisolated static func provisionIdentity(using store: ClientCertStore, into delegate: NavigationLockDelegate) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let store = ClientCertStore(keyTag: keyTag, commonName: hostName)
-                let identity = try store.loadOrCreateIdentity(
-                    caCertPath: caCertPath,
-                    caKeyPath: caKeyPath
-                )
+                let identity = try store.loadOrCreateIdentity()
                 DispatchQueue.main.async {
                     delegate.clientIdentity = identity
                     // The very first page load (triggered synchronously in
@@ -50,6 +72,16 @@ struct TrustedWebView: NSViewRepresentable {
                     // lock permits.
                     delegate.webView?.load(URLRequest(url: delegate.trustedURL))
                 }
+            } catch ClientCertStoreError.awaitingExternalSigning(let csrPath) {
+                print("""
+                    OSINetStrikerViewer: waiting for a signed client certificate.
+                    Run this once from Terminal, then this app will pick it up automatically:
+                        ./deploy/sign-native-app-csr.sh
+                    (CSR is at \(csrPath); retrying every 3s.)
+                    """)
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3) {
+                    provisionIdentity(using: store, into: delegate)
+                }
             } catch {
                 // Not fatal -- the app still launches; the WKWebView's own
                 // TLS-failure UI communicates the problem instead of
@@ -57,20 +89,6 @@ struct TrustedWebView: NSViewRepresentable {
                 print("ClientCertStore.loadOrCreateIdentity failed: \(error)")
             }
         }
-        return delegate
-    }
-
-    // mkcert's default CAROOT on macOS -- matches `$(mkcert -CAROOT)` from
-    // deploy/setup-ca.sh (Task 1). Override via these env vars (Xcode
-    // scheme > Run > Arguments) if `mkcert -CAROOT` reports something
-    // different on your machine (e.g. a global CAROOT env var override).
-    private static var caCertPath: String {
-        ProcessInfo.processInfo.environment["OSINETSTRIKER_CA_CERT"]
-            ?? "\(NSHomeDirectory())/Library/Application Support/mkcert/rootCA.pem"
-    }
-    private static var caKeyPath: String {
-        ProcessInfo.processInfo.environment["OSINETSTRIKER_CA_KEY"]
-            ?? "\(NSHomeDirectory())/Library/Application Support/mkcert/rootCA-key.pem"
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -106,11 +124,10 @@ struct ContentView: View {
     //     OSINETSTRIKER_URL=https://localhost:8443
     //
     // (Xcode scheme > Run > Arguments > Environment Variables, or just
-    // export it before `open`ing the built .app from a shell.) Same
-    // override pattern as OSINETSTRIKER_CA_CERT/OSINETSTRIKER_CA_KEY
-    // above. Whatever host you point at must be in the server cert's SAN
-    // list -- deploy/setup-ca.sh includes both "<hostname>.local" and
-    // "localhost", so both of the above work out of the box.
+    // export it before `open`ing the built .app from a shell.) Whatever
+    // host you point at must be in the server cert's SAN list --
+    // deploy/setup-ca.sh includes both "<hostname>.local" and "localhost",
+    // so both of the above work out of the box.
     //
     // On the default: ProcessInfo.processInfo.hostName is backed by
     // gethostname(), which on stock macOS typically already returns the

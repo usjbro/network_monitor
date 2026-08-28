@@ -27,10 +27,13 @@ gitignored -- regenerate it with `xcodegen generate` after any
 "Cannot code sign because the target does not have an Info.plist file".
 
 Known failure: `ClientCertStoreTests.testGeneratesAP256SecureEnclaveKey`
-fails with `OSStatus -25308` in an unsigned and/or headless build --
+fails with an `OSStatus` error (observed: `-25308`, `-34018` -- same root
+cause, different manifestation) in an unsigned and/or headless build --
 Secure Enclave key generation gated on `.biometryCurrentSet` needs a real
-signed app and an interactive session. The `NavigationLockDelegateTests`
-suite passes in full and has no such requirement.
+signed app, a real Team ID, and an interactive session (see "Provisioning
+the client certificate" below for what a real run needs). The
+`NavigationLockDelegateTests` suite passes in full and has no such
+requirement.
 
 When changing `NavigationLockDelegate`, always run a **`clean build`**,
 not an incremental one, and check for `nearly matches optional
@@ -63,23 +66,47 @@ before launching the built `.app` from a shell.) The host you choose must
 appear in the server certificate's SAN list; `deploy/setup-ca.sh` puts
 both `<hostname>.local` and `localhost` there.
 
-## Known limitation: App Sandbox vs. the CA private key
+## Provisioning the client certificate
 
-`ClientCertStore.signCSR` reads the mkcert CA private key from
-`~/Library/Application Support/mkcert/rootCA-key.pem` at runtime and
-shells out to `/usr/bin/openssl` to sign its CSR.
-`OSINetStrikerViewer.entitlements` enables the App Sandbox with only
-`com.apple.security.network.client` -- which grants neither read access
-to that path nor unconstrained execution of external binaries. First-run
-certificate provisioning is therefore expected to fail on a sandboxed
-build.
+**Confirmed working end-to-end on real Secure Enclave hardware.** The app
+generates its own P-256 Secure Enclave key and builds its own PKCS#10
+CSR, but it never touches the CA private key -- App Sandbox blocks that
+outright (confirmed: `SecKeyCreateRandomKey`/keychain operations that
+need it fail with `errSecMissingEntitlement`, `OSStatus -34018`, unless
+the app is given a security-relevant entitlement this design deliberately
+avoids). Instead, the CA-signing step happens entirely outside the
+sandbox:
 
-This is known and **not yet resolved**. It has not been confirmed on real
-hardware (Secure Enclave key generation doesn't succeed in this build
-environment either -- see the known test failure above), so treat it as a
-reasoned expectation rather than a measured result. Resolving it means
-picking one of: sign the CSR out-of-band and import the finished
-certificate, add an entitlement plus user-selected file access for the CA
-key, or drop the sandbox. Until then, don't assume this app completes
-end-to-end mTLS provisioning on its own. See `docs/security.md`
-("Residual risks in the LAN-access design").
+1. Launch the app. On first run it generates the Secure Enclave key
+   (a Touch ID/password prompt appears) and writes its CSR to its own
+   sandbox container -- always writable, no extra entitlement needed.
+   Console.app will show it waiting, e.g.:
+   ```
+   OSINetStrikerViewer: waiting for a signed client certificate.
+   Run this once from Terminal, then this app will pick it up automatically:
+       ./deploy/sign-native-app-csr.sh
+   ```
+2. From Terminal (**not** from inside the sandboxed app -- this script
+   runs unsandboxed and is the only thing that ever reads the CA private
+   key), run:
+   ```
+   ./deploy/sign-native-app-csr.sh
+   ```
+   This signs the CSR sitting in the app's container against the same
+   local CA `deploy/setup-ca.sh` established, and writes the result back
+   to that same container directory.
+3. The app polls for the signed certificate every 3 seconds while it's
+   running and imports it automatically once it appears -- no relaunch
+   needed. The dashboard loads within a few seconds of running the
+   script.
+
+This requires two things beyond a default Xcode setup, both one-time:
+a real Apple ID **Team** selected under Signing & Capabilities (not
+"Automatic" with no team -- Secure-Enclave-backed *permanent* Keychain
+items need a properly provisioned signing identity), and the
+`keychain-access-groups` entitlement (already in
+`OSINetStrikerViewer.entitlements`) actually taking effect, which may
+prompt Xcode to offer to update your provisioning -- accept it.
+
+See `docs/security.md` ("Residual risks in the LAN-access design") for
+what this design does and doesn't protect against.

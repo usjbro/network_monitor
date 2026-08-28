@@ -96,3 +96,13 @@ old one from working -- you have to reissue the CA itself (`mkcert
 -uninstall`, delete `$(mkcert -CAROOT)`, then re-run `setup-ca.sh` for
 every device) so the leaked cert no longer chains to anything Caddy
 trusts. See `docs/security.md` for the rest of the residual risks here.
+
+## The native macOS app's client certificate
+
+`macos-app/` provisions its own client certificate differently from the
+devices above: it generates a Secure-Enclave-backed key and CSR itself
+(App Sandbox blocks it from ever reading the CA private key directly),
+and `deploy/sign-native-app-csr.sh` -- a separate script, run once from
+Terminal after the app's first launch -- signs that CSR against the same
+local CA this file sets up. See `macos-app/README.md` ("Provisioning the
+client certificate") for the full flow.

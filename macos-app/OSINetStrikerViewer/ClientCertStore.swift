@@ -5,6 +5,12 @@ import SwiftASN1
 enum ClientCertStoreError: Error {
     case accessControlCreationFailed
     case keyGenerationFailed(String)
+    /// Not a failure -- the SE key + CSR are ready and waiting at csrPath
+    /// for `deploy/sign-native-app-csr.sh` (run unsandboxed, from
+    /// Terminal) to sign. The app can never read the CA private key
+    /// itself under App Sandbox; this is the intended, expected state on
+    /// first launch (and any relaunch before that script has been run).
+    case awaitingExternalSigning(csrPath: String)
 }
 
 /// Generates (or, on a later run with the same tag, would collide with --
@@ -57,48 +63,68 @@ struct ClientCertStore {
     let keyTag: String
     let commonName: String
 
-    /// Returns the existing identity if one was already provisioned, or
-    /// generates a new SE key + CSR, has it signed by the local CA at
-    /// caCertPath/caKeyPath, imports the result, and returns that.
-    ///
-    /// KNOWN LIMITATION -- App Sandbox. The signing path below
-    /// (`signCSR`) reads the CA private key at caKeyPath, which lives
-    /// outside this app's container (mkcert's CAROOT, normally
-    /// ~/Library/Application Support/mkcert/), and runs /usr/bin/openssl
-    /// as a subprocess. OSINetStrikerViewer.entitlements enables the App
-    /// Sandbox with only com.apple.security.network.client, which grants
-    /// neither of those. First-run provisioning is therefore expected to
-    /// fail on a sandboxed build -- a reasoned expectation, not a measured
-    /// one; it hasn't been confirmed on real Secure Enclave hardware.
-    /// This is deliberately surfaced rather than swallowed: signCSR
-    /// captures openssl's stderr so the real reason appears in the error,
-    /// and the caller in ContentView logs it. Not yet resolved; the
-    /// candidate fixes (sign the CSR out-of-band and import the result, add
-    /// an entitlement + user-selected file access, or drop the sandbox) are
-    /// written up in macos-app/README.md and docs/security.md.
-    func loadOrCreateIdentity(caCertPath: String, caKeyPath: String) throws -> SecIdentity {
+    /// Confirmed on real Secure Enclave hardware: App Sandbox blocks this
+    /// app from ever reading the CA private key directly (verified --
+    /// `com.apple.security.temporary-exception.*`-style workarounds were
+    /// deliberately not used; a sandboxed app reading an arbitrary CA
+    /// private key path is exactly the kind of access this design's own
+    /// threat model argues against). Instead, the CA-signing step happens
+    /// entirely outside the sandbox: this app writes its CSR to a path
+    /// inside its own container (always writable, no extra entitlement),
+    /// and `deploy/sign-native-app-csr.sh` -- a plain, unsandboxed script
+    /// you run from Terminal -- reads that same path directly (an
+    /// unsandboxed process sees a sandboxed app's container as ordinary
+    /// files on disk, no special access needed) and writes the signed
+    /// certificate back to the same directory. This app never touches the
+    /// CA private key at any point.
+    static let containerSupportDirectory: URL = {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("OSINetStrikerViewer", isDirectory: true)
+    }()
+    static let csrURL = containerSupportDirectory.appendingPathComponent("client.csr")
+    static let signedCertURL = containerSupportDirectory.appendingPathComponent("client-signed.pem")
+
+    /// Returns the existing identity if one was already provisioned.
+    /// Otherwise generates (or reuses) an SE key, builds its CSR, and
+    /// either imports an already-signed certificate waiting at
+    /// `Self.signedCertURL` (left there by `deploy/sign-native-app-csr.sh`
+    /// on a prior run) or writes the CSR to `Self.csrURL` and throws
+    /// `.awaitingExternalSigning` -- the caller is expected to tell the
+    /// user to run that script, then retry.
+    func loadOrCreateIdentity() throws -> SecIdentity {
         if let existing = try? findExistingIdentity() {
             return existing
         }
 
         // Reuse an already-generated SE key under this tag if one exists --
         // "key created, identity absent" (e.g. a prior run that generated
-        // the key but failed before/during CSR signing or cert import) is a
-        // realistic first-run outcome, and unconditionally calling
-        // makeSecureEnclaveKey again would either hit errSecDuplicateItem
-        // or, if a colliding tag isn't already firmly rejected, silently
-        // accumulate orphaned SE keys. makeSecureEnclaveKey's own doc
-        // comment flags exactly this: "callers should check
+        // the key but hasn't been signed yet) is the expected steady state
+        // while waiting on the external signing script, and unconditionally
+        // calling makeSecureEnclaveKey again would either hit
+        // errSecDuplicateItem or, if a colliding tag isn't already firmly
+        // rejected, silently accumulate orphaned SE keys. makeSecureEnclaveKey's
+        // own doc comment flags exactly this: "callers should check
         // SecItemCopyMatching first in real use."
         let privateKey = try findExistingKey() ?? (try makeSecureEnclaveKey(tag: keyTag))
         let csrPEM = try buildCSR(privateKey: privateKey, commonName: commonName)
-        let certPEM = try signCSR(csrPEM: csrPEM, caCertPath: caCertPath, caKeyPath: caKeyPath)
-        try importCertificate(pem: certPEM)
 
-        guard let identity = try findExistingIdentity() else {
-            throw ClientCertStoreError.keyGenerationFailed("identity not found in Keychain after import")
+        try FileManager.default.createDirectory(at: Self.containerSupportDirectory, withIntermediateDirectories: true)
+
+        if let signedPEM = try? String(contentsOf: Self.signedCertURL, encoding: .utf8) {
+            try importCertificate(pem: signedPEM)
+            // Clean up now that the cert is safely in the Keychain -- no
+            // reason to leave the CSR/signed-cert pair sitting on disk.
+            try? FileManager.default.removeItem(at: Self.csrURL)
+            try? FileManager.default.removeItem(at: Self.signedCertURL)
+
+            guard let identity = try findExistingIdentity() else {
+                throw ClientCertStoreError.keyGenerationFailed("identity not found in Keychain after import")
+            }
+            return identity
         }
-        return identity
+
+        try csrPEM.write(to: Self.csrURL, atomically: true, encoding: .utf8)
+        throw ClientCertStoreError.awaitingExternalSigning(csrPath: Self.csrURL.path)
     }
 
     private func findExistingIdentity() throws -> SecIdentity? {
@@ -211,60 +237,6 @@ struct ClientCertStore {
         let der = Data(outerSerializer.serializedBytes)
         let base64 = der.base64EncodedString(options: [.lineLength64Characters, .endLineWithLineFeed])
         return "-----BEGIN CERTIFICATE REQUEST-----\n\(base64)\n-----END CERTIFICATE REQUEST-----\n"
-    }
-
-    /// Shells out to openssl to sign the CSR against the mkcert-issued
-    /// local CA (deploy/setup-ca.sh's rootCA.pem/rootCA-key.pem) -- mkcert
-    /// itself only issues leaf certs from its own held CA key, it doesn't
-    /// expose a "sign this external CSR" command, so openssl is used
-    /// directly here for just this one step.
-    private func signCSR(csrPEM: String, caCertPath: String, caKeyPath: String) throws -> String {
-        let tempDir = FileManager.default.temporaryDirectory
-        let csrURL = tempDir.appendingPathComponent("\(UUID().uuidString).csr")
-        let certURL = tempDir.appendingPathComponent("\(UUID().uuidString).pem")
-        let extURL = tempDir.appendingPathComponent("\(UUID().uuidString).ext")
-        defer {
-            try? FileManager.default.removeItem(at: csrURL)
-            try? FileManager.default.removeItem(at: certURL)
-            try? FileManager.default.removeItem(at: extURL)
-        }
-        try csrPEM.write(to: csrURL, atomically: true, encoding: .utf8)
-        // Without an explicit clientAuth Extended Key Usage, some mTLS
-        // stacks (not necessarily Caddy's require_and_verify today, but
-        // this shouldn't rely on that) may accept a cert that isn't
-        // actually scoped to client authentication -- cheap to be
-        // explicit here rather than relying on the absence of an EKU
-        // extension being interpreted permissively everywhere.
-        try "extendedKeyUsage = clientAuth\n".write(to: extURL, atomically: true, encoding: .utf8)
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-        process.arguments = [
-            "x509", "-req",
-            "-in", csrURL.path,
-            "-CA", caCertPath,
-            "-CAkey", caKeyPath,
-            "-CAcreateserial",
-            "-days", "90",
-            "-extfile", extURL.path,
-            "-out", certURL.path,
-        ]
-        // Capture stderr so a failure (including e.g. a sandboxed build
-        // being unable to read caKeyPath -- see the App Sandbox note on
-        // ClientCertStore.loadOrCreateIdentity's callers) surfaces openssl's
-        // actual message instead of collapsing to an opaque exit status.
-        let stderrPipe = Pipe()
-        process.standardError = stderrPipe
-        try process.run()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            let stderrOutput = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            throw ClientCertStoreError.keyGenerationFailed(
-                "openssl CSR signing failed with status \(process.terminationStatus): \(stderrOutput)"
-            )
-        }
-        return try String(contentsOf: certURL, encoding: .utf8)
     }
 
     private func importCertificate(pem: String) throws {
