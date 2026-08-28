@@ -17,6 +17,14 @@ gitignored -- regenerate it with `xcodegen generate` after any
 `project.yml` change or a fresh checkout; don't hand-edit the
 `.xcodeproj`.
 
+**Trap:** `project.yml` sets `CODE_SIGN_STYLE: Automatic` but deliberately
+does not pin a `DEVELOPMENT_TEAM` (that's per-developer, not something to
+commit). Regenerating the project resets the Team dropdown in Signing &
+Capabilities to blank -- if the Secure Enclave / keychain entitlements are
+in play, you'll see "has entitlements that require signing with a
+development certificate" on the next build. Fix: reopen the target's
+**Signing & Capabilities** tab and re-select your Team.
+
 ## Test
 
     xcodebuild -project OSINetStrikerViewer.xcodeproj -scheme OSINetStrikerViewer \
