@@ -60,6 +60,22 @@ struct ClientCertStore {
     /// Returns the existing identity if one was already provisioned, or
     /// generates a new SE key + CSR, has it signed by the local CA at
     /// caCertPath/caKeyPath, imports the result, and returns that.
+    ///
+    /// KNOWN LIMITATION -- App Sandbox. The signing path below
+    /// (`signCSR`) reads the CA private key at caKeyPath, which lives
+    /// outside this app's container (mkcert's CAROOT, normally
+    /// ~/Library/Application Support/mkcert/), and runs /usr/bin/openssl
+    /// as a subprocess. OSINetStrikerViewer.entitlements enables the App
+    /// Sandbox with only com.apple.security.network.client, which grants
+    /// neither of those. First-run provisioning is therefore expected to
+    /// fail on a sandboxed build -- a reasoned expectation, not a measured
+    /// one; it hasn't been confirmed on real Secure Enclave hardware.
+    /// This is deliberately surfaced rather than swallowed: signCSR
+    /// captures openssl's stderr so the real reason appears in the error,
+    /// and the caller in ContentView logs it. Not yet resolved; the
+    /// candidate fixes (sign the CSR out-of-band and import the result, add
+    /// an entitlement + user-selected file access, or drop the sandbox) are
+    /// written up in macos-app/README.md and docs/security.md.
     func loadOrCreateIdentity(caCertPath: String, caKeyPath: String) throws -> SecIdentity {
         if let existing = try? findExistingIdentity() {
             return existing

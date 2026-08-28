@@ -20,7 +20,7 @@ The app has three pieces, split by trust level: a privileged capture agent, an u
 
 The SSE connection is one-way, server → browser only. `pause`/`resume` from the browser go over a separate plain `fetch('/api/control', ...)` POST request, not back over the SSE stream.
 
-Both the agent and the Next.js server bind to `127.0.0.1` only — this is the localhost-only increment of the project. Nothing here is reachable from your LAN. Securing LAN access (mTLS, a reverse proxy, a native macOS app) is tracked as separate future work (GitHub epic #22), not yet implemented.
+Both the agent and the Next.js server bind to `127.0.0.1` only, and neither authenticates anything by itself. LAN access, when you opt into it, is a fourth piece in front of them: a Caddy reverse proxy (`deploy/`) that terminates TLS and requires a client certificate signed by a local mkcert CA before proxying to `127.0.0.1:3000`. It ships bound to loopback (`bind 127.0.0.1`, site address `localhost:8443`); exposing it to the LAN is a manual, documented switch (`deploy/README.md` step 5). `macos-app/` is a native macOS viewer for that endpoint — a `WKWebView` locked to one origin with a Secure-Enclave-backed client certificate. See [security.md](security.md) for the posture and its residual risks, and `deploy/README.md` for setup.
 
 ## The three pieces
 
@@ -78,6 +78,6 @@ These aren't oversights — they're scoped out of the current increment and trac
 - **`headerBreakdown`** (per-layer packet detail: MACs, TLS SNI, HTTP method/path, DNS query name) is parsed by the agent but never reaches the wire — issue #29.
 - **The packet-event stream is uncapped** — no sampling/rate limit yet, issue #27.
 - **Flows never expire** — the flow table grows unbounded for the life of the process, issue #28.
-- **LAN access is unsecured by design** at this stage — both processes are loopback-only; mTLS/reverse-proxy/native-app work is epic #22, not yet planned in detail.
+- **The app has no application-layer auth of its own** — epic #22 landed mTLS at the Caddy layer (`deploy/`) plus a native viewer (`macos-app/`), so LAN access is gated on a client certificate, but the relay still can't distinguish one authenticated client from another and every one of them has full access. That layer also carries known residual risks (an unencrypted local CA key, long-lived certs with no revocation, and an App Sandbox limitation in the native app's cert provisioning) — see [security.md](security.md).
 
 See [troubleshooting.md](troubleshooting.md) for what these look like in practice, and [security.md](security.md) for the full security posture.
