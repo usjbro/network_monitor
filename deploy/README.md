@@ -47,8 +47,9 @@ for the full design and threat model.
    (see the comments in that file):
 
    - change the site address from `localhost:8443` to `:443`
-   - change `bind {$CADDY_BIND_ADDR:127.0.0.1}` to bind all interfaces
-     (`bind 0.0.0.0`), or just delete the `bind` line
+   - **delete** the `bind {$CADDY_BIND_ADDR:127.0.0.1}` line, so Caddy
+     goes back to its default of every interface (prefer deleting it
+     over setting `bind 0.0.0.0`, which is IPv4-only)
 
    Both are needed and they do different jobs: the site address is the
    name Caddy *matches* requests against, while `bind` is what chooses
@@ -82,8 +83,16 @@ valid for the IP; it does not make an IP-literal connection work.
 
 ## Reissuing certificates
 
-mkcert-issued leaf certs are valid for a long time by mkcert's defaults;
-this project's stated preference is short-lived, periodically-reissued
-certs over OCSP revocation checking. Re-run `./deploy/setup-ca.sh <name>`
-to reissue a given device's client cert, then reinstall it on that
-device.
+This project's stated preference is short-lived, periodically-reissued
+certs over OCSP revocation checking. Note that `setup-ca.sh` takes
+mkcert's *default* validity, which is not short: about two years and
+three months (measured -- a cert issued 2026-08-28 expires 2028-11-28).
+Re-run `./deploy/setup-ca.sh <name>` to reissue a given device's client
+cert, then reinstall it on that device.
+
+There is no revocation mechanism, by design. If a device is lost or a
+client key leaks, reissuing that one device's cert does **not** stop the
+old one from working -- you have to reissue the CA itself (`mkcert
+-uninstall`, delete `$(mkcert -CAROOT)`, then re-run `setup-ca.sh` for
+every device) so the leaked cert no longer chains to anything Caddy
+trusts. See `docs/security.md` for the rest of the residual risks here.
