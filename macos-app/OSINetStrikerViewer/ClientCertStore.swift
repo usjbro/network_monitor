@@ -1,6 +1,16 @@
 import Foundation
 import Security
 import SwiftASN1
+import os
+
+/// print() to a GUI app's stdout is fully buffered (not line-buffered, the
+/// way it is in a terminal), so output from a long-running app session can
+/// sit invisible until the process exits -- misleading during exactly the
+/// kind of "which step is this stuck on" debugging this store needs.
+/// os.Logger writes straight to the unified logging system instead
+/// (queryable live with `log stream`/`log show` or Console.app), regardless
+/// of how the app was launched.
+private let logger = Logger(subsystem: "com.osinetstriker.viewer", category: "ClientCertStore")
 
 enum ClientCertStoreError: Error {
     case accessControlCreationFailed
@@ -49,11 +59,14 @@ func makeSecureEnclaveKey(tag: String) throws -> SecKey {
         ],
     ]
 
+    logger.notice("makeSecureEnclaveKey: calling SecKeyCreateRandomKey (may prompt Touch ID/password to set the biometryCurrentSet gate)")
     var error: Unmanaged<CFError>?
     guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
         let message = error.map { (($0.takeRetainedValue()) as Error).localizedDescription } ?? "unknown error"
+        logger.error("makeSecureEnclaveKey: SecKeyCreateRandomKey failed: \(message, privacy: .public)")
         throw ClientCertStoreError.keyGenerationFailed(message)
     }
+    logger.notice("makeSecureEnclaveKey: SecKeyCreateRandomKey returned successfully")
     return privateKey
 }
 
@@ -92,13 +105,16 @@ struct ClientCertStore {
     /// `.awaitingExternalSigning` -- the caller is expected to tell the
     /// user to run that script, then retry.
     func loadOrCreateIdentity() throws -> SecIdentity {
+        logger.notice("loadOrCreateIdentity: checking for an existing identity")
         if let existing = try? findExistingIdentity() {
+            logger.notice("loadOrCreateIdentity: found an existing identity, returning it")
             return existing
         }
 
         try FileManager.default.createDirectory(at: Self.containerSupportDirectory, withIntermediateDirectories: true)
 
         if let signedPEM = try? String(contentsOf: Self.signedCertURL, encoding: .utf8) {
+            logger.notice("loadOrCreateIdentity: found a signed cert on disk, importing it")
             try importCertificate(pem: signedPEM)
             // Clean up now that the cert is safely in the Keychain -- no
             // reason to leave the CSR/signed-cert pair sitting on disk.
@@ -118,6 +134,7 @@ struct ClientCertStore {
         // function every 3s while waiting, and re-signing on every retry
         // would re-prompt Touch ID/password every 3s right along with it.
         if FileManager.default.fileExists(atPath: Self.csrURL.path) {
+            logger.notice("loadOrCreateIdentity: a CSR is already on disk, awaiting external signing")
             throw ClientCertStoreError.awaitingExternalSigning(csrPath: Self.csrURL.path)
         }
 
@@ -127,8 +144,13 @@ struct ClientCertStore {
         // firmly rejected, silently accumulate orphaned SE keys.
         // makeSecureEnclaveKey's own doc comment flags exactly this:
         // "callers should check SecItemCopyMatching first in real use."
-        let privateKey = try findExistingKey() ?? (try makeSecureEnclaveKey(tag: keyTag))
+        logger.notice("loadOrCreateIdentity: no existing key or CSR found, looking one up")
+        let existingKey = try findExistingKey()
+        logger.notice("loadOrCreateIdentity: existing key lookup done, found=\(existingKey != nil)")
+        let privateKey = try existingKey ?? (try makeSecureEnclaveKey(tag: keyTag))
+        logger.notice("loadOrCreateIdentity: have a private key, building CSR (this signs -- may prompt Touch ID/password)")
         let csrPEM = try buildCSR(privateKey: privateKey, commonName: commonName)
+        logger.notice("loadOrCreateIdentity: CSR built, writing to disk")
         try csrPEM.write(to: Self.csrURL, atomically: true, encoding: .utf8)
         throw ClientCertStoreError.awaitingExternalSigning(csrPath: Self.csrURL.path)
     }
@@ -221,6 +243,7 @@ struct ClientCertStore {
         }
         let certificationRequestInfoDER = infoSerializer.serializedBytes
 
+        logger.notice("buildCSR: calling SecKeyCreateSignature (biometryCurrentSet-gated -- expect a Touch ID/password prompt here)")
         var signError: Unmanaged<CFError>?
         guard let signature = SecKeyCreateSignature(
             privateKey,
@@ -228,8 +251,11 @@ struct ClientCertStore {
             Data(certificationRequestInfoDER) as CFData,
             &signError
         ) as Data? else {
-            throw ClientCertStoreError.keyGenerationFailed("signing failed: \(String(describing: signError))")
+            let message = String(describing: signError)
+            logger.error("buildCSR: SecKeyCreateSignature failed: \(message, privacy: .public)")
+            throw ClientCertStoreError.keyGenerationFailed("signing failed: \(message)")
         }
+        logger.notice("buildCSR: SecKeyCreateSignature returned successfully")
 
         var outerSerializer = DER.Serializer()
         try outerSerializer.appendConstructedNode(identifier: .sequence) { coder in

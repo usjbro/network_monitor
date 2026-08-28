@@ -1,5 +1,8 @@
 import SwiftUI
 import WebKit
+import os
+
+private let logger = Logger(subsystem: "com.osinetstriker.viewer", category: "ContentView")
 
 struct TrustedWebView: NSViewRepresentable {
     let trustedURL: URL
@@ -47,8 +50,10 @@ struct TrustedWebView: NSViewRepresentable {
     /// actually gone, not just silenced.
     private nonisolated static func provisionIdentity(using store: ClientCertStore, into delegate: NavigationLockDelegate) {
         DispatchQueue.global(qos: .userInitiated).async {
+            logger.notice("provisionIdentity: calling loadOrCreateIdentity")
             do {
                 let identity = try store.loadOrCreateIdentity()
+                logger.notice("provisionIdentity: loadOrCreateIdentity succeeded")
                 DispatchQueue.main.async {
                     delegate.clientIdentity = identity
                     // The very first page load (triggered synchronously in
@@ -73,20 +78,16 @@ struct TrustedWebView: NSViewRepresentable {
                     delegate.webView?.load(URLRequest(url: delegate.trustedURL))
                 }
             } catch ClientCertStoreError.awaitingExternalSigning(let csrPath) {
-                print("""
-                    OSINetStrikerViewer: waiting for a signed client certificate.
-                    Run this once from Terminal, then this app will pick it up automatically:
-                        ./deploy/sign-native-app-csr.sh
-                    (CSR is at \(csrPath); retrying every 3s.)
-                    """)
+                logger.notice("provisionIdentity: awaiting external signing, CSR at \(csrPath, privacy: .public); retrying in 3s")
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3) {
                     provisionIdentity(using: store, into: delegate)
                 }
             } catch {
                 // Not fatal -- the app still launches; the WKWebView's own
                 // TLS-failure UI communicates the problem instead of
-                // crashing, and this print gives a debugging trail for why.
-                print("ClientCertStore.loadOrCreateIdentity failed: \(error)")
+                // crashing, and this log gives a debugging trail for why.
+                let message = String(describing: error)
+                logger.error("provisionIdentity: loadOrCreateIdentity failed: \(message, privacy: .public)")
             }
         }
     }
