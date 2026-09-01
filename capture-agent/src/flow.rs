@@ -39,6 +39,8 @@ struct FlowState {
     retransmits: u64,
     segments: u64,
     last_seen_ms: u64,
+    ja3_fingerprint: Option<String>,
+    ja3_label: Option<&'static str>,
 }
 
 impl Default for FlowState {
@@ -59,6 +61,8 @@ impl Default for FlowState {
             retransmits: 0,
             segments: 0,
             last_seen_ms: 0,
+            ja3_fingerprint: None,
+            ja3_label: None,
         }
     }
 }
@@ -74,6 +78,8 @@ pub struct FlowSnapshot {
     pub tx_bytes_total: u64,
     pub latency_ms: f64,
     pub packet_loss: f64,
+    pub ja3_fingerprint: Option<String>,
+    pub ja3_label: Option<&'static str>,
 }
 
 /// Default ceiling on the number of tracked flows. Bounds memory under a SYN
@@ -188,9 +194,17 @@ impl FlowTable {
         match l7 {
             L7Info::Http { .. } => state.app_layer_protocol = "HTTP".to_string(),
             L7Info::Dns { .. } => state.app_layer_protocol = "DNS".to_string(),
-            L7Info::TlsClientHello { .. } => {
+            L7Info::TlsClientHello { ja3, ja3_label, .. } => {
                 state.app_layer_protocol = "HTTPS/TLS".to_string();
                 state.encryption = "TLS".to_string();
+                // First ClientHello wins: a flow has exactly one handshake,
+                // so once a JA3 fingerprint is recorded, later packets on
+                // the same flow (which report L7Info::None) must not
+                // overwrite it.
+                if state.ja3_fingerprint.is_none() {
+                    state.ja3_fingerprint = ja3.clone();
+                    state.ja3_label = *ja3_label;
+                }
             }
             L7Info::None => {
                 if state.app_layer_protocol == "Unknown" {
@@ -277,6 +291,8 @@ impl FlowTable {
                 tx_bytes_total: state.tx_bytes_total,
                 latency_ms: state.rtt_ms.unwrap_or(0.0),
                 packet_loss: packet_loss.min(100.0),
+                ja3_fingerprint: state.ja3_fingerprint.clone(),
+                ja3_label: state.ja3_label,
             });
 
             state.rx_bytes_this_tick = 0;
@@ -657,6 +673,26 @@ mod tests {
         let remaining_ports: Vec<u16> = remaining.iter().map(|s| s.key.remote_port).collect();
         assert!(remaining_ports.contains(&2));
         assert!(remaining_ports.contains(&3));
+    }
+
+    #[test]
+    fn observe_records_ja3_from_a_tls_client_hello_and_keeps_it_across_later_non_tls_packets() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        // `tcp_packet` (the existing fixture-building helper in this test
+        // module) always targets remote 93.184.216.34:443.
+        let packet = tcp_packet(true, TcpFlags::default(), 60);
+        let l7 = L7Info::TlsClientHello {
+            sni: "example.com".to_string(),
+            ja3: Some("abc123".to_string() + &"0".repeat(26)), // 32-char hex-like JA3 hash
+            ja3_label: Some("matches Chrome 12x"),
+        };
+        table.observe(&packet, &l7, 0);
+        table.observe(&packet, &L7Info::None, 100); // a later, non-ClientHello packet on the same flow
+
+        let snaps = table.snapshot(200);
+        let snap = snaps.iter().find(|s| s.key.remote_addr == "93.184.216.34").expect("flow present");
+        assert!(snap.ja3_fingerprint.is_some());
+        assert_eq!(snap.ja3_label, Some("matches Chrome 12x"));
     }
 
     #[test]
