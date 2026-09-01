@@ -51,6 +51,8 @@ export interface NetworkConnection {
   status: 'ESTABLISHED' | 'SYN_SENT' | 'LISTEN' | 'TIME_WAIT' | 'CLOSE_WAIT';
   encryption: string;
   sparkline: number[];
+  ja3Fingerprint?: string;
+  ja3Label?: string;
 }
 
 export interface PacketFrame {

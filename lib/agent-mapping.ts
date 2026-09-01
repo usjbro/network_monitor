@@ -31,6 +31,8 @@ export function mapConnectionEvent(json: unknown): NetworkConnection {
     status: requireField(w, 'status'),
     encryption: requireField(w, 'encryption'),
     sparkline: requireField(w, 'sparkline'),
+    ja3Fingerprint: w.ja3Fingerprint as string | undefined,
+    ja3Label: w.ja3Label as string | undefined,
   };
 }
 

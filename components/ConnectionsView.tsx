@@ -186,6 +186,21 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           <div className="p-2 bg-black/60 rounded border border-slate-800 font-mono text-[11px] text-emerald-300 break-all">
             {selectedConn.osiStack}
           </div>
+
+          {/* TLS Client Fingerprint (JA3) */}
+          <div className="mt-2 text-slate-300">
+            <span className="text-slate-400">JA3</span>{' '}
+            {selectedConn.ja3Fingerprint ? (
+              <>
+                <span className="font-mono">{selectedConn.ja3Fingerprint}</span>
+                {selectedConn.ja3Label && (
+                  <span className="ml-2 text-slate-500">{selectedConn.ja3Label}</span>
+                )}
+              </>
+            ) : (
+              <span className="text-slate-500">no TLS handshake observed for this connection</span>
+            )}
+          </div>
         </div>
       )}
     </div>
