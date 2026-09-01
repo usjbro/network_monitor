@@ -8,6 +8,27 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::io::FromRawFd;
 use std::net::UdpSocket;
 
+// Standard Internet checksum (RFC 1071 / the same algorithm ICMP, IP, and TCP
+// all use): sum the packet as 16-bit big-endian words with end-around carry,
+// then take the one's complement of the sum.
+fn icmp_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i < data.len() {
+        let word = if i + 1 < data.len() {
+            ((data[i] as u32) << 8) | (data[i + 1] as u32)
+        } else {
+            (data[i] as u32) << 8
+        };
+        sum += word;
+        i += 2;
+    }
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 fn main() {
     // libc::socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP) is the mechanism under
     // test. Using raw libc here (added as a dev-dependency for this example
@@ -35,9 +56,21 @@ fn main() {
     let mut packet = [0u8; 8];
     packet[0] = 8; // type: echo request
     packet[1] = 0; // code
-    // checksum left as 0 for this loopback spike — a real implementation
-    // computes it properly in Task 2; this spike only needs a reply to
-    // arrive at all, which loopback ICMP handling tolerates for this check.
+    // Controller-directed correction: the original brief left the checksum at
+    // 0, which is not a valid ICMP checksum and gets silently dropped by most
+    // IP stacks (including loopback) before ever reaching a listener — that
+    // would produce the exact "socket()/send_to() succeed, no reply ever
+    // arrives" symptom independent of whether the unprivileged ping-socket
+    // mechanism itself works. Compute a real checksum: 16-bit one's
+    // complement sum of the packet as 16-bit words, then one's complement
+    // the sum, written into bytes[2..4] before sending.
+    // packet[2..4] (checksum field) and packet[4..8] (identifier/sequence)
+    // are 0 at this point, so the initial sum below is just over
+    // type/code/checksum-placeholder/id/seq, all currently zero except
+    // bytes[0]=8.
+    let checksum = icmp_checksum(&packet);
+    packet[2] = (checksum >> 8) as u8;
+    packet[3] = (checksum & 0xff) as u8;
     let dest = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
     match socket.send_to(&packet, dest) {
         Ok(_) => println!("RESULT: send_to() succeeded."),
