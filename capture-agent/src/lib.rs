@@ -4,3 +4,4 @@ pub mod flow;
 pub mod process_lookup;
 pub mod rate_limit;
 pub mod wire;
+pub mod ja3;
