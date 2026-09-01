@@ -1,10 +1,33 @@
 import { AgentClient } from '@/lib/agent-client';
-import { EnrichmentClient } from '@/lib/enrichment';
+import { EnrichmentClient, EnrichmentMode } from '@/lib/enrichment';
 import { join } from 'node:path';
 
 declare global {
   var __agentClient: AgentClient | undefined;
   var __enrichmentClient: EnrichmentClient | undefined;
+}
+
+// Minimal structural interfaces for what GET() actually calls on each
+// client — narrower than the concrete AgentClient/EnrichmentClient classes
+// so tests can inject a small fake (a bare EventEmitter plus these methods)
+// without needing to construct/mock a real singleton (a real AgentClient
+// opens a TCP socket in its constructor's start() path; a real
+// EnrichmentClient touches disk). Both concrete classes satisfy these
+// structurally, so production callers pass no deps and get the real thing
+// via getAgentClient()/getEnrichmentClient() below.
+export interface StreamAgentClient {
+  on(event: 'event', listener: (event: unknown) => void): unknown;
+  on(event: 'status', listener: (status: { connected: boolean }) => void): unknown;
+  off(event: 'event', listener: (event: unknown) => void): unknown;
+  off(event: 'status', listener: (status: { connected: boolean }) => void): unknown;
+  isConnected(): boolean;
+}
+
+export interface StreamEnrichmentClient {
+  on(event: 'result', listener: (event: unknown) => void): unknown;
+  off(event: 'result', listener: (event: unknown) => void): unknown;
+  getMode(): EnrichmentMode;
+  notifyObservedConnections(conns: Array<{ id: string; remoteAddr: string }>): void;
 }
 
 function getAgentClient(): AgentClient {
@@ -27,9 +50,18 @@ export function getEnrichmentClient(): EnrichmentClient {
   return global.__enrichmentClient;
 }
 
-export async function GET() {
-  const client = getAgentClient();
-  const enrichmentClient = getEnrichmentClient();
+// The actual SSE-stream construction, factored out of GET() so tests can
+// call it directly with injected fakes. It's kept out of GET()'s own
+// signature (rather than GET() taking a second `deps` parameter) because
+// Next.js's generated route-handler type validator (`.next/types/validator.ts`,
+// checked by `next build`'s typecheck step) requires GET's second parameter
+// to match its own `{ params: Promise<...> }` route-context shape — a `deps`
+// parameter there fails that check. This function has no such constraint.
+export function buildStreamResponse(
+  deps: { agent?: StreamAgentClient; enrichment?: StreamEnrichmentClient } = {}
+): Response {
+  const client = deps.agent ?? getAgentClient();
+  const enrichmentClient = deps.enrichment ?? getEnrichmentClient();
   const encoder = new TextEncoder();
 
   // Hoisted so `cancel()` can remove the exact same listener references
@@ -94,7 +126,7 @@ export async function GET() {
 
       // Replay current connection status immediately so a fresh client
       // doesn't wait for the next status change to know the agent's state.
-      onStatus({ connected: client['socket'] !== null });
+      onStatus({ connected: client.isConnected() });
     },
     cancel() {
       if (onEvent) client.off('event', onEvent);
@@ -110,4 +142,8 @@ export async function GET() {
       Connection: 'keep-alive',
     },
   });
+}
+
+export async function GET() {
+  return buildStreamResponse();
 }
