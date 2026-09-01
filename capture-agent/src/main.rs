@@ -51,6 +51,10 @@ fn local_addrs_for(device: &pcap::Device) -> Vec<String> {
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    if let Err(e) = capture_agent::core_limits::disable_core_dumps() {
+        eprintln!("capture-agent: WARNING failed to disable core dumps: {e}");
+    }
+
     let device = detect_interface();
     let interface_name = device.name.clone();
     let local_addrs = local_addrs_for(&device);
