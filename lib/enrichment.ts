@@ -1,0 +1,257 @@
+// lib/enrichment.ts
+import { EventEmitter } from 'node:events';
+import { join } from 'node:path';
+import { isPrivateOrReserved, ipToInt } from './enrichment/scope-filter';
+import { EnrichmentCache } from './enrichment/cache';
+import { QueryLog } from './enrichment/query-log';
+import { RequestQueue, RequestQueueOptions, shuffle } from './enrichment/request-queue';
+import { loadIpBootstrap, resolveRdapBaseForIp } from './enrichment/bootstrap';
+import { RdapClient } from './enrichment/rdap-client';
+import { extractIpRdap, buildEnrichmentEvent } from './enrichment-mapping';
+import { EnrichmentRecord } from './enrichment/types';
+
+export type EnrichmentMode = 'off' | 'on-demand' | 'background';
+
+const CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+const NEGATIVE_TTL_MS = 60 * 60 * 1000;
+const QUERY_LOG_RETENTION_DAYS = 30;
+
+export const DISCLOSURE_TEXT =
+  'Enabling ownership lookups sends the remote IP addresses this Mac talks to ' +
+  'to public internet registries (ARIN, RIPE, APNIC, LACNIC, AFRINIC) over RDAP, ' +
+  'so they learn that this Mac queried that address. Because results are cached ' +
+  'for up to 14 days from one stable home IP, a registry could also infer this ' +
+  'household\'s general usage rhythm and the breadth of destinations investigated ' +
+  'over time — not just a single query. Lookups only happen for connections you ' +
+  'select. Use "enrich clear" at any time to wipe the local cache and query log ' +
+  'and turn this off.';
+
+// Deliberately separately worded from DISCLOSURE_TEXT, not a shared template
+// with a substituted clause — spec Components §1: background mode "requires
+// its own separately-worded confirmation, since it multiplies the number of
+// registries contacted and the correlatable query volume." Re-using the
+// on-demand string here (even with a mode-specific sentence appended) would
+// undercut the reason the spec asks for a second, distinct confirmation in
+// the first place: that a person re-reading it should register it as a
+// materially bigger step, not a checkbox variant of the same text.
+export const DISCLOSURE_TEXT_BACKGROUND =
+  'Background ownership lookups query EVERY connection currently visible in ' +
+  'the table automatically — not just ones you select — in random order, on ' +
+  'the same schedule as on-demand mode (one lookup at a time, several seconds ' +
+  'apart). This multiplies how many remote addresses public internet registries ' +
+  '(ARIN, RIPE, APNIC, LACNIC, AFRINIC) learn this Mac queried, and how much ' +
+  'those registries can infer about this household\'s usage rhythm and the ' +
+  'breadth of destinations investigated, compared to looking up connections ' +
+  'one at a time. Results are still cached for up to 14 days. Use "enrich ' +
+  'clear" at any time to wipe the local cache and query log and turn this off.';
+
+export class EnrichmentClient extends EventEmitter {
+  private mode: EnrichmentMode = 'off';
+  private cache: EnrichmentCache;
+  private queryLog: QueryLog;
+  private queue: RequestQueue;
+  private rdap: RdapClient;
+  private fetchImpl: typeof fetch;
+  // Keyed by remoteAddr (the single-flight key). Each in-flight lookup
+  // tracks every connectionId that asked for it while it was already
+  // underway, so that a second (or third...) request for the same address
+  // — from a different connection row, or the same row clicked twice —
+  // still gets notified once the shared lookup resolves, rather than being
+  // silently dropped. Spec's Error handling & lifecycle: a connection
+  // sitting on "Looking up…" behind an in-flight request for the same key
+  // must still resolve, not hang forever just because it wasn't the first
+  // asker.
+  private inFlightWaiters = new Map<string, Set<string>>();
+  private bootstrapPromise: ReturnType<typeof loadIpBootstrap> | null = null;
+  private random: () => number;
+  private bootstrapCachePath: string;
+
+  constructor(opts: {
+    dataDir: string;
+    fetchImpl?: typeof fetch;
+    random?: () => number;
+    // Test-only override of the queue's inter-dispatch jitter window — production
+    // callers never pass this and get RequestQueue's real 3-10s default spacing.
+    queueOptions?: RequestQueueOptions;
+  }) {
+    super();
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+    this.random = opts.random ?? Math.random;
+    this.cache = new EnrichmentCache(join(opts.dataDir, 'cache.json'));
+    this.cache.load();
+    this.queryLog = new QueryLog(join(opts.dataDir, 'query-log.ndjson'));
+    this.rdap = new RdapClient(this.fetchImpl);
+    // The same injected `random` drives both this.queue's inter-dispatch
+    // jitter and the shuffle() call in notifyObservedConnections below, so a
+    // single injected sequence makes the whole dispatch pipeline
+    // deterministic for tests.
+    this.queue = new RequestQueue({ random: this.random, ...opts.queueOptions });
+    void this.queryLog.prune(QUERY_LOG_RETENTION_DAYS).catch(() => {});
+    this.bootstrapCachePath = join(opts.dataDir, 'bootstrap-ipv4.json');
+  }
+
+  getMode(): EnrichmentMode {
+    return this.mode;
+  }
+
+  enable(): { disclosureText: string } {
+    this.mode = 'on-demand';
+    return { disclosureText: DISCLOSURE_TEXT };
+  }
+
+  enableBackground(): { disclosureText: string } {
+    this.mode = 'background';
+    return { disclosureText: DISCLOSURE_TEXT_BACKGROUND };
+  }
+
+  disable(): void {
+    if (this.mode !== 'off') this.mode = 'off';
+  }
+
+  disableBackground(): void {
+    if (this.mode === 'background') this.mode = 'on-demand';
+  }
+
+  async clear(): Promise<void> {
+    await this.cache.clear();
+    await this.queryLog.clear();
+    this.mode = 'off';
+  }
+
+  requestLookup(connectionId: string, remoteAddr: string): void {
+    if (this.mode === 'off') return;
+    void this.lookup(connectionId, remoteAddr);
+  }
+
+  notifyObservedConnections(conns: Array<{ id: string; remoteAddr: string }>): void {
+    if (this.mode !== 'background') return;
+    // Randomized order, not activity-ranked — spec Components §5. `conns` is
+    // whatever the caller currently has observed; it's the caller's job
+    // (app/api/stream/route.ts, Task 9) to only pass connections not already
+    // cached/in-flight, so this doesn't re-shuffle-and-requeue every tick.
+    for (const conn of shuffle(conns, this.random)) {
+      void this.lookup(conn.id, conn.remoteAddr);
+    }
+  }
+
+  private async lookup(connectionId: string, remoteAddr: string): Promise<void> {
+    if (isPrivateOrReserved(remoteAddr)) return;
+    const flightKey = remoteAddr;
+
+    const cached = this.cache.getForIp(remoteAddr);
+    if (cached && this.cache.isFresh(cached)) {
+      await this.queryLog.append({ target: remoteAddr, endpoint: 'cache', cacheStatus: 'hit' });
+      if (cached.record) {
+        this.emit('result', buildEnrichmentEvent(connectionId, remoteAddr, { ...cached.record, source: 'cache' }));
+      }
+      return;
+    }
+
+    const existingWaiters = this.inFlightWaiters.get(flightKey);
+    if (existingWaiters) {
+      // Single-flight: join the in-flight lookup's waiter set rather than
+      // issuing a duplicate request. All waiters get the eventual 'result'.
+      existingWaiters.add(connectionId);
+      return;
+    }
+    const waiters = new Set([connectionId]);
+    this.inFlightWaiters.set(flightKey, waiters);
+
+    try {
+      if (!this.bootstrapPromise) {
+        this.bootstrapPromise = loadIpBootstrap(this.bootstrapCachePath, this.fetchImpl);
+      }
+      const services = await this.bootstrapPromise;
+      const base = resolveRdapBaseForIp(remoteAddr, services);
+      if (!base) {
+        await this.queryLog.append({ target: remoteAddr, endpoint: 'bootstrap', cacheStatus: 'miss' });
+        await this.cache.setNegative(cidrKeyFor(remoteAddr), NEGATIVE_TTL_MS);
+        return;
+      }
+      const url = `${base.replace(/\/$/, '')}/ip/${remoteAddr}`;
+      const result = await this.queue.enqueue(() => this.rdap.fetch(url));
+      await this.queryLog.append({ target: remoteAddr, endpoint: new URL(url).host, cacheStatus: 'miss' });
+
+      if (!result.ok) {
+        // Stale-on-failure: leave any existing (expired) cache entry alone —
+        // it's already what getForIp would return next time — rather than
+        // overwriting it with a negative result. Only cache negative when
+        // there is nothing at all yet.
+        if (!cached) await this.cache.setNegative(cidrKeyFor(remoteAddr), NEGATIVE_TTL_MS);
+        return;
+      }
+
+      const extracted = extractIpRdap(result.json);
+      const record: EnrichmentRecord = { ...extracted, source: 'rdap', fetchedAt: new Date().toISOString() };
+      const key = cidrKeyFromRdap(result.json) ?? cidrKeyFor(remoteAddr);
+      await this.cache.setSuccess(key, record, CACHE_TTL_MS);
+      for (const cid of waiters) {
+        this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record));
+      }
+    } finally {
+      this.inFlightWaiters.delete(flightKey);
+    }
+  }
+}
+
+// Falls back to a /32 "block" (i.e. just this one address) only when the
+// RDAP response doesn't carry a usable, exact CIDR for the allocation — the
+// spec (Components §2) treats CIDR-block keying as "the primary privacy
+// control," not an optional refinement, so cidrKeyFromRdap below is the
+// normal path and this is genuinely a fallback, not the common case.
+function cidrKeyFor(ip: string): string {
+  return `${ip}/32`;
+}
+
+function intToIp(n: number): string {
+  return [24, 16, 8, 0].map((shift) => (n >>> shift) & 0xff).join('.');
+}
+
+// Derives the allocation's actual CIDR block from an RDAP "ip network"
+// response, so a single real query caches an entire /24 or /20 the way the
+// spec's caching design assumes (Components §2: "RDAP responses cover whole
+// allocations, so caching at the returned prefix means an entire /24 or /20
+// of future connections resolves from cache after one real query"). Returns
+// null — and lets the caller fall back to cidrKeyFor's per-address /32 key —
+// only when the response doesn't carry a block we can derive exactly; it
+// never guesses at a wider block than the data actually supports.
+function cidrKeyFromRdap(json: unknown): string | null {
+  const obj = json as {
+    startAddress?: string;
+    endAddress?: string;
+    cidr0_cidrs?: Array<{ v4prefix?: string; v6prefix?: string; length?: number }>;
+  } | null;
+  if (!obj || typeof obj !== 'object') return null;
+
+  // Prefer the RDAP cidr0 extension when present — it states the block
+  // directly rather than requiring it to be inferred from a range.
+  const cidrs = obj.cidr0_cidrs;
+  if (Array.isArray(cidrs) && cidrs.length > 0) {
+    const first = cidrs[0];
+    const prefix = first?.v4prefix; // IPv6 (v6prefix) is out of scope for this IPv4-only cache-key helper
+    if (typeof prefix === 'string' && typeof first?.length === 'number') {
+      return `${prefix}/${first.length}`;
+    }
+  }
+
+  // Otherwise, derive a CIDR from startAddress/endAddress — but only when
+  // the range is an exact, power-of-two-aligned block (the common case for
+  // RIR allocations). An irregular, non-CIDR-aligned range (legitimate in
+  // RDAP; some allocations are described as a raw address range rather than
+  // a single block) is not force-fit into a wider prefix that would
+  // over-claim addresses outside the actual allocation — it falls through to
+  // the /32 fallback instead.
+  if (typeof obj.startAddress !== 'string' || typeof obj.endAddress !== 'string') return null;
+  const start = ipToInt(obj.startAddress);
+  const end = ipToInt(obj.endAddress);
+  if (start === null || end === null || end < start) return null;
+
+  for (let prefixLen = 32; prefixLen >= 0; prefixLen--) {
+    const mask = prefixLen === 0 ? 0 : (~0 << (32 - prefixLen)) >>> 0;
+    const blockSize = prefixLen === 32 ? 1 : Math.pow(2, 32 - prefixLen);
+    if ((start & mask) >>> 0 === start && start + blockSize - 1 === end) {
+      return `${intToIp(start)}/${prefixLen}`;
+    }
+  }
+  return null;
+}
