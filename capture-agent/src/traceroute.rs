@@ -6,9 +6,12 @@
 // on this macOS version, an ordinary (non-root) process can open one of
 // these sockets, send ICMP Echo Requests with a chosen TTL, and receive both
 // direct Echo Replies and router-generated Time Exceeded messages on it.
+use std::fmt;
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::{timeout, Instant};
@@ -19,6 +22,28 @@ pub struct HopResult {
     pub hop_ip: Option<String>,
     pub rtt_ms: Option<f64>,
 }
+
+/// Distinguishes "couldn't even open a local ICMP probe socket" (an
+/// environment/permission problem — the run never produced any real probe
+/// data) from a real trace that legitimately got zero replies for every hop
+/// (a `Vec<HopResult>` full of `hop_ip: None`). Callers must not treat these
+/// as the same shape of "no data".
+#[derive(Debug)]
+pub enum TracerouteError {
+    ProbeSocketUnavailable(String),
+}
+
+impl fmt::Display for TracerouteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TracerouteError::ProbeSocketUnavailable(detail) => {
+                write!(f, "could not open ICMP probe socket: {detail}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TracerouteError {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum IcmpReplyType {
@@ -158,6 +183,21 @@ const PER_HOP_TIMEOUT: Duration = Duration::from_secs(1);
 const PER_HOP_RETRIES: u8 = 3;
 const TOTAL_TRACE_TIMEOUT: Duration = Duration::from_secs(45);
 
+/// A boxed, `Send` future carrying one probe attempt's result. Boxing is
+/// what lets `Prober` be an ordinary (non-async-trait-macro) trait object,
+/// so both the real socket-backed prober and a test-only fake can be used
+/// interchangeably by the bounding loop below.
+type BoxedProbeFuture<'a> = Pin<Box<dyn Future<Output = Option<(String, f64)>> + Send + 'a>>;
+
+/// Seam between the bounding logic (hop ceiling, per-hop retries, total
+/// deadline, progressive `on_hop`) and the actual probe mechanism. The real
+/// implementation (`ProbeSession`) sends genuine ICMP packets; tests use a
+/// fake that never replies, so `cargo test`'s default run never touches a
+/// socket or the network — see `mod tests` below.
+trait Prober {
+    fn probe<'a>(&'a mut self, target_ip: &'a str, ttl: u8, timeout_duration: Duration) -> BoxedProbeFuture<'a>;
+}
+
 /// One ICMP ping-socket, opened once per traceroute run (not once per
 /// probe), plus the per-run identifier and a monotonically increasing
 /// sequence counter used to match replies to the probe that elicited them.
@@ -217,41 +257,56 @@ impl ProbeSession {
     }
 }
 
+impl Prober for ProbeSession {
+    fn probe<'a>(&'a mut self, target_ip: &'a str, ttl: u8, timeout_duration: Duration) -> BoxedProbeFuture<'a> {
+        Box::pin(send_probe_and_await_reply(self, target_ip, ttl, timeout_duration))
+    }
+}
+
 /// Real entry point, used by main.rs (Task 3). Wraps
 /// run_traceroute_with_timeouts with the production bounds above — kept as
-/// a thin wrapper so tests can inject much shorter timeouts (Step 1) without
+/// a thin wrapper so tests can inject much shorter timeouts without
 /// duplicating the probe-loop logic itself.
-pub async fn run_traceroute(target_ip: &str, on_hop: impl FnMut(HopResult)) -> Vec<HopResult> {
+pub async fn run_traceroute(
+    target_ip: &str,
+    on_hop: impl FnMut(HopResult),
+) -> Result<Vec<HopResult>, TracerouteError> {
     run_traceroute_with_timeouts(target_ip, PER_HOP_TIMEOUT, TOTAL_TRACE_TIMEOUT, on_hop).await
 }
 
+/// Opens one real ICMP probe socket for this run and drives the bounding
+/// loop against it. Returns `Err(TracerouteError::ProbeSocketUnavailable)`
+/// if the socket itself couldn't be opened (an environment/permission
+/// problem) — distinct from `Ok(hops)` where every hop legitimately got no
+/// reply, which is real trace data, not a failure.
 pub async fn run_traceroute_with_timeouts(
     target_ip: &str,
     per_hop_timeout: Duration,
     total_trace_timeout: Duration,
+    on_hop: impl FnMut(HopResult),
+) -> Result<Vec<HopResult>, TracerouteError> {
+    // Unprivileged ping-sockets are confirmed available on this platform
+    // (Task 1's spike), so a failure here is an unexpected runtime problem
+    // (e.g. resource exhaustion), not the expected path.
+    let session = ProbeSession::open()
+        .map_err(|e| TracerouteError::ProbeSocketUnavailable(e.to_string()))?;
+    Ok(run_traceroute_loop(target_ip, per_hop_timeout, total_trace_timeout, on_hop, session).await)
+}
+
+/// The actual bounded probe loop (hop ceiling / per-hop timeout+retry /
+/// total-trace timeout / progressive `on_hop`), generic over the probe
+/// mechanism so it can run against a real socket (production, and the
+/// `#[ignore]`d live integration test below) or a fake that never replies
+/// (the two hermetic bounding tests below — no socket, no network).
+async fn run_traceroute_loop<P: Prober>(
+    target_ip: &str,
+    per_hop_timeout: Duration,
+    total_trace_timeout: Duration,
     mut on_hop: impl FnMut(HopResult),
+    mut prober: P,
 ) -> Vec<HopResult> {
     let deadline = Instant::now() + total_trace_timeout;
     let mut results = Vec::new();
-
-    let mut session = match ProbeSession::open() {
-        Ok(session) => session,
-        Err(e) => {
-            // Unprivileged ping-sockets are confirmed available on this
-            // platform (Task 1's spike), so this is an unexpected runtime
-            // failure (e.g. resource exhaustion), not the expected-failure
-            // path. Degrade gracefully — report every hop as no-response
-            // rather than hanging or panicking — so a caller streaming
-            // `on_hop` still gets a bounded, terminating sequence of events.
-            eprintln!("traceroute: failed to open ICMP probe socket: {e}");
-            for hop_number in 1..=HOP_CEILING {
-                let hop = HopResult { hop_number, hop_ip: None, rtt_ms: None };
-                on_hop(hop.clone());
-                results.push(hop);
-            }
-            return results;
-        }
-    };
 
     for ttl in 1..=HOP_CEILING {
         if Instant::now() >= deadline {
@@ -262,7 +317,7 @@ pub async fn run_traceroute_with_timeouts(
             if Instant::now() >= deadline {
                 break;
             }
-            match send_probe_and_await_reply(&mut session, target_ip, ttl, per_hop_timeout).await {
+            match prober.probe(target_ip, ttl, per_hop_timeout).await {
                 Some((ip, rtt)) => {
                     hop.hop_ip = Some(ip);
                     hop.rtt_ms = Some(rtt);
@@ -323,13 +378,21 @@ async fn send_probe_and_await_reply(
                     // from a prior attempt) — keep waiting
                 }
                 IcmpReplyType::TimeExceeded => {
-                    // This dedicated socket only ever carries our own
-                    // probes, so any Time Exceeded on it is a valid
-                    // intermediate-hop response; id/sequence matching isn't
-                    // required to treat it as ours (also embedded id/seq
-                    // extraction can legitimately fail if a router truncates
-                    // the original datagram it echoes back).
-                    return Some(from.ip().to_string());
+                    // Same identifier/sequence filter as Echo Reply, applied
+                    // to the id/seq embedded in the original datagram this
+                    // Time Exceeded wraps. Without this, a *stale* Time
+                    // Exceeded from an earlier, already-timed-out attempt
+                    // could arrive late during a later hop's receive window
+                    // (real network jitter) and get mis-attributed to the
+                    // wrong hop. A router that truncates its embedded
+                    // original-datagram copy below the required RFC 792
+                    // minimum (original IP header + 8 bytes) would make
+                    // `identifier`/`sequence` come back `None` here, which
+                    // correctly fails this match rather than guessing.
+                    if parsed.identifier == Some(identifier) && parsed.sequence == Some(sequence) {
+                        return Some(from.ip().to_string());
+                    }
+                    // a Time Exceeded that isn't ours — keep waiting
                 }
                 IcmpReplyType::Other => {
                     // unrelated ICMP traffic on this socket — keep waiting
@@ -388,28 +451,48 @@ mod tests {
         assert!(parse_icmp_reply(&raw[..raw.len() - 5]).is_none());
     }
 
+    /// Test-only `Prober` that never replies — no socket, no network call of
+    /// any kind. It still genuinely awaits the given timeout (via
+    /// `tokio::time::sleep`, not an immediate return) so the two bounding
+    /// tests below exercise real async waiting/retry/deadline behavior in
+    /// `run_traceroute_loop`, just without a real send/recv underneath it.
+    /// This matches the brief's original Step 1 intent: "Injects a
+    /// probe-sender that never receives anything, exercising only the
+    /// bounding logic... not real sockets."
+    struct NeverReplyingProbe;
+
+    impl Prober for NeverReplyingProbe {
+        fn probe<'a>(&'a mut self, _target_ip: &'a str, _ttl: u8, timeout_duration: Duration) -> BoxedProbeFuture<'a> {
+            Box::pin(async move {
+                tokio::time::sleep(timeout_duration).await;
+                None
+            })
+        }
+    }
+
     #[tokio::test]
     async fn a_trace_that_never_gets_a_reply_terminates_at_the_hop_ceiling_not_hangs() {
-        // This exercises the real socket path end-to-end (real send, real
-        // recv-with-timeout), so the target must be one that deterministically
-        // never elicits a reply on ANY real network, not just an unreachable
-        // one. TEST-NET-3 (203.0.113.1, RFC 5737) was tried first and does
-        // NOT work for that: any routable destination still gets its TTL
-        // decremented by real intermediate routers (this machine's own
-        // default gateway, then its ISP's router) before those routers ever
-        // check whether the final destination is reachable — that's the
-        // whole mechanism traceroute relies on, so a "reserved, presumably
-        // unreachable" destination still produces real Time Exceeded replies
-        // from the first couple of real hops. 0.0.0.0 ("this network", RFC
-        // 791/1122) is rejected at the local IP layer before any packet
-        // leaves the host, on any machine/network, giving a genuinely
-        // deterministic "never any reply" case while still exercising the
-        // real send/recv/timeout code path (a real, failing sendto()).
-        let hops = run_traceroute_with_timeouts(
-            "0.0.0.0",
+        // Runs against NeverReplyingProbe, not a real socket — this test's
+        // job is the bounding logic (hop ceiling / retries / total
+        // deadline), not the real send/recv/match path. An earlier version
+        // of this test called the real socket-backed implementation
+        // directly (against 0.0.0.0 or 203.0.113.1); that was found in
+        // review to (a) violate this plan's "no live network calls in any
+        // test" constraint — 203.0.113.1 in particular gets real replies
+        // from this machine's own gateway/ISP router, since any routable
+        // destination gets its TTL decremented by real intermediate routers
+        // regardless of final reachability — and (b) not even exercise the
+        // timeout/retry path it was named for, since 0.0.0.0 fails
+        // synchronously at sendto() before the timeout() wrapper around
+        // recv_from is ever reached. See `run_traceroute_with_timeouts`'s
+        // `#[ignore]`d live-network sibling test below for coverage of the
+        // real socket path instead.
+        let hops = run_traceroute_loop(
+            "203.0.113.1",
             Duration::from_millis(1),
             Duration::from_millis(50),
             |_| {},
+            NeverReplyingProbe,
         )
         .await;
         assert!(hops.len() <= 30, "must respect the hop ceiling even when nothing ever replies");
@@ -422,13 +505,41 @@ mod tests {
     #[tokio::test]
     async fn on_hop_callback_fires_progressively_not_batched_at_the_end() {
         let mut seen = Vec::new();
-        let _ = run_traceroute_with_timeouts(
+        let _ = run_traceroute_loop(
             "203.0.113.1",
             Duration::from_millis(1),
             Duration::from_millis(20),
             |hop| seen.push(hop.hop_number),
+            NeverReplyingProbe,
         )
         .await;
         assert!(!seen.is_empty(), "on_hop must be called at least once per hop attempted, even for no-response hops");
+    }
+
+    #[tokio::test]
+    #[ignore = "exercises the real ICMP ping-socket over loopback; run explicitly with `cargo test -- --ignored` \
+                to verify the real send/recv/match path, kept out of the default hermetic suite per this plan's \
+                'no live network calls in any test' constraint"]
+    async fn real_socket_traceroute_against_loopback_resolves_hop_one() {
+        // Loopback never actually decrements TTL through a router — the
+        // kernel delivers directly — so this should resolve hop 1 as an
+        // Echo Reply from 127.0.0.1 on the first attempt, real socket and
+        // all. This is the "genuinely local-only" integration coverage of
+        // the real Prober impl (ProbeSession) that the two tests above
+        // deliberately do not exercise.
+        let hops = run_traceroute_with_timeouts(
+            "127.0.0.1",
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+            |_| {},
+        )
+        .await
+        .expect("real ICMP probe socket should open on this platform (Task 1's spike)");
+        assert_eq!(hops.first().map(|h| h.hop_number), Some(1));
+        assert_eq!(
+            hops.first().and_then(|h| h.hop_ip.as_deref()),
+            Some("127.0.0.1"),
+            "loopback should answer hop 1 directly"
+        );
     }
 }
