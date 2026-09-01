@@ -169,7 +169,7 @@ pub fn build_header_breakdown(parsed: &ParsedPacket, l7: &L7Info) -> HeaderBreak
             status_or_code: None,
             payload_bytes: parsed.payload.len() as u32,
         }),
-        L7Info::TlsClientHello { sni } => Some(Layer7Json {
+        L7Info::TlsClientHello { sni, .. } => Some(Layer7Json {
             app: "TLS".to_string(),
             method_or_type: "ClientHello".to_string(),
             path_or_query: sni.clone(),
