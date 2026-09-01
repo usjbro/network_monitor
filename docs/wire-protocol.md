@@ -40,7 +40,9 @@ Sent once per active flow, every ~1 second (the periodic emitter's tick).
     "packetLoss": 0.0,
     "status": "ESTABLISHED",
     "encryption": "TLS",
-    "sparkline": []
+    "sparkline": [],
+    "ja3Fingerprint": "e7d705a3286e19ea42f587b344ee6865",
+    "ja3Label": "matches Chrome 12x"
   }
 }
 ```
@@ -52,6 +54,7 @@ Field notes:
 - `packetLoss` — a retransmission-based *approximation*, not a precise measurement. See [troubleshooting.md](troubleshooting.md#what-does-retransmit-anomaly-mean).
 - `latencyMs` — SYN→SYN-ACK round-trip time, `0` if the handshake wasn't observed (e.g. the connection predates the agent starting).
 - `remoteHostname` (optional in the TS type) is never populated by the current agent — reverse-DNS/WHOIS enrichment is a separate, not-yet-built sub-project.
+- `ja3Fingerprint`/`ja3Label` (both optional) — present once the agent has observed this flow's TLS ClientHello; absent for flows without an observed handshake (e.g. non-TLS, or the connection predates the agent starting). `ja3Label` is best-effort and informational only — never treat it as an authenticated client identity, it is trivially spoofable by any TLS client (see `docs/superpowers/specs/2026-08-29-tls-interception-design.md`, Security model).
 
 ### `packet`
 

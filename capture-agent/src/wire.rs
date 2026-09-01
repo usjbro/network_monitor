@@ -25,6 +25,10 @@ pub struct ConnectionJson {
     pub status: String,
     pub encryption: String,
     pub sparkline: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ja3_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ja3_label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -257,37 +261,71 @@ pub fn decode_control(line: &str) -> Option<ControlMessage> {
 mod tests {
     use super::*;
 
+    /// Shared fixture for `ConnectionJson` tests: fills every field with the
+    /// same baseline values `encodes_connection_update_as_one_json_line_camel_case`
+    /// has historically used, so individual tests only need to override the
+    /// field(s) under test via struct-update syntax (`..fixture_connection_json()`).
+    fn fixture_connection_json() -> ConnectionJson {
+        ConnectionJson {
+            id: "tcp-192.168.1.10:51000-93.184.216.34:443".to_string(),
+            protocol: "TCP".to_string(),
+            app_layer_protocol: "HTTPS/TLS".to_string(),
+            transport_protocol: "TCP".to_string(),
+            osi_stack: "L4:TCP -> L3:IPv4".to_string(),
+            local_addr: "192.168.1.10".to_string(),
+            local_port: 51000,
+            remote_addr: "93.184.216.34".to_string(),
+            remote_port: 443,
+            process_name: "Safari".to_string(),
+            pid: 1234,
+            rx_speed: 1024.0,
+            tx_speed: 512.0,
+            rx_bytes_total: 4096,
+            tx_bytes_total: 2048,
+            latency_ms: 20.0,
+            packet_loss: 0.0,
+            status: "ESTABLISHED".to_string(),
+            encryption: "TLS".to_string(),
+            sparkline: vec![1, 2, 3],
+            ja3_fingerprint: None,
+            ja3_label: None,
+        }
+    }
+
     #[test]
     fn encodes_connection_update_as_one_json_line_camel_case() {
         let event = AgentEvent::ConnectionUpdate {
-            connection: Box::new(ConnectionJson {
-                id: "tcp-192.168.1.10:51000-93.184.216.34:443".to_string(),
-                protocol: "TCP".to_string(),
-                app_layer_protocol: "HTTPS/TLS".to_string(),
-                transport_protocol: "TCP".to_string(),
-                osi_stack: "L4:TCP -> L3:IPv4".to_string(),
-                local_addr: "192.168.1.10".to_string(),
-                local_port: 51000,
-                remote_addr: "93.184.216.34".to_string(),
-                remote_port: 443,
-                process_name: "Safari".to_string(),
-                pid: 1234,
-                rx_speed: 1024.0,
-                tx_speed: 512.0,
-                rx_bytes_total: 4096,
-                tx_bytes_total: 2048,
-                latency_ms: 20.0,
-                packet_loss: 0.0,
-                status: "ESTABLISHED".to_string(),
-                encryption: "TLS".to_string(),
-                sparkline: vec![1, 2, 3],
-            }),
+            connection: Box::new(fixture_connection_json()),
         };
         let line = encode_event(&event);
         assert!(line.ends_with('\n'));
         assert!(line.contains("\"appLayerProtocol\":\"HTTPS/TLS\""));
         assert!(line.contains("\"processName\":\"Safari\""));
         assert!(line.contains("\"type\":\"connection_update\""));
+    }
+
+    #[test]
+    fn connection_json_serializes_ja3_fields_as_camel_case_when_present() {
+        let json = ConnectionJson {
+            ja3_fingerprint: Some("deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+            ja3_label: Some("matches Chrome 12x".to_string()),
+            ..fixture_connection_json()
+        };
+        let s = serde_json::to_string(&json).unwrap();
+        assert!(s.contains("\"ja3Fingerprint\":\"deadbeefdeadbeefdeadbeefdeadbeef\""));
+        assert!(s.contains("\"ja3Label\":\"matches Chrome 12x\""));
+    }
+
+    #[test]
+    fn connection_json_omits_ja3_fields_entirely_when_absent() {
+        let json = ConnectionJson {
+            ja3_fingerprint: None,
+            ja3_label: None,
+            ..fixture_connection_json()
+        };
+        let s = serde_json::to_string(&json).unwrap();
+        assert!(!s.contains("ja3Fingerprint"));
+        assert!(!s.contains("ja3Label"));
     }
 
     #[test]

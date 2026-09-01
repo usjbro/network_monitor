@@ -254,6 +254,8 @@ async fn main() -> std::io::Result<()> {
                         status: snap.status,
                         encryption: snap.encryption,
                         sparkline: vec![],
+                        ja3_fingerprint: snap.ja3_fingerprint.clone(),
+                        ja3_label: snap.ja3_label.map(|s| s.to_string()),
                     };
                     let event = wire::AgentEvent::ConnectionUpdate {
                         connection: Box::new(connection),
