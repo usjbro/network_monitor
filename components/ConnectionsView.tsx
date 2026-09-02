@@ -5,9 +5,10 @@ import {
   Filter,
   Lock,
   Network,
+  Route,
   Search,
 } from 'lucide-react';
-import { NetworkConnection, ThemeConfig } from '@/lib/types';
+import { NetworkConnection, ThemeConfig, TracerouteHop } from '@/lib/types';
 import { formatSpeed, formatBytes } from '@/lib/osi-engine';
 
 interface ConnectionsViewProps {
@@ -21,6 +22,9 @@ interface ConnectionsViewProps {
   // producing a usable enrichment object within a reasonable window.
   lookingUpIds?: Set<string>;
   unavailableIds?: Set<string>;
+  traceroute?: Record<string, TracerouteHop[]>;
+  traceInFlight?: Record<string, boolean>;
+  onTraceRoute?: (connectionId: string, remoteAddr: string) => void;
 }
 
 export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
@@ -30,6 +34,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   onRequestLookup,
   lookingUpIds,
   unavailableIds,
+  traceroute,
+  traceInFlight,
+  onTraceRoute,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [protocolFilter, setProtocolFilter] = useState<string>('ALL');
@@ -238,6 +245,49 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               </div>
             )}
           </div>
+
+          {/* Trace Route: on-demand only, never triggered automatically */}
+          {onTraceRoute && (
+            <div className="pt-2 border-t border-slate-800">
+              <button
+                onClick={() => onTraceRoute(selectedConn.id, selectedConn.remoteAddr)}
+                disabled={traceInFlight?.[selectedConn.id]}
+                className="flex items-center space-x-1 px-2.5 py-1 rounded border text-[11px] transition bg-slate-800/80 border-slate-700 hover:border-slate-500 text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-700"
+              >
+                <Route className="h-3 w-3" />
+                <span>Trace Route</span>
+              </button>
+
+              {traceroute?.[selectedConn.id] && (
+                <table className="mt-2 w-full text-left text-[11px]">
+                  <thead>
+                    <tr className="text-slate-500 uppercase text-[10px]">
+                      <th className="py-1 pr-2">#</th>
+                      <th className="py-1 pr-2">IP</th>
+                      <th className="py-1 pr-2">RTT</th>
+                      <th className="py-1 pr-2">Location</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {traceroute[selectedConn.id].map((hop) => (
+                      <tr key={hop.hopNumber} className="text-slate-300">
+                        <td className="py-0.5 pr-2">{hop.hopNumber}</td>
+                        <td className="py-0.5 pr-2 font-mono">{hop.hopIp ?? '* * *'}</td>
+                        <td className="py-0.5 pr-2">{hop.rttMs != null ? `${hop.rttMs.toFixed(1)}ms` : '-'}</td>
+                        <td className="py-0.5 pr-2 text-slate-400">
+                          {hop.hopIp
+                            ? hop.location?.city
+                              ? `${hop.location.city}, ${hop.location.country}`
+                              : 'location unavailable'
+                            : ''}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

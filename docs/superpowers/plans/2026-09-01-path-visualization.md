@@ -1034,7 +1034,7 @@ git commit -m "feat(path-viz): map traceroute_hop wire event to TracerouteHop"
 - Consumes: `TracerouteHop[]` per connection (passed down as a new prop from `app/page.tsx`, wired in Task 9).
 - Produces: a `traceroute?: TracerouteHop[]` and `onTraceRoute?: (connectionId: string, remoteAddr: string) => void` prop on `ConnectionsViewProps`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```tsx
 // lib/__tests__/connections-view-traceroute.test.tsx
@@ -1081,12 +1081,12 @@ describe('ConnectionsView traceroute', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/connections-view-traceroute.test.tsx`
 Expected: FAIL — props/UI don't exist yet.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `components/ConnectionsView.tsx`, add to `ConnectionsViewProps`:
 ```typescript
@@ -1131,12 +1131,12 @@ In the detail panel for `selectedConn` (same area Task 5 of the ownership-enrich
 ```
 Import `TracerouteHop` from `@/lib/types`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/connections-view-traceroute.test.tsx`
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add components/ConnectionsView.tsx lib/__tests__/connections-view-traceroute.test.tsx
