@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyEnrichmentEvent, buildEnrichmentEvent, extractDomainRdap, extractIpRdap } from '../enrichment-mapping';
+import { applyEnrichmentEvent, buildEnrichmentEvent, extractDomainRdap, extractIpRdap, extractWhois } from '../enrichment-mapping';
 import { NetworkConnection } from '../types';
 
 const VALID_RDAP_IP_NETWORK = {
@@ -120,5 +120,51 @@ describe('extractDomainRdap — registrant extraction drops personal/vCard/posta
   it('returns an empty-ish record when no registrant entity is present', () => {
     const result = extractDomainRdap({ objectClassName: 'domain', entities: [] });
     expect(result.registrant).toBeUndefined();
+  });
+});
+
+describe('extractWhois — only allowlisted org-level field patterns are ever extracted', () => {
+  it('extracts org from a matching field pattern and ignores everything else in the response', () => {
+    const text = [
+      'Domain Name: EXAMPLE.TEST',
+      'Registrant Organization: Example Org',
+      'Registrant Name: Jane Doe',      // personal — the entry's fieldPatterns below deliberately has no pattern for this key
+      'Registrant Email: jane@example.test',
+    ].join('\r\n');
+    const entry = {
+      matches: () => true,
+      host: 'whois.example.test',
+      fieldPatterns: { org: /^Registrant Organization:\s*(.+)$/m },
+    };
+    const result = extractWhois(text, entry);
+    expect(result.org).toBe('Example Org');
+    expect(JSON.stringify(result)).not.toContain('Jane Doe');
+  });
+
+  it('never throws on malformed/adversarial WHOIS text', () => {
+    const entry = { matches: () => true, host: 'x', fieldPatterns: { org: /Organization:\s*(.+)/ } };
+    const hostile = ['', 'x'.repeat(1_000_000), '\0\0\0binary garbage\0\0\0', 'Organization:'.repeat(10000)];
+    for (const text of hostile) {
+      expect(() => extractWhois(text, entry)).not.toThrow();
+    }
+  });
+
+  it('truncates a pathologically long match rather than returning it in full', () => {
+    const entry = { matches: () => true, host: 'x', fieldPatterns: { org: /Organization:\s*(.+)/ } };
+    const text = `Organization: ${'X'.repeat(10_000)}`;
+    const result = extractWhois(text, entry);
+    expect(result.org!.length).toBeLessThanOrEqual(500);
+  });
+
+  it('only reads field names literally "org" or "registrant" from fieldPatterns, even if given others', () => {
+    const text = 'Email: jane@example.test\r\nOrganization: Example Org';
+    const entry = {
+      matches: () => true,
+      host: 'x',
+      fieldPatterns: { email: /Email:\s*(.+)/, org: /Organization:\s*(.+)/ } as Record<string, RegExp>,
+    };
+    const result = extractWhois(text, entry);
+    expect(result.org).toBe('Example Org');
+    expect(JSON.stringify(result)).not.toContain('jane@example.test');
   });
 });

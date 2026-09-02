@@ -2939,7 +2939,7 @@ git commit -m "feat(enrichment): add domain RDAP bootstrap + registrar referral 
   export function extractWhois(text: string, entry: WhoisAllowlistEntry): { org?: string; registrant?: string };
   ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/enrichment-whois-client.test.ts
@@ -3028,12 +3028,12 @@ describe('extractWhois — only allowlisted org-level field patterns are ever ex
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/enrichment-whois-client.test.ts lib/__tests__/enrichment-mapping.test.ts`
 Expected: new cases FAIL — modules/exports don't exist yet.
 
-- [ ] **Step 3: Implement `lib/enrichment/whois-client.ts`**
+- [x] **Step 3: Implement `lib/enrichment/whois-client.ts`**
 
 ```typescript
 // lib/enrichment/whois-client.ts
@@ -3098,7 +3098,7 @@ export function queryWhois(
 }
 ```
 
-- [ ] **Step 4: Add `extractWhois` to `lib/enrichment-mapping.ts`**
+- [x] **Step 4: Add `extractWhois` to `lib/enrichment-mapping.ts`**
 
 ```typescript
 // lib/enrichment-mapping.ts addition
@@ -3127,12 +3127,12 @@ export function extractWhois(text: string, entry: WhoisAllowlistEntry): { org?: 
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/enrichment-whois-client.test.ts lib/__tests__/enrichment-mapping.test.ts`
 Expected: all tests PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/enrichment/whois-client.ts lib/enrichment-mapping.ts lib/__tests__/enrichment-whois-client.test.ts lib/__tests__/enrichment-mapping.test.ts

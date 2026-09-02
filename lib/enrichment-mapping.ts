@@ -1,5 +1,6 @@
 // lib/enrichment-mapping.ts
 import { EnrichmentRecord } from './enrichment/types';
+import { WhoisAllowlistEntry } from './enrichment/whois-client';
 import { NetworkConnection } from './types';
 
 function asString(v: unknown): string | undefined {
@@ -71,6 +72,33 @@ export function extractDomainRdap(json: unknown): { registrant?: string; country
       }
     }
     return {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Extracts org/registrant text out of a raw port-43 WHOIS response using
+ * only the field patterns an allowlist entry (lib/enrichment/whois-client.ts)
+ * itself defines. Like extractDomainRdap above, this is a safety property of
+ * *which keys are ever read* — an entry that only defines an `org` pattern
+ * has no code path here that could read a personal field, because
+ * WHOIS_ALLOWLIST entries are deliberately never given patterns for
+ * personal fields (name/email/phone/address) in the first place.
+ */
+export function extractWhois(text: string, entry: WhoisAllowlistEntry): { org?: string; registrant?: string } {
+  try {
+    const result: { org?: string; registrant?: string } = {};
+    for (const [key, pattern] of Object.entries(entry.fieldPatterns)) {
+      if (key !== 'org' && key !== 'registrant') continue;
+      const match = text.match(pattern);
+      if (match?.[1]) {
+        const value = match[1].trim().slice(0, 500); // guard against pathologically long matches
+        if (key === 'org') result.org = value;
+        if (key === 'registrant') result.registrant = value;
+      }
+    }
+    return result;
   } catch {
     return {};
   }
