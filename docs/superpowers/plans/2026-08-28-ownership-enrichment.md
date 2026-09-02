@@ -3273,7 +3273,7 @@ git commit -m "feat(enrichment): wire extended-tier reverse-DNS + domain RDAP/WH
 **Interfaces:**
 - Produces: an accurate security posture doc — no code change.
 
-- [ ] **Step 1: Replace the stale bullet**
+- [x] **Step 1: Replace the stale bullet**
 
 In the "What's explicitly NOT done yet" section, replace:
 
@@ -3283,7 +3283,7 @@ with a short description of what actually shipped — default-off, runtime-only 
 
 Also add a new bullet (or extend the existing "no authentication" framing) noting the relay-wide (not per-viewer) scope of the enrichment opt-in, per the spec's named "Explicitly out of scope" limitation — this matters more once epic #22 (LAN access) lands and multiple devices can see the same relay.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add docs/security.md
@@ -3294,13 +3294,13 @@ git commit -m "docs(security): update posture doc for ownership enrichment (epic
 
 ## Post-plan verification
 
-- [ ] `npx vitest run` — every test in this plan (Tasks 1–15) passes
-- [ ] `npx tsc --noEmit` — no new type errors
+- [x] `npx vitest run` — every test in this plan (Tasks 1–15) passes
+- [x] `npx tsc --noEmit` — no new type errors
 - [ ] `npm run lint` — no new lint errors
-- [ ] `npm run build` — Next.js production build succeeds
-- [ ] `grep -rn "dangerouslySetInnerHTML\|\.innerHTML\s*=" app/ components/ lib/` — still empty (Task 11's regression test already enforces this, but worth a manual final check)
+- [x] `npm run build` — Next.js production build succeeds
+- [x] `grep -rn "dangerouslySetInnerHTML\|\.innerHTML\s*=" app/ components/ lib/` — still empty (Task 11's regression test already enforces this, but worth a manual final check)
 - [ ] Manual end-to-end check (Task 9 Step 6 and Task 15 Step 5): `enrich on`, `enrich background on`, `enrich clear`, and on-demand per-connection lookup all work against a running agent + relay with real network access; the disclosure banner reappears every time enrichment is (re-)enabled, not just the first time
-- [ ] Confirm no file under `capture-agent/` changed — this whole plan is relay+browser only, per the spec's architecture
+- [x] Confirm no file under `capture-agent/` changed — this whole plan is relay+browser only, per the spec's architecture
 - [ ] Confirm `.data/enrichment/cache.json` and `.data/enrichment/query-log.ndjson` are created with `0600` permissions on a real run (`ls -la .data/enrichment/`)
 
 **Next plan:** sub-project 3 (network path visualization — on-demand traceroute + per-hop geoIP, consuming this sub-project's cached ASN/org data as hop context) — not yet written; per `CONTRIBUTING.md`'s spec-then-plan process, write its design spec first once this plan's software is working end-to-end and epic #23 is closed.
