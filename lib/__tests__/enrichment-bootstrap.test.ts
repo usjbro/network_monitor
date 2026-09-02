@@ -1,5 +1,5 @@
 // lib/__tests__/enrichment-bootstrap.test.ts
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,6 +63,42 @@ describe('loadIpBootstrap', () => {
 
     expect(fetchCount).toBe(1);
     expect(first).toEqual(second);
+  });
+
+  // These two mirror RdapClient's own timeout/size-cap coverage
+  // (enrichment-rdap-client.test.ts) — loadIpBootstrap/loadDomainBootstrap
+  // call fetchImpl directly rather than going through RdapClient, so without
+  // their own guard a hung or oversized data.iana.org response would hang
+  // forever (bootstrapPromise is memoized and awaited by every lookup()) or
+  // buffer an unbounded body into memory.
+
+  it('aborts at the 10-second timeout when the bootstrap host never responds', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = ((_url: string, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      })) as typeof fetch;
+
+    const resultPromise = loadIpBootstrap(cachePath, fetchImpl, 30 * 24 * 60 * 60 * 1000);
+    resultPromise.catch(() => {}); // rejection is expected/asserted below; suppress the fake-timer-tick warning
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(resultPromise).rejects.toThrow();
+    vi.useRealTimers();
+  });
+
+  it('rejects a response exceeding the size cap rather than buffering it unbounded', async () => {
+    const bigChunk = new Uint8Array(3 * 1024 * 1024); // 3MB > the 2MB cap
+    const fetchImpl = (async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bigChunk);
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200 });
+    }) as typeof fetch;
+
+    await expect(loadIpBootstrap(cachePath, fetchImpl, 30 * 24 * 60 * 60 * 1000)).rejects.toThrow();
   });
 });
 

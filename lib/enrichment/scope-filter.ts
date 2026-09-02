@@ -37,6 +37,14 @@ const IPV4_RESERVED: string[] = [
 
 function isIPv6PrivateOrReserved(ip: string): boolean {
   const lower = ip.toLowerCase();
+  // IPv4-mapped IPv6 (::ffff:a.b.c.d, or the rarer ::a.b.c.d form) embeds a
+  // real IPv4 address in the low 32 bits — unwrap it and re-check against
+  // the IPv4 reserved list, so e.g. "::ffff:192.168.1.1" is still caught as
+  // private rather than falling through as if it were a public v6 address.
+  const mappedMatch = lower.match(/^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (mappedMatch) {
+    return IPV4_RESERVED.some((cidr) => cidrContains(cidr, mappedMatch[1]));
+  }
   return (
     lower === '::1' ||
     lower.startsWith('fe80:') ||       // link-local

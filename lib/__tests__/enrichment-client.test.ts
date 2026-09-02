@@ -204,6 +204,37 @@ describe('EnrichmentClient', () => {
     expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterFirst + 1);
   }, 15_000);
 
+  it('falls back to a /32 key (not a poisoned wide block) when a malformed/malicious RDAP response claims a whole-internet range', async () => {
+    // A response claiming startAddress 0.0.0.0 / endAddress 255.255.255.255
+    // derives, with no floor, "0.0.0.0/0" — which EnrichmentCache.getForIp
+    // matches against every subsequent IP address, silently poisoning
+    // ownership data for the whole cache. MIN_CIDR_PREFIX_LEN must reject
+    // this and fall back to the /32-scoped key instead.
+    const fetchImpl = fakeFetch(200, {
+      objectClassName: 'ip network',
+      name: 'BOGUS-WHOLE-INTERNET-ORG',
+      startAddress: '0.0.0.0',
+      endAddress: '255.255.255.255',
+    });
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    client.enable();
+
+    const first = new Promise((resolve) => client.once('result', resolve));
+    client.requestLookup('conn-1', '203.0.113.7');
+    await first;
+    const callsAfterFirst = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    // A different address — even one in the same /24 as the first query —
+    // must NOT be served the bogus cached org from a poisoned /0 entry; it
+    // must issue its own genuine RDAP fetch, proving the fallback really is
+    // scoped to /32 and not to the malicious whole-internet range.
+    const second = new Promise((resolve) => client.once('result', resolve));
+    client.requestLookup('conn-2', '203.0.113.99');
+    const secondResult = (await second) as { enrichment: { source?: string; org?: string } };
+    expect(secondResult.enrichment.source).toBe('rdap');
+    expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterFirst + 1);
+  }, 15_000);
+
   it('single-flight fanout: two different connections requesting the same in-flight address both eventually receive a result', async () => {
     let rdapCalls = 0;
     const fetchImpl = vi.fn(async (url: string) => {

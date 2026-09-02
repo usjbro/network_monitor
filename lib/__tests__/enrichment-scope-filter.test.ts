@@ -25,6 +25,11 @@ describe('isPrivateOrReserved', () => {
     ['ff02::1', true],           // multicast v6
     ['93.184.216.34', false],    // public (example.com)
     ['8.8.8.8', false],          // public
+    ['::ffff:127.0.0.1', true],       // IPv4-mapped loopback
+    ['::ffff:192.168.1.10', true],    // IPv4-mapped RFC1918
+    ['::ffff:169.254.169.254', true], // IPv4-mapped link-local (cloud metadata)
+    ['::ffff:8.8.8.8', false],        // IPv4-mapped public
+    ['::93.184.216.34', false],       // bare-mapped (deprecated form) public
   ];
   it.each(cases)('isPrivateOrReserved(%s) === %s', (ip, expected) => {
     expect(isPrivateOrReserved(ip)).toBe(expected);

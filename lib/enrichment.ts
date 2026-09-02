@@ -223,6 +223,24 @@ export class EnrichmentClient extends EventEmitter {
       for (const cid of waiters) {
         this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record, resolvedHostname));
       }
+    } catch (err) {
+      // lookup() is always invoked fire-and-forget (`void this.lookup(...)`)
+      // from requestLookup()/notifyObservedConnections() — there is no
+      // caller anywhere that awaits or attaches a rejection handler to it.
+      // An uncaught error here (e.g. a transient disk error from
+      // queryLog.append/cache.setSuccess) would otherwise become an
+      // unhandled promise rejection and, under Node's default policy, crash
+      // the entire process — taking down the unrelated live packet-capture
+      // SSE stream over what should be a contained, best-effort enrichment
+      // failure. Deliberately NOT `this.emit('error', err)`: EventEmitter
+      // special-cases the 'error' event and throws synchronously when there
+      // is no registered listener (there is none, anywhere in this app),
+      // which would just reproduce the exact unhandled-rejection crash this
+      // catch exists to prevent. Fail closed the same way the RDAP-failure
+      // branch above does instead: log for observability, and let the
+      // affected connection(s) simply never receive a 'result' event — the
+      // UI's own timeout resolves them to "Unavailable".
+      console.error('[enrichment] lookup failed for', remoteAddr, err);
     } finally {
       this.inFlightWaiters.delete(flightKey);
     }
@@ -305,6 +323,17 @@ function intToIp(n: number): string {
 // null — and lets the caller fall back to cidrKeyFor's per-address /32 key —
 // only when the response doesn't carry a block we can derive exactly; it
 // never guesses at a wider block than the data actually supports.
+// Floor on how wide a single RDAP response is ever allowed to poison the
+// cache for. Real-world RIR delegations are essentially never wider than a
+// /8 (that's already an entire legacy Class-A block); a response claiming
+// anything wider than that is a malformed or malicious registry, not a
+// legitimate allocation, and must not be trusted to key the cache — since
+// EnrichmentCache.getForIp matches any IP falling inside the cached CIDR
+// (cidrContains treats bits===0 as "matches everything"), an unbounded
+// prefix here would let one bad response silently poison ownership data for
+// every future connection for up to CACHE_TTL_MS.
+const MIN_CIDR_PREFIX_LEN = 8;
+
 function cidrKeyFromRdap(json: unknown): string | null {
   const obj = json as {
     startAddress?: string;
@@ -319,7 +348,7 @@ function cidrKeyFromRdap(json: unknown): string | null {
   if (Array.isArray(cidrs) && cidrs.length > 0) {
     const first = cidrs[0];
     const prefix = first?.v4prefix; // IPv6 (v6prefix) is out of scope for this IPv4-only cache-key helper
-    if (typeof prefix === 'string' && typeof first?.length === 'number') {
+    if (typeof prefix === 'string' && typeof first?.length === 'number' && first.length >= MIN_CIDR_PREFIX_LEN) {
       return `${prefix}/${first.length}`;
     }
   }
@@ -336,7 +365,7 @@ function cidrKeyFromRdap(json: unknown): string | null {
   const end = ipToInt(obj.endAddress);
   if (start === null || end === null || end < start) return null;
 
-  for (let prefixLen = 32; prefixLen >= 0; prefixLen--) {
+  for (let prefixLen = 32; prefixLen >= MIN_CIDR_PREFIX_LEN; prefixLen--) {
     const mask = prefixLen === 0 ? 0 : (~0 << (32 - prefixLen)) >>> 0;
     const blockSize = prefixLen === 32 ? 1 : Math.pow(2, 32 - prefixLen);
     if ((start & mask) >>> 0 === start && start + blockSize - 1 === end) {

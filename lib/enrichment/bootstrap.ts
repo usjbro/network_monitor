@@ -42,6 +42,51 @@ export function parseIpBootstrap(json: unknown): BootstrapService[] {
   return out;
 }
 
+// Mirrors RdapClient's timeout + streamed-size-cap hardening (Task 2) for
+// the two bootstrap fetches below, which call fetchImpl directly rather
+// than going through RdapClient — they need their own guard against a
+// hung/oversized response from data.iana.org, since without one a stalled
+// fetch here would hang forever (no AbortController) and, because
+// bootstrapPromise/domainBootstrapPromise are memoized and awaited by every
+// lookup(), would wedge every future enrichment lookup behind it
+// indefinitely. Deliberately not routed through RdapClient itself: that
+// class's per-host backoff/circuit-breaker state is keyed and tuned for
+// RIR/registrar RDAP hosts hit on every lookup, not this one-per-30-days
+// bootstrap fetch, and reusing it would require broader signature changes
+// to this module's existing (test-covered) fetchImpl-based API.
+const BOOTSTRAP_TIMEOUT_MS = 10_000;
+const BOOTSTRAP_MAX_RESPONSE_BYTES = 2 * 1024 * 1024; // IANA's real ipv4.json/dns.json are well under 1MB
+
+async function fetchBootstrapJson(url: string, fetchImpl: typeof fetch): Promise<unknown> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BOOTSTRAP_TIMEOUT_MS);
+  try {
+    const res = await fetchImpl(url, { redirect: 'manual', signal: controller.signal });
+    if ((res as Response & { type?: string }).type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+      throw new Error(`bootstrap fetch redirected: ${url}`);
+    }
+    if (!res.ok) throw new Error(`bootstrap fetch failed: ${res.status}`);
+    const reader = res.body?.getReader();
+    if (!reader) throw new Error('bootstrap response has no body');
+    let received = 0;
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > BOOTSTRAP_MAX_RESPONSE_BYTES) {
+        controller.abort();
+        throw new Error('bootstrap response too large');
+      }
+      chunks.push(value);
+    }
+    const text = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
+    return JSON.parse(text);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function resolveRdapBaseForIp(ip: string, services: BootstrapService[]): string | null {
   for (const service of services) {
     for (const prefix of service.prefixes) {
@@ -75,8 +120,8 @@ export async function loadIpBootstrap(
     return cached.services;
   }
 
-  const res = await fetchImpl(IANA_IPV4_BOOTSTRAP_URL, { redirect: 'manual' });
-  const services = parseIpBootstrap(await res.json());
+  const json = await fetchBootstrapJson(IANA_IPV4_BOOTSTRAP_URL, fetchImpl);
+  const services = parseIpBootstrap(json);
   await atomicWriteJson(cachePath, { fetchedAt: Date.now(), services } satisfies BootstrapCacheFile);
   return services;
 }
@@ -145,8 +190,8 @@ export async function loadDomainBootstrap(
     return cached.services;
   }
 
-  const res = await fetchImpl(IANA_DNS_BOOTSTRAP_URL, { redirect: 'manual' });
-  const services = parseDomainBootstrap(await res.json());
+  const json = await fetchBootstrapJson(IANA_DNS_BOOTSTRAP_URL, fetchImpl);
+  const services = parseDomainBootstrap(json);
   await atomicWriteJson(cachePath, { fetchedAt: Date.now(), services } satisfies DomainBootstrapCacheFile);
   return services;
 }
