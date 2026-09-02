@@ -80,9 +80,22 @@ impl Http2Reassembler {
             self.buffer.drain(0..9 + len);
 
             if frame_type == 0x01 {
-                // HEADERS frame
-                match self.hpack.decode(&payload) {
-                    Ok(pairs) => {
+                // HEADERS frame. `fluke_hpack::Decoder::decode` is a
+                // third-party, historically-unmaintained-upstream
+                // dependency (see the crate-choice note in this plan's
+                // final report) — fuzzing (Task 15) found it can `panic!`
+                // (not just `Err`) on certain malformed dynamic-table-size
+                // update encodings. Isolating that panic behind
+                // `catch_unwind` and treating it exactly like a decode
+                // `Err` (whole-connection desync, never propagated) is
+                // safe here specifically because every path below already
+                // permanently desyncs this `Http2Reassembler` instance on
+                // any decode failure and never calls into `self.hpack`
+                // again afterward — a poisoned/inconsistent decoder state
+                // post-panic is never observed.
+                let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.hpack.decode(&payload)));
+                match decode_result {
+                    Ok(Ok(pairs)) => {
                         let mut headers: Vec<(String, String)> = pairs
                             .into_iter()
                             .map(|(k, v)| {
@@ -96,11 +109,14 @@ impl Http2Reassembler {
                         redact_headers(&mut headers);
                         outcomes.push(FrameOutcome::Frame { stream_id, headers, body: Vec::new() });
                     }
-                    Err(_) => {
-                        // HPACK decode failure = irrecoverable desync for the
-                        // WHOLE connection, not just this frame (spec
-                        // Components §4 — no safe per-frame recovery once
-                        // the dynamic table state is in question).
+                    Ok(Err(_)) | Err(_) => {
+                        // HPACK decode failure (an `Err`, OR a caught panic
+                        // from inside the third-party decoder — see the
+                        // catch_unwind comment above) = irrecoverable
+                        // desync for the WHOLE connection, not just this
+                        // frame (spec Components §4 — no safe per-frame
+                        // recovery once the dynamic table state is in
+                        // question).
                         self.desynced = true;
                         outcomes.push(FrameOutcome::DesyncFallback {
                             reason: "HPACK decode failed — dynamic table state unrecoverable",
@@ -228,5 +244,25 @@ mod tests {
         let mut r = Http2Reassembler::new();
         let _ = r.feed(0, &[0xff; 3]); // shorter than a frame header, must not panic
         let _ = r.feed(3, &[0xff; 50]); // frame header with a bogus huge length
+    }
+
+    #[test]
+    fn a_malformed_hpack_dynamic_table_size_update_desyncs_instead_of_panicking() {
+        // Regression test for a real panic `cargo +nightly fuzz run
+        // http2_reassembly` found within one fuzzing pass (Task 15): this
+        // exact byte sequence reaches `Option::unwrap()` on `None` inside
+        // fluke_hpack::Decoder::update_max_dynamic_size (a third-party
+        // dependency bug, not this crate's), which previously aborted the
+        // whole capture-agent process. `Http2Reassembler::feed` must
+        // isolate that panic and degrade to `DesyncFallback`, per this
+        // module's existing "never propagate a decode failure as a crash"
+        // invariant — see the `catch_unwind` usage in `feed` above.
+        let crash_input: &[u8] = &[0, 0, 1, 1, 1, 0, 0, 32, 0, 63, 0, 1, 1, 32, 0, 0, 0, 0, 0];
+        let mut r = Http2Reassembler::new();
+        let outcomes = r.feed(0, crash_input);
+        assert!(
+            outcomes.iter().any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })),
+            "expected a DesyncFallback outcome, not a panic or a silently-swallowed frame"
+        );
     }
 }
