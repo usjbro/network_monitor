@@ -9,3 +9,4 @@ pub mod core_limits;
 pub mod keylog;
 pub mod tls_decrypt;
 pub mod ring_buffer;
+pub mod redact;
