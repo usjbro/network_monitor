@@ -72,6 +72,28 @@ describe('buildEnrichmentEvent / applyEnrichmentEvent', () => {
     const result = applyEnrichmentEvent([], event);
     expect(result).toEqual([]);
   });
+
+  it('carries an optional remoteHostname through to the connection (Task 15: extended-tier reverse-DNS result)', () => {
+    const base: NetworkConnection = {
+      id: 'conn-1', protocol: 'HTTPS/TLS', appLayerProtocol: 'HTTPS/TLS', transportProtocol: 'TCP',
+      osiStack: 'x', localAddr: '192.168.1.10', localPort: 51000, remoteAddr: '93.184.216.34', remotePort: 443,
+      processName: 'Safari', pid: 1234, rxSpeed: 0, txSpeed: 0, rxBytesTotal: 0, txBytesTotal: 0,
+      latencyMs: 0, packetLoss: 0, status: 'ESTABLISHED', encryption: 'TLS', sparkline: [],
+    };
+    const event = buildEnrichmentEvent(
+      'conn-1',
+      '93.184.216.34',
+      { org: 'Example Org', registrant: 'Example Registrant Org', source: 'rdap', fetchedAt: '2026-08-28T00:00:00.000Z' },
+      'example.com',
+    );
+    const result = applyEnrichmentEvent([base], event);
+    expect(result[0].remoteHostname).toBe('example.com');
+  });
+
+  it('leaves remoteHostname unset on the event/connection when no hostname was resolved', () => {
+    const event = buildEnrichmentEvent('conn-1', '93.184.216.34', { org: 'Example Org', source: 'rdap', fetchedAt: 'x' });
+    expect(event).not.toHaveProperty('remoteHostname');
+  });
 });
 
 describe('extractDomainRdap — registrant extraction drops personal/vCard/postal fields', () => {

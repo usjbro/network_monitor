@@ -295,4 +295,112 @@ describe('EnrichmentClient', () => {
     expect(dispatchedAddrs).toEqual(expectedOrder);
     expect(dispatchedAddrs).not.toEqual(conns.map((c) => c.remoteAddr));
   }, 15_000);
+
+  // Task 15: extended-tier chain (reverse DNS -> domain RDAP/WHOIS) wired
+  // end-to-end. reverseDnsFn is injected directly (the seam Task 12 already
+  // built and every test above already uses via NO_PTR) rather than
+  // vi.mock('node:dns') — same offline-only posture, one fewer mocking
+  // mechanism in this file.
+  const DOMAIN_BOOTSTRAP_FIXTURE = {
+    services: [[['com'], ['https://rdap.verisign.com/com/v1/']]],
+  };
+
+  function extendedTierFetch(domainRdapResponse: unknown, ipRdapResponse: unknown = { objectClassName: 'ip network', name: 'EXAMPLE-NET', country: 'US' }) {
+    return vi.fn(async (url: string) => {
+      if (url.includes('ipv4.json')) return new Response(JSON.stringify(BOOTSTRAP_FIXTURE), { status: 200 });
+      if (url.includes('dns.json')) return new Response(JSON.stringify(DOMAIN_BOOTSTRAP_FIXTURE), { status: 200 });
+      if (url.includes('rdap.verisign.com')) return new Response(JSON.stringify(domainRdapResponse), { status: 200 });
+      return new Response(JSON.stringify(ipRdapResponse), { status: 200 });
+    }) as unknown as typeof fetch;
+  }
+
+  it('extended tier: resolves a hostname via reverse DNS, then looks up domain registrant, and emits both on one result', async () => {
+    const domainRdapResponse = {
+      objectClassName: 'domain',
+      entities: [{ roles: ['registrant'], vcardArray: ['vcard', [['org', {}, 'text', 'Example Registrant Org']]] }],
+    };
+    const fetchImpl = extendedTierFetch(domainRdapResponse);
+    const reverseDnsFn = vi.fn(async () => 'example.com');
+    const client = new EnrichmentClient({
+      dataDir: dir,
+      fetchImpl,
+      reverseDnsFn,
+      // Tiny jitter window — this lookup issues two queued fetches (IP RDAP,
+      // then domain RDAP) and the default 3-10s inter-dispatch spacing would
+      // make this test needlessly slow without adding any real coverage.
+      queueOptions: { minDelayMs: 1, maxDelayMs: 2 },
+    });
+    client.enable();
+
+    const resultPromise = new Promise((resolve) => client.once('result', resolve));
+    client.requestLookup('conn-1', '93.184.216.34');
+    const result = (await resultPromise) as { connectionId: string; remoteHostname?: string; enrichment: { org?: string; registrant?: string; country?: string } };
+
+    expect(result.enrichment.org).toBe('EXAMPLE-NET');
+    expect(result.enrichment.country).toBe('US');
+    expect(result.enrichment.registrant).toBe('Example Registrant Org');
+    expect(result.remoteHostname).toBe('example.com'); // surfaced onto the connection, per Task 12's TODO
+    expect(reverseDnsFn).toHaveBeenCalledWith('93.184.216.34');
+  }, 20_000);
+
+  it('extended tier: reverse-DNS failure leaves the core-tier result intact, no registrant field, no error', async () => {
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes('ipv4.json')) return new Response(JSON.stringify(BOOTSTRAP_FIXTURE), { status: 200 });
+      // dns.json / any domain-registry host must never be requested in this
+      // test — reverse DNS never resolves a hostname, so the domain chain
+      // must never even start.
+      return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'EXAMPLE-NET', country: 'US' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const reverseDnsFn = vi.fn(async () => null);
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn });
+    client.enable();
+
+    const resultPromise = new Promise((resolve) => client.once('result', resolve));
+    client.requestLookup('conn-1', '93.184.216.34');
+    const result = (await resultPromise) as { remoteHostname?: string; enrichment: { org?: string; registrant?: string } };
+
+    expect(result.enrichment.org).toBe('EXAMPLE-NET');
+    expect(result.enrichment.registrant).toBeUndefined();
+    expect(result.remoteHostname).toBeUndefined();
+    expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes('dns.json'))).toBe(false);
+  }, 15_000);
+
+  it('extended tier: a registrar referral for the resolved domain is followed only through the hardened RdapClient path (allowlisted host)', async () => {
+    // The registry (verisign) response refers to itself here for simplicity
+    // — what's under test is that fetchWithReferral's allowlist-gated
+    // referral-following is actually wired into this chain, not a specific
+    // registry/registrar pairing.
+    const domainRegistryResponse = {
+      objectClassName: 'domain',
+      links: [{ rel: 'related', href: 'https://rdap.publicinterestregistry.org/rdap/domain/example.com' }],
+    };
+    const domainRegistrarResponse = {
+      objectClassName: 'domain',
+      entities: [{ roles: ['registrant'], vcardArray: ['vcard', [['org', {}, 'text', 'Referred Org']]] }],
+    };
+    const calls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      calls.push(url);
+      if (url.includes('ipv4.json')) return new Response(JSON.stringify(BOOTSTRAP_FIXTURE), { status: 200 });
+      if (url.includes('dns.json')) return new Response(JSON.stringify(DOMAIN_BOOTSTRAP_FIXTURE), { status: 200 });
+      if (url.includes('rdap.publicinterestregistry.org')) return new Response(JSON.stringify(domainRegistrarResponse), { status: 200 });
+      if (url.includes('rdap.verisign.com')) return new Response(JSON.stringify(domainRegistryResponse), { status: 200 });
+      return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'EXAMPLE-NET' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const reverseDnsFn = vi.fn(async () => 'example.com');
+    const client = new EnrichmentClient({
+      dataDir: dir,
+      fetchImpl,
+      reverseDnsFn,
+      queueOptions: { minDelayMs: 1, maxDelayMs: 2 },
+    });
+    client.enable();
+
+    const resultPromise = new Promise((resolve) => client.once('result', resolve));
+    client.requestLookup('conn-1', '93.184.216.34');
+    const result = (await resultPromise) as { enrichment: { registrant?: string } };
+
+    expect(result.enrichment.registrant).toBe('Referred Org');
+    expect(calls).toContain('https://rdap.publicinterestregistry.org/rdap/domain/example.com');
+  }, 20_000);
 });

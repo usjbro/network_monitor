@@ -215,6 +215,14 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
               >
                 Not yet looked up — click to look up
               </button>
+            ) : !selectedConn.enrichment.org && !selectedConn.enrichment.asn && !selectedConn.enrichment.registrant ? (
+              // Task 15's fifth state: a lookup genuinely completed (the
+              // connection_enrichment event arrived — this is NOT the
+              // in-flight-timeout `unavailableIds` case above) but produced
+              // no ownership data at all. Deliberately distinct from the
+              // normal render path below, where a blank ASN alongside a
+              // present org is expected and shown as "—", not an error.
+              <div className="text-slate-500">Unavailable — no ownership data returned for this address.</div>
             ) : (
               <div className="text-slate-300">
                 {/* Org/registrant are wrapped in their own <span> (rather than

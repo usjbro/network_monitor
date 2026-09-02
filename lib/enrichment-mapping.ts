@@ -108,22 +108,37 @@ export function buildEnrichmentEvent(
   connectionId: string,
   remoteAddr: string,
   record: EnrichmentRecord,
-): { type: 'connection_enrichment'; connectionId: string; remoteAddr: string; enrichment: NetworkConnection['enrichment'] } {
+  // Extended tier only (Task 15): the reverse-DNS hostname resolved as the
+  // prerequisite for the domain registrant lookup, surfaced onto the
+  // connection's own top-level `remoteHostname` field (lib/types.ts) — the
+  // same field the connections table already displays in place of the raw
+  // remote address (components/ConnectionsView.tsx) but that, per
+  // docs/wire-protocol.md, the capture agent itself never populates.
+  // Omitted entirely (not even as `undefined`) when no hostname resolved,
+  // so `'remoteHostname' in event` cleanly distinguishes "resolved" from
+  // "never attempted/failed."
+  remoteHostname?: string,
+): { type: 'connection_enrichment'; connectionId: string; remoteAddr: string; remoteHostname?: string; enrichment: NetworkConnection['enrichment'] } {
   return {
     type: 'connection_enrichment',
     connectionId,
     remoteAddr,
+    ...(remoteHostname ? { remoteHostname } : {}),
     enrichment: { ...record },
   };
 }
 
 export function applyEnrichmentEvent(
   connections: NetworkConnection[],
-  event: { connectionId: string; enrichment: NetworkConnection['enrichment'] },
+  event: { connectionId: string; enrichment: NetworkConnection['enrichment']; remoteHostname?: string },
 ): NetworkConnection[] {
   const idx = connections.findIndex((c) => c.id === event.connectionId);
   if (idx === -1) return connections;
   const next = [...connections];
-  next[idx] = { ...next[idx], enrichment: event.enrichment };
+  next[idx] = {
+    ...next[idx],
+    enrichment: event.enrichment,
+    ...(event.remoteHostname ? { remoteHostname: event.remoteHostname } : {}),
+  };
   return next;
 }

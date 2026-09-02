@@ -22,6 +22,7 @@ RDAP/WHOIS result) resolves for a connection currently on the wire.
   "type": "connection_enrichment",
   "connectionId": "Tcp-192.168.1.10:51000-93.184.216.34:443",
   "remoteAddr": "93.184.216.34",
+  "remoteHostname": "example.com",
   "enrichment": {
     "org": "EXAMPLE-ORG",
     "asn": "AS15133",
@@ -42,6 +43,15 @@ Field notes:
   absent for core-tier (IP-only) results.
 - `source` is `'cache'` for a cache hit, `'rdap'`/`'whois'` for a fresh
   lookup that actually reached a registry.
+- `remoteHostname` (top-level, sibling of `enrichment` — not nested inside
+  it) is extended-tier only: the reverse-DNS PTR hostname resolved for
+  `remoteAddr` as the prerequisite for the domain registrant lookup. Omitted
+  entirely (not sent as `null`/`undefined`) whenever no hostname resolved —
+  a private/no-PTR address, a core-tier-only result, or a cache hit that
+  predates this field. The browser merges it onto the connection's own
+  top-level `remoteHostname` (`lib/types.ts`), the same field
+  `docs/wire-protocol.md` notes the capture agent itself never populates —
+  this SSE event is that field's only source today.
 
 ## Control: `POST /api/enrichment/control`
 

@@ -3152,7 +3152,7 @@ git commit -m "feat(enrichment): add narrow legacy WHOIS fallback client (extend
 - Consumes: everything from Tasks 12–14.
 - Produces: the fully-wired extended tier — this is the last task in the plan.
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 ```typescript
 // addition to lib/__tests__/enrichment-client.test.ts
@@ -3192,12 +3192,12 @@ it('extended tier: reverse-DNS failure leaves the core-tier result intact, no re
 
 The second stub test needs the same `vi.mock('node:dns', ...)` treatment as the first — write both fully rather than leaving the second as an empty body; it's flagged as a stub here only to keep this plan's own code block from duplicating the mock-setup boilerplate twice.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/enrichment-client.test.ts`
 Expected: the new extended-tier case FAILs — `lookup()` doesn't chain into domain RDAP yet.
 
-- [ ] **Step 3: Complete the chain in `lib/enrichment.ts`**
+- [x] **Step 3: Complete the chain in `lib/enrichment.ts`**
 
 Replace the `// TODO(Task 13): domain RDAP lookup goes here` marker from Task 12 Step 5 with:
 
@@ -3242,11 +3242,11 @@ if (hostname) {
 
 (Add the corresponding imports — `reverseDnsLookup`, `loadDomainBootstrap`, `resolveRdapBaseForDomain`, `extractDomainRdap`, `WHOIS_ALLOWLIST`, `queryWhois`, `extractWhois` — and a `domainBootstrapPromise`/`domainBootstrapCachePath` field pair mirroring the existing IP-bootstrap ones from Task 8.)
 
-- [ ] **Step 4: Confirm the "Unavailable" UI state is reachable**
+- [x] **Step 4: Confirm the "Unavailable" UI state is reachable**
 
 `ConnectionsView`'s Ownership section (Task 10 Step 4) currently branches only on `!selectedConn.enrichment` vs. present. Add the fifth state: when a lookup has completed (i.e. the connection is no longer in the `lookingUpIds` set from Task 10) but produced no `org`/`asn`/`registrant` at all, render `"Unavailable."` instead of an empty `Org: — · ASN: —` line — the spec draws a distinction between "an ASN can legitimately be blank while org is present" (fine, shown as `—`) and "nothing came back at all" (shown as `Unavailable`, a different message). Add a short-circuit check for `!enrichment.org && !enrichment.asn && !enrichment.registrant` before the normal render path.
 
-- [ ] **Step 5: Run the full test suite and manual end-to-end check**
+- [x] **Step 5: Run the full test suite and manual end-to-end check**
 
 Run: `npx vitest run`
 Expected: every test in this plan passes, including the extended-tier chain.
@@ -3256,7 +3256,7 @@ Expected: both succeed with no new errors/warnings.
 
 Manually (with the capture agent and `npm run dev` both running, real network access): `enrich on` in the command bar, select a connection to a domain you expect to have RDAP-visible registrant data (e.g. one resolving to a `.com`/`.org` you control or know), expand Ownership, and confirm `Registrant: ...` appears after the on-demand lookup completes.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/enrichment.ts components/ConnectionsView.tsx lib/__tests__/enrichment-client.test.ts

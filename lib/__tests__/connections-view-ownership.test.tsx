@@ -1,10 +1,19 @@
 // lib/__tests__/connections-view-ownership.test.tsx
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, render, screen } from '@testing-library/react';
 import { ConnectionsView } from '../../components/ConnectionsView';
 import { THEMES } from '../osi-engine';
 import { NetworkConnection } from '../types';
+
+// This file imports `afterEach` explicitly rather than relying on vitest's
+// `globals: true` (not enabled in vitest.config.ts), so @testing-library/
+// react's own auto-cleanup — which detects a *global* afterEach — never
+// registers here. Without this, every render() in this file accumulates in
+// document.body across tests, and a later query (e.g. Task 15's "Unavailable"
+// case asserting `queryByText(/org:/i)` is absent) can spuriously find
+// leftover matches from an earlier test's still-mounted DOM.
+afterEach(() => cleanup());
 
 const theme = THEMES.sophisticated;
 
@@ -52,6 +61,31 @@ describe('ConnectionsView Ownership section', () => {
       />,
     );
     expect(screen.queryByText(/error/i)).not.toBeInTheDocument();
+  });
+
+  it('shows registrant when present (extended tier)', () => {
+    render(
+      <ConnectionsView
+        connections={[baseConn({ enrichment: { org: 'EXAMPLE-ORG', registrant: 'EXAMPLE REGISTRANT ORG', source: 'rdap', fetchedAt: '2026-08-28T00:00:00.000Z' } })]}
+        theme={theme}
+        enrichmentMode="on-demand"
+        onRequestLookup={() => {}}
+      />,
+    );
+    expect(screen.getByText(/EXAMPLE REGISTRANT ORG/)).toBeInTheDocument();
+  });
+
+  it('shows "Unavailable" (Task 15\'s fifth state) when a lookup completed but produced no org/ASN/registrant at all — distinct from a legitimately-blank ASN', () => {
+    render(
+      <ConnectionsView
+        connections={[baseConn({ enrichment: { source: 'rdap', fetchedAt: '2026-08-28T00:00:00.000Z' } })]}
+        theme={theme}
+        enrichmentMode="on-demand"
+        onRequestLookup={() => {}}
+      />,
+    );
+    expect(screen.getByText(/unavailable/i)).toBeInTheDocument();
+    expect(screen.queryByText(/org:/i)).not.toBeInTheDocument();
   });
 
   it('renders org/registrant strings as plain text, never via dangerouslySetInnerHTML', () => {

@@ -5,10 +5,11 @@ import { isPrivateOrReserved, ipToInt } from './enrichment/scope-filter';
 import { EnrichmentCache } from './enrichment/cache';
 import { QueryLog } from './enrichment/query-log';
 import { RequestQueue, RequestQueueOptions, shuffle } from './enrichment/request-queue';
-import { loadIpBootstrap, resolveRdapBaseForIp } from './enrichment/bootstrap';
+import { loadIpBootstrap, resolveRdapBaseForIp, loadDomainBootstrap, resolveRdapBaseForDomain } from './enrichment/bootstrap';
 import { RdapClient } from './enrichment/rdap-client';
 import { reverseDnsLookup } from './enrichment/reverse-dns';
-import { extractIpRdap, buildEnrichmentEvent } from './enrichment-mapping';
+import { WHOIS_ALLOWLIST, queryWhois } from './enrichment/whois-client';
+import { extractIpRdap, extractDomainRdap, extractWhois, buildEnrichmentEvent } from './enrichment-mapping';
 import { EnrichmentRecord } from './enrichment/types';
 
 export type EnrichmentMode = 'off' | 'on-demand' | 'background';
@@ -67,6 +68,13 @@ export class EnrichmentClient extends EventEmitter {
   private random: () => number;
   private bootstrapCachePath: string;
   private reverseDnsFn: typeof reverseDnsLookup;
+  // Mirrors bootstrapPromise/bootstrapCachePath above, but for the
+  // domain-name RDAP bootstrap (Task 13) — a genuinely separate registry
+  // host set (Verisign/PIR/etc., not ARIN/RIPE/etc.), fetched/cached
+  // independently and only once the extended tier actually needs it (i.e.
+  // never for a client that only ever does core-tier IP lookups).
+  private domainBootstrapPromise: ReturnType<typeof loadDomainBootstrap> | null = null;
+  private domainBootstrapCachePath: string;
 
   constructor(opts: {
     dataDir: string;
@@ -97,6 +105,7 @@ export class EnrichmentClient extends EventEmitter {
     this.queue = new RequestQueue({ random: this.random, ...opts.queueOptions });
     void this.queryLog.prune(QUERY_LOG_RETENTION_DAYS).catch(() => {});
     this.bootstrapCachePath = join(opts.dataDir, 'bootstrap-ipv4.json');
+    this.domainBootstrapCachePath = join(opts.dataDir, 'bootstrap-dns.json');
   }
 
   getMode(): EnrichmentMode {
@@ -195,31 +204,82 @@ export class EnrichmentClient extends EventEmitter {
 
       // Extended tier (spec §4): once core-tier RDAP has resolved an org,
       // and there's no domain-level data on this record yet (there never is
-      // today — the registrant leg doesn't exist until Task 13/14), resolve
-      // remoteAddr's PTR hostname as the prerequisite for a domain
+      // on a fresh lookup — a cache hit above already returned early),
+      // resolve remoteAddr's PTR hostname as the prerequisite for a domain
       // RDAP/WHOIS registrant lookup. Sequential, not parallel-with-RDAP: it
       // only makes sense to spend a reverse-DNS query once we know RDAP
       // actually found an organization worth attributing a domain to.
+      let resolvedHostname: string | undefined;
       if (record.org && !record.registrant) {
         const remoteHostname = await this.reverseDnsFn(remoteAddr);
         if (remoteHostname) {
-          // TODO(Task 13): domain RDAP lookup goes here — resolve
-          // `remoteHostname`'s registrable domain via RDAP (registrar
-          // referral allowlist, Task 13) with legacy WHOIS fallback
-          // (Task 14), then merge `registrant` onto `record` above before
-          // it's cached/emitted below. Task 15 wires the resolved hostname
-          // itself through to the UI (surfacing `registrant`/`Unavailable`
-          // and the connection's top-level `remoteHostname` field).
+          resolvedHostname = remoteHostname;
+          await this.resolveRegistrant(remoteHostname, record);
         }
       }
 
       const key = cidrKeyFromRdap(result.json) ?? cidrKeyFor(remoteAddr);
       await this.cache.setSuccess(key, record, CACHE_TTL_MS);
       for (const cid of waiters) {
-        this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record));
+        this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record, resolvedHostname));
       }
     } finally {
       this.inFlightWaiters.delete(flightKey);
+    }
+  }
+
+  // Extended tier (Tasks 13/14), invoked once a hostname has been resolved
+  // for the connection's remote address: domain RDAP first (registry, with
+  // an allowlist-gated registrar referral per Task 13), falling back to the
+  // narrow legacy WHOIS allowlist (Task 14) only when the hostname's TLD has
+  // no RDAP service at all. Mutates `record.registrant` in place when
+  // something is found; leaves it unset (surfaced as "Unavailable" in the UI,
+  // Step 4) on any failure — never throws, mirroring the core-tier RDAP leg's
+  // stale-on-failure posture just below in `lookup()`.
+  private async resolveRegistrant(hostname: string, record: EnrichmentRecord): Promise<void> {
+    const domainCached = this.cache.getForDomain(hostname);
+    if (domainCached && this.cache.isFresh(domainCached)) {
+      if (domainCached.record) record.registrant = domainCached.record.registrant;
+      return; // fresh negative cache entry: no registrant, and no re-query.
+    }
+
+    if (!this.domainBootstrapPromise) {
+      this.domainBootstrapPromise = loadDomainBootstrap(this.domainBootstrapCachePath, this.fetchImpl);
+    }
+    const domainServices = await this.domainBootstrapPromise;
+    const domainBase = resolveRdapBaseForDomain(hostname, domainServices);
+
+    if (domainBase) {
+      const domainUrl = `${domainBase.replace(/\/$/, '')}/domain/${hostname}`;
+      const domainResult = await this.queue.enqueue(() => this.rdap.fetchWithReferral(domainUrl));
+      await this.queryLog.append({ target: hostname, endpoint: new URL(domainUrl).host, cacheStatus: 'miss' });
+      if (domainResult.ok) {
+        const domainExtracted = extractDomainRdap(domainResult.json);
+        record.registrant = domainExtracted.registrant;
+        await this.cache.setSuccess(hostname, { ...domainExtracted, source: 'rdap', fetchedAt: new Date().toISOString() }, CACHE_TTL_MS);
+      } else {
+        await this.cache.setNegative(hostname, NEGATIVE_TTL_MS);
+      }
+      return;
+    }
+
+    // Not RDAP-eligible — fall through to the narrow legacy WHOIS allowlist.
+    // No matching entry (the common case: most TLDs have RDAP) resolves to
+    // "unavailable" for registrant specifically; the core-tier org/ASN/
+    // country result is unaffected either way.
+    const whoisEntry = WHOIS_ALLOWLIST.find((e) => e.matches(hostname));
+    if (!whoisEntry) {
+      await this.cache.setNegative(hostname, NEGATIVE_TTL_MS);
+      return;
+    }
+    const whoisText = await this.queue.enqueue(() => queryWhois(whoisEntry, hostname));
+    await this.queryLog.append({ target: hostname, endpoint: whoisEntry.host, cacheStatus: 'miss' });
+    if (whoisText) {
+      const whoisExtracted = extractWhois(whoisText, whoisEntry);
+      record.registrant = whoisExtracted.registrant ?? whoisExtracted.org;
+      await this.cache.setSuccess(hostname, { registrant: record.registrant, source: 'whois', fetchedAt: new Date().toISOString() }, CACHE_TTL_MS);
+    } else {
+      await this.cache.setNegative(hostname, NEGATIVE_TTL_MS);
     }
   }
 }
