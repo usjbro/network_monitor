@@ -1037,6 +1037,8 @@ git add bin/osi-inspect.js bin/__tests__/osi-inspect.test.ts package.json .gitig
 git commit -m "feat(tls-interception): add osi-inspect CLI wrapper for opt-in SSLKEYLOGFILE decryption"
 ```
 
+**Post-implementation fix (found during PR #45's verification pass):** this task's original scope built the key-log file lifecycle but never called the `register_decrypt_eligible`/`unregister_decrypt_eligible` control message Task 13 added — `osi-inspect` set `SSLKEYLOGFILE` correctly but the agent never learned to trust that PID/file pairing, so decryption silently never happened despite every piece being individually unit-tested. Fixed by having `osi-inspect.js` POST `register_decrypt_eligible` to the relay's `/api/control` as soon as the wrapped child's PID is known (right after `spawn`, not `spawnSync`, since a PID isn't available before that), and `unregister_decrypt_eligible` on the child's exit, whatever the reason. A relay that's unreachable at registration time is a warning to stderr, not a hard failure — the wrapped process still runs, decryption just isn't active for that run, matching this repo's existing best-effort posture for opt-in network-touching features. Covered by two new tests in `bin/__tests__/osi-inspect.test.ts` using a local `http.createServer` standing in for the relay (asserting the actual POST bodies, not just that *a* request fired) — see `docs/wire-protocol.md`'s `register_decrypt_eligible`/`unregister_decrypt_eligible` entry, updated to match.
+
 ---
 
 ### Task 8: `KeyLogWatcher` — tail key-log files, track decrypt-eligible PIDs

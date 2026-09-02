@@ -154,7 +154,7 @@ Tagged by `"type"` (snake_case).
 
 Sent by `app/api/control/route.ts` (POST endpoint, called by the UI's `pause`/`resume` command-bar commands and the header pause button) over the same TCP socket the agent uses to send events. `pause` stops the capture loop from processing new packets (existing flow state is retained, not cleared); `resume` restarts it.
 
-`register_decrypt_eligible`/`unregister_decrypt_eligible` (Tier B) add/remove a PID from the agent's in-memory `KeyLogWatcher` (`capture-agent/src/keylog.rs`) — nothing currently on the relay side sends these automatically; they're the intended trigger point for a future UI/CLI integration that watches an `osi-inspect`-wrapped process's lifetime, not yet wired up end-to-end in this plan. `keylogPath` must point at a key-log file the agent can read (normally the one `bin/osi-inspect.js` created). Decrypt-eligibility state is in-memory only and never persists across an agent restart.
+`register_decrypt_eligible`/`unregister_decrypt_eligible` (Tier B) add/remove a PID from the agent's in-memory `KeyLogWatcher` (`capture-agent/src/keylog.rs`) — `bin/osi-inspect.js` sends these itself: `register_decrypt_eligible` as soon as the wrapped process's PID is known (right after spawn), `unregister_decrypt_eligible` when that process exits, for whatever reason. `keylogPath` must point at a key-log file the agent can read (normally the one `bin/osi-inspect.js` created). Decrypt-eligibility state is in-memory only and never persists across an agent restart. If the relay is unreachable when `osi-inspect` tries to register, it warns to stderr and still runs the wrapped process — decryption just won't be active for that run.
 
 ## Adding a new field or event type
 

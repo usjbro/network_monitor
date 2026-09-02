@@ -4,8 +4,16 @@
 // decrypt that one process's TLS traffic for this run only. No CA, no
 // certificate forging, no traffic redirection — see
 // docs/superpowers/specs/2026-08-29-tls-interception-design.md, Components §2.
+//
+// Registration: once the child's PID is known, this wrapper POSTs
+// register_decrypt_eligible to the relay's /api/control endpoint (which
+// forwards it to the capture agent's KeyLogWatcher over the existing
+// TCP control channel — see docs/wire-protocol.md), and unregisters on the
+// child's exit, whatever the reason. Without this, the agent never learns
+// which PID/key-log file pairing to trust and decryption silently never
+// happens despite SSLKEYLOGFILE being set correctly.
 
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -68,6 +76,37 @@ function confirmBrowserWrap(command) {
   });
 }
 
+// Best-effort POST to the relay's /api/control, which forwards the message
+// to the capture agent over its existing TCP control channel. Failures
+// (relay not running, agent not connected) are logged and swallowed, never
+// thrown — a missing relay must not stop the wrapped process from running,
+// it just means decryption won't happen for this run (same "opt-in,
+// best-effort" posture as EnrichmentClient elsewhere in this repo). A short
+// timeout keeps a hung/unreachable relay from stalling the wrapped process's
+// startup or exit.
+async function sendControlMessage(relayUrl, message) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2000);
+  try {
+    const res = await fetch(`${relayUrl}/api/control`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      process.stderr.write(`osi-inspect: relay rejected ${message.type} (HTTP ${res.status}) — decryption may not be active for this run.\n`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    process.stderr.write(`osi-inspect: could not reach relay at ${relayUrl} for ${message.type} (${err.message}) — decryption will not be active for this run.\n`);
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function main() {
   const dataDir = path.join(process.cwd(), '.data', 'keylogs');
   sweepOrphanedKeylogs(dataDir, 60 * 60 * 1000); // 1 hour orphan threshold
@@ -93,34 +132,80 @@ async function main() {
     }
   }
 
+  // Overridable for tests and for non-default relay ports/hosts; defaults to
+  // the same loopback address+port every other piece of this app assumes
+  // (see CLAUDE.md — the relay is always bound to 127.0.0.1:3000).
+  const relayUrl = process.env.OSI_INSPECT_RELAY_URL || 'http://127.0.0.1:3000';
+
   const keylog = keylogPath(dataDir);
   fs.writeFileSync(keylog, '', { mode: 0o600 }); // created 0600 before the child can ever write to it
 
-  const cleanup = () => {
+  let unregistered = false;
+  const cleanup = async (pid) => {
+    if (pid !== undefined && !unregistered) {
+      unregistered = true;
+      await sendControlMessage(relayUrl, { type: 'unregister_decrypt_eligible', pid });
+    }
     try {
       fs.unlinkSync(keylog);
     } catch {
       /* already gone */
     }
   };
+  // Synchronous last-resort fallback if the process exits without the
+  // 'exit'/'error' handlers below getting a chance to run their async
+  // cleanup (e.g. an uncaught exception elsewhere) — best-effort file
+  // removal only, since fetch() can't run inside a synchronous 'exit'
+  // handler. The unregister POST is not repeated here; it's a no-op on the
+  // agent side if the process that owned the PID is already gone.
+  process.on('exit', () => {
+    try {
+      fs.unlinkSync(keylog);
+    } catch {
+      /* already gone, or normal cleanup() already removed it */
+    }
+  });
 
-  const result = spawnSync(command, commandArgs, {
+  const child = spawn(command, commandArgs, {
     stdio: 'inherit',
     env: { ...process.env, SSLKEYLOGFILE: keylog },
   });
 
-  cleanup();
-
-  if (result.error) {
-    process.stderr.write(`osi-inspect: failed to launch "${command}": ${result.error.message}\n`);
+  child.on('error', async (err) => {
+    process.stderr.write(`osi-inspect: failed to launch "${command}": ${err.message}\n`);
+    await cleanup(child.pid);
     process.exit(1);
-    return;
+  });
+
+  // Registered as soon as the PID is known, rather than before spawn — a
+  // PID doesn't exist to register until the child process actually starts.
+  // This leaves a small window where the child's very first TLS handshake
+  // could begin before registration completes; closing that fully would
+  // require pausing the child's own start, which plain child_process has no
+  // primitive for. Registering immediately (not deferred to next tick)
+  // keeps that window as small as this API allows.
+  if (child.pid !== undefined) {
+    sendControlMessage(relayUrl, {
+      type: 'register_decrypt_eligible',
+      pid: child.pid,
+      keylogPath: keylog,
+    });
   }
-  process.exit(result.status ?? 1);
+
+  child.on('exit', async (code, signal) => {
+    await cleanup(child.pid);
+    if (signal) {
+      // Match the wrapped process's signal-based termination rather than
+      // inventing an unrelated exit code for it.
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code ?? 1);
+  });
 }
 
 if (require.main === module) {
   main();
 }
 
-module.exports = { isKnownBrowserBinary, keylogPath, sweepOrphanedKeylogs };
+module.exports = { isKnownBrowserBinary, keylogPath, sweepOrphanedKeylogs, sendControlMessage };
