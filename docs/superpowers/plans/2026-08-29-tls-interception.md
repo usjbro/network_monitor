@@ -2129,7 +2129,7 @@ git commit -m "feat(tls-interception): wire decrypted_payload event with loopbac
 - Consumes: the `decrypted_payload` wire event (Task 13).
 - Produces: `DecryptedPayloadSegment` type; `mapDecryptedPayloadEvent(raw): DecryptedPayloadSegment`; a `decryptEligibleProcesses` piece of state in `app/page.tsx` driving the banner (populated by a matching `decrypt_status`-style signal — for this plan, inferred directly from whether any `decrypted_payload` events have been seen for a still-open connection, avoiding the need for a fourth new wire event type).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/decrypted-mapping.test.ts
@@ -2189,12 +2189,12 @@ describe('PacketStreamView decrypted content', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/decrypted-mapping.test.ts lib/__tests__/packet-stream-decrypted.test.tsx`
 Expected: FAIL — module/props don't exist yet.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```typescript
 // lib/types.ts — add
@@ -2230,12 +2230,12 @@ In `app/page.tsx`: subscribe to `decrypted_payload` SSE events the same way `pac
 
 Extend `lib/__tests__/no-dangerous-html.test.ts`'s existing fixture list with HTML/script-like decrypted-content fixtures and a `[REDACTED]` fixture, per the spec's Testing section — inspect that file's existing fixture-array pattern before adding to it rather than restructuring the file.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run`
 Expected: full suite PASSES, including the extended `no-dangerous-html.test.ts`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/types.ts lib/decrypted-mapping.ts lib/__tests__/decrypted-mapping.test.ts components/PacketStreamView.tsx app/page.tsx lib/__tests__/packet-stream-decrypted.test.tsx lib/__tests__/no-dangerous-html.test.ts
@@ -2255,7 +2255,7 @@ git commit -m "feat(tls-interception): render decrypted content and persistent d
 - Consumes: everything from Tasks 8–12.
 - Produces: no new public interfaces — this task is pure test/verification infrastructure closing out the spec's Testing section items not yet covered by earlier tasks' own unit tests (JA3 fuzz coverage was already folded into the existing `parse.rs`/`l7.rs` fuzz target's input space in Task 2 implicitly, since it's the same entry point).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 // capture-agent/tests/no_disk_write_invariant.rs
@@ -2293,16 +2293,16 @@ fn a_full_decrypt_session_creates_no_files_beyond_the_keylog_itself() {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test --test no_disk_write_invariant`
 Expected: initially FAILS only if `keylog`/`ring_buffer` aren't `pub` from `lib.rs` yet for integration-test visibility (they should already be, from Tasks 8/10) — if it fails for a different reason, that's a real bug surfaced by this test, fix it before proceeding.
 
-- [ ] **Step 3: Confirm/adjust module visibility**
+- [x] **Step 3: Confirm/adjust module visibility**
 
 If `capture-agent/src/lib.rs` doesn't already expose `keylog` and `ring_buffer` as `pub mod`, make them so (integration tests under `tests/` can only reach `pub` items). No other implementation change should be needed if Tasks 8–10 were implemented as specified.
 
-- [ ] **Step 4: Run tests to verify they pass, then extend fuzz coverage**
+- [x] **Step 4: Run tests to verify they pass, then extend fuzz coverage**
 
 Run: `cd capture-agent && cargo test --test no_disk_write_invariant`
 Expected: PASS.
@@ -2321,7 +2321,7 @@ fuzz_target!(|data: &[u8]| {
 ```
 Run: `cd capture-agent && cargo +nightly fuzz run http2_reassembly -- -max_total_time=60` for a quick local smoke pass (full fuzzing is a CI/background concern, not a per-task gate — 60s is enough to catch an immediate panic from this task's own new code).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
