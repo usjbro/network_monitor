@@ -2,6 +2,9 @@
   "name": "ai-studio-applet",
   "version": "0.1.0",
   "private": true,
+  "bin": {
+    "osi-inspect": "./bin/osi-inspect.js"
+  },
   "scripts": {
     "dev": "next dev -H 127.0.0.1 --webpack",
     "build": "next build --webpack",
