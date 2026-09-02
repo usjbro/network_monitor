@@ -1,20 +1,23 @@
 import { AgentClient } from '@/lib/agent-client';
 import { EnrichmentClient, EnrichmentMode } from '@/lib/enrichment';
+import { GeoIpClient } from '@/lib/geoip';
+import { buildGeoHopEvent } from '@/lib/geoip-mapping';
 import { join } from 'node:path';
 
 declare global {
   var __agentClient: AgentClient | undefined;
   var __enrichmentClient: EnrichmentClient | undefined;
+  var __geoIpClient: GeoIpClient | undefined;
 }
 
 // Minimal structural interfaces for what GET() actually calls on each
-// client — narrower than the concrete AgentClient/EnrichmentClient classes
-// so tests can inject a small fake (a bare EventEmitter plus these methods)
-// without needing to construct/mock a real singleton (a real AgentClient
-// opens a TCP socket in its constructor's start() path; a real
-// EnrichmentClient touches disk). Both concrete classes satisfy these
-// structurally, so production callers pass no deps and get the real thing
-// via getAgentClient()/getEnrichmentClient() below.
+// client — narrower than the concrete AgentClient/EnrichmentClient/GeoIpClient
+// classes so tests can inject a small fake (a bare EventEmitter plus these
+// methods) without needing to construct/mock a real singleton (a real
+// AgentClient opens a TCP socket in its constructor's start() path; a real
+// EnrichmentClient/GeoIpClient touches disk). All three concrete classes
+// satisfy these structurally, so production callers pass no deps and get the
+// real thing via getAgentClient()/getEnrichmentClient()/getGeoIpClient() below.
 export interface StreamAgentClient {
   on(event: 'event', listener: (event: unknown) => void): unknown;
   on(event: 'status', listener: (status: { connected: boolean }) => void): unknown;
@@ -28,6 +31,13 @@ export interface StreamEnrichmentClient {
   off(event: 'result', listener: (event: unknown) => void): unknown;
   getMode(): EnrichmentMode;
   notifyObservedConnections(conns: Array<{ id: string; remoteAddr: string }>): void;
+}
+
+export interface StreamGeoIpClient {
+  on(event: 'result', listener: (result: { ip: string; location: unknown }) => void): unknown;
+  off(event: 'result', listener: (result: { ip: string; location: unknown }) => void): unknown;
+  getMode(): 'off' | 'on';
+  lookup(ip: string): Promise<void> | void;
 }
 
 function getAgentClient(): AgentClient {
@@ -50,6 +60,15 @@ export function getEnrichmentClient(): EnrichmentClient {
   return global.__enrichmentClient;
 }
 
+// Same rationale as getEnrichmentClient above — shared with
+// app/api/geoip/control/route.ts.
+export function getGeoIpClient(): GeoIpClient {
+  if (!global.__geoIpClient) {
+    global.__geoIpClient = new GeoIpClient();
+  }
+  return global.__geoIpClient;
+}
+
 // The actual SSE-stream construction, factored out of GET() so tests can
 // call it directly with injected fakes. It's kept out of GET()'s own
 // signature (rather than GET() taking a second `deps` parameter) because
@@ -58,21 +77,24 @@ export function getEnrichmentClient(): EnrichmentClient {
 // to match its own `{ params: Promise<...> }` route-context shape — a `deps`
 // parameter there fails that check. This function has no such constraint.
 export function buildStreamResponse(
-  deps: { agent?: StreamAgentClient; enrichment?: StreamEnrichmentClient } = {}
+  deps: { agent?: StreamAgentClient; enrichment?: StreamEnrichmentClient; geoip?: StreamGeoIpClient } = {}
 ): Response {
   const client = deps.agent ?? getAgentClient();
   const enrichmentClient = deps.enrichment ?? getEnrichmentClient();
+  const geoIpClient = deps.geoip ?? getGeoIpClient();
   const encoder = new TextEncoder();
 
   // Hoisted so `cancel()` can remove the exact same listener references
   // `start()` registered. Without this, every browser connect/disconnect
   // (including the reconnects this app's "agent not connected" banner
-  // relies on) leaks a pair of listeners on the shared AgentClient
-  // singleton — it's shared across every browser talking to this server,
-  // not per-request, so this isn't a theoretical leak.
+  // relies on) leaks listeners on the shared AgentClient/EnrichmentClient/
+  // GeoIpClient singletons — they're shared across every browser talking to
+  // this server, not per-request, so this isn't a theoretical leak.
   let onEvent: ((event: unknown) => void) | null = null;
   let onStatus: ((status: { connected: boolean }) => void) | null = null;
   let onResult: ((event: unknown) => void) | null = null;
+  let onTracerouteHop: ((event: unknown) => void) | null = null;
+  let onGeoResult: ((result: { ip: string; location: unknown }) => void) | null = null;
 
   const stream = new ReadableStream({
     start(controller) {
@@ -120,9 +142,47 @@ export function buildStreamResponse(
           // stream already closed/closing — ignore
         }
       };
+
+      // Tracks the (targetIp, hopNumber) that produced each hopIp we've seen
+      // on this stream, so that when GeoIpClient's bare `'result'` event
+      // comes back (keyed only by ip) we can reattach the trace-correlation
+      // fields `geo_hop_update` needs. Scoped to this one SSE connection —
+      // not persisted, not shared across browser tabs — since it only needs
+      // to outlive the traceroute that populated it.
+      const hopContextByIp = new Map<string, { targetIp: string; hopNumber: number }>();
+
+      // NOTE: `onEvent` above already forwards every agent event verbatim,
+      // traceroute_hop included, so this listener does NOT re-enqueue it —
+      // doing so would double-send the same hop to the browser. This
+      // listener's only job is the geoIP side effect: remembering which
+      // (targetIp, hopNumber) produced a given hopIp, and kicking off a
+      // lookup for it when geoIP is enabled.
+      onTracerouteHop = (event: unknown) => {
+        const hop = event as { type?: string; targetIp?: string; hopNumber?: number; hopIp?: string };
+        if (hop.type !== 'traceroute_hop') return;
+        if (hop.hopIp && hop.targetIp !== undefined && hop.hopNumber !== undefined) {
+          hopContextByIp.set(hop.hopIp, { targetIp: hop.targetIp, hopNumber: hop.hopNumber });
+          if (geoIpClient.getMode() === 'on') {
+            geoIpClient.lookup(hop.hopIp);
+          }
+        }
+      };
+      onGeoResult = (result: { ip: string; location: unknown }) => {
+        const context = hopContextByIp.get(result.ip);
+        if (!context) return; // a result for a hop this stream never reported — nothing to correlate it to
+        const event = buildGeoHopEvent(result.ip, context.hopNumber, context.targetIp, result.location as any);
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        } catch {
+          // stream already closed/closing — ignore
+        }
+      };
+
       client.on('event', onEvent);
       client.on('status', onStatus);
+      client.on('event', onTracerouteHop);
       enrichmentClient.on('result', onResult);
+      geoIpClient.on('result', onGeoResult);
 
       // Replay current connection status immediately so a fresh client
       // doesn't wait for the next status change to know the agent's state.
@@ -132,6 +192,8 @@ export function buildStreamResponse(
       if (onEvent) client.off('event', onEvent);
       if (onStatus) client.off('status', onStatus);
       if (onResult) enrichmentClient.off('result', onResult);
+      if (onTracerouteHop) client.off('event', onTracerouteHop);
+      if (onGeoResult) geoIpClient.off('result', onGeoResult);
     },
   });
 

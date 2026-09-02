@@ -802,7 +802,7 @@ git commit -m "feat(path-viz): add geo_hop_update event mapping and protocol doc
 - Consumes: `AgentClient` (existing singleton), `GeoIpClient` (Task 4), `buildGeoHopEvent` (Task 5).
 - Produces: `POST /api/traceroute/start { connectionId, remoteAddr }` → sends `{ type: 'trace_route', targetIp: remoteAddr }` to the agent via `AgentClient.sendControl`; `POST /api/geoip/control { action: 'enable' | 'disable' | 'clear' }`; SSE stream additionally forwards `traceroute_hop` (agent-sourced, pass-through) and `geo_hop_update` (relay-generated once `GeoIpClient.lookup` resolves for each hop IP the agent reports).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/traceroute-stream.test.ts
@@ -849,12 +849,12 @@ describe('traceroute_hop and geo_hop_update relay', () => {
 
 If `app/api/stream/route.ts`'s `GET()` was made injectable during the ownership-enrichment plan's Task 9 fix round (an `agent`/`enrichment` deps parameter), extend that same deps parameter with a `geoip` field rather than inventing a second injection mechanism — check the current signature of `GET()` before writing this task's code, since that fix may have landed on a sibling branch merged before this one.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/traceroute-stream.test.ts`
 Expected: FAIL — routes/wiring don't exist yet.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```typescript
 // app/api/traceroute/start/route.ts
@@ -934,12 +934,12 @@ geoIpClient.on('result', onGeoResult);
 ```
 Register the corresponding `cancel()` cleanup (`client.off('event', onTracerouteHop); geoIpClient.off('result', onGeoResult);`), matching the existing `onEvent`/`onStatus` teardown pattern exactly.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/traceroute-stream.test.ts` and the full suite `npx vitest run`
 Expected: all PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add app/api/traceroute/start/route.ts app/api/geoip/control/route.ts app/api/stream/route.ts lib/__tests__/traceroute-stream.test.ts
