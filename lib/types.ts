@@ -89,6 +89,20 @@ export interface PacketFrame {
   };
 }
 
+// A single traceroute hop, as reported by capture-agent's `traceroute_hop`
+// wire event (docs/wire-protocol.md) and, once resolved, enriched by the
+// relay's `geo_hop_update` SSE event (docs/geoip-protocol.md). `hopIp`/
+// `rttMs` are both absent — not an error state — when that hop got no
+// reply within its retry budget. `location` starts undefined and is filled
+// in later, separately, only if geoIP is enabled.
+export interface TracerouteHop {
+  targetIp: string;
+  hopNumber: number;
+  hopIp?: string;
+  rttMs?: number;
+  location?: { city?: string; country?: string };
+}
+
 export type TerminalTheme = 'sophisticated' | 'macos_pro' | 'macos_homebrew' | 'iterm_snazzy' | 'matrix' | 'dracula' | 'amber' | 'cyberpunk' | 'catppuccin' | 'nord';
 
 export interface ThemeConfig {

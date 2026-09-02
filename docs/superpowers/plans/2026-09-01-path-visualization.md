@@ -959,7 +959,7 @@ git commit -m "feat(path-viz): add traceroute/geoip control routes and SSE relay
 - Consumes: the `traceroute_hop` wire event (Task 3), `geo_hop_update` (Task 5).
 - Produces: `TracerouteHop` type; `mapTracerouteHopEvent(raw): TracerouteHop`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/agent-mapping.test.ts — additional describe block
@@ -979,12 +979,12 @@ describe('mapTracerouteHopEvent', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/agent-mapping.test.ts`
 Expected: FAIL — function doesn't exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```typescript
 // lib/types.ts — add
@@ -1010,12 +1010,12 @@ export function mapTracerouteHopEvent(raw: any): TracerouteHop {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/agent-mapping.test.ts`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/types.ts lib/agent-mapping.ts lib/__tests__/agent-mapping.test.ts
