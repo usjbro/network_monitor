@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isDecryptedPayloadAllowed } from '@/app/api/stream/route';
+import { isDecryptedPayloadAllowed } from '@/lib/decrypted-payload-gate';
 
 function fakeRequest(headers: Record<string, string>) {
   return { headers: new Headers(headers) } as unknown as Request;

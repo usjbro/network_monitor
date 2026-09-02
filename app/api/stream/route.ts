@@ -1,4 +1,5 @@
 import { AgentClient } from '@/lib/agent-client';
+import { isDecryptedPayloadAllowed } from '@/lib/decrypted-payload-gate';
 
 declare global {
   var __agentClient: AgentClient | undefined;
@@ -10,25 +11,6 @@ function getAgentClient(): AgentClient {
     global.__agentClient.start();
   }
   return global.__agentClient;
-}
-
-// Gates `decrypted_payload` events (Tier B — opt-in decrypted TLS content)
-// separately from every other event type on this same stream: those events
-// are refused outright unless the request is either (a) direct loopback
-// dev usage with no reverse proxy in front at all (no `x-mtls-verified`
-// header present — the capture agent's own `127.0.0.1:9990` bind and this
-// route's Next.js `-H 127.0.0.1` bind are the only gate in that case), or
-// (b) proxied through deploy/Caddyfile's mTLS reverse proxy AND carrying a
-// verified client certificate. A present-but-false header (proxied, but the
-// client cert didn't verify) is refused — Caddy's `client_auth
-// require_and_verify` would already reject the connection before it got
-// this far in practice, but this is a defense-in-depth check on the
-// application side, not the only one. See docs/wire-protocol.md's
-// `decrypted_payload` section.
-export function isDecryptedPayloadAllowed(request: Request): boolean {
-  const header = request.headers.get('x-mtls-verified');
-  if (header === null) return true; // no Caddy in front — direct loopback access
-  return header === 'true';
 }
 
 export async function GET(request: Request) {
