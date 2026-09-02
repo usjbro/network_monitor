@@ -15,7 +15,7 @@ fn looks_like_bearer_token(value: &str) -> bool {
 /// record ever enters the ring buffer or is emitted (spec Components §3);
 /// body content is never in scope for this function (named limitation, see
 /// Scope).
-pub fn redact_headers(headers: &mut Vec<(String, String)>) {
+pub fn redact_headers(headers: &mut [(String, String)]) {
     for (name, value) in headers.iter_mut() {
         if is_sensitive_header_name(name) || looks_like_bearer_token(value) {
             *value = "[REDACTED]".to_string();
