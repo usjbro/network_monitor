@@ -540,7 +540,7 @@ git commit -m "feat(path-viz): wire trace_route control message and traceroute_h
   ```
   Consumed by `app/api/geoip/control/route.ts` (Task 6) and `app/api/stream/route.ts` (Task 6).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/geoip.test.ts
@@ -605,12 +605,12 @@ function tmpCachePath(): string {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/geoip.test.ts`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement `lib/geoip.ts`**
+- [x] **Step 3: Implement `lib/geoip.ts`**
 
 ```typescript
 // lib/geoip.ts
@@ -701,12 +701,12 @@ export class GeoIpClient extends EventEmitter {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/geoip.test.ts`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/geoip.ts lib/__tests__/geoip.test.ts
