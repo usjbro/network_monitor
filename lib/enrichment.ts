@@ -177,7 +177,16 @@ export class EnrichmentClient extends EventEmitter {
 
     try {
       if (!this.bootstrapPromise) {
-        this.bootstrapPromise = loadIpBootstrap(this.bootstrapCachePath, this.fetchImpl);
+        // Un-memoize on rejection: a transient failure (timeout, network
+        // blip, oversized/redirected response — anything fetchBootstrapJson
+        // now rejects on) must not permanently wedge every future lookup
+        // behind the same stale rejected promise for the rest of the
+        // process's lifetime. Clearing the field lets the next lookup()
+        // retry a fresh fetch instead of instantly re-throwing forever.
+        this.bootstrapPromise = loadIpBootstrap(this.bootstrapCachePath, this.fetchImpl).catch((err) => {
+          this.bootstrapPromise = null;
+          throw err;
+        });
       }
       const services = await this.bootstrapPromise;
       const base = resolveRdapBaseForIp(remoteAddr, services);
@@ -262,7 +271,13 @@ export class EnrichmentClient extends EventEmitter {
     }
 
     if (!this.domainBootstrapPromise) {
-      this.domainBootstrapPromise = loadDomainBootstrap(this.domainBootstrapCachePath, this.fetchImpl);
+      // Same un-memoize-on-rejection reasoning as bootstrapPromise above: a
+      // transient failure must not permanently wedge every future
+      // registrant lookup behind one stale rejected promise.
+      this.domainBootstrapPromise = loadDomainBootstrap(this.domainBootstrapCachePath, this.fetchImpl).catch((err) => {
+        this.domainBootstrapPromise = null;
+        throw err;
+      });
     }
     const domainServices = await this.domainBootstrapPromise;
     const domainBase = resolveRdapBaseForDomain(hostname, domainServices);

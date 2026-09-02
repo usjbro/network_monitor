@@ -235,6 +235,37 @@ describe('EnrichmentClient', () => {
     expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterFirst + 1);
   }, 15_000);
 
+  it('retries the IANA bootstrap fetch on a later lookup after a transient failure, instead of permanently wedging on the first rejection', async () => {
+    let ianaCalls = 0;
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes('data.iana.org')) {
+        ianaCalls += 1;
+        if (ianaCalls === 1) throw new Error('simulated transient network failure');
+        return new Response(JSON.stringify(BOOTSTRAP_FIXTURE), { status: 200 });
+      }
+      return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'RETRY-ORG' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    client.enable();
+
+    // First lookup: the bootstrap fetch itself fails. lookup() must fail
+    // closed (no crash, no 'result' event) rather than permanently caching
+    // the rejected promise. Assert no 'result' fires within a short window.
+    let gotResult = false;
+    client.once('result', () => { gotResult = true; });
+    client.requestLookup('conn-1', '93.184.216.34');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(gotResult).toBe(false);
+
+    // Second lookup for the same address: must retry the bootstrap fetch
+    // (not instantly re-throw a stale memoized rejection) and succeed.
+    const second = new Promise((resolve) => client.once('result', resolve));
+    client.requestLookup('conn-2', '93.184.216.34');
+    const secondResult = (await second) as { enrichment: { org?: string } };
+    expect(secondResult.enrichment.org).toBe('RETRY-ORG');
+    expect(ianaCalls).toBe(2);
+  }, 15_000);
+
   it('single-flight fanout: two different connections requesting the same in-flight address both eventually receive a result', async () => {
     let rdapCalls = 0;
     const fetchImpl = vi.fn(async (url: string) => {
