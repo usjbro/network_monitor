@@ -87,7 +87,7 @@
   ```
   Consumed by `l7.rs` (Task 2), which will parse `ClientHelloFields` out of the raw ClientHello bytes it already has and call `compute_ja3`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // capture-agent/src/ja3.rs (test module, top of file initially, before the real impl)
@@ -149,12 +149,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test ja3::`
 Expected: FAIL — `compute_ja3`/`label_for_ja3` don't exist yet.
 
-- [ ] **Step 3: Implement `capture-agent/src/ja3.rs`**
+- [x] **Step 3: Implement `capture-agent/src/ja3.rs`**
 
 ```rust
 // capture-agent/src/ja3.rs
@@ -202,12 +202,12 @@ pub fn label_for_ja3(hash: &str) -> Option<&'static str> {
 
 Add the `md5` crate: `cd capture-agent && cargo add md5`. This is the one new Tier-A dependency — a pure, tiny, non-cryptographic-use hashing crate (JA3 mandates MD5 by spec, not as a security primitive), no extra-scrutiny review needed given the spec's Dependency hygiene section only calls that out for Tier B's TLS/HPACK/memory-hardening crates.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test ja3::`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -230,7 +230,7 @@ git commit -m "feat(tls-interception): add JA3 fingerprint computation and label
   ```
   Consumed by `flow.rs` (Task 3).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Extend the existing test module in `capture-agent/src/l7.rs`. The existing `sniff_tls_client_hello` function only has to walk cipher suites/extensions as opaque-length blocks to skip past them today (it never reads their contents); this task makes it also *record* what it walks past.
 
@@ -317,12 +317,12 @@ Extend the existing test module in `capture-agent/src/l7.rs`. The existing `snif
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test l7::`
 Expected: FAIL — `L7Info::TlsClientHello` doesn't have `ja3`/`ja3_label` fields yet; compile error.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 // capture-agent/src/l7.rs — replace the enum and sniff_tls_client_hello body
@@ -419,12 +419,12 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
 
 Update `capture-agent/src/lib.rs` to add `pub mod ja3;` if Task 1 didn't already (idempotent if it did).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test l7::`
 Expected: all tests PASS, including the two pre-existing tests (`detects_http_get_request`, `detects_dns_query`) which must still pass unmodified.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -444,7 +444,7 @@ git commit -m "feat(tls-interception): extract JA3 fields during ClientHello par
 - Produces: `FlowSnapshot` grows `pub ja3_fingerprint: Option<String>` and `pub ja3_label: Option<&'static str>`.
   Consumed by `wire.rs` (Task 4).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 // capture-agent/src/flow.rs — additional test inside mod tests
@@ -469,12 +469,12 @@ git commit -m "feat(tls-interception): extract JA3 fields during ClientHello par
 
 (If `make_tcp_packet` doesn't already exist as a shared test helper in `flow.rs`'s test module, use whatever fixture-construction helper the existing tests in that file already use — the pattern is: check the file's existing tests for a packet-builder before adding a new one, don't duplicate one.)
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test flow::`
 Expected: FAIL — `FlowSnapshot` has no `ja3_fingerprint`/`ja3_label` fields; compile error.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In the flow-entry struct that `FlowTable` keeps internally (the per-flow accumulator that `observe` mutates and `snapshot` reads from — inspect the existing struct near `FlowTable`'s definition before editing), add:
 ```rust
@@ -492,12 +492,12 @@ if let L7Info::TlsClientHello { ja3, ja3_label, .. } = l7 {
 ```
 Add the same two fields to `FlowSnapshot`, and copy them from the flow entry in `snapshot()`'s existing per-flow mapping.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test flow::`
 Expected: all tests PASS, including every pre-existing test in this file.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -518,7 +518,7 @@ git commit -m "feat(tls-interception): carry JA3 fingerprint on FlowSnapshot"
 - Consumes: `FlowSnapshot.ja3_fingerprint`/`.ja3_label` (Task 3).
 - Produces: `ConnectionJson.ja3_fingerprint: Option<String>` / `.ja3_label: Option<String>` (both `#[serde(skip_serializing_if = "Option::is_none")]`), serialized as `ja3Fingerprint`/`ja3Label` on the wire.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 // capture-agent/src/wire.rs — additional test inside mod tests
@@ -547,12 +547,12 @@ git commit -m "feat(tls-interception): carry JA3 fingerprint on FlowSnapshot"
 
 If `wire.rs`'s existing tests don't yet have a shared `existing_fixture_connection_json()`-style builder, add one as part of this task (extract it from whatever inline struct literal the file's current tests use) rather than duplicating a huge struct literal across two new tests.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test wire::`
 Expected: FAIL — `ConnectionJson` has no `ja3_fingerprint`/`ja3_label` fields; compile error.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 // capture-agent/src/wire.rs — in ConnectionJson
@@ -568,12 +568,12 @@ ja3_fingerprint: snap.ja3_fingerprint.clone(),
 ja3_label: snap.ja3_label.map(|s| s.to_string()),
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test`
 Expected: all tests PASS (full suite, since `ConnectionJson` construction sites elsewhere in the crate must also be updated to satisfy the compiler — search for every `ConnectionJson {` literal, not just the one in `main.rs`).
 
-- [ ] **Step 5: Update `docs/wire-protocol.md` and commit**
+- [x] **Step 5: Update `docs/wire-protocol.md` and commit**
 
 Add to the `connection_update` example JSON and field notes:
 ```json
@@ -604,7 +604,7 @@ git commit -m "feat(tls-interception): emit ja3Fingerprint/ja3Label on connectio
 - Consumes: `ja3Fingerprint?: string` / `ja3Label?: string` on the `connection_update` wire event (Task 4).
 - Produces: `NetworkConnection.ja3Fingerprint?: string`, `.ja3Label?: string`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/agent-mapping.test.ts — add to the existing mapConnectionEvent describe block
@@ -659,12 +659,12 @@ describe('ConnectionsView JA3 display', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/agent-mapping.test.ts lib/__tests__/connections-view-ja3.test.tsx`
 Expected: FAIL — fields don't exist on the type yet / UI doesn't render them yet.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```typescript
 // lib/types.ts — add to NetworkConnection
@@ -694,12 +694,12 @@ In `components/ConnectionsView.tsx`, in the detail panel for the selected connec
 ```
 (Adjust class names to whatever this component's existing theme-driven classnames actually are — do not invent new theme keys; reuse ones already used elsewhere in this file.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/agent-mapping.test.ts lib/__tests__/connections-view-ja3.test.tsx`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add lib/types.ts lib/agent-mapping.ts components/ConnectionsView.tsx lib/__tests__/connections-view-ja3.test.tsx lib/__tests__/agent-mapping.test.ts
@@ -721,7 +721,7 @@ git commit -m "feat(tls-interception): surface JA3 fingerprint in ConnectionsVie
 - Consumes: nothing.
 - Produces: `pub fn disable_core_dumps() -> std::io::Result<()>` — sets `RLIMIT_CORE` to 0 for the current process. Called once at the very top of `main()`, before any capture setup, independent of whether Tier B is ever exercised in a given run (spec Security model: "unconditionally at startup").
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 // capture-agent/src/core_limits.rs
@@ -741,12 +741,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test core_limits::`
 Expected: FAIL — module/function don't exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 // capture-agent/src/core_limits.rs
@@ -773,12 +773,12 @@ if let Err(e) = capture_agent::core_limits::disable_core_dumps() {
 ```
 (A warning, not a hard failure — the agent should still run for users on a platform/sandbox where this syscall is restricted, but the warning makes the gap visible rather than silent.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test core_limits::`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -805,7 +805,7 @@ git commit -m "feat(tls-interception): disable core dumps unconditionally at age
   ```
   Consumed by `capture-agent`'s `KeyLogWatcher` (Task 8) only indirectly — via the file it writes and the PID registration mechanism built in Task 8, not a direct code dependency (this is a separate process).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // bin/__tests__/osi-inspect.test.ts
@@ -899,12 +899,12 @@ describe('osi-inspect end-to-end (spawned as a real process)', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run bin/__tests__/osi-inspect.test.ts`
 Expected: FAIL — `bin/osi-inspect.js` doesn't exist.
 
-- [ ] **Step 3: Implement `bin/osi-inspect.js`**
+- [x] **Step 3: Implement `bin/osi-inspect.js`**
 
 ```javascript
 #!/usr/bin/env node
@@ -1025,12 +1025,12 @@ Add `.data/` to `.gitignore` if sub-project 2 didn't already (check first — it
   },
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run bin/__tests__/osi-inspect.test.ts`
 Expected: all tests PASS. `chmod +x bin/osi-inspect.js` if the test harness's `spawn`/`spawnSync` calls need the file executable on this platform (they invoke it via `node bin/osi-inspect.js` explicitly above, so this is only needed for direct `./bin/osi-inspect.js` invocation, not for the tests as written).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bin/osi-inspect.js bin/__tests__/osi-inspect.test.ts package.json .gitignore
@@ -1064,7 +1064,7 @@ git commit -m "feat(tls-interception): add osi-inspect CLI wrapper for opt-in SS
   ```
   Consumed by `tls_decrypt.rs` (Task 9) via `secret_for`, and by `main.rs`'s capture loop (Task 10 wiring) via `is_eligible`/`poll`. PID registration itself is driven by a small control-message extension on the existing agent TCP socket (not built in this task — Task 11 wires the relay-side trigger; this task only needs the in-memory data structure and its own unit tests using direct `register_eligible_pid` calls).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // capture-agent/src/keylog.rs
@@ -1130,12 +1130,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test keylog::`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement `capture-agent/src/keylog.rs`**
+- [x] **Step 3: Implement `capture-agent/src/keylog.rs`**
 
 ```rust
 // capture-agent/src/keylog.rs
@@ -1227,12 +1227,12 @@ impl KeyLogWatcher {
 
 Add the `hex` crate: `cd capture-agent && cargo add hex`. Add `pub mod keylog;` to `lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test keylog::`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -1257,7 +1257,7 @@ git commit -m "feat(tls-interception): add KeyLogWatcher for tailing SSLKEYLOGFI
   ```
   Consumed by the agent's capture-loop wiring (Task 10) for decrypt-eligible flows only.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 This is the one component in this plan justified in using a real, minimal loopback TLS 1.3 handshake as its correctness fixture rather than a hand-built one — TLS 1.3's key schedule (HKDF-Expand-Label chains) is exactly the kind of logic that's easy to get subtly wrong against hand-rolled vectors and hard to notice. Use the official RFC 8446 §Appendix / `tls13-vectors` published test vectors for the fixture instead of generating one at test time (keeps this test fixture-driven and network-free, consistent with the plan's Global Constraints).
 
@@ -1321,12 +1321,12 @@ mod tests {
 
 Add `capture-agent/tests/fixtures/tls13_rfc8446_vector.json` sourced from a published, independently-verifiable TLS 1.3 test vector set (e.g. the vectors accompanying RFC 8448 "Example Handshake Traces for TLS 1.3," which is the standard reference fixture set used by TLS implementers for exactly this purpose) with fields `client_random`, `client_traffic_secret_0`, `encrypted_record`, `expected_plaintext` populated from that published trace — not invented values, since an invented "known-correct" ciphertext/plaintext pair proves nothing about the implementation's correctness against a real TLS 1.3 key schedule.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test tls_decrypt::`
 Expected: FAIL — module doesn't exist yet.
 
-- [ ] **Step 3: Implement `capture-agent/src/tls_decrypt.rs`**
+- [x] **Step 3: Implement `capture-agent/src/tls_decrypt.rs`**
 
 Use the `ring` crate for the AEAD primitive (AES-128-GCM per RFC 8446's mandatory-to-implement cipher suite) and manual HKDF-Expand-Label per RFC 8446 §7.1 (ring exposes raw HKDF; the TLS 1.3-specific label-wrapping needs to be hand-implemented, as no small crate does exactly this without pulling in a much larger TLS stack):
 
@@ -1414,12 +1414,12 @@ pub fn decrypt_record(record: &[u8], secret: &SessionSecret) -> DecryptOutcome {
 
 Add the `ring` crate: `cd capture-agent && cargo add ring`. **Extra-scrutiny dependency review, per the spec's Dependency hygiene section:** `ring` is a widely-used, actively-maintained, security-audited crate already relied upon by major Rust TLS stacks (`rustls`); pin an exact version and note it in the PR description for this task per `docs/security.md`'s dependency-hygiene process. Add `pub mod tls_decrypt;` to `lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test tls_decrypt::`
 Expected: all tests PASS, including the RFC-vector-based correctness test — if it fails, the key-schedule implementation has a real bug; do not adjust the fixture to match incorrect output.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -1449,7 +1449,7 @@ git commit -m "feat(tls-interception): add TLS 1.3 record decryption from logged
   ```
   Consumed by the capture-loop wiring (Task 11) — one `DecryptedRingBuffer` per decrypt-eligible flow.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // capture-agent/src/ring_buffer.rs
@@ -1499,12 +1499,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test ring_buffer::`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement `capture-agent/src/ring_buffer.rs`**
+- [x] **Step 3: Implement `capture-agent/src/ring_buffer.rs`**
 
 ```rust
 // capture-agent/src/ring_buffer.rs
@@ -1575,12 +1575,12 @@ impl DecryptedRingBuffer {
 
 Add the `zeroize` crate: `cd capture-agent && cargo add zeroize`. **Extra-scrutiny dependency review** (spec Dependency hygiene): `zeroize` is a small, widely-used, purpose-built crate specifically for this use case (used by `RustCrypto` and many production TLS/crypto stacks) — note the pinned version in the PR description. Add `pub mod ring_buffer;` to `lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test ring_buffer::`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -1605,7 +1605,7 @@ git commit -m "feat(tls-interception): add capped mlock'd zeroed-on-evict ring b
   ```
   Consumed by the HTTP/1.1 and HTTP/2 parsing paths (Task 12, and the existing plaintext HTTP path if extended later) before any decrypted content enters `DecryptedRingBuffer` (Task 10) or is emitted.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // capture-agent/src/redact.rs
@@ -1661,12 +1661,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test redact::`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement `capture-agent/src/redact.rs`**
+- [x] **Step 3: Implement `capture-agent/src/redact.rs`**
 
 ```rust
 // capture-agent/src/redact.rs
@@ -1704,12 +1704,12 @@ pub fn redact_headers(headers: &mut Vec<(String, String)>) {
 
 Add `pub mod redact;` to `lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test redact::`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -1742,7 +1742,7 @@ git commit -m "feat(tls-interception): add sensitive-header redaction pass"
   ```
   Consumed by the capture-loop wiring (Task 13).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // capture-agent/src/http2.rs
@@ -1832,12 +1832,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test http2::`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement `capture-agent/src/http2.rs`**
+- [x] **Step 3: Implement `capture-agent/src/http2.rs`**
 
 Use the `hpack` crate (a small, focused RFC 7541 decoder) rather than hand-rolling HPACK — hand-rolling a stateful, order-dependent decoder is exactly the kind of thing the earlier spec draft underestimated (per the spec's Components §4 self-critique).
 
@@ -1950,12 +1950,12 @@ impl Http2Reassembler {
 
 Add the `hpack` crate: `cd capture-agent && cargo add hpack`. **Extra-scrutiny dependency review** (spec Dependency hygiene + Components §4's own note): confirm the crate's maintenance status and RFC 7541 compliance coverage before pinning; if `hpack` proves unmaintained or insufficient during implementation, the fallback is to hand-roll a decoder covering only the static table + literal-without-Huffman cases (sufficient for the majority of real traffic) and treat any frame requiring Huffman or dynamic-table lookups the decoder doesn't support as an immediate `DesyncFallback` — never a guessed decode. Add `pub mod http2;` to `lib.rs`.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test http2::`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
@@ -1980,7 +1980,7 @@ git commit -m "feat(tls-interception): add HTTP/2 stream reassembly and HPACK de
 - Consumes: `KeyLogWatcher` (Task 8), `tls_decrypt::decrypt_record` (Task 9), `DecryptedRingBuffer` (Task 10), `Http2Reassembler` (Task 12); the existing control-message channel `app/api/control/route.ts` already sends over the same TCP socket.
 - Produces: a new `decrypted_payload` NDJSON agent event; a new `register_decrypt_eligible`/`unregister_decrypt_eligible` control message the relay sends to the agent; `isDecryptedPayloadAllowed(request)` in the relay.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // capture-agent/src/wire.rs — additional test
@@ -2024,12 +2024,12 @@ describe('isDecryptedPayloadAllowed', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test wire::decrypted_payload` and `npx vitest run lib/__tests__/stream-decrypted-gating.test.ts`
 Expected: FAIL on both — types/functions don't exist yet.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 // capture-agent/src/wire.rs — new struct + AgentEvent variant
@@ -2095,12 +2095,12 @@ onEvent = (event: unknown) => {
 ```
 Re-run `deploy/test-mtls-rejection.sh` after this change per its own documented requirement (CLAUDE.md: "re-run it after any Caddyfile change").
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test` and `npx vitest run lib/__tests__/stream-decrypted-gating.test.ts`
 Expected: all PASS. Also run `cd deploy && ./test-mtls-rejection.sh` and confirm all three checks still pass with the header addition in place.
 
-- [ ] **Step 5: Update `docs/wire-protocol.md` and commit**
+- [x] **Step 5: Update `docs/wire-protocol.md` and commit**
 
 Add a new `### decrypted_payload` section documenting the event shape, mirroring the existing `connection_update`/`packet` sections' format, and a note: "Refused outright over any non-loopback listener; once served through 1b's Caddy mTLS proxy, requires the `X-Mtls-Verified: true` upstream header — see `app/api/stream/route.ts`'s `isDecryptedPayloadAllowed`."
 
