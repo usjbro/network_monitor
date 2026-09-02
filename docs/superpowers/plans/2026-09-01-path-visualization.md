@@ -1155,7 +1155,7 @@ git commit -m "feat(path-viz): add Trace Route button and hop table to Connectio
 - Consumes: `mapTracerouteHopEvent` (Task 7), `ConnectionsView`'s new props (Task 8), `POST /api/traceroute/start` and `POST /api/geoip/control` (Task 6).
 - Produces: wires the full flow end to end.
 
-- [ ] **Step 1: Manual verification plan (no new unit test — this task is integration wiring in the app's single client component, matching how sub-project 2's equivalent `app/page.tsx` SSE-subscription wiring was verified in that plan's own Task 10/11 rather than unit tested)**
+- [x] **Step 1: Manual verification plan (no new unit test — this task is integration wiring in the app's single client component, matching how sub-project 2's equivalent `app/page.tsx` SSE-subscription wiring was verified in that plan's own Task 10/11 rather than unit tested)**
 
 Read `app/page.tsx`'s existing `useEffect` that opens `EventSource('/api/stream')` and folds `connection_update`/`packet`/`layer_update`/`connection_status` events into state (and `connection_enrichment` if sub-project 2's Task 10 already landed on a merged branch — check first). Add:
 ```typescript
@@ -1187,11 +1187,11 @@ In `handleExecuteCommand`, add `geoip enable`/`geoip disable`/`geoip clear` verb
 
 In `components/CommandLineBar.tsx`, add the three `geoip ...` verbs to its existing help-text listing, next to `enrich ...`'s entries.
 
-- [ ] **Step 2: Manual smoke test**
+- [ ] **Step 2: Manual smoke test** — NOT performed by the automated implementer (no browser/display and no live network capture available in this environment). The state-merge logic this step would exercise (`mergeTracerouteHop`, `mergeGeoHopUpdate`, `isTraceComplete`) was extracted to `lib/traceroute-state.ts` per this step's own suggestion below and covered by `lib/__tests__/traceroute-state.test.ts` (9 passing tests) instead, plus `npx vitest run && npm run lint && npm run build` all pass. A human with a real capture-agent + browser should still run this step before shipping — the pure-function tests can't catch EventSource wiring mistakes, CSS/layout issues, or `fetch('/api/traceroute/start')` request-shape bugs.
 
 Run: `npm run dev` (with `cd capture-agent && cargo run --release` also running in a second terminal, per this repo's existing manual-testing convention) and, in the browser, select a connection in ConnectionsView, click "Trace Route," and confirm hops appear progressively in the table. Then run `geoip enable` in the command bar and confirm location data appears on subsequent hops. This is the same manual-verification posture the ownership-enrichment plan's Task 9 review flagged as this codebase's actual precedent for `app/page.tsx`-level SSE wiring (no route-level automated test existed there either) — but per that review's own finding, prefer adding one if a clean seam exists; if `handleExecuteCommand` or the SSE-folding logic can be extracted into a small pure function taking `(prevState, event) => newState`, do so and add a unit test for that pure function rather than leaving this task's coverage entirely manual.
 
-- [ ] **Step 3: Run the full test suite and commit**
+- [x] **Step 3: Run the full test suite and commit**
 
 Run: `npx vitest run && npm run lint && npm run build`
 Expected: all PASS, clean build.

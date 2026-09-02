@@ -1,7 +1,7 @@
 // lib/__tests__/traceroute-stream.test.ts
 import { describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { buildStreamResponse, StreamAgentClient, StreamEnrichmentClient, StreamGeoIpClient } from '@/app/api/stream/route';
+import { buildStreamResponse, StreamAgentClient, StreamEnrichmentClient, StreamGeoIpClient } from '@/lib/stream-response';
 
 class FakeAgentClient extends EventEmitter implements StreamAgentClient {
   isConnected(): boolean {

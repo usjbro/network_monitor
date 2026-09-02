@@ -1,16 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GeoIpClient } from '@/lib/geoip';
-
-declare global {
-  var __geoIpClient: GeoIpClient | undefined;
-}
-
-export function getGeoIpClient(): GeoIpClient {
-  if (!global.__geoIpClient) {
-    global.__geoIpClient = new GeoIpClient();
-  }
-  return global.__geoIpClient;
-}
+import { getGeoIpClient } from '@/lib/stream-response';
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
