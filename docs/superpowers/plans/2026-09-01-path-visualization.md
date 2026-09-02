@@ -64,7 +64,7 @@
 
 This task is a spike per the spec's own framing (Components §1): its output is an answer, not shipped code. The scratch binary itself may be deleted or kept as a debugging aid at the implementer's discretion once the answer is known — what matters is the written finding.
 
-- [ ] **Step 1: Write the spike binary**
+- [x] **Step 1: Write the spike binary**
 
 ```rust
 // capture-agent/examples/icmp_ping_spike.rs
@@ -128,12 +128,12 @@ fn main() {
 
 Add `libc` as a dev-dependency if not already a normal dependency by this point in the branch: `cd capture-agent && cargo add --dev libc` (if Task 6 of the TLS-interception plan already added `libc` as a normal dependency on a branch that gets merged before this one, promote this to a normal dependency instead and skip the `--dev` flag — check `capture-agent/Cargo.toml` first).
 
-- [ ] **Step 2: Run the spike**
+- [x] **Step 2: Run the spike**
 
 Run: `cd capture-agent && cargo run --example icmp_ping_spike`
 Record the exact `RESULT:` line(s) printed.
 
-- [ ] **Step 3: Write the finding**
+- [x] **Step 3: Write the finding**
 
 Create `docs/superpowers/specs/2026-09-01-path-visualization-privilege-spike-result.md`:
 ```markdown
@@ -149,7 +149,7 @@ Create `docs/superpowers/specs/2026-09-01-path-visualization-privilege-spike-res
 ```
 This file is the single source of truth Task 2 depends on — do not proceed to Task 2 without it committed.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add capture-agent/examples/icmp_ping_spike.rs capture-agent/Cargo.toml capture-agent/Cargo.lock docs/superpowers/specs/2026-09-01-path-visualization-privilege-spike-result.md
@@ -178,7 +178,7 @@ git commit -m "spike(path-viz): confirm unprivileged ICMP ping-socket availabili
   ```
   `on_hop` is called once per resolved hop, in order, as soon as that hop's result is known — this is what lets `main.rs` (Task 3) stream `traceroute_hop` events progressively rather than batching until the whole trace finishes. Consumed by `main.rs`'s `ControlMessage::TraceRoute` handler (Task 3).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // capture-agent/src/traceroute.rs
@@ -239,12 +239,12 @@ mod tests {
 
 Add `capture-agent/tests/fixtures/icmp/time_exceeded.bin` and `echo_reply.bin` — generate these by running `tcpdump`/`ping -T` (traceroute-with-record) against a real target during implementation and saving the raw ICMP bytes (a short, one-time manual capture step, documented in a comment at the top of the fixture directory's `README.md` if one is added, so a future maintainer knows how to regenerate them, not because this plan invents fabricated "known-correct" bytes the way Task 9 of the TLS plan explicitly avoided for its own TLS 1.3 vectors — real captured bytes serve the same "not invented" purpose here).
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test traceroute::`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement `capture-agent/src/traceroute.rs`**
+- [x] **Step 3: Implement `capture-agent/src/traceroute.rs`**
 
 ```rust
 // capture-agent/src/traceroute.rs
@@ -376,12 +376,12 @@ The `todo!()` in `send_probe_and_await_reply` is deliberate and is the one sanct
 
 Add `pub mod traceroute;` to `lib.rs`. Add `tokio` `dev-dependencies` test macro support if not already present (`#[tokio::test]` requires the `test-util`/`rt` features — check `capture-agent/Cargo.toml`'s existing `tokio` feature list first, since `main.rs` already uses `#[tokio::main]`).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test traceroute::`
 Expected: all tests PASS against the real (non-`todo!()`) implementation selected by Task 1's spike.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd capture-agent
