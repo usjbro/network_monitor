@@ -1213,22 +1213,22 @@ git commit -m "feat(path-viz): wire traceroute/geoip SSE handling and command-ba
 - Consumes: everything from Tasks 1–9.
 - Produces: no new public interfaces — closes out the spec's Testing section items not yet covered by earlier tasks' own unit tests.
 
-- [ ] **Step 1: Extend `no-dangerous-html.test.ts`**
+- [x] **Step 1: Extend `no-dangerous-html.test.ts`**
 
 Add fixtures for geoIP-response city/country strings, including deliberately HTML/script-like ones (`<img src=x onerror=alert(1)>` as a fake "city" value), asserting the existing regression suite's plain-text-rendering check catches them the same way it already catches every other network-sourced string in this app. Inspect the file's existing fixture-array pattern before adding to it.
 
-- [ ] **Step 2: Run to verify it passes**
+- [x] **Step 2: Run to verify it passes**
 
 Run: `npx vitest run lib/__tests__/no-dangerous-html.test.ts`
 Expected: PASS.
 
-- [ ] **Step 3: Fold ICMP reply parsing into fuzz coverage**
+- [x] **Step 3: Fold ICMP reply parsing into fuzz coverage**
 
 Check `capture-agent/fuzz/fuzz_targets/` for the existing target's harness function (same check the TLS-interception plan's Task 15 performs). If it already calls into every parser reachable from raw captured bytes, confirm `traceroute::parse_icmp_reply` is reachable from that same entry point (ICMP replies arrive over the same socket the rest of the capture path already reads from, in the SOCK_DGRAM branch — if the spike selected the system-traceroute fallback instead, `parse_icmp_reply` may be dead code entirely, in which case skip this step and note why in the commit message). If not already reachable, add a call to it in the existing target rather than creating a second one, since it's the same "untrusted bytes" input class already covered.
 
 Run: `cd capture-agent && cargo +nightly fuzz run <target-name> -- -max_total_time=60` for a quick local smoke pass.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add lib/__tests__/no-dangerous-html.test.ts capture-agent/fuzz/fuzz_targets/
