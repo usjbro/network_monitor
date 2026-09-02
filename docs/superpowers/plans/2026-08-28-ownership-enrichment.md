@@ -2546,7 +2546,7 @@ Everything below is additive on top of core tier — no core-tier file from Task
   ```
   Consumed by `lib/enrichment.ts`'s extended-tier lookup path (this task's Step 5) to populate `remoteHostname` before attempting a domain RDAP/WHOIS lookup.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/enrichment-reverse-dns.test.ts
@@ -2574,12 +2574,12 @@ describe('reverseDnsLookup', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/enrichment-reverse-dns.test.ts`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement `lib/enrichment/reverse-dns.ts`**
+- [x] **Step 3: Implement `lib/enrichment/reverse-dns.ts`**
 
 ```typescript
 // lib/enrichment/reverse-dns.ts
@@ -2607,16 +2607,16 @@ export async function reverseDnsLookup(
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/enrichment-reverse-dns.test.ts`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Wire the extended-tier trigger into `lib/enrichment.ts`**
+- [x] **Step 5: Wire the extended-tier trigger into `lib/enrichment.ts`**
 
 In `EnrichmentClient`'s private `lookup()` method, after a successful core-tier RDAP result (or in parallel — implementer's call, but document the choice), add: if `record.org` resolved successfully and no domain-level data exists yet, call `reverseDnsLookup(remoteAddr)`; if it resolves, proceed to Task 13/14's domain RDAP/WHOIS chain (added in those tasks) and merge `registrant` onto the same `EnrichmentRecord` before emitting `'result'`. This task only adds the reverse-DNS step itself and a `remoteHostname` result field passthrough — the domain-RDAP call site is added in Task 13, so at the end of *this* task `lookup()` resolves a hostname but doesn't yet do anything further with it beyond making it available. Leave a `// TODO(Task 13): domain RDAP lookup goes here` comment marking the exact insertion point so Task 13's diff is a small, obvious addition rather than a rewrite.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/enrichment/reverse-dns.ts lib/__tests__/enrichment-reverse-dns.test.ts lib/enrichment.ts

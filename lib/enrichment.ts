@@ -7,6 +7,7 @@ import { QueryLog } from './enrichment/query-log';
 import { RequestQueue, RequestQueueOptions, shuffle } from './enrichment/request-queue';
 import { loadIpBootstrap, resolveRdapBaseForIp } from './enrichment/bootstrap';
 import { RdapClient } from './enrichment/rdap-client';
+import { reverseDnsLookup } from './enrichment/reverse-dns';
 import { extractIpRdap, buildEnrichmentEvent } from './enrichment-mapping';
 import { EnrichmentRecord } from './enrichment/types';
 
@@ -65,6 +66,7 @@ export class EnrichmentClient extends EventEmitter {
   private bootstrapPromise: ReturnType<typeof loadIpBootstrap> | null = null;
   private random: () => number;
   private bootstrapCachePath: string;
+  private reverseDnsFn: typeof reverseDnsLookup;
 
   constructor(opts: {
     dataDir: string;
@@ -73,10 +75,17 @@ export class EnrichmentClient extends EventEmitter {
     // Test-only override of the queue's inter-dispatch jitter window — production
     // callers never pass this and get RequestQueue's real 3-10s default spacing.
     queueOptions?: RequestQueueOptions;
+    // Test-only override of the extended-tier reverse-DNS step (Task 12).
+    // Production callers never pass this and get the real
+    // dns.promises.reverse() wrapper; tests inject a fast, offline stub so
+    // this otherwise-fully-mocked suite never attempts a live DNS query —
+    // same reasoning as `fetchImpl` already gets for RDAP HTTP calls.
+    reverseDnsFn?: typeof reverseDnsLookup;
   }) {
     super();
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.random = opts.random ?? Math.random;
+    this.reverseDnsFn = opts.reverseDnsFn ?? reverseDnsLookup;
     this.cache = new EnrichmentCache(join(opts.dataDir, 'cache.json'));
     this.cache.load();
     this.queryLog = new QueryLog(join(opts.dataDir, 'query-log.ndjson'));
@@ -183,6 +192,27 @@ export class EnrichmentClient extends EventEmitter {
 
       const extracted = extractIpRdap(result.json);
       const record: EnrichmentRecord = { ...extracted, source: 'rdap', fetchedAt: new Date().toISOString() };
+
+      // Extended tier (spec §4): once core-tier RDAP has resolved an org,
+      // and there's no domain-level data on this record yet (there never is
+      // today — the registrant leg doesn't exist until Task 13/14), resolve
+      // remoteAddr's PTR hostname as the prerequisite for a domain
+      // RDAP/WHOIS registrant lookup. Sequential, not parallel-with-RDAP: it
+      // only makes sense to spend a reverse-DNS query once we know RDAP
+      // actually found an organization worth attributing a domain to.
+      if (record.org && !record.registrant) {
+        const remoteHostname = await this.reverseDnsFn(remoteAddr);
+        if (remoteHostname) {
+          // TODO(Task 13): domain RDAP lookup goes here — resolve
+          // `remoteHostname`'s registrable domain via RDAP (registrar
+          // referral allowlist, Task 13) with legacy WHOIS fallback
+          // (Task 14), then merge `registrant` onto `record` above before
+          // it's cached/emitted below. Task 15 wires the resolved hostname
+          // itself through to the UI (surfacing `registrant`/`Unavailable`
+          // and the connection's top-level `remoteHostname` field).
+        }
+      }
+
       const key = cidrKeyFromRdap(result.json) ?? cidrKeyFor(remoteAddr);
       await this.cache.setSuccess(key, record, CACHE_TTL_MS);
       for (const cid of waiters) {

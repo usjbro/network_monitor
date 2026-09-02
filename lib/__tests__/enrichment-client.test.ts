@@ -33,6 +33,14 @@ function fakeFetch(status = 200, body: unknown = { objectClassName: 'ip network'
   return routedFetch(body, status);
 }
 
+// Task 12 wired a reverse-DNS step into the successful-RDAP path of
+// lookup(). This suite predates that and is otherwise fully offline (all
+// HTTP goes through the fetchImpl fixtures above) — inject a fast, no-PTR
+// stub everywhere a client actually exercises that path, rather than
+// falling through to the real dns.promises.reverse() default and making a
+// live DNS query from an automated test.
+const NO_PTR = async () => null;
+
 describe('EnrichmentClient', () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'enrichment-client-')); });
@@ -86,7 +94,7 @@ describe('EnrichmentClient', () => {
 
   it('on-demand lookup emits a "result" event with mapped org data on success', async () => {
     const fetchImpl = fakeFetch();
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const resultPromise = new Promise((resolve) => client.once('result', resolve));
@@ -107,7 +115,7 @@ describe('EnrichmentClient', () => {
       await new Promise((r) => setTimeout(r, 20));
       return new Response(JSON.stringify({ name: 'X' }), { status: 200 });
     }) as unknown as typeof fetch;
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     client.requestLookup('conn-1', '93.184.216.34');
@@ -123,7 +131,7 @@ describe('EnrichmentClient', () => {
       startAddress: '93.184.216.0',
       endAddress: '93.184.216.255',
     });
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
@@ -152,7 +160,7 @@ describe('EnrichmentClient', () => {
       endAddress: '198.51.100.10',
       cidr0_cidrs: [{ v4prefix: '198.51.100.0', length: 24 }],
     });
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
@@ -173,7 +181,7 @@ describe('EnrichmentClient', () => {
 
   it('falls back to a /32 cache key when the RDAP response has no derivable CIDR block', async () => {
     const fetchImpl = fakeFetch(200, { objectClassName: 'ip network', name: 'NO-RANGE-ORG' });
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
@@ -206,7 +214,7 @@ describe('EnrichmentClient', () => {
       await new Promise((r) => setTimeout(r, 30));
       return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'SHARED-ORG' }), { status: 200 });
     }) as unknown as typeof fetch;
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const results: Array<{ connectionId: string }> = [];
@@ -255,6 +263,7 @@ describe('EnrichmentClient', () => {
       // Tiny, deterministic-from-`random` delay window so this test doesn't
       // have to wait out the real 3-10s production inter-dispatch spacing.
       queueOptions: { minDelayMs: 1, maxDelayMs: 2 },
+      reverseDnsFn: NO_PTR,
     });
     client.enableBackground();
 
