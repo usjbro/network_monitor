@@ -16,7 +16,6 @@ export function readJsonIfExists<T>(filePath: string): T | undefined {
   try {
     // Synchronous on purpose: load() runs once at EnrichmentClient
     // construction, not on any request-serving path.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const raw = require('node:fs').readFileSync(filePath, 'utf8');
     return JSON.parse(raw) as T;
   } catch {
