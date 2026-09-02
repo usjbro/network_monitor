@@ -402,7 +402,7 @@ git commit -m "feat(path-viz): add bounded ICMP traceroute probe loop"
 - Consumes: `traceroute::run_traceroute`, `traceroute::HopResult` (Task 2).
 - Produces: `ControlMessage::TraceRoute { target_ip: String }`; `AgentEvent::TracerouteHop { hop: Box<TracerouteHopJson> }`; `TracerouteHopJson { target_ip, hop_number, hop_ip: Option<String>, rtt_ms: Option<f64> }` (camelCase on the wire).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 // capture-agent/src/wire.rs — additional tests
@@ -449,12 +449,12 @@ git commit -m "feat(path-viz): add bounded ICMP traceroute probe loop"
     }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd capture-agent && cargo test wire::traceroute` and `cargo test wire::control_message`
 Expected: FAIL — types don't exist.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 // capture-agent/src/wire.rs — add to ControlMessage
@@ -499,12 +499,12 @@ Some(wire::ControlMessage::TraceRoute { target_ip }) => {
 ```
 (This spawns each trace on its own task rather than blocking the control-message read loop for up to 45s — check the exact shape of the existing control-message read loop in `main.rs` first, since the closure above assumes `tx` is already an in-scope `broadcast::Sender<String>` clone, matching what the `Packet`-emitting capture loop already does.)
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd capture-agent && cargo test`
 Expected: full suite PASSES.
 
-- [ ] **Step 5: Update `docs/wire-protocol.md` and commit**
+- [x] **Step 5: Update `docs/wire-protocol.md` and commit**
 
 Add a `### trace_route` subsection under "Relay → agent control messages" (or create that heading if `pause`/`resume` aren't already documented under one — check first) documenting the control message shape, and a `### traceroute_hop` subsection under "Agent → relay events" documenting the event shape and field notes ("`hopIp`/`rttMs` both absent = no response at that hop, not an error — see the design spec's Error handling & lifecycle section").
 
