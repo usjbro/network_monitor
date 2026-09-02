@@ -1,8 +1,48 @@
 // lib/enrichment/rdap-client.ts
+import { isAllowedReferralHost } from './referral-allowlist';
 
 export type RdapResult =
   | { ok: true; json: unknown }
   | { ok: false; reason: 'timeout' | 'too_large' | 'http_error' | 'redirect' | 'circuit_open' | 'backoff' | 'network'; status?: number };
+
+// Result of a registry fetch followed by an optional registrar referral
+// (Task 13, extended tier). Only ever adds `referralFollowed` on a
+// successful outcome — a failure from the *initial* registry fetch is
+// returned completely unchanged (no extra fields), since no referral was
+// ever attempted or even considered.
+export type RdapReferralResult = RdapResult | { ok: true; json: unknown; referralFollowed: boolean };
+
+// Pulls candidate referral URLs out of an RDAP response body per the
+// RFC 7480-style conventions the spec calls out: top-level `links` entries
+// with `rel: 'related'`, and the same shape nested under `notices[].links`.
+// This reads *untrusted* third-party response JSON — same defensive posture
+// as lib/enrichment-mapping.ts's extract* functions: never throw, tolerate
+// any shape.
+function extractReferralCandidates(json: unknown): string[] {
+  const out: string[] = [];
+  try {
+    const obj = json as Record<string, unknown>;
+    if (!obj || typeof obj !== 'object') return out;
+
+    const collectFrom = (links: unknown) => {
+      if (!Array.isArray(links)) return;
+      for (const link of links) {
+        const rel = (link as Record<string, unknown>)?.rel;
+        const href = (link as Record<string, unknown>)?.href;
+        if (rel === 'related' && typeof href === 'string') out.push(href);
+      }
+    };
+
+    collectFrom(obj.links);
+    const notices = Array.isArray(obj.notices) ? obj.notices : [];
+    for (const notice of notices) {
+      collectFrom((notice as Record<string, unknown>)?.links);
+    }
+  } catch {
+    // fall through — return whatever was collected before the failure
+  }
+  return out;
+}
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -108,5 +148,34 @@ export class RdapClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  // Extended tier (Task 13): thin gTLD registries (e.g. .com/.net via
+  // Verisign) respond to a domain RDAP query with a registry-level stub
+  // that refers the caller to the registrar's own RDAP service for the
+  // actual registrant. This method fetches `url`, and — only if the
+  // response carries a `rel: 'related'` referral link whose host is on the
+  // reviewed registrar allowlist (lib/enrichment/referral-allowlist.ts) —
+  // follows it through this same hardened `fetch` path (timeout/size-cap/
+  // backoff/circuit-breaker all apply identically to the referral request).
+  // A referral to any other host, including a loopback/private address, is
+  // never dialed: the lookup falls back to the original registry response,
+  // just marked as not having followed a referral.
+  async fetchWithReferral(url: string): Promise<RdapReferralResult> {
+    const result = await this.fetch(url);
+    if (!result.ok) return result;
+
+    const candidates = extractReferralCandidates(result.json);
+    const referralUrl = candidates.find((u) => isAllowedReferralHost(u));
+    if (!referralUrl) return { ...result, referralFollowed: false };
+
+    const referralResult = await this.fetch(referralUrl);
+    if (referralResult.ok) return { ...referralResult, referralFollowed: true };
+
+    // The registrar referral itself failed (timeout/5xx/etc) — fall back to
+    // the registry's own response rather than failing the whole lookup;
+    // it typically has no registrant entity, which resolves to
+    // "Unavailable" downstream (Task 15), not an error.
+    return { ...result, referralFollowed: false };
   }
 }

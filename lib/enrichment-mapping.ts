@@ -45,6 +45,37 @@ export function extractIpRdap(json: unknown): Omit<EnrichmentRecord, 'source' | 
   }
 }
 
+/**
+ * Extracts ONLY organization-level registrant fields from a domain RDAP
+ * response's vCard entities — deliberately never reads `fn` (personal name),
+ * `email`, `tel`, or `adr` (postal address). This is a safety property of
+ * *which vCard keys this function ever looks at*, not a redaction step
+ * applied after the fact — there's no code path here that could
+ * accidentally forward a personal field, because the personal fields are
+ * never read into a variable in the first place.
+ */
+export function extractDomainRdap(json: unknown): { registrant?: string; country?: string } {
+  try {
+    const obj = json as Record<string, unknown>;
+    if (!obj || typeof obj !== 'object') return {};
+    const entities = Array.isArray(obj.entities) ? obj.entities : [];
+    for (const entity of entities) {
+      const roles = (entity as Record<string, unknown>)?.roles;
+      if (!Array.isArray(roles) || !roles.includes('registrant')) continue;
+      const vcardArray = (entity as Record<string, unknown>)?.vcardArray;
+      if (!Array.isArray(vcardArray) || !Array.isArray(vcardArray[1])) continue;
+      const fields = vcardArray[1] as unknown[];
+      const orgField = fields.find((f) => Array.isArray(f) && f[0] === 'org');
+      if (Array.isArray(orgField) && typeof orgField[3] === 'string') {
+        return { registrant: asString(orgField[3]) };
+      }
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
+
 export function buildEnrichmentEvent(
   connectionId: string,
   remoteAddr: string,

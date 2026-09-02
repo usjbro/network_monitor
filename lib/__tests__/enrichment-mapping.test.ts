@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyEnrichmentEvent, buildEnrichmentEvent, extractIpRdap } from '../enrichment-mapping';
+import { applyEnrichmentEvent, buildEnrichmentEvent, extractDomainRdap, extractIpRdap } from '../enrichment-mapping';
 import { NetworkConnection } from '../types';
 
 const VALID_RDAP_IP_NETWORK = {
@@ -71,5 +71,54 @@ describe('buildEnrichmentEvent / applyEnrichmentEvent', () => {
     const event = buildEnrichmentEvent('conn-missing', '1.2.3.4', { source: 'rdap', fetchedAt: 'x' });
     const result = applyEnrichmentEvent([], event);
     expect(result).toEqual([]);
+  });
+});
+
+describe('extractDomainRdap — registrant extraction drops personal/vCard/postal fields', () => {
+  it('extracts only organization-level fields, never name/email/phone/address', () => {
+    const rdapDomainResponse = {
+      objectClassName: 'domain',
+      entities: [
+        {
+          roles: ['registrant'],
+          vcardArray: ['vcard', [
+            ['version', {}, 'text', '4.0'],
+            ['fn', {}, 'text', 'Jane Doe'],                 // personal name — must NOT leak
+            ['org', {}, 'text', 'Example Registrant Org'],   // org — should be extracted
+            ['email', {}, 'text', 'jane@example.com'],       // personal — must NOT leak
+            ['tel', {}, 'text', '+1.5551234567'],            // personal — must NOT leak
+            ['adr', {}, 'text', ['', '', '123 Main St', 'Anytown', 'CA', '99999', 'US']], // postal — must NOT leak
+          ]],
+        },
+      ],
+    };
+    const result = extractDomainRdap(rdapDomainResponse);
+    expect(result.registrant).toBe('Example Registrant Org');
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('Jane Doe');
+    expect(serialized).not.toContain('jane@example.com');
+    expect(serialized).not.toContain('555');
+    expect(serialized).not.toContain('123 Main St');
+  });
+
+  it('never throws on malformed/wrong-shaped input — untrusted third-party JSON', () => {
+    const hostileInputs: unknown[] = [
+      null,
+      undefined,
+      42,
+      'a string, not an object',
+      {},
+      { entities: 'not an array' },
+      { entities: [{ roles: ['registrant'], vcardArray: 'not an array' }] },
+      { entities: [{ roles: 'not an array' }] },
+    ];
+    for (const input of hostileInputs) {
+      expect(() => extractDomainRdap(input)).not.toThrow();
+    }
+  });
+
+  it('returns an empty-ish record when no registrant entity is present', () => {
+    const result = extractDomainRdap({ objectClassName: 'domain', entities: [] });
+    expect(result.registrant).toBeUndefined();
   });
 });

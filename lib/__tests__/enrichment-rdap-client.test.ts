@@ -99,4 +99,52 @@ describe('RdapClient', () => {
     const result = await client.fetch('https://rdap.arin.net/registry/ip/93.184.216.34');
     expect(result).toEqual({ ok: true, json: { objectClassName: 'ip network' } });
   });
+
+  describe('fetchWithReferral (Task 13, response-controlled SSRF hardening)', () => {
+    it('follows a referral link only if its host is on the allowlist', async () => {
+      const registryResponse = { objectClassName: 'domain', links: [{ rel: 'related', href: 'https://rdap.verisign.com/com/v1/domain/example.com' }] };
+      const registrarResponse = { objectClassName: 'domain', entities: [] };
+      const calls: string[] = [];
+      const fetchImpl = (async (url: string) => {
+        calls.push(url);
+        if (calls.length === 1) return jsonResponse(registryResponse);
+        return jsonResponse(registrarResponse);
+      }) as typeof fetch;
+
+      const client = new RdapClient(fetchImpl);
+      const result = await client.fetchWithReferral('https://rdap.example-registry.test/domain/example.com');
+      expect(calls).toContain('https://rdap.verisign.com/com/v1/domain/example.com');
+      expect(result).toMatchObject({ ok: true, referralFollowed: true, json: registrarResponse });
+    });
+
+    it('never dials a referral to a non-allowlisted host, including a loopback address', async () => {
+      const registryResponse = { objectClassName: 'domain', links: [{ rel: 'related', href: 'http://127.0.0.1:9990/pause' }] };
+      const calls: string[] = [];
+      const fetchImpl = (async (url: string) => {
+        calls.push(url);
+        return jsonResponse(registryResponse);
+      }) as typeof fetch;
+
+      const client = new RdapClient(fetchImpl);
+      const result = await client.fetchWithReferral('https://rdap.example-registry.test/domain/example.com');
+      // only the first call — the loopback referral was never dialed
+      expect(calls).toEqual(['https://rdap.example-registry.test/domain/example.com']);
+      expect(result).toMatchObject({ referralFollowed: false });
+    });
+
+    it('returns the registry response unchanged (with referralFollowed:false) when there is no referral link at all', async () => {
+      const registryResponse = { objectClassName: 'domain', entities: [] };
+      const fetchImpl = (async () => jsonResponse(registryResponse)) as typeof fetch;
+      const client = new RdapClient(fetchImpl);
+      const result = await client.fetchWithReferral('https://rdap.example-registry.test/domain/example.com');
+      expect(result).toMatchObject({ ok: true, referralFollowed: false, json: registryResponse });
+    });
+
+    it('propagates a failure from the initial registry fetch without attempting any referral', async () => {
+      const fetchImpl = (async () => jsonResponse({}, 500)) as typeof fetch;
+      const client = new RdapClient(fetchImpl);
+      const result = await client.fetchWithReferral('https://rdap.example-registry.test/domain/example.com');
+      expect(result).toEqual({ ok: false, reason: 'http_error', status: 500 });
+    });
+  });
 });

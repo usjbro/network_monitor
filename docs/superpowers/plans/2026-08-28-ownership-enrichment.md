@@ -2652,7 +2652,7 @@ git commit -m "feat(enrichment): add reverse-DNS resolution (extended tier, step
   export function extractDomainRdap(json: unknown): { registrant?: string; country?: string }; // org-level fields ONLY
   ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/enrichment-referral-allowlist.test.ts
@@ -2730,12 +2730,12 @@ describe('extractDomainRdap — registrant extraction drops personal/vCard/posta
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/enrichment-referral-allowlist.test.ts lib/__tests__/enrichment-bootstrap.test.ts lib/__tests__/enrichment-mapping.test.ts`
 Expected: the new/added cases FAIL — the new exports don't exist yet.
 
-- [ ] **Step 3: Implement `lib/enrichment/referral-allowlist.ts`**
+- [x] **Step 3: Implement `lib/enrichment/referral-allowlist.ts`**
 
 ```typescript
 // lib/enrichment/referral-allowlist.ts
@@ -2763,7 +2763,7 @@ export function isAllowedReferralHost(url: string): boolean {
 }
 ```
 
-- [ ] **Step 4: Extend `lib/enrichment/bootstrap.ts` with domain routing**
+- [x] **Step 4: Extend `lib/enrichment/bootstrap.ts` with domain routing**
 
 ```typescript
 // lib/enrichment/bootstrap.ts additions
@@ -2828,7 +2828,7 @@ export async function loadDomainBootstrap(
 
 (`readJsonIfExists`/`atomicWriteJson` are already imported at the top of this file from Task 5 — no new import needed beyond what's already there.)
 
-- [ ] **Step 5: Add `extractDomainRdap` to `lib/enrichment-mapping.ts`**
+- [x] **Step 5: Add `extractDomainRdap` to `lib/enrichment-mapping.ts`**
 
 ```typescript
 // lib/enrichment-mapping.ts addition
@@ -2865,7 +2865,7 @@ export function extractDomainRdap(json: unknown): { registrant?: string; country
 }
 ```
 
-- [ ] **Step 6: Add referral-following to `lib/enrichment/rdap-client.ts`**
+- [x] **Step 6: Add referral-following to `lib/enrichment/rdap-client.ts`**
 
 Add an optional second step to `RdapClient#fetch` (or a new `fetchWithReferral` method — implementer's choice, but keep the base `fetch` unchanged so Tasks 6/8's existing tests and call sites don't need to change): after a successful response, inspect `json.links` (RDAP `rel: 'related'` entries, per RFC 7484-style referral) and, separately, `json.port43`/`json.notices[].links` per the spec. For each candidate URL found, call `isAllowedReferralHost(url)`; if true, issue a second `fetch(url)` through the same hardened path (timeout/size-cap/backoff apply identically) and prefer its result; if false, treat the lookup as `unavailable` for registrant purposes without ever dialing that host. Add tests mirroring Task 6's structure:
 
@@ -2901,12 +2901,12 @@ it('never dials a referral to a non-allowlisted host, including a loopback addre
 });
 ```
 
-- [ ] **Step 7: Run all affected tests to verify they pass**
+- [x] **Step 7: Run all affected tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/enrichment-referral-allowlist.test.ts lib/__tests__/enrichment-bootstrap.test.ts lib/__tests__/enrichment-mapping.test.ts lib/__tests__/enrichment-rdap-client.test.ts`
 Expected: all PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add lib/enrichment/bootstrap.ts lib/enrichment/referral-allowlist.ts lib/enrichment-mapping.ts lib/enrichment/rdap-client.ts lib/__tests__/enrichment-referral-allowlist.test.ts lib/__tests__/enrichment-bootstrap.test.ts lib/__tests__/enrichment-mapping.test.ts lib/__tests__/enrichment-rdap-client.test.ts

@@ -80,3 +80,73 @@ export async function loadIpBootstrap(
   await atomicWriteJson(cachePath, { fetchedAt: Date.now(), services } satisfies BootstrapCacheFile);
   return services;
 }
+
+// --- Domain-name RDAP bootstrap (extended tier, Task 13) ---
+
+export interface DomainBootstrapService {
+  tlds: string[];
+  url: string;
+}
+
+// Domain-name RDAP bootstrap uses a genuinely different set of hosts than
+// the IP one (registries like Verisign, PIR, etc.) — a separate allowlist
+// from KNOWN_RIR_HOSTS is deliberate, not an oversight (spec Scope: "an
+// earlier draft ... was a factual error" about conflating the two).
+const KNOWN_DOMAIN_REGISTRY_HOSTS = new Set([
+  'rdap.verisign.com',
+  'rdap.publicinterestregistry.org',
+  // extend deliberately, same posture as KNOWN_RIR_HOSTS
+]);
+
+export function parseDomainBootstrap(json: unknown): DomainBootstrapService[] {
+  const obj = json as { services?: unknown } | null;
+  if (!obj || !Array.isArray(obj.services)) return [];
+  const out: DomainBootstrapService[] = [];
+  for (const entry of obj.services) {
+    if (!Array.isArray(entry) || entry.length < 2) continue;
+    const [tlds, urls] = entry;
+    if (!Array.isArray(tlds) || !Array.isArray(urls)) continue;
+    const url = urls.find((u: unknown): u is string => typeof u === 'string' && u.startsWith('https://'));
+    if (!url) continue;
+    let host: string;
+    try {
+      host = new URL(url).host;
+    } catch {
+      continue;
+    }
+    if (!KNOWN_DOMAIN_REGISTRY_HOSTS.has(host)) continue;
+    out.push({ tlds: tlds.filter((t: unknown): t is string => typeof t === 'string').map((t) => t.toLowerCase()), url });
+  }
+  return out;
+}
+
+export function resolveRdapBaseForDomain(domain: string, services: DomainBootstrapService[]): string | null {
+  const tld = domain.toLowerCase().split('.').pop() ?? '';
+  for (const service of services) {
+    if (service.tlds.includes(tld)) return service.url;
+  }
+  return null;
+}
+
+interface DomainBootstrapCacheFile {
+  fetchedAt: number;
+  services: DomainBootstrapService[];
+}
+
+const IANA_DNS_BOOTSTRAP_URL = 'https://data.iana.org/rdap/dns.json';
+
+export async function loadDomainBootstrap(
+  cachePath: string,
+  fetchImpl: typeof fetch,
+  ttlMs: number = 30 * 24 * 60 * 60 * 1000,
+): Promise<DomainBootstrapService[]> {
+  const cached = readJsonIfExists<DomainBootstrapCacheFile>(cachePath);
+  if (cached && Date.now() - cached.fetchedAt < ttlMs) {
+    return cached.services;
+  }
+
+  const res = await fetchImpl(IANA_DNS_BOOTSTRAP_URL, { redirect: 'manual' });
+  const services = parseDomainBootstrap(await res.json());
+  await atomicWriteJson(cachePath, { fetchedAt: Date.now(), services } satisfies DomainBootstrapCacheFile);
+  return services;
+}

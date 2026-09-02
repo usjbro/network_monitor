@@ -3,7 +3,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadIpBootstrap, parseIpBootstrap, resolveRdapBaseForIp } from '../enrichment/bootstrap';
+import { loadIpBootstrap, parseIpBootstrap, resolveRdapBaseForIp, loadDomainBootstrap, parseDomainBootstrap, resolveRdapBaseForDomain } from '../enrichment/bootstrap';
 
 // Fixture shaped like IANA's real ipv4.json (RFC 7484 bootstrap format):
 // { "services": [ [ [prefixes...], [urls...] ], ... ] }
@@ -63,5 +63,59 @@ describe('loadIpBootstrap', () => {
 
     expect(fetchCount).toBe(1);
     expect(first).toEqual(second);
+  });
+});
+
+// Fixture shaped like IANA's real dns.json (RFC 7484-style bootstrap format):
+// { "services": [ [ [tlds...], [urls...] ], ... ] }
+const FIXTURE_DNS_BOOTSTRAP = {
+  services: [
+    [['com', 'net'], ['https://rdap.verisign.com/com/v1/']],
+    [['org'], ['https://rdap.publicinterestregistry.org/rdap/']],
+    // A malicious/compromised-CDN entry: not a real domain registry host.
+    // Must be dropped by parseDomainBootstrap, not trusted just because it
+    // came back in IANA's response body (same response-controlled SSRF
+    // posture as the IP bootstrap above).
+    [['xyz'], ['https://attacker.example/rdap/']],
+  ],
+};
+
+describe('domain bootstrap (extended tier)', () => {
+  it('routes to the correct registry base URL by TLD', () => {
+    const services = parseDomainBootstrap(FIXTURE_DNS_BOOTSTRAP);
+    expect(resolveRdapBaseForDomain('example.com', services)).toBe('https://rdap.verisign.com/com/v1/');
+    expect(resolveRdapBaseForDomain('example.org', services)).toBe('https://rdap.publicinterestregistry.org/rdap/');
+    expect(resolveRdapBaseForDomain('example.xyz', services)).toBeNull();
+  });
+
+  it('drops non-allowlisted domain registry hosts from a parsed bootstrap response', () => {
+    const services = parseDomainBootstrap(FIXTURE_DNS_BOOTSTRAP);
+    expect(services.some((s) => s.url.includes('attacker.example'))).toBe(false);
+  });
+
+  it('tolerates malformed entries without throwing', () => {
+    expect(() => parseDomainBootstrap({ services: [null, [], ['only one element'], { not: 'an array' }] })).not.toThrow();
+    expect(parseDomainBootstrap({})).toEqual([]);
+    expect(parseDomainBootstrap(null)).toEqual([]);
+  });
+
+  it('fetches once and reuses the disk cache on a second call within TTL', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'domain-bootstrap-'));
+    try {
+      const cachePath = join(dir, 'bootstrap-dns.json');
+      let fetchCount = 0;
+      const fetchImpl = (async () => {
+        fetchCount += 1;
+        return new Response(JSON.stringify(FIXTURE_DNS_BOOTSTRAP), { status: 200 });
+      }) as typeof fetch;
+
+      const first = await loadDomainBootstrap(cachePath, fetchImpl, 30 * 24 * 60 * 60 * 1000);
+      const second = await loadDomainBootstrap(cachePath, fetchImpl, 30 * 24 * 60 * 60 * 1000);
+
+      expect(fetchCount).toBe(1);
+      expect(first).toEqual(second);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
