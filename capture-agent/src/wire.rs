@@ -234,6 +234,22 @@ pub enum AgentEvent {
     Packet { packet: Box<PacketJson> },
     LayerUpdate { layers: Vec<LayerStatsJson> },
     AgentStatus { interface: String, capturing: bool },
+    // Boxed for the same reason as ConnectionUpdate/Packet above — keeps
+    // clippy::large_enum_variant satisfied and avoids paying for this
+    // variant's size in every broadcast-channel slot regardless of what it
+    // actually holds.
+    TracerouteHop { hop: Box<TracerouteHopJson> },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TracerouteHopJson {
+    pub target_ip: String,
+    pub hop_number: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hop_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -241,6 +257,10 @@ pub enum AgentEvent {
 pub enum ControlMessage {
     Pause,
     Resume,
+    TraceRoute {
+        #[serde(rename = "targetIp")]
+        target_ip: String,
+    },
 }
 
 pub fn encode_event(event: &AgentEvent) -> String {
@@ -306,6 +326,49 @@ mod tests {
         assert!(matches!(decode_control("{\"type\":\"pause\"}"), Some(ControlMessage::Pause)));
         assert!(matches!(decode_control("{\"type\":\"resume\"}"), Some(ControlMessage::Resume)));
         assert!(decode_control("not json").is_none());
+    }
+
+    #[test]
+    fn control_message_deserializes_trace_route_with_target_ip() {
+        let msg: ControlMessage =
+            serde_json::from_str(r#"{"type":"trace_route","targetIp":"93.184.216.34"}"#).unwrap();
+        match msg {
+            ControlMessage::TraceRoute { target_ip } => assert_eq!(target_ip, "93.184.216.34"),
+            _ => panic!("expected TraceRoute variant"),
+        }
+    }
+
+    #[test]
+    fn traceroute_hop_json_serializes_camel_case_with_optional_fields_omitted_when_none() {
+        let event = AgentEvent::TracerouteHop {
+            hop: Box::new(TracerouteHopJson {
+                target_ip: "93.184.216.34".to_string(),
+                hop_number: 4,
+                hop_ip: None,
+                rtt_ms: None,
+            }),
+        };
+        let s = serde_json::to_string(&event).unwrap();
+        assert!(s.contains("\"type\":\"traceroute_hop\""));
+        assert!(s.contains("\"targetIp\":\"93.184.216.34\""));
+        assert!(s.contains("\"hopNumber\":4"));
+        assert!(!s.contains("hopIp"));
+        assert!(!s.contains("rttMs"));
+    }
+
+    #[test]
+    fn traceroute_hop_json_includes_hop_ip_and_rtt_when_present() {
+        let event = AgentEvent::TracerouteHop {
+            hop: Box::new(TracerouteHopJson {
+                target_ip: "93.184.216.34".to_string(),
+                hop_number: 4,
+                hop_ip: Some("12.122.1.1".to_string()),
+                rtt_ms: Some(18.4),
+            }),
+        };
+        let s = serde_json::to_string(&event).unwrap();
+        assert!(s.contains("\"hopIp\":\"12.122.1.1\""));
+        assert!(s.contains("\"rttMs\":18.4"));
     }
 
     fn sample_tcp_packet(payload: Vec<u8>) -> ParsedPacket {
