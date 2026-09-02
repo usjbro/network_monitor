@@ -51,6 +51,20 @@ export interface NetworkConnection {
   status: 'ESTABLISHED' | 'SYN_SENT' | 'LISTEN' | 'TIME_WAIT' | 'CLOSE_WAIT';
   encryption: string;
   sparkline: number[];
+  // Populated only when the user has opted into ownership enrichment
+  // (docs/superpowers/specs/2026-08-28-ownership-enrichment-design.md).
+  // `undefined` unambiguously means "never looked up" — a single presence
+  // check gates whether the Ownership section shows anything but its
+  // disabled/not-yet-looked-up state.
+  enrichment?: {
+    org?: string;
+    asn?: string;    // best-effort RIR registry data, NOT BGP-observed routing data — see spec Scope
+    asnOrg?: string;
+    country?: string;
+    registrant?: string; // extended tier only (domain registrant)
+    source: 'rdap' | 'whois' | 'cache';
+    fetchedAt: string;
+  };
 }
 
 export interface PacketFrame {

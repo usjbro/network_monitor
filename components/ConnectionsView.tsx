@@ -13,11 +13,23 @@ import { formatSpeed, formatBytes } from '@/lib/osi-engine';
 interface ConnectionsViewProps {
   connections: NetworkConnection[];
   theme: ThemeConfig;
+  enrichmentMode?: 'off' | 'on-demand' | 'background'; // default 'off' if omitted
+  onRequestLookup?: (connectionId: string, remoteAddr: string) => void;
+  // Driven from app/page.tsx: a connection's id is present while a lookup
+  // is in flight for it (cleared on the matching connection_enrichment
+  // event or a timeout), or present after a lookup completed without
+  // producing a usable enrichment object within a reasonable window.
+  lookingUpIds?: Set<string>;
+  unavailableIds?: Set<string>;
 }
 
 export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   connections,
   theme,
+  enrichmentMode,
+  onRequestLookup,
+  lookingUpIds,
+  unavailableIds,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [protocolFilter, setProtocolFilter] = useState<string>('ALL');
@@ -185,6 +197,46 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           {/* OSI Stack Path */}
           <div className="p-2 bg-black/60 rounded border border-slate-800 font-mono text-[11px] text-emerald-300 break-all">
             {selectedConn.osiStack}
+          </div>
+
+          {/* Ownership section — spec Components §7 five-state display */}
+          <div className="pt-2 border-t border-slate-800 space-y-1.5">
+            <div className="text-[11px] font-bold text-slate-400 uppercase">Ownership</div>
+            {(!enrichmentMode || enrichmentMode === 'off') ? (
+              <div className="text-slate-500">Enrichment disabled — enable with <code>enrich on</code> in the command bar.</div>
+            ) : lookingUpIds?.has(selectedConn.id) ? (
+              <div className="text-slate-400">Looking up…</div>
+            ) : unavailableIds?.has(selectedConn.id) ? (
+              <div className="text-slate-500">Unavailable — no ownership data returned for this address.</div>
+            ) : !selectedConn.enrichment ? (
+              <button
+                onClick={() => onRequestLookup?.(selectedConn.id, selectedConn.remoteAddr)}
+                className="px-2 py-1 rounded text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200"
+              >
+                Not yet looked up — click to look up
+              </button>
+            ) : !selectedConn.enrichment.org && !selectedConn.enrichment.asn && !selectedConn.enrichment.registrant ? (
+              // Task 15's fifth state: a lookup genuinely completed (the
+              // connection_enrichment event arrived — this is NOT the
+              // in-flight-timeout `unavailableIds` case above) but produced
+              // no ownership data at all. Deliberately distinct from the
+              // normal render path below, where a blank ASN alongside a
+              // present org is expected and shown as "—", not an error.
+              <div className="text-slate-500">Unavailable — no ownership data returned for this address.</div>
+            ) : (
+              <div className="text-slate-300">
+                {/* Org/registrant are wrapped in their own <span> (rather than
+                    left as bare sibling text nodes) so each renders as a
+                    single, individually-addressable text element — both so
+                    a hostile/adversarial registry string can't visually run
+                    together with the surrounding "Org: "/" · ASN: " labels,
+                    and so it's independently queryable in tests without
+                    picking up neighboring label text. */}
+                Org: <span>{selectedConn.enrichment.org ?? '—'}</span> · ASN: {selectedConn.enrichment.asn ?? '—'}
+                {selectedConn.enrichment.registrant && <> · Registrant: <span>{selectedConn.enrichment.registrant}</span></>}
+                <span className="text-slate-500"> · as of {selectedConn.enrichment.fetchedAt}</span>
+              </div>
+            )}
           </div>
         </div>
       )}

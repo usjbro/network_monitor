@@ -73,6 +73,10 @@ export class AgentClient extends EventEmitter {
     this.socket?.write(JSON.stringify(message) + '\n');
   }
 
+  isConnected(): boolean {
+    return this.socket !== null;
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);

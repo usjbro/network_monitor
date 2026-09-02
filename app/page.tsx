@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   BarChart2,
   Globe,
@@ -19,6 +19,7 @@ import {
 } from '@/lib/types';
 import { THEMES } from '@/lib/osi-engine';
 import { mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mergeLayerStats } from '@/lib/agent-mapping';
+import { applyEnrichmentEvent } from '@/lib/enrichment-mapping';
 import { HeaderBar } from '@/components/HeaderBar';
 import { DashboardView } from '@/components/DashboardView';
 import { LayerDetailView } from '@/components/LayerDetailView';
@@ -67,6 +68,21 @@ export default function TerminalApp() {
   const [historyRx, setHistoryRx] = useState<number[]>([]);
   const [historyTx, setHistoryTx] = useState<number[]>([]);
 
+  // Ownership enrichment state (spec Components §7's five-state Ownership
+  // display, and §1's opt-in disclosure). `enrichmentMode` mirrors the
+  // server-side EnrichmentClient's mode (kept in sync via the
+  // /api/enrichment/control responses below, not read back from the
+  // server); `disclosureText` drives a dismissible banner shown on every
+  // enable per spec §1 ("re-shown on every enable").
+  const [enrichmentMode, setEnrichmentMode] = useState<'off' | 'on-demand' | 'background'>('off');
+  const [disclosureText, setDisclosureText] = useState<string | null>(null);
+  const [lookingUpIds, setLookingUpIds] = useState<Set<string>>(new Set());
+  const [unavailableIds, setUnavailableIds] = useState<Set<string>>(new Set());
+  // Per-connectionId lookup timers, keyed outside React state since they're
+  // an implementation detail (not rendered) and need synchronous
+  // set/clear access from both requestLookup and the SSE handler below.
+  const lookupTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
   // Live Capture Stream — replaces the old simulation loop
   useEffect(() => {
     const source = new EventSource('/api/stream');
@@ -111,6 +127,30 @@ export default function TerminalApp() {
             return next;
           });
         }
+        if (data.type === 'connection_enrichment') {
+          setConnections((prev) => applyEnrichmentEvent(prev, data));
+          // A result arrived for this connectionId — it's no longer "in
+          // flight," and if it had previously timed out into "unavailable"
+          // (e.g. a slow background-mode lookup that finished late), a real
+          // result should supersede that state rather than leave it stuck.
+          const timer = lookupTimers.current.get(data.connectionId);
+          if (timer) {
+            clearTimeout(timer);
+            lookupTimers.current.delete(data.connectionId);
+          }
+          setLookingUpIds((prev) => {
+            if (!prev.has(data.connectionId)) return prev;
+            const next = new Set(prev);
+            next.delete(data.connectionId);
+            return next;
+          });
+          setUnavailableIds((prev) => {
+            if (!prev.has(data.connectionId)) return prev;
+            const next = new Set(prev);
+            next.delete(data.connectionId);
+            return next;
+          });
+        }
       } catch (err) {
         console.error('capture-agent: failed to process stream event', err, event.data);
       }
@@ -125,6 +165,72 @@ export default function TerminalApp() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type }),
+    });
+  };
+
+  // Toggles ownership enrichment mode via /api/enrichment/control (Task 9's
+  // route, backed by Task 8's EnrichmentClient). Re-shows the disclosure
+  // banner on every enable (on-demand or background), per spec §1.
+  const enrichmentControl = async (action: string) => {
+    const res = await fetch('/api/enrichment/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    const body = await res.json();
+    if (body.disclosureText) setDisclosureText(body.disclosureText); // re-shown on every enable, per spec §1
+    if (action === 'enable') setEnrichmentMode('on-demand');
+    if (action === 'enable_background') setEnrichmentMode('background');
+    if (action === 'disable') setEnrichmentMode('off');
+    if (action === 'disable_background') setEnrichmentMode('on-demand');
+    if (action === 'clear') {
+      setEnrichmentMode('off');
+      // Wipe any in-flight/unavailable bookkeeping along with the
+      // server-side cache+log clear — a stale "Looking up…" or
+      // "Unavailable" badge left over from before the clear would be
+      // misleading once enrichment is off and the cache is gone.
+      for (const timer of lookupTimers.current.values()) clearTimeout(timer);
+      lookupTimers.current.clear();
+      setLookingUpIds(new Set());
+      setUnavailableIds(new Set());
+    }
+  };
+
+  // How long to wait for a connection_enrichment event before treating a
+  // lookup as "Unavailable" rather than leaving it on "Looking up…"
+  // forever. Generous on purpose: RequestQueue can hold a lookup for up to
+  // ~10s of jittered spacing (lib/enrichment/request-queue.ts) before even
+  // dispatching it, on top of RdapClient's own 10s request timeout
+  // (lib/enrichment/rdap-client.ts) — 25s covers both with margin.
+  const LOOKUP_TIMEOUT_MS = 25_000;
+
+  const requestLookup = (connectionId: string, remoteAddr: string) => {
+    setLookingUpIds((prev) => new Set(prev).add(connectionId));
+    setUnavailableIds((prev) => {
+      if (!prev.has(connectionId)) return prev;
+      const next = new Set(prev);
+      next.delete(connectionId);
+      return next;
+    });
+
+    const existing = lookupTimers.current.get(connectionId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      lookupTimers.current.delete(connectionId);
+      setLookingUpIds((prev) => {
+        if (!prev.has(connectionId)) return prev;
+        const next = new Set(prev);
+        next.delete(connectionId);
+        return next;
+      });
+      setUnavailableIds((prev) => new Set(prev).add(connectionId));
+    }, LOOKUP_TIMEOUT_MS);
+    lookupTimers.current.set(connectionId, timer);
+
+    fetch('/api/enrichment/lookup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connectionId, remoteAddr }),
     });
   };
 
@@ -161,6 +267,19 @@ export default function TerminalApp() {
       setPackets([]);
     } else if (['install', 'macos', 'brew', 'curl', 'sw_vers'].includes(mainCmd)) {
       setIsInstallOpen(true);
+    } else if (mainCmd === 'enrich' && arg1 === 'on') {
+      enrichmentControl('enable');
+    } else if (mainCmd === 'enrich' && arg1 === 'off') {
+      enrichmentControl('disable');
+    } else if (mainCmd === 'enrich' && arg1 === 'background' && parts[2] === 'on') {
+      // `parts` comes from cmdStr.toLowerCase().split(' ') above, so this
+      // three-token form is reachable — a two-token-only mainCmd/arg1 check
+      // would silently drop the "on"/"off" token here.
+      enrichmentControl('enable_background');
+    } else if (mainCmd === 'enrich' && arg1 === 'background' && parts[2] === 'off') {
+      enrichmentControl('disable_background');
+    } else if (mainCmd === 'enrich' && arg1 === 'clear') {
+      enrichmentControl('clear');
     }
   };
 
@@ -172,6 +291,23 @@ export default function TerminalApp() {
       {!agentConnected && (
         <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2">
           capture agent not connected — run <code>./capture-agent</code> in <code>capture-agent/</code> (see capture-agent/README.md)
+        </div>
+      )}
+
+      {/* Ownership enrichment disclosure — re-shown on every "enrich on" /
+          "enrich background on", per spec §1. Simple dismissible banner,
+          consistent with the "agent not connected" banner's styling above,
+          not a full modal. */}
+      {disclosureText && (
+        <div className="w-full bg-amber-900/40 border-b border-amber-700 text-amber-100 text-sm px-4 py-2 flex items-start justify-between gap-3">
+          <span>{disclosureText}</span>
+          <button
+            onClick={() => setDisclosureText(null)}
+            className="shrink-0 text-amber-200 hover:text-white font-bold"
+            aria-label="Dismiss disclosure"
+          >
+            [CLOSE]
+          </button>
         </div>
       )}
 
@@ -289,7 +425,14 @@ export default function TerminalApp() {
           )}
 
           {activeTab === 'connections' && (
-            <ConnectionsView connections={connections} theme={themeConfig} />
+            <ConnectionsView
+              connections={connections}
+              theme={themeConfig}
+              enrichmentMode={enrichmentMode}
+              onRequestLookup={requestLookup}
+              lookingUpIds={lookingUpIds}
+              unavailableIds={unavailableIds}
+            />
           )}
 
           {activeTab === 'packets' && (

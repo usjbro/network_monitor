@@ -1,6 +1,19 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import React from 'react';
+import { render, screen } from '@testing-library/react';
+import { ConnectionsView } from '../../components/ConnectionsView';
+import { THEMES } from '../osi-engine';
+import { NetworkConnection } from '../types';
+
+// This file stays a plain `.ts` (not `.tsx`) so it keeps matching the exact
+// path `2026-08-26-secure-lan-access.md` Task 4 also targets (see the
+// module-collision note in `task-11-brief.md`) — a `.tsx` rename here would
+// silently defeat that convergence. Since a `.ts` file's default esbuild
+// loader doesn't parse JSX syntax, the rendering fixture below uses
+// `React.createElement` instead of a `<ConnectionsView ... />` literal.
 
 const SCAN_DIRS = ['app', 'components', 'lib'];
 const DANGEROUS_PATTERN = /dangerouslySetInnerHTML|\.innerHTML\s*=/;
@@ -32,5 +45,99 @@ describe('network-sourced strings are never rendered as raw HTML', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+// The static scan above only proves the two dangerous APIs are absent from
+// the source *text* repo-wide — it can't prove that the specific untrusted
+// RDAP/WHOIS-derived strings this sub-project introduces (org, asnOrg,
+// registrant — see lib/types.ts NetworkConnection['enrichment']) actually
+// flow through a safe render path at runtime. This block closes that gap:
+// it renders ConnectionsView's Ownership section (added in Task 10; see
+// components/ConnectionsView.tsx lines ~202-232) with deliberately hostile
+// org/registrant values and asserts, via actual DOM inspection, that
+// React's default JSX text interpolation ({...}) rendered them as inert
+// literal text rather than parsing them into live HTML elements.
+describe('ConnectionsView renders hostile RDAP/WHOIS ownership strings as inert text', () => {
+  function baseConn(overrides: Partial<NetworkConnection> = {}): NetworkConnection {
+    return {
+      id: 'conn-hostile-1',
+      protocol: 'HTTPS/TLS',
+      appLayerProtocol: 'HTTPS/TLS',
+      transportProtocol: 'TCP',
+      osiStack: 'x',
+      localAddr: '192.168.1.10',
+      localPort: 51000,
+      remoteAddr: '93.184.216.34',
+      remotePort: 443,
+      processName: 'Safari',
+      pid: 1234,
+      rxSpeed: 0,
+      txSpeed: 0,
+      rxBytesTotal: 0,
+      txBytesTotal: 0,
+      latencyMs: 0,
+      packetLoss: 0,
+      status: 'ESTABLISHED',
+      encryption: 'TLS',
+      sparkline: [],
+      ...overrides,
+    };
+  }
+
+  it('renders a hostile org string as literal text, never as a live <img> element', () => {
+    const hostileOrg = '<img src=x onerror="window.__pwned=true">';
+
+    render(
+      React.createElement(ConnectionsView, {
+        connections: [
+          baseConn({
+            enrichment: {
+              org: hostileOrg,
+              asn: 'AS15133',
+              source: 'rdap',
+              fetchedAt: '2026-08-28T00:00:00.000Z',
+            },
+          }),
+        ],
+        theme: THEMES.sophisticated,
+        enrichmentMode: 'on-demand',
+        onRequestLookup: () => {},
+      }),
+    );
+
+    // If ConnectionsView had rendered this via dangerouslySetInnerHTML (or
+    // an .innerHTML= assignment), the browser/jsdom would have parsed the
+    // markup into a real <img> element and there would be no literal text
+    // node containing the tag characters to find. Finding the literal
+    // string — and finding no matching <img> — proves the escape held.
+    expect(screen.getByText(hostileOrg)).toBeInTheDocument();
+    expect(document.querySelector('img[src="x"]')).toBeNull();
+  });
+
+  it('renders a hostile registrant string as literal text, never as a live <script> element', () => {
+    const hostileRegistrant = '<script>window.__pwned2=true</script>';
+
+    render(
+      React.createElement(ConnectionsView, {
+        connections: [
+          baseConn({
+            enrichment: {
+              org: 'EXAMPLE-ORG',
+              asn: 'AS15133',
+              registrant: hostileRegistrant,
+              source: 'rdap',
+              fetchedAt: '2026-08-28T00:00:00.000Z',
+            },
+          }),
+        ],
+        theme: THEMES.sophisticated,
+        enrichmentMode: 'on-demand',
+        onRequestLookup: () => {},
+      }),
+    );
+
+    expect(screen.getByText(hostileRegistrant)).toBeInTheDocument();
+    expect(document.querySelector('script')).toBeNull();
   });
 });
