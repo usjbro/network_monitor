@@ -77,6 +77,19 @@ export interface PacketFrame {
   };
 }
 
+// Tier B (opt-in, per-process decrypted TLS content via `osi-inspect` /
+// SSLKEYLOGFILE) — one entry per decrypted HTTP/2 header block or DATA
+// frame body. Kept as a separate type (not folded into PacketFrame) since
+// it comes from a distinct, separately-gated wire event
+// (`decrypted_payload`, see docs/wire-protocol.md) with different
+// trust/sensitivity characteristics than ordinary packet metadata.
+export interface DecryptedPayloadSegment {
+  connectionId: string;
+  streamId?: number;
+  text: string;
+  redacted: boolean;
+}
+
 export type TerminalTheme = 'sophisticated' | 'macos_pro' | 'macos_homebrew' | 'iterm_snazzy' | 'matrix' | 'dracula' | 'amber' | 'cyberpunk' | 'catppuccin' | 'nord';
 
 export interface ThemeConfig {
