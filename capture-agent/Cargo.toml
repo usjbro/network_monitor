@@ -21,6 +21,7 @@ md5 = "0.8.1"
 libc = "0.2.189"
 hex = "0.4.3"
 ring = "0.17.14"
+zeroize = "1.9.0"
 
 [dev-dependencies]
 etherparse = { version = "0.20", features = ["std"] }
