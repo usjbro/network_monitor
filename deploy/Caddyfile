@@ -42,5 +42,23 @@
 		}
 	}
 
-	reverse_proxy 127.0.0.1:3000
+	# Lets the Next.js relay (app/api/stream/route.ts's
+	# isDecryptedPayloadAllowed) distinguish a verified LAN client from a
+	# direct loopback one, so it knows whether to forward Tier B
+	# (decrypted TLS content) events at all. This is a static "true", not
+	# a templated placeholder: Caddy has no built-in
+	# `{tls_client_certificate_verified}`-style placeholder (confirmed
+	# against caddyserver.com/docs/caddyfile/concepts#placeholders), and
+	# critically doesn't need one here — `client_auth { mode
+	# require_and_verify }` above already terminates any connection
+	# whose client certificate doesn't verify at the TLS handshake, before
+	# the request ever reaches this reverse_proxy block. So by the time a
+	# request gets here at all, verification has unconditionally already
+	# succeeded; this header exists only so the relay can tell "came
+	# through Caddy's mTLS gate" apart from "direct loopback, no Caddy in
+	# front" (see docs/wire-protocol.md's decrypted_payload section),
+	# never to carry a pass/fail judgment Caddy itself already made.
+	reverse_proxy 127.0.0.1:3000 {
+		header_up X-Mtls-Verified "true"
+	}
 }

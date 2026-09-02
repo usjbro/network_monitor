@@ -4,7 +4,16 @@ use crate::ja3::{compute_ja3, label_for_ja3, ClientHelloFields};
 pub enum L7Info {
     Http { method: String, path: String },
     Dns { query_name: String },
-    TlsClientHello { sni: String, ja3: Option<String>, ja3_label: Option<&'static str> },
+    TlsClientHello {
+        sni: String,
+        ja3: Option<String>,
+        ja3_label: Option<&'static str>,
+        // The ClientHello's 32-byte `random` field, kept so the capture loop
+        // can look up this flow's logged session secret by client_random
+        // (Tier B / Task 13) — never sent over the wire, purely an
+        // in-process decrypt-eligibility lookup key.
+        client_random: Option<Vec<u8>>,
+    },
     None,
 }
 
@@ -135,7 +144,11 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
     let fields = ClientHelloFields { tls_version, cipher_suites, extensions, elliptic_curves, ec_point_formats };
     let ja3 = Some(compute_ja3(&fields));
     let ja3_label = ja3.as_deref().and_then(label_for_ja3);
-    Some(L7Info::TlsClientHello { sni, ja3, ja3_label })
+    // random is the 32 bytes right after the 2-byte client_version, i.e.
+    // offset 11..43 of the record (record header(5) + handshake header(4) +
+    // client_version(2) = 11).
+    let client_random = payload.get(11..43).map(|b| b.to_vec());
+    Some(L7Info::TlsClientHello { sni, ja3, ja3_label, client_random })
 }
 
 pub fn sniff_l7(payload: &[u8], dst_port: Option<u16>) -> L7Info {
@@ -252,6 +265,17 @@ mod tests {
                 assert_eq!(sni, "example.com");
                 assert!(ja3.is_some(), "expected a computed JA3 hash");
                 assert_eq!(ja3.unwrap().len(), 32);
+            }
+            other => panic!("expected TlsClientHello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extracts_the_32_byte_client_random_for_decrypt_key_lookup() {
+        let payload = build_client_hello("example.com");
+        match sniff_l7(&payload, Some(443)) {
+            L7Info::TlsClientHello { client_random, .. } => {
+                assert_eq!(client_random.as_deref(), Some([0u8; 32].as_slice()));
             }
             other => panic!("expected TlsClientHello, got {other:?}"),
         }

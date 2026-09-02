@@ -69,7 +69,12 @@ export class AgentClient extends EventEmitter {
     socket.on('close', handleDisconnect);
   }
 
-  sendControl(message: { type: 'pause' | 'resume' }): void {
+  sendControl(
+    message:
+      | { type: 'pause' | 'resume' }
+      | { type: 'register_decrypt_eligible'; pid: number; keylogPath: string }
+      | { type: 'unregister_decrypt_eligible'; pid: number }
+  ): void {
     this.socket?.write(JSON.stringify(message) + '\n');
   }
 

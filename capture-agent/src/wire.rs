@@ -222,6 +222,16 @@ pub fn build_header_breakdown(parsed: &ParsedPacket, l7: &L7Info) -> HeaderBreak
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecryptedPayloadJson {
+    pub connection_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<u32>,
+    pub redacted: bool,
+    pub data_base64: String,
+}
+
+#[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     // Boxed alongside `Packet` below: `ConnectionJson` (~320B, mostly its
@@ -238,13 +248,22 @@ pub enum AgentEvent {
     Packet { packet: Box<PacketJson> },
     LayerUpdate { layers: Vec<LayerStatsJson> },
     AgentStatus { interface: String, capturing: bool },
+    DecryptedPayload { payload: Box<DecryptedPayloadJson> },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlMessage {
     Pause,
     Resume,
+    RegisterDecryptEligible {
+        pid: u32,
+        #[serde(rename = "keylogPath")]
+        keylog_path: String,
+    },
+    UnregisterDecryptEligible {
+        pid: u32,
+    },
 }
 
 pub fn encode_event(event: &AgentEvent) -> String {
@@ -344,6 +363,54 @@ mod tests {
         assert!(matches!(decode_control("{\"type\":\"pause\"}"), Some(ControlMessage::Pause)));
         assert!(matches!(decode_control("{\"type\":\"resume\"}"), Some(ControlMessage::Resume)));
         assert!(decode_control("not json").is_none());
+    }
+
+    #[test]
+    fn decrypted_payload_json_serializes_expected_camel_case_fields() {
+        let json = DecryptedPayloadJson {
+            connection_id: "Tcp-1.2.3.4:1-5.6.7.8:443".to_string(),
+            stream_id: Some(3),
+            redacted: false,
+            data_base64: "aGVsbG8=".to_string(),
+        };
+        let s = serde_json::to_string(&json).unwrap();
+        assert!(s.contains("\"connectionId\""));
+        assert!(s.contains("\"streamId\":3"));
+        assert!(s.contains("\"redacted\":false"));
+        assert!(s.contains("\"dataBase64\""));
+    }
+
+    #[test]
+    fn encodes_decrypted_payload_event_with_type_tag() {
+        let event = AgentEvent::DecryptedPayload {
+            payload: Box::new(DecryptedPayloadJson {
+                connection_id: "Tcp-1.2.3.4:1-5.6.7.8:443".to_string(),
+                stream_id: None,
+                redacted: true,
+                data_base64: "".to_string(),
+            }),
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"decrypted_payload\""));
+        assert!(!line.contains("\"streamId\""), "streamId should be omitted when None");
+    }
+
+    #[test]
+    fn decodes_register_and_unregister_decrypt_eligible_control_messages() {
+        let msg = decode_control("{\"type\":\"register_decrypt_eligible\",\"pid\":4242,\"keylogPath\":\"/tmp/x.keylog\"}");
+        match msg {
+            Some(ControlMessage::RegisterDecryptEligible { pid, keylog_path }) => {
+                assert_eq!(pid, 4242);
+                assert_eq!(keylog_path, "/tmp/x.keylog");
+            }
+            other => panic!("expected RegisterDecryptEligible, got {other:?}"),
+        }
+
+        let msg = decode_control("{\"type\":\"unregister_decrypt_eligible\",\"pid\":4242}");
+        match msg {
+            Some(ControlMessage::UnregisterDecryptEligible { pid }) => assert_eq!(pid, 4242),
+            other => panic!("expected UnregisterDecryptEligible, got {other:?}"),
+        }
     }
 
     fn sample_tcp_packet(payload: Vec<u8>) -> ParsedPacket {

@@ -41,6 +41,7 @@ struct FlowState {
     last_seen_ms: u64,
     ja3_fingerprint: Option<String>,
     ja3_label: Option<&'static str>,
+    client_random: Option<Vec<u8>>,
 }
 
 impl Default for FlowState {
@@ -63,6 +64,7 @@ impl Default for FlowState {
             last_seen_ms: 0,
             ja3_fingerprint: None,
             ja3_label: None,
+            client_random: None,
         }
     }
 }
@@ -80,6 +82,10 @@ pub struct FlowSnapshot {
     pub packet_loss: f64,
     pub ja3_fingerprint: Option<String>,
     pub ja3_label: Option<&'static str>,
+    // Server-side-only lookup key for Tier B decrypt eligibility — never
+    // serialized onto any wire event (see l7::L7Info::TlsClientHello's
+    // client_random field doc comment).
+    pub client_random: Option<Vec<u8>>,
 }
 
 /// Default ceiling on the number of tracked flows. Bounds memory under a SYN
@@ -194,7 +200,7 @@ impl FlowTable {
         match l7 {
             L7Info::Http { .. } => state.app_layer_protocol = "HTTP".to_string(),
             L7Info::Dns { .. } => state.app_layer_protocol = "DNS".to_string(),
-            L7Info::TlsClientHello { ja3, ja3_label, .. } => {
+            L7Info::TlsClientHello { ja3, ja3_label, client_random, .. } => {
                 state.app_layer_protocol = "HTTPS/TLS".to_string();
                 state.encryption = "TLS".to_string();
                 // First ClientHello wins: a flow has exactly one handshake,
@@ -204,6 +210,7 @@ impl FlowTable {
                 if state.ja3_fingerprint.is_none() {
                     state.ja3_fingerprint = ja3.clone();
                     state.ja3_label = *ja3_label;
+                    state.client_random = client_random.clone();
                 }
             }
             L7Info::None => {
@@ -266,6 +273,15 @@ impl FlowTable {
         }
     }
 
+    /// Looks up the given flow's observed ClientHello `client_random`, if
+    /// any — used by the capture loop (Tier B) to find this flow's logged
+    /// session secret without needing a full `snapshot()`. Returns `None`
+    /// for a flow that hasn't been `observe()`d yet, or one whose
+    /// ClientHello (if any) hasn't been seen yet.
+    pub fn client_random_for(&self, key: &FlowKey) -> Option<Vec<u8>> {
+        self.flows.get(key)?.client_random.clone()
+    }
+
     pub fn snapshot(&mut self, now_ms: u64) -> Vec<FlowSnapshot> {
         let elapsed_s = ((now_ms.saturating_sub(self.last_snapshot_ms)).max(1)) as f64 / 1000.0;
         self.last_snapshot_ms = now_ms;
@@ -293,6 +309,7 @@ impl FlowTable {
                 packet_loss: packet_loss.min(100.0),
                 ja3_fingerprint: state.ja3_fingerprint.clone(),
                 ja3_label: state.ja3_label,
+                client_random: state.client_random.clone(),
             });
 
             state.rx_bytes_this_tick = 0;
@@ -685,6 +702,7 @@ mod tests {
             sni: "example.com".to_string(),
             ja3: Some("abc123".to_string() + &"0".repeat(26)), // 32-char hex-like JA3 hash
             ja3_label: Some("matches Chrome 12x"),
+            client_random: Some(vec![0xab; 32]),
         };
         table.observe(&packet, &l7, 0);
         table.observe(&packet, &L7Info::None, 100); // a later, non-ClientHello packet on the same flow
@@ -693,6 +711,33 @@ mod tests {
         let snap = snaps.iter().find(|s| s.key.remote_addr == "93.184.216.34").expect("flow present");
         assert!(snap.ja3_fingerprint.is_some());
         assert_eq!(snap.ja3_label, Some("matches Chrome 12x"));
+        assert_eq!(snap.client_random, Some(vec![0xab; 32]));
+    }
+
+    #[test]
+    fn client_random_for_returns_none_until_a_client_hello_is_observed() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let packet = tcp_packet(true, TcpFlags::default(), 60);
+        let key = FlowKey {
+            protocol: TransportProtocol::Tcp,
+            local_addr: "192.168.1.10".to_string(),
+            local_port: 51000,
+            remote_addr: "93.184.216.34".to_string(),
+            remote_port: 443,
+        };
+        assert!(table.client_random_for(&key).is_none());
+
+        table.observe(&packet, &L7Info::None, 0);
+        assert!(table.client_random_for(&key).is_none(), "no ClientHello observed yet");
+
+        let l7 = L7Info::TlsClientHello {
+            sni: "example.com".to_string(),
+            ja3: Some("x".to_string()),
+            ja3_label: None,
+            client_random: Some(vec![0x42; 32]),
+        };
+        table.observe(&packet, &l7, 1);
+        assert_eq!(table.client_random_for(&key), Some(vec![0x42; 32]));
     }
 
     #[test]

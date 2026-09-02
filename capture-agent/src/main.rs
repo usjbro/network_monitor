@@ -1,10 +1,189 @@
-use capture_agent::{flow::FlowTable, l7, parse, process_lookup, rate_limit::PacketEventLimiter, wire};
+use base64::Engine;
+use capture_agent::{
+    flow::{FlowKey, FlowTable},
+    http2::{FrameOutcome, Http2Reassembler},
+    keylog::KeyLogWatcher,
+    l7, parse, process_lookup,
+    rate_limit::PacketEventLimiter,
+    ring_buffer::DecryptedRingBuffer,
+    tls_decrypt::{self, DecryptOutcome},
+    wire,
+};
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+
+/// Per-connection state for Tier B decrypted content: the HTTP/2 byte-stream
+/// reassembler and the capped ring buffer that holds this connection's
+/// decrypted-and-redacted content in memory only. Torn down when the flow
+/// itself is evicted (see the periodic emitter's `ConnectionClosed`
+/// handling below).
+type DecryptState = HashMap<String, (Http2Reassembler, DecryptedRingBuffer)>;
+
+/// Per-connection ring buffer cap. Matches the spirit of the existing
+/// packet-stream cap discipline (issue #27: bounded per connection, never
+/// unbounded) — 256KiB is generous for the handful of headers/small bodies
+/// this view is meant to show, without letting one busy decrypt-eligible
+/// connection grow without bound for the lifetime of the agent process.
+const DECRYPT_RING_CAP_BYTES: usize = 256 * 1024;
+
+/// Returns this packet's local-side port (the process-attribution key used
+/// by `process_map`), using the same local-address check `FlowTable`
+/// applies internally — duplicated here (rather than locking `FlowTable`
+/// just to ask) because this runs in the hot per-packet capture path and
+/// `local_addrs` is already available in this scope for free.
+fn local_port_of(parsed: &parse::ParsedPacket, local_addrs: &[String]) -> Option<u16> {
+    if local_addrs.iter().any(|a| a == &parsed.src_ip) {
+        parsed.src_port
+    } else if local_addrs.iter().any(|a| a == &parsed.dst_ip) {
+        parsed.dst_port
+    } else {
+        None
+    }
+}
+
+/// Builds the same canonical `FlowKey` `FlowTable::observe` would have used
+/// for this packet, so the capture loop can ask `FlowTable::client_random_for`
+/// about this exact flow without exposing `FlowTable`'s internal key
+/// construction.
+fn build_flow_key(parsed: &parse::ParsedPacket, local_addrs: &[String]) -> Option<FlowKey> {
+    if local_addrs.iter().any(|a| a == &parsed.src_ip) {
+        Some(FlowKey {
+            protocol: parsed.protocol,
+            local_addr: parsed.src_ip.clone(),
+            local_port: parsed.src_port?,
+            remote_addr: parsed.dst_ip.clone(),
+            remote_port: parsed.dst_port?,
+        })
+    } else if local_addrs.iter().any(|a| a == &parsed.dst_ip) {
+        Some(FlowKey {
+            protocol: parsed.protocol,
+            local_addr: parsed.dst_ip.clone(),
+            local_port: parsed.dst_port?,
+            remote_addr: parsed.src_ip.clone(),
+            remote_port: parsed.src_port?,
+        })
+    } else {
+        None
+    }
+}
+
+fn emit_decrypted(
+    connection_id: &str,
+    stream_id: Option<u32>,
+    redacted: bool,
+    data: &[u8],
+    limiter: &Mutex<PacketEventLimiter>,
+    now_ms: u64,
+    tx: &broadcast::Sender<String>,
+) {
+    // Same discrete-event rate cap as the existing packet_event_limiter
+    // (100/sec) — stats/redaction/decryption already happened above this
+    // call regardless; this only gates how often a *browser-visible* event
+    // goes out.
+    if !limiter.lock().unwrap().allow(now_ms) {
+        return;
+    }
+    let event = wire::AgentEvent::DecryptedPayload {
+        payload: Box::new(wire::DecryptedPayloadJson {
+            connection_id: connection_id.to_string(),
+            stream_id,
+            redacted,
+            data_base64: base64::engine::general_purpose::STANDARD.encode(data),
+        }),
+    };
+    let _ = tx.send(wire::encode_event(&event));
+}
+
+/// Attempts Tier B decryption + HTTP/2 framing for one captured packet.
+/// Entirely best-effort: any missing prerequisite (no attributed process,
+/// not decrypt-eligible, no logged secret yet, undecodable record) is a
+/// silent no-op, never a panic — this runs on the overwhelming majority of
+/// captured packets, for which none of Tier B applies at all.
+///
+/// Only ever decrypts a captured TCP payload that itself begins with the
+/// TLS `application_data` record type (0x17): this agent has no separate
+/// TLS-record-boundary reassembler distinct from `Http2Reassembler`'s own
+/// byte-stream reassembly, so a record split across multiple TCP segments
+/// is not reconstructed before this check — such a record is silently
+/// skipped here (not decrypted, not emitted), same as any other
+/// `Undecryptable` outcome. Similarly, `tls_decrypt::decrypt_record` derives
+/// its key/IV straight from the logged secret with no per-record sequence
+/// number, so only the FIRST application_data record on a given secret
+/// decrypts correctly — later records on the same secret fail the AEAD tag
+/// check and are silently skipped too, same fail-closed path. Both are
+/// named, disclosed limitations of this pass, not silent data corruption:
+/// every failure here degrades to "nothing shown for this record," never a
+/// wrong/garbled one.
+#[allow(clippy::too_many_arguments)]
+fn try_decrypt_and_emit(
+    parsed: &parse::ParsedPacket,
+    now_ms: u64,
+    local_addrs: &[String],
+    process_map: &Mutex<HashMap<u16, process_lookup::ProcessInfo>>,
+    flow_table: &Mutex<FlowTable>,
+    keylog_watcher: &Mutex<KeyLogWatcher>,
+    decrypt_state: &Mutex<DecryptState>,
+    decrypt_event_limiter: &Mutex<PacketEventLimiter>,
+    tx: &broadcast::Sender<String>,
+) {
+    if parsed.payload.first() != Some(&0x17) {
+        return; // not a TLS application_data record — nothing to decrypt
+    }
+    let Some(local_port) = local_port_of(parsed, local_addrs) else { return };
+    let Some(pid) = process_map.lock().unwrap().get(&local_port).map(|p| p.pid) else { return };
+
+    let secret = {
+        let mut watcher = keylog_watcher.lock().unwrap();
+        // Cheap when the eligible set is empty (the overwhelming common
+        // case) — only currently-registered PIDs' key-log files are read.
+        watcher.poll();
+        if !watcher.is_eligible(pid) {
+            return;
+        }
+        let Some(flow_key) = build_flow_key(parsed, local_addrs) else { return };
+        let Some(client_random) = flow_table.lock().unwrap().client_random_for(&flow_key) else { return };
+        let Some(secret) = watcher.secret_for(&client_random).cloned() else { return };
+        secret
+    };
+
+    let DecryptOutcome::Plaintext(bytes) = tls_decrypt::decrypt_record(&parsed.payload, &secret) else {
+        return; // undecryptable (wrong record, wrong key, truncated, ...) — fail closed, no event
+    };
+
+    let Some(flow_key) = build_flow_key(parsed, local_addrs) else { return };
+    let connection_id = flow_key.connection_id();
+    let seq = parsed.seq.unwrap_or(0) as u64;
+
+    let mut state = decrypt_state.lock().unwrap();
+    let entry = state
+        .entry(connection_id.clone())
+        .or_insert_with(|| (Http2Reassembler::new(), DecryptedRingBuffer::new(DECRYPT_RING_CAP_BYTES)));
+    let outcomes = entry.0.feed(seq, &bytes);
+
+    for outcome in outcomes {
+        // DesyncFallback/NeedMoreData never emit — the whole point of the
+        // reassembler's desync handling is that garbled/out-of-order bytes
+        // must never be surfaced as if they were real decoded content.
+        let FrameOutcome::Frame { stream_id, headers, body } = outcome else { continue };
+        if !headers.is_empty() {
+            // redact_headers has already run inside Http2Reassembler::feed
+            // before these headers were ever returned here.
+            let text = headers.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n");
+            entry.1.push(text.clone().into_bytes());
+            emit_decrypted(&connection_id, Some(stream_id), false, text.as_bytes(), decrypt_event_limiter, now_ms, tx);
+        }
+        if !body.is_empty() {
+            entry.1.push(body.clone());
+            emit_decrypted(&connection_id, Some(stream_id), false, &body, decrypt_event_limiter, now_ms, tx);
+        }
+    }
+}
 
 /// The interface name carrying the OS's default route (e.g. "en0"), read via
 /// `route -n get default` and parsed from its "interface: <name>" line.
@@ -66,8 +245,17 @@ async fn main() -> std::io::Result<()> {
     // (`Instant::now().elapsed()`) always returns ~0, not time-since-start.
     let start = Instant::now();
     let paused = Arc::new(AtomicBool::new(false));
+    // Cloned before the move into FlowTable::new below — the capture thread
+    // (Tier B decrypt-eligibility lookups) and FlowTable both need their own
+    // copy of the local-address list.
+    let local_addrs_for_capture = local_addrs.clone();
     let flow_table = Arc::new(Mutex::new(FlowTable::new(local_addrs)));
     let process_map = Arc::new(Mutex::new(process_lookup::refresh()));
+    // Tier B (opt-in decrypted TLS content) state — all in-memory only,
+    // never persisted across a restart (spec: "opt-in never persists").
+    let keylog_watcher = Arc::new(Mutex::new(KeyLogWatcher::new()));
+    let decrypt_state: Arc<Mutex<DecryptState>> = Arc::new(Mutex::new(HashMap::new()));
+    let decrypt_event_limiter = Arc::new(Mutex::new(PacketEventLimiter::new(100, 1000)));
     // Monotonic counter appended to packet IDs. epoch_ms/now_ms are both
     // millisecond-resolution clocks, so two packets captured within the same
     // millisecond would otherwise get identical IDs — and the TS side uses
@@ -93,6 +281,11 @@ async fn main() -> std::io::Result<()> {
         let device = device.clone();
         let tx = tx.clone();
         let packet_seq = packet_seq.clone();
+        let local_addrs = local_addrs_for_capture;
+        let process_map = process_map.clone();
+        let keylog_watcher = keylog_watcher.clone();
+        let decrypt_state = decrypt_state.clone();
+        let decrypt_event_limiter = decrypt_event_limiter.clone();
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
                 .and_then(|c| {
@@ -131,6 +324,23 @@ async fn main() -> std::io::Result<()> {
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
                         flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+
+                        // Tier B: best-effort, entirely opt-in — a no-op for
+                        // the overwhelming majority of packets (see
+                        // try_decrypt_and_emit's own doc comment for the
+                        // early-return conditions).
+                        try_decrypt_and_emit(
+                            &parsed,
+                            now_ms,
+                            &local_addrs,
+                            &process_map,
+                            &flow_table,
+                            &keylog_watcher,
+                            &decrypt_state,
+                            &decrypt_event_limiter,
+                            &tx,
+                        );
+
                         if !packet_event_limiter.allow(now_ms) {
                             continue; // stats already recorded; just skip the discrete event
                         }
@@ -184,6 +394,7 @@ async fn main() -> std::io::Result<()> {
     {
         let flow_table = flow_table.clone();
         let process_map = process_map.clone();
+        let decrypt_state = decrypt_state.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -268,8 +479,15 @@ async fn main() -> std::io::Result<()> {
                 }
 
                 for key in evicted {
+                    let connection_id = key.connection_id();
+                    // Tear down this connection's decrypted-content ring
+                    // buffer/reassembler along with the flow itself — the
+                    // ring buffer's own Drop (via zeroize on eviction, plus
+                    // ordinary deallocation here) means no decrypted
+                    // plaintext outlives the connection it belonged to.
+                    decrypt_state.lock().unwrap().remove(&connection_id);
                     let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
-                        id: key.connection_id(),
+                        id: connection_id,
                     }));
                 }
 
@@ -331,6 +549,7 @@ async fn main() -> std::io::Result<()> {
         };
         let mut rx = tx.subscribe();
         let paused = paused.clone();
+        let keylog_watcher = keylog_watcher.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half).lines();
@@ -343,6 +562,12 @@ async fn main() -> std::io::Result<()> {
                                 match wire::decode_control(&text) {
                                     Some(wire::ControlMessage::Pause) => paused.store(true, Ordering::Relaxed),
                                     Some(wire::ControlMessage::Resume) => paused.store(false, Ordering::Relaxed),
+                                    Some(wire::ControlMessage::RegisterDecryptEligible { pid, keylog_path }) => {
+                                        keylog_watcher.lock().unwrap().register_eligible_pid(pid, PathBuf::from(keylog_path));
+                                    }
+                                    Some(wire::ControlMessage::UnregisterDecryptEligible { pid }) => {
+                                        keylog_watcher.lock().unwrap().unregister_pid(pid);
+                                    }
                                     None => {}
                                 }
                             }

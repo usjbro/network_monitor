@@ -105,6 +105,32 @@ Only layers 3, 4, and 7 are ever present — the agent has no independent way to
 
 Defined in the wire protocol (`interface: String, capturing: bool`) but **never actually sent** by the current agent — the relay synthesizes its own `connection_status` event from the TCP connection state instead (see below). This is dead wire protocol surface; a future task should either wire it up (so the UI can display which interface is active) or remove it.
 
+### `decrypted_payload`
+
+Tier B only (opt-in, per-process decrypted TLS content via `osi-inspect` / `SSLKEYLOGFILE` — see `docs/superpowers/specs/2026-08-29-tls-interception-design.md`, Components §2–§5). Sent per HTTP/2 frame successfully decrypted and reassembled for a decrypt-eligible connection; rate-capped at the same 100/sec discrete-event budget as `packet`.
+
+```json
+{
+  "type": "decrypted_payload",
+  "payload": {
+    "connectionId": "Tcp-192.168.1.10:51000-93.184.216.34:443",
+    "streamId": 3,
+    "redacted": false,
+    "dataBase64": "OmF1dGhvcml0eTogZXhhbXBsZS5jb20="
+  }
+}
+```
+
+Field notes:
+- `connectionId` — matches `connection_update`'s `id`, so the browser can associate decrypted content with the connection/packet stream it belongs to.
+- `streamId` (optional) — the HTTP/2 stream ID this frame belongs to; absent for content the agent couldn't attribute to a specific stream.
+- `redacted` — `true` if this event's `dataBase64` decodes to a `[REDACTED]` placeholder (sensitive header name or bearer-token-shaped value; see `capture-agent/src/redact.rs`). The redaction pass runs on parsed HTTP/2 headers only — body content is never redacted (named limitation, not a bug).
+- `dataBase64` — base64-encoded UTF-8 text: either a decrypted HTTP/2 header block (`Name: value` pairs joined by `\n`, after redaction) or a decrypted HTTP/2 DATA frame body.
+
+**Refused outright over any non-loopback listener; once served through the LAN-access Caddy mTLS proxy (`deploy/`), requires the `X-Mtls-Verified: true` upstream header** — see `app/api/stream/route.ts`'s `isDecryptedPayloadAllowed`. A request with no such header at all (direct loopback, no Caddy in front) is allowed; a request proxied through Caddy without a verified client cert is refused. This is the same event type in both cases — the gating happens relay-side, per-connection, not by the agent withholding the event.
+
+Only ever produced for a captured TCP payload that itself begins with a TLS `application_data` record (`0x17`) — a record split across multiple TCP segments, or any record after the first one sent under a given logged secret (this module has no per-record sequence-number tracking), is silently not decrypted rather than partially/incorrectly shown. See `capture-agent/src/main.rs`'s `try_decrypt_and_emit` doc comment for the full list of named limitations.
+
 ## Relay → browser (SSE, not the raw agent protocol)
 
 `app/api/stream/route.ts` re-wraps agent events as Server-Sent Events (`data: <json>\n\n`) and adds one synthetic event type the agent itself never sends:
@@ -122,9 +148,13 @@ Tagged by `"type"` (snake_case).
 ```json
 {"type": "pause"}
 {"type": "resume"}
+{"type": "register_decrypt_eligible", "pid": 4242, "keylogPath": "/Users/you/project/.data/keylogs/ab12cd34.keylog"}
+{"type": "unregister_decrypt_eligible", "pid": 4242}
 ```
 
 Sent by `app/api/control/route.ts` (POST endpoint, called by the UI's `pause`/`resume` command-bar commands and the header pause button) over the same TCP socket the agent uses to send events. `pause` stops the capture loop from processing new packets (existing flow state is retained, not cleared); `resume` restarts it.
+
+`register_decrypt_eligible`/`unregister_decrypt_eligible` (Tier B) add/remove a PID from the agent's in-memory `KeyLogWatcher` (`capture-agent/src/keylog.rs`) — nothing currently on the relay side sends these automatically; they're the intended trigger point for a future UI/CLI integration that watches an `osi-inspect`-wrapped process's lifetime, not yet wired up end-to-end in this plan. `keylogPath` must point at a key-log file the agent can read (normally the one `bin/osi-inspect.js` created). Decrypt-eligibility state is in-memory only and never persists across an agent restart.
 
 ## Adding a new field or event type
 
