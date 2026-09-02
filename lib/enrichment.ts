@@ -220,10 +220,27 @@ export class EnrichmentClient extends EventEmitter {
       // actually found an organization worth attributing a domain to.
       let resolvedHostname: string | undefined;
       if (record.org && !record.registrant) {
-        const remoteHostname = await this.reverseDnsFn(remoteAddr);
-        if (remoteHostname) {
-          resolvedHostname = remoteHostname;
-          await this.resolveRegistrant(remoteHostname, record);
+        try {
+          const remoteHostname = await this.reverseDnsFn(remoteAddr);
+          if (remoteHostname) {
+            resolvedHostname = remoteHostname;
+            await this.resolveRegistrant(remoteHostname, record);
+          }
+        } catch (err) {
+          // Isolated on purpose: resolveRegistrant's own doc comment
+          // promises it "never throws," but its await on
+          // domainBootstrapPromise can still reject (network failure,
+          // timeout) — and that promise is exactly the same shape as
+          // bootstrapPromise above, which is allowed to reject. Without this
+          // local catch, that rejection would propagate up to lookup()'s
+          // outer catch and discard the core-tier RDAP result that was
+          // *already successfully fetched* above (extracted/record), losing
+          // a good org/ASN/country result and the cache.setSuccess/emit
+          // that should follow it, over an unrelated extended-tier hiccup.
+          // Fail this one sub-step closed instead: leave registrant unset
+          // (surfaces as "Unavailable" for that field only) and let the
+          // core-tier result proceed to cache + emit normally below.
+          console.error('[enrichment] extended-tier registrant lookup failed for', remoteAddr, err);
         }
       }
 

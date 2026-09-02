@@ -43,6 +43,15 @@ function isIPv6PrivateOrReserved(ip: string): boolean {
   // private rather than falling through as if it were a public v6 address.
   const mappedMatch = lower.match(/^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
   if (mappedMatch) {
+    // The regex's \d{1,3} groups accept any 0-999 value, not just valid
+    // 0-255 octets — ipToInt (called both here and, transitively, by
+    // cidrContains below) is what actually validates the octet range. A
+    // malformed embedded address (e.g. "::ffff:999.1.1.1") must not
+    // silently fall through to "not private": that would make this gate —
+    // the spec's primary defense before any lookup is even queued — fail
+    // open on bad input instead of failing closed. Treat "can't be parsed
+    // as a real IPv4 address" the same as "private/reserved": block it.
+    if (ipToInt(mappedMatch[1]) === null) return true;
     return IPV4_RESERVED.some((cidr) => cidrContains(cidr, mappedMatch[1]));
   }
   return (

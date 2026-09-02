@@ -30,6 +30,11 @@ describe('isPrivateOrReserved', () => {
     ['::ffff:169.254.169.254', true], // IPv4-mapped link-local (cloud metadata)
     ['::ffff:8.8.8.8', false],        // IPv4-mapped public
     ['::93.184.216.34', false],       // bare-mapped (deprecated form) public
+    // Malformed embedded IPv4 (octet > 255): the extraction regex's \d{1,3}
+    // groups match this syntactically, but it's not a real IPv4 address —
+    // must fail closed (treated as reserved/blocked), not fall through to
+    // "not private" just because it doesn't match any real CIDR block.
+    ['::ffff:999.1.1.1', true],
   ];
   it.each(cases)('isPrivateOrReserved(%s) === %s', (ip, expected) => {
     expect(isPrivateOrReserved(ip)).toBe(expected);

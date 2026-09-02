@@ -427,6 +427,42 @@ describe('EnrichmentClient', () => {
     expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.some((c: unknown[]) => String(c[0]).includes('dns.json'))).toBe(false);
   }, 15_000);
 
+  it('extended tier: a domain-bootstrap fetch failure is isolated — the already-successful core-tier result still caches and emits, not silently discarded', async () => {
+    // Reverse DNS resolves a hostname (so the extended-tier chain starts),
+    // but the domain-bootstrap fetch (dns.json) itself fails. Before this
+    // fix, that rejection propagated out of resolveRegistrant, past
+    // lookup()'s outer catch, and discarded the whole in-progress lookup —
+    // including the core-tier org/country/ASN result that had *already*
+    // been successfully fetched and extracted moments earlier. It must
+    // instead only affect `registrant`.
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes('ipv4.json')) return new Response(JSON.stringify(BOOTSTRAP_FIXTURE), { status: 200 });
+      if (url.includes('dns.json')) throw new Error('simulated dns.json fetch failure');
+      return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'EXAMPLE-NET', country: 'US' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const reverseDnsFn = vi.fn(async () => 'example.com');
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn });
+    client.enable();
+
+    const resultPromise = new Promise((resolve) => client.once('result', resolve));
+    client.requestLookup('conn-1', '93.184.216.34');
+    const result = (await resultPromise) as { enrichment: { org?: string; country?: string; registrant?: string; source?: string } };
+
+    expect(result.enrichment.org).toBe('EXAMPLE-NET');
+    expect(result.enrichment.country).toBe('US');
+    expect(result.enrichment.registrant).toBeUndefined();
+
+    // And the core-tier result must actually be cached too (setSuccess ran),
+    // not just emitted once and lost — a second lookup for the same block
+    // should hit cache rather than issuing a fresh RDAP fetch.
+    const callsBefore = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length;
+    const second = new Promise((resolve) => client.once('result', resolve));
+    client.requestLookup('conn-2', '93.184.216.34');
+    const secondResult = (await second) as { enrichment: { source?: string } };
+    expect(secondResult.enrichment.source).toBe('cache');
+    expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore);
+  }, 15_000);
+
   it('extended tier: a registrar referral for the resolved domain is followed only through the hardened RdapClient path (allowlisted host)', async () => {
     // The registry (verisign) response refers to itself here for simplicity
     // — what's under test is that fetchWithReferral's allowlist-gated
