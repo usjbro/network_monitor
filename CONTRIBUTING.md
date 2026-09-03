@@ -4,7 +4,7 @@
 
 See [docs/architecture.md](docs/architecture.md) for how the pieces fit together before making changes. Broadly:
 
-- `capture-agent/` — Rust, the privileged capture agent. Own `Cargo.toml`, own test suite (`cargo test`), own fuzz target (`cargo fuzz run parse_packet`).
+- `capture-agent/` — Rust, the privileged capture agent. Own `Cargo.toml`, own test suite (`cargo test`), two fuzz targets (`cargo fuzz run parse_packet`, `cargo fuzz run http2_reassembly`).
 - `app/`, `components/`, `lib/` — Next.js/React/TypeScript, the relay and UI. Own test suite (`npx vitest run` / `npm test`).
 - `docs/` — user-facing documentation (this file's sibling).
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and implementation plans for each sub-project, written before implementation. If you're planning substantial new work, look at the existing ones for the expected shape and level of detail.
@@ -15,7 +15,8 @@ See [docs/architecture.md](docs/architecture.md) for how the pieces fit together
 # Rust
 cd capture-agent
 cargo test
-cargo fuzz run parse_packet -- -max_total_time=30   # if touching parse.rs
+cargo fuzz run parse_packet -- -max_total_time=30      # if touching parse.rs
+cargo fuzz run http2_reassembly -- -max_total_time=30  # if touching http2.rs
 
 # TypeScript
 npx vitest run        # or: npm test
@@ -32,13 +33,13 @@ Full roadmap, epics, and individual tasks are tracked as GitHub issues in this r
 
 - Issue #26 — top-level roadmap, links every epic
 - Epic #13 — Live Capture Core (done)
-- Epic #22 — Secure LAN Access (mTLS, reverse proxy, native app) — speced, not yet planned in detail
-- Epic #23 — Ownership Enrichment (WHOIS/RDAP) — not yet speced
-- Epic #24 — Network Path Visualization (traceroute + geoIP) — not yet speced
-- Epic #25 — TLS Interception / MITM Proxy — not yet speced, deliberately treated as the highest-risk piece, needs its own dedicated design pass before any code
+- Epic #22 — Secure LAN Access (mTLS, reverse proxy, native app) — done (see `deploy/`, `macos-app/`, `docs/security.md`)
+- Epic #23 — Ownership Enrichment (WHOIS/RDAP) — done (see `lib/enrichment/`, `docs/enrichment-protocol.md`)
+- Epic #24 — Network Path Visualization (traceroute + geoIP) — done (see `capture-agent/src/traceroute.rs`, `docs/geoip-protocol.md`)
+- Epic #25 — TLS Visibility (JA3 fingerprinting + opt-in per-process decryption) — done. Landed as a narrower, lower-risk design than originally scoped: not a MITM proxy — no CA install, no traffic redirection, no certificate pinning broken. Decryption only happens for a process explicitly launched via `bin/osi-inspect.js`, which points `SSLKEYLOGFILE` at a fresh ephemeral file and registers that one PID as decrypt-eligible with the agent. See `docs/superpowers/specs/2026-08-29-tls-interception-design.md`.
 - Issues #27, #28, #29 — known, real gaps in the current implementation (uncapped packet stream, flows never expiring, `headerBreakdown` never reaching the wire)
 
-Labels: `epic` (tracking issues), `rust`, `web`, `security`, `not-speced` (blocked on a design pass before it can be broken into real tasks).
+Labels: `epic` (tracking issues), `rust`, `web`, `security`, `not-speced` (blocked on a design pass before it can be broken into real tasks — none of the current epics carry this label).
 
 ## Design process for new work
 
@@ -56,7 +57,7 @@ If you change anything in `capture-agent/src/wire.rs`, you must also update `lib
 
 ## Security-sensitive changes
 
-Anything touching the capture agent's privilege model, the network binding of either process, authentication, or dependency additions in security-adjacent areas should be treated with extra scrutiny — see [docs/security.md](docs/security.md) for the current posture and what's explicitly out of scope until epic #22 lands. Do not casually expose either process beyond loopback.
+Anything touching the capture agent's privilege model, the network binding of either process, authentication, or dependency additions in security-adjacent areas should be treated with extra scrutiny — see [docs/security.md](docs/security.md) for the current posture, including the residual risks called out for the mTLS/LAN-access design (epic #22) and the newer TLS-visibility and ownership-enrichment opt-in features. Do not casually expose either process beyond loopback.
 
 ## Commit and PR conventions
 
