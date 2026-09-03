@@ -36,8 +36,19 @@ export function mapConnectionEvent(json: unknown): NetworkConnection {
   };
 }
 
+// Accepts the full `traceroute_hop` event envelope, not just its payload —
+// mirrors mapDecryptedPayloadEvent's shape (lib/decrypted-mapping.ts) for
+// the structurally identical DecryptedPayload wire variant. Owning the
+// envelope's `hop` unwrap here, in the one place both of this event's
+// consumers (app/page.tsx and lib/stream-response.ts) call through, means a
+// caller can no longer independently get the wire shape wrong the way the
+// two of them each once did (see issue #46).
 export function mapTracerouteHopEvent(json: unknown): TracerouteHop {
-  const w = json as Record<string, unknown>;
+  const envelope = json as { hop?: Record<string, unknown> };
+  const w = envelope.hop;
+  if (!w) {
+    throw new Error('malformed traceroute_hop event: missing "hop" field');
+  }
   return {
     targetIp: requireField(w, 'targetIp'),
     hopNumber: requireField(w, 'hopNumber'),

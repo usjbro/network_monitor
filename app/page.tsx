@@ -182,7 +182,7 @@ export default function TerminalApp() {
           });
         }
         if (data.type === 'traceroute_hop') {
-          const hop = mapTracerouteHopEvent(data.hop);
+          const hop = mapTracerouteHopEvent(data);
           const connectionId = targetIpToConnectionId.current.get(hop.targetIp);
           if (connectionId) {
             setTraceroute((prev) => mergeTracerouteHop(prev, connectionId, hop));

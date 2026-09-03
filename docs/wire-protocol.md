@@ -138,14 +138,18 @@ Sent once per resolved hop, progressively, as a `trace_route` control message's 
 ```json
 {
   "type": "traceroute_hop",
-  "targetIp": "93.184.216.34",
-  "hopNumber": 4,
-  "hopIp": "12.122.1.1",
-  "rttMs": 18.4
+  "hop": {
+    "targetIp": "93.184.216.34",
+    "hopNumber": 4,
+    "hopIp": "12.122.1.1",
+    "rttMs": 18.4
+  }
 }
 ```
 
-Maps to `TracerouteHop` (`lib/types.ts`) via `mapTracerouteHopEvent` (`lib/agent-mapping.ts`).
+Note the nesting: hop fields sit under a `hop` key, not flat on the event — this matches `capture-agent/src/wire.rs`'s `TracerouteHop { hop: Box<TracerouteHopJson> }` (an internally-tagged enum variant holding a single named struct field, which serde nests rather than flattens). This doc previously showed a flat shape here, which two independent call sites each copied — see [issue #46](https://github.com/usjbro/network_monitor/issues/46).
+
+Maps to `TracerouteHop` (`lib/types.ts`) via `mapTracerouteHopEvent` (`lib/agent-mapping.ts`), which owns this unwrap — pass it the full event, not `event.hop`.
 
 Field notes:
 - `hopIp`/`rttMs` are both **omitted from the JSON entirely** (not `null`) when that hop got no reply within its retry budget — this is expected, real trace data ("no response at this hop"), not an error. See the design spec's Error handling & lifecycle section.
