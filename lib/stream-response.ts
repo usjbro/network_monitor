@@ -180,9 +180,13 @@ export function buildStreamResponse(deps: StreamRouteDeps = {}): Response {
       // (targetIp, hopNumber) produced a given hopIp, and kicking off a
       // lookup for it when geoIP is enabled.
       onTracerouteHop = (event: unknown) => {
-        const hop = event as { type?: string; targetIp?: string; hopNumber?: number; hopIp?: string };
-        if (hop.type !== 'traceroute_hop') return;
-        if (hop.hopIp && hop.targetIp !== undefined && hop.hopNumber !== undefined) {
+        // Wire shape (capture-agent/src/wire.rs's `TracerouteHop { hop:
+        // Box<TracerouteHopJson> }`): hop fields nest under `hop`, not flat
+        // on the event.
+        const envelope = event as { type?: string; hop?: { targetIp?: string; hopNumber?: number; hopIp?: string } };
+        if (envelope.type !== 'traceroute_hop') return;
+        const hop = envelope.hop;
+        if (hop?.hopIp && hop.targetIp !== undefined && hop.hopNumber !== undefined) {
           hopContextByIp.set(hop.hopIp, { targetIp: hop.targetIp, hopNumber: hop.hopNumber });
           if (geoIpClient.getMode() === 'on') {
             geoIpClient.lookup(hop.hopIp);
