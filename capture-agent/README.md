@@ -29,8 +29,8 @@ event contract this binary produces.
 
 ## Beyond the base flow table
 
-This binary also does three further things, each opt-in and each documented
-in more depth elsewhere:
+This binary also does three further things, each documented in more depth
+elsewhere:
 
 - **JA3 fingerprinting** (`src/ja3.rs`) — informational, computed from
   observed TLS ClientHellos, always on (no opt-in needed since it's derived

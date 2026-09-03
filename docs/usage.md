@@ -25,7 +25,7 @@ Three additional pieces of detail live here, all read-only until you interact wi
 
 - **JA3 fingerprint** — a short label next to a connection's encryption info once the agent has observed that flow's TLS ClientHello. Informational only; treat it as "roughly what TLS client made this connection," never as an authenticated identity (JA3 is trivially spoofable by any TLS client).
 - **Ownership lookup** — trigger a WHOIS/RDAP lookup for a connection's remote IP/domain to see the owning organization. Off by default; turn it on with `enrich on` in the command bar first (see below) — the trigger does nothing while enrichment is off.
-- **Trace Route button** — runs an on-demand ICMP traceroute to that connection's remote address and renders the result as a per-hop table (RTT, and — if you also enable it — a rough geographic location per hop). Bounded agent-side to 30 hops / 45s total; a trace that doesn't complete within that window just stops, it doesn't hang the UI.
+- **Trace Route button** — runs an on-demand ICMP traceroute to that connection's remote address and is designed to render the result as a per-hop table (RTT, and — if you also enable it — a rough geographic location per hop), bounded agent-side to 30 hops / 45s total. **Currently non-functional**: a client-side bug drops every `traceroute_hop` event before it reaches the table, so the hop table stays empty even though the agent's ICMP probing works correctly — see [issue #46](https://github.com/usjbro/network_monitor/issues/46).
 
 ### Packet stream (`pcap` / `packets`)
 

@@ -65,7 +65,7 @@ Sibling routes handle the three sub-projects: `app/api/enrichment/control/route.
 | `packet` | prepends into a capped `packets` buffer (keeps the newest ~100: `[packet, ...prev.slice(0, 100)]`) |
 | `layer_update` | merges into `liveLayers`; `layers` is *derived* from it via `useMemo` |
 | `decrypted_payload` | mapped via `lib/decrypted-mapping.ts`, gated by `lib/decrypted-payload-gate.ts` to loopback/mTLS-authenticated transport, rendered in `PacketStreamView` |
-| `traceroute_hop` / `geo_hop_update` | folded into `lib/traceroute-state.ts`, rendered as a per-hop table in `ConnectionsView` |
+| `traceroute_hop` / `geo_hop_update` | intended to fold into `lib/traceroute-state.ts` and render as a per-hop table in `ConnectionsView` — **currently broken**: `app/page.tsx`'s handler passes the raw `traceroute_hop` event straight to `mapTracerouteHopEvent` instead of unwrapping its nested `hop` field, so the mapper throws on every event and it's silently dropped; the hop table never populates ([issue #46](https://github.com/usjbro/network_monitor/issues/46)) |
 
 There is no simulation code anywhere in this path — but that's not quite the same as "every number displayed originates from the capture agent": the header bar's CPU%, memory%, hostname, and uptime are still static invented values from the original scaffold, not wired to anything (see "Known, deliberate gaps" below). `components/` holds one file per view (`DashboardView`, `LayerDetailView`, `ConnectionsView`, `PacketStreamView`, `ProtocolMatrixView`), plus chrome (`HeaderBar`, `CommandLineBar`, `InstallModal`). All are presentational — they receive `theme` and view-specific data as props; there's no separate client-side data-fetching layer.
 
