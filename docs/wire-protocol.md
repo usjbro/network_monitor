@@ -40,7 +40,9 @@ Sent once per active flow, every ~1 second (the periodic emitter's tick).
     "packetLoss": 0.0,
     "status": "ESTABLISHED",
     "encryption": "TLS",
-    "sparkline": []
+    "sparkline": [],
+    "ja3Fingerprint": "e7d705a3286e19ea42f587b344ee6865",
+    "ja3Label": "matches Chrome 12x"
   }
 }
 ```
@@ -52,6 +54,7 @@ Field notes:
 - `packetLoss` — a retransmission-based *approximation*, not a precise measurement. See [troubleshooting.md](troubleshooting.md#what-does-retransmit-anomaly-mean).
 - `latencyMs` — SYN→SYN-ACK round-trip time, `0` if the handshake wasn't observed (e.g. the connection predates the agent starting).
 - `remoteHostname` (optional in the TS type) is never populated by the current agent — reverse-DNS/WHOIS enrichment is a separate, not-yet-built sub-project.
+- `ja3Fingerprint`/`ja3Label` (both optional) — present once the agent has observed this flow's TLS ClientHello; absent for flows without an observed handshake (e.g. non-TLS, or the connection predates the agent starting). `ja3Label` is best-effort and informational only — never treat it as an authenticated client identity, it is trivially spoofable by any TLS client (see `docs/superpowers/specs/2026-08-29-tls-interception-design.md`, Security model).
 
 ### `packet`
 
@@ -102,6 +105,32 @@ Only layers 3, 4, and 7 are ever present — the agent has no independent way to
 
 Defined in the wire protocol (`interface: String, capturing: bool`) but **never actually sent** by the current agent — the relay synthesizes its own `connection_status` event from the TCP connection state instead (see below). This is dead wire protocol surface; a future task should either wire it up (so the UI can display which interface is active) or remove it.
 
+### `decrypted_payload`
+
+Tier B only (opt-in, per-process decrypted TLS content via `osi-inspect` / `SSLKEYLOGFILE` — see `docs/superpowers/specs/2026-08-29-tls-interception-design.md`, Components §2–§5). Sent per HTTP/2 frame successfully decrypted and reassembled for a decrypt-eligible connection; rate-capped at the same 100/sec discrete-event budget as `packet`.
+
+```json
+{
+  "type": "decrypted_payload",
+  "payload": {
+    "connectionId": "Tcp-192.168.1.10:51000-93.184.216.34:443",
+    "streamId": 3,
+    "redacted": false,
+    "dataBase64": "OmF1dGhvcml0eTogZXhhbXBsZS5jb20="
+  }
+}
+```
+
+Field notes:
+- `connectionId` — matches `connection_update`'s `id`, so the browser can associate decrypted content with the connection/packet stream it belongs to.
+- `streamId` (optional) — the HTTP/2 stream ID this frame belongs to; absent for content the agent couldn't attribute to a specific stream.
+- `redacted` — `true` if this event's `dataBase64` decodes to a `[REDACTED]` placeholder (sensitive header name or bearer-token-shaped value; see `capture-agent/src/redact.rs`). The redaction pass runs on parsed HTTP/2 headers only — body content is never redacted (named limitation, not a bug).
+- `dataBase64` — base64-encoded UTF-8 text: either a decrypted HTTP/2 header block (`Name: value` pairs joined by `\n`, after redaction) or a decrypted HTTP/2 DATA frame body.
+
+**Refused outright over any non-loopback listener; once served through the LAN-access Caddy mTLS proxy (`deploy/`), requires the `X-Mtls-Verified: true` upstream header** — see `lib/decrypted-payload-gate.ts`'s `isDecryptedPayloadAllowed` (used by `app/api/stream/route.ts`; kept in its own module rather than exported from the route file because Next.js's typed-routes build step rejects non-standard exports from `route.ts`). A request with no such header at all (direct loopback, no Caddy in front) is allowed; a request proxied through Caddy without a verified client cert is refused. This is the same event type in both cases — the gating happens relay-side, per-connection, not by the agent withholding the event.
+
+Only ever produced for a captured TCP payload that itself begins with a TLS `application_data` record (`0x17`) — a record split across multiple TCP segments, or any record after the first one sent under a given logged secret (this module has no per-record sequence-number tracking), is silently not decrypted rather than partially/incorrectly shown. See `capture-agent/src/main.rs`'s `try_decrypt_and_emit` doc comment for the full list of named limitations.
+
 ### `traceroute_hop`
 
 Sent once per resolved hop, progressively, as a `trace_route` control message's trace runs — never automatically, and never more than once per hop (see the `trace_route` control message below for what triggers a trace at all).
@@ -140,9 +169,13 @@ Tagged by `"type"` (snake_case).
 ```json
 {"type": "pause"}
 {"type": "resume"}
+{"type": "register_decrypt_eligible", "pid": 4242, "keylogPath": "/Users/you/project/.data/keylogs/ab12cd34.keylog"}
+{"type": "unregister_decrypt_eligible", "pid": 4242}
 ```
 
 Sent by `app/api/control/route.ts` (POST endpoint, called by the UI's `pause`/`resume` command-bar commands and the header pause button) over the same TCP socket the agent uses to send events. `pause` stops the capture loop from processing new packets (existing flow state is retained, not cleared); `resume` restarts it.
+
+`register_decrypt_eligible`/`unregister_decrypt_eligible` (Tier B) add/remove a PID from the agent's in-memory `KeyLogWatcher` (`capture-agent/src/keylog.rs`) — `bin/osi-inspect.js` sends these itself: `register_decrypt_eligible` as soon as the wrapped process's PID is known (right after spawn), `unregister_decrypt_eligible` when that process exits, for whatever reason. `keylogPath` must point at a key-log file the agent can read (normally the one `bin/osi-inspect.js` created). Decrypt-eligibility state is in-memory only and never persists across an agent restart. If the relay is unreachable when `osi-inspect` tries to register, it warns to stderr and still runs the wrapped process — decryption just won't be active for that run.
 
 ### `trace_route`
 

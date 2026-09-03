@@ -38,6 +38,68 @@ describe('mapConnectionEvent', () => {
   it('throws on a malformed event rather than silently producing garbage', () => {
     expect(() => mapConnectionEvent({ id: 'incomplete' })).toThrow();
   });
+
+  it('carries ja3Fingerprint/ja3Label through when present', () => {
+    const wire = {
+      id: 'tcp-192.168.1.10:51000-93.184.216.34:443',
+      protocol: 'HTTPS/TLS',
+      appLayerProtocol: 'HTTPS/TLS',
+      transportProtocol: 'TCP',
+      osiStack: 'L4:TCP -> L3:IP',
+      localAddr: '192.168.1.10',
+      localPort: 51000,
+      remoteAddr: '93.184.216.34',
+      remotePort: 443,
+      processName: 'Safari',
+      pid: 1234,
+      rxSpeed: 1024,
+      txSpeed: 512,
+      rxBytesTotal: 4096,
+      txBytesTotal: 2048,
+      latencyMs: 20,
+      packetLoss: 0,
+      status: 'ESTABLISHED',
+      encryption: 'TLS',
+      sparkline: [1, 2, 3],
+      ja3Fingerprint: 'deadbeef',
+      ja3Label: 'matches Chrome 12x',
+    };
+
+    const connection = mapConnectionEvent(wire);
+
+    expect(connection.ja3Fingerprint).toBe('deadbeef');
+    expect(connection.ja3Label).toBe('matches Chrome 12x');
+  });
+
+  it('leaves ja3Fingerprint/ja3Label undefined when absent from the wire event', () => {
+    const wire = {
+      id: 'tcp-192.168.1.10:51000-93.184.216.34:443',
+      protocol: 'HTTPS/TLS',
+      appLayerProtocol: 'HTTPS/TLS',
+      transportProtocol: 'TCP',
+      osiStack: 'L4:TCP -> L3:IP',
+      localAddr: '192.168.1.10',
+      localPort: 51000,
+      remoteAddr: '93.184.216.34',
+      remotePort: 443,
+      processName: 'Safari',
+      pid: 1234,
+      rxSpeed: 1024,
+      txSpeed: 512,
+      rxBytesTotal: 4096,
+      txBytesTotal: 2048,
+      latencyMs: 20,
+      packetLoss: 0,
+      status: 'ESTABLISHED',
+      encryption: 'TLS',
+      sparkline: [1, 2, 3],
+    };
+
+    const connection = mapConnectionEvent(wire);
+
+    expect(connection.ja3Fingerprint).toBeUndefined();
+    expect(connection.ja3Label).toBeUndefined();
+  });
 });
 
 describe('mapConnectionClosedEvent', () => {

@@ -9,6 +9,7 @@ import {
   Radio,
 } from 'lucide-react';
 import {
+  DecryptedPayloadSegment,
   OSILayerInfo,
   NetworkConnection,
   PacketFrame,
@@ -26,6 +27,7 @@ import {
   mapTracerouteHopEvent,
   mergeLayerStats,
 } from '@/lib/agent-mapping';
+import { mapDecryptedPayloadEvent } from '@/lib/decrypted-mapping';
 import { applyEnrichmentEvent } from '@/lib/enrichment-mapping';
 import { isTraceComplete, mergeGeoHopUpdate, mergeTracerouteHop } from '@/lib/traceroute-state';
 import { HeaderBar } from '@/components/HeaderBar';
@@ -75,6 +77,10 @@ export default function TerminalApp() {
   const [packets, setPackets] = useState<PacketFrame[]>([]);
   const [historyRx, setHistoryRx] = useState<number[]>([]);
   const [historyTx, setHistoryTx] = useState<number[]>([]);
+  // Tier B (opt-in decrypted TLS content) — same 100-entry cap discipline
+  // as `packets` above, so one busy decrypt-eligible connection can't grow
+  // this buffer without bound for the life of the browser tab.
+  const [decryptedSegments, setDecryptedSegments] = useState<DecryptedPayloadSegment[]>([]);
 
   // Ownership enrichment state (spec Components §7's five-state Ownership
   // display, and §1's opt-in disclosure). `enrichmentMode` mirrors the
@@ -137,6 +143,10 @@ export default function TerminalApp() {
         if (data.type === 'packet') {
           const packet = mapPacketEvent(data.packet);
           setPackets((prev) => [packet, ...prev.slice(0, 100)]);
+        }
+        if (data.type === 'decrypted_payload') {
+          const segment = mapDecryptedPayloadEvent(data);
+          setDecryptedSegments((prev) => [segment, ...prev.slice(0, 100)]);
         }
         if (data.type === 'layer_update') {
           setLiveLayers((prev) => {
@@ -325,6 +335,7 @@ export default function TerminalApp() {
     } else if (mainCmd === 'reset') {
       setConnections([]);
       setPackets([]);
+      setDecryptedSegments([]);
     } else if (mainCmd === 'geoip' && arg1 === 'enable') {
       sendGeoIpControl('enable');
     } else if (mainCmd === 'geoip' && arg1 === 'disable') {
@@ -352,11 +363,29 @@ export default function TerminalApp() {
   const themeConfig = THEMES[selectedTheme];
   const activeLayer = layers.find((l) => l.layer === selectedLayerNum) || layers[0];
 
+  // Persistent, always-visible indicator that Tier B (opt-in decrypted TLS
+  // content) is active for at least one connection — never ambient/silent,
+  // per the spec's "decrypting must always be visible" requirement. Derived
+  // straight from having seen any decrypted_payload events for a still-open
+  // connection, rather than a dedicated wire signal (see docs/wire-protocol.md
+  // and the plan's Self-Review Notes for why: threading the wrapped
+  // command string through to the browser is flagged there as a follow-up,
+  // not built in this pass — this connection-count banner is the interim
+  // stand-in that still satisfies "never silent").
+  const decryptingConnectionIds = new Set(decryptedSegments.map((s) => s.connectionId));
+  const isDecrypting = decryptingConnectionIds.size > 0;
+
   return (
     <div className={`min-h-screen ${themeConfig.bg} ${themeConfig.text} font-mono flex flex-col justify-between overflow-x-hidden relative select-none transition-colors duration-300`}>
       {!agentConnected && (
         <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2">
           capture agent not connected — run <code>./capture-agent</code> in <code>capture-agent/</code> (see capture-agent/README.md)
+        </div>
+      )}
+
+      {isDecrypting && (
+        <div className="w-full bg-amber-900/40 border-b border-amber-700 text-amber-200 text-sm px-4 py-2">
+          Decrypting traffic for: {decryptingConnectionIds.size} connection(s) — Tier B opt-in content visible in LIVE PCAP
         </div>
       )}
 
@@ -395,6 +424,7 @@ export default function TerminalApp() {
           onReset={() => {
             setConnections([]);
             setPackets([]);
+            setDecryptedSegments([]);
           }}
           crtEnabled={crtEnabled}
           onToggleCrt={() => setCrtEnabled(!crtEnabled)}
@@ -509,6 +539,7 @@ export default function TerminalApp() {
               packets={packets}
               theme={themeConfig}
               onClearPackets={() => setPackets([])}
+              decryptedSegments={decryptedSegments}
             />
           )}
 

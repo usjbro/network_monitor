@@ -8,18 +8,22 @@ import {
   Search,
   Trash2,
 } from 'lucide-react';
-import { PacketFrame, ThemeConfig, OSILayerNumber } from '@/lib/types';
+import { DecryptedPayloadSegment, PacketFrame, ThemeConfig, OSILayerNumber } from '@/lib/types';
 
 interface PacketStreamViewProps {
   packets: PacketFrame[];
   theme: ThemeConfig;
   onClearPackets: () => void;
+  // Tier B (opt-in decrypted TLS content) — optional so this component
+  // stays backward compatible with call sites that never pass it.
+  decryptedSegments?: DecryptedPayloadSegment[];
 }
 
 export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   packets,
   theme,
   onClearPackets,
+  decryptedSegments = [],
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isFrozen, setIsFrozen] = useState(false);
@@ -241,6 +245,40 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* Tier B: Decrypted TLS Content Pane — additive to the ciphertext
+          view above, never replacing it. Only rendered at all when at
+          least one decrypted segment has been seen, so this stays
+          invisible (and the "never ambient" requirement holds) for anyone
+          not running osi-inspect. */}
+      {decryptedSegments.length > 0 && (
+        <div className={`rounded border ${theme.border} ${theme.cardBg} overflow-hidden`}>
+          <div className="bg-slate-950 px-3 py-2 border-b border-slate-800 flex justify-between items-center text-[10px] text-slate-400 font-bold">
+            <span>DECRYPTED CONTENT ({decryptedSegments.length} SEGMENTS)</span>
+            <span className="text-amber-400">[TIER B — OPT-IN]</span>
+          </div>
+          <div className="max-h-64 overflow-y-auto divide-y divide-slate-800/80">
+            {decryptedSegments.map((seg, idx) => (
+              <div key={`${seg.connectionId}-${seg.streamId ?? 'x'}-${idx}`} className="p-2 text-[11px] space-y-1">
+                <div className="flex items-center space-x-2 text-[10px] text-slate-500">
+                  <span className="px-1.5 py-0.2 rounded font-bold bg-amber-950 text-amber-400 border border-amber-800/60">
+                    Decrypted
+                  </span>
+                  <span>{seg.connectionId}</span>
+                  {seg.streamId !== undefined && <span>stream {seg.streamId}</span>}
+                </div>
+                <pre
+                  className={`p-2 rounded border border-slate-800 overflow-x-auto whitespace-pre-wrap break-all ${
+                    seg.redacted ? 'redacted italic opacity-70 text-slate-500 bg-black/40' : 'text-emerald-300 bg-black'
+                  }`}
+                >
+                  {seg.text}
+                </pre>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

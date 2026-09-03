@@ -206,6 +206,21 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             {selectedConn.osiStack}
           </div>
 
+          {/* TLS Client Fingerprint (JA3) */}
+          <div className="mt-2 text-slate-300">
+            <span className="text-slate-400">JA3</span>{' '}
+            {selectedConn.ja3Fingerprint ? (
+              <>
+                <span className="font-mono">{selectedConn.ja3Fingerprint}</span>
+                {selectedConn.ja3Label && (
+                  <span className="ml-2 text-slate-500">{selectedConn.ja3Label}</span>
+                )}
+              </>
+            ) : (
+              <span className="text-slate-500">no TLS handshake observed for this connection</span>
+            )}
+          </div>
+
           {/* Ownership section — spec Components §7 five-state display */}
           <div className="pt-2 border-t border-slate-800 space-y-1.5">
             <div className="text-[11px] font-bold text-slate-400 uppercase">Ownership</div>

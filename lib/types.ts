@@ -51,6 +51,8 @@ export interface NetworkConnection {
   status: 'ESTABLISHED' | 'SYN_SENT' | 'LISTEN' | 'TIME_WAIT' | 'CLOSE_WAIT';
   encryption: string;
   sparkline: number[];
+  ja3Fingerprint?: string;
+  ja3Label?: string;
   // Populated only when the user has opted into ownership enrichment
   // (docs/superpowers/specs/2026-08-28-ownership-enrichment-design.md).
   // `undefined` unambiguously means "never looked up" — a single presence
@@ -87,6 +89,19 @@ export interface PacketFrame {
     layer2?: { srcMac: string; dstMac: string; ethType: string; vlanTag?: string };
     layer1?: { phyType: string; bitrateMbps: number; snrDb: number; linkStatus: string };
   };
+}
+
+// Tier B (opt-in, per-process decrypted TLS content via `osi-inspect` /
+// SSLKEYLOGFILE) — one entry per decrypted HTTP/2 header block or DATA
+// frame body. Kept as a separate type (not folded into PacketFrame) since
+// it comes from a distinct, separately-gated wire event
+// (`decrypted_payload`, see docs/wire-protocol.md) with different
+// trust/sensitivity characteristics than ordinary packet metadata.
+export interface DecryptedPayloadSegment {
+  connectionId: string;
+  streamId?: number;
+  text: string;
+  redacted: boolean;
 }
 
 // A single traceroute hop, as reported by capture-agent's `traceroute_hop`

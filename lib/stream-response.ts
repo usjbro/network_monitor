@@ -15,6 +15,7 @@ import { AgentClient } from './agent-client';
 import { EnrichmentClient, EnrichmentMode } from './enrichment';
 import { GeoIpClient } from './geoip';
 import { buildGeoHopEvent } from './geoip-mapping';
+import { isDecryptedPayloadAllowed } from './decrypted-payload-gate';
 import { join } from 'node:path';
 
 declare global {
@@ -87,12 +88,19 @@ export interface StreamRouteDeps {
   agent?: StreamAgentClient;
   enrichment?: StreamEnrichmentClient;
   geoip?: StreamGeoIpClient;
+  // The incoming request, used only to gate `decrypted_payload` events
+  // (Tier B — see lib/decrypted-payload-gate.ts). Optional so existing
+  // tests that don't exercise decrypted_payload don't need to construct
+  // one — absent request behaves like direct loopback access (permissive),
+  // matching isDecryptedPayloadAllowed's own no-header default.
+  request?: Request;
 }
 
 export function buildStreamResponse(deps: StreamRouteDeps = {}): Response {
   const client = deps.agent ?? getAgentClient();
   const enrichmentClient = deps.enrichment ?? getEnrichmentClient();
   const geoIpClient = deps.geoip ?? getGeoIpClient();
+  const decryptedPayloadAllowed = deps.request ? isDecryptedPayloadAllowed(deps.request) : true;
   const encoder = new TextEncoder();
 
   // Hoisted so `cancel()` can remove the exact same listener references
@@ -110,6 +118,9 @@ export function buildStreamResponse(deps: StreamRouteDeps = {}): Response {
   const stream = new ReadableStream({
     start(controller) {
       onEvent = (event: unknown) => {
+        if ((event as { type?: string }).type === 'decrypted_payload' && !decryptedPayloadAllowed) {
+          return; // refused per transport gating — spec Components §5
+        }
         // controller.enqueue() throws if the stream has already closed/errored
         // (e.g. the browser tab navigated away between the emit and this
         // callback running). These callbacks run synchronously inside

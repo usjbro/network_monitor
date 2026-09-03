@@ -7,12 +7,13 @@ declare global {
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
-  if (body.type !== 'pause' && body.type !== 'resume') {
+  const allowedTypes = ['pause', 'resume', 'register_decrypt_eligible', 'unregister_decrypt_eligible'];
+  if (!allowedTypes.includes(body.type)) {
     return NextResponse.json({ error: 'invalid control message type' }, { status: 400 });
   }
   if (!global.__agentClient) {
     return NextResponse.json({ error: 'agent not connected' }, { status: 503 });
   }
-  global.__agentClient.sendControl({ type: body.type });
+  global.__agentClient.sendControl(body);
   return NextResponse.json({ ok: true });
 }
