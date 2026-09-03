@@ -24,13 +24,13 @@ Look at the `interface:` line. The agent runs the same command internally and cr
 
 **A VPN client is a common, deceptive case of this**: when a VPN is connected, it commonly becomes your actual default-route interface (a `utun*` device) — `route -n get default` genuinely reports it, and the agent picks it up correctly per its own logic, so nothing above looks wrong. But `utun*` tunnel interfaces are typically not visible to packet capture the way a real Wi-Fi/Ethernet interface is: the agent starts and reports "using interface utun8" with no error, then silently captures zero packets — every layer/connection stat stays at 0 indefinitely. Confirm this is what's happening with `curl -N http://127.0.0.1:3000/api/stream` (see [getting-started.md](getting-started.md#verifying-its-really-working)): if you only ever see `layer_update` events with everything zeroed, and no `packet`/`connection_update` events at all, this is almost certainly it.
 
-**Override the auto-detected interface** by setting `CAPTURE_INTERFACE` before starting the agent — this always wins over auto-detection, and fails loudly (listing the interfaces it actually found) if you name one that doesn't exist, rather than silently falling back:
+**Override the auto-detected interface** by setting `CAPTURE_INTERFACE` before starting the agent — this wins over auto-detection, and fails loudly rather than silently falling back: if you name one that doesn't exist, if it has no assigned address (which would otherwise silently capture nothing, the same failure mode as above), or if the value isn't valid UTF-8.
 
 ```bash
 CAPTURE_INTERFACE=en0 cargo run --release
 ```
 
-Use `ifconfig -l` or the `route -n get default` output from *before* your VPN connected to find your real interface name.
+Use the `route -n get default` output from *before* your VPN connected to find your real interface name (or `ifconfig -l` as a starting point — usually the same set `pcap::Device::list()` sees, but not guaranteed).
 
 ## No packets/connections appear at all, even though the agent says it's listening
 
