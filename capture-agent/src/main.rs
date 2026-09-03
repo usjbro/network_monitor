@@ -325,6 +325,7 @@ async fn main() -> std::io::Result<()> {
         };
         let mut rx = tx.subscribe();
         let paused = paused.clone();
+        let trace_tx = tx.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half).lines();
@@ -337,6 +338,34 @@ async fn main() -> std::io::Result<()> {
                                 match wire::decode_control(&text) {
                                     Some(wire::ControlMessage::Pause) => paused.store(true, Ordering::Relaxed),
                                     Some(wire::ControlMessage::Resume) => paused.store(false, Ordering::Relaxed),
+                                    Some(wire::ControlMessage::TraceRoute { target_ip }) => {
+                                        // Traceroute is on-demand only (never
+                                        // automatic) and bounded (hop
+                                        // ceiling/timeouts enforced inside
+                                        // traceroute::run_traceroute) — spawn
+                                        // it on its own task so a trace (up
+                                        // to 45s) never blocks this
+                                        // connection's control-message read
+                                        // loop or its event forwarding.
+                                        let tx = trace_tx.clone();
+                                        tokio::spawn(async move {
+                                            let result = capture_agent::traceroute::run_traceroute(&target_ip, |hop| {
+                                                let hop_json = wire::TracerouteHopJson {
+                                                    target_ip: target_ip.clone(),
+                                                    hop_number: hop.hop_number,
+                                                    hop_ip: hop.hop_ip,
+                                                    rtt_ms: hop.rtt_ms,
+                                                };
+                                                let _ = tx.send(wire::encode_event(&wire::AgentEvent::TracerouteHop {
+                                                    hop: Box::new(hop_json),
+                                                }));
+                                            })
+                                            .await;
+                                            if let Err(e) = result {
+                                                eprintln!("capture-agent: traceroute to {target_ip} failed: {e}");
+                                            }
+                                        });
+                                    }
                                     None => {}
                                 }
                             }

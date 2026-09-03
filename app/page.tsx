@@ -16,10 +16,18 @@ import {
   TerminalTheme,
   ThemeConfig,
   OSILayerNumber,
+  TracerouteHop,
 } from '@/lib/types';
 import { THEMES } from '@/lib/osi-engine';
-import { mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mergeLayerStats } from '@/lib/agent-mapping';
+import {
+  mapConnectionClosedEvent,
+  mapConnectionEvent,
+  mapPacketEvent,
+  mapTracerouteHopEvent,
+  mergeLayerStats,
+} from '@/lib/agent-mapping';
 import { applyEnrichmentEvent } from '@/lib/enrichment-mapping';
+import { isTraceComplete, mergeGeoHopUpdate, mergeTracerouteHop } from '@/lib/traceroute-state';
 import { HeaderBar } from '@/components/HeaderBar';
 import { DashboardView } from '@/components/DashboardView';
 import { LayerDetailView } from '@/components/LayerDetailView';
@@ -82,6 +90,18 @@ export default function TerminalApp() {
   // an implementation detail (not rendered) and need synchronous
   // set/clear access from both requestLookup and the SSE handler below.
   const lookupTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  // Traceroute state (on-demand only — see handleTraceRoute below, the sole
+  // trigger). Keyed by connectionId, matching ConnectionsView's props.
+  const [traceroute, setTraceroute] = useState<Record<string, TracerouteHop[]>>({});
+  const [traceInFlight, setTraceInFlight] = useState<Record<string, boolean>>({});
+  // The traceroute_hop/geo_hop_update wire events only carry targetIp, not
+  // connectionId — this ref remembers which connection asked for a trace
+  // against a given target IP so the SSE handler below can route hops back
+  // to the right connection. Populated in handleTraceRoute, read-only from
+  // the SSE effect. A ref (not state) because it's write-once-per-trace
+  // bookkeeping that should never itself trigger a re-render.
+  const targetIpToConnectionId = useRef<Map<string, string>>(new Map());
 
   // Live Capture Stream — replaces the old simulation loop
   useEffect(() => {
@@ -150,6 +170,22 @@ export default function TerminalApp() {
             next.delete(data.connectionId);
             return next;
           });
+        }
+        if (data.type === 'traceroute_hop') {
+          const hop = mapTracerouteHopEvent(data);
+          const connectionId = targetIpToConnectionId.current.get(hop.targetIp);
+          if (connectionId) {
+            setTraceroute((prev) => mergeTracerouteHop(prev, connectionId, hop));
+            if (isTraceComplete(hop, hop.targetIp)) {
+              setTraceInFlight((prev) => ({ ...prev, [connectionId]: false }));
+            }
+          }
+        }
+        if (data.type === 'geo_hop_update') {
+          const connectionId = targetIpToConnectionId.current.get(data.targetIp);
+          if (connectionId) {
+            setTraceroute((prev) => mergeGeoHopUpdate(prev, connectionId, data.hopNumber, data.location ?? undefined));
+          }
         }
       } catch (err) {
         console.error('capture-agent: failed to process stream event', err, event.data);
@@ -234,6 +270,30 @@ export default function TerminalApp() {
     });
   };
 
+  // Traceroute is on-demand only — this is the sole trigger for a trace
+  // anywhere in the app (see the design spec's Explicitly out of scope
+  // section and the implementation plan's Global Constraints).
+  const handleTraceRoute = (connectionId: string, remoteAddr: string) => {
+    targetIpToConnectionId.current.set(remoteAddr, connectionId);
+    setTraceroute((prev) => ({ ...prev, [connectionId]: [] }));
+    setTraceInFlight((prev) => ({ ...prev, [connectionId]: true }));
+    fetch('/api/traceroute/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connectionId, remoteAddr }),
+    });
+  };
+
+  // GeoIP mode is opt-in and runtime-only (never persisted) — see
+  // lib/geoip.ts and docs/geoip-protocol.md.
+  const sendGeoIpControl = (action: 'enable' | 'disable' | 'clear') => {
+    fetch('/api/geoip/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+  };
+
   // Command Line Handler
   const handleExecuteCommand = (cmdStr: string) => {
     const parts = cmdStr.toLowerCase().split(' ');
@@ -265,6 +325,12 @@ export default function TerminalApp() {
     } else if (mainCmd === 'reset') {
       setConnections([]);
       setPackets([]);
+    } else if (mainCmd === 'geoip' && arg1 === 'enable') {
+      sendGeoIpControl('enable');
+    } else if (mainCmd === 'geoip' && arg1 === 'disable') {
+      sendGeoIpControl('disable');
+    } else if (mainCmd === 'geoip' && arg1 === 'clear') {
+      sendGeoIpControl('clear');
     } else if (['install', 'macos', 'brew', 'curl', 'sw_vers'].includes(mainCmd)) {
       setIsInstallOpen(true);
     } else if (mainCmd === 'enrich' && arg1 === 'on') {
@@ -432,6 +498,9 @@ export default function TerminalApp() {
               onRequestLookup={requestLookup}
               lookingUpIds={lookingUpIds}
               unavailableIds={unavailableIds}
+              traceroute={traceroute}
+              traceInFlight={traceInFlight}
+              onTraceRoute={handleTraceRoute}
             />
           )}
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getEnrichmentClient } from '@/app/api/stream/route';
+import { getEnrichmentClient } from '@/lib/stream-response';
 
 export async function POST(request: NextRequest) {
   const body = await request.json();

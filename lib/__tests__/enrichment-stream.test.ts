@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { buildStreamResponse, StreamAgentClient, StreamEnrichmentClient } from '@/app/api/stream/route';
+import { buildStreamResponse, StreamAgentClient, StreamEnrichmentClient } from '@/lib/stream-response';
 
 // Exercises the *real* app/api/stream/route.ts stream-construction logic
 // directly, rather than a reimplementation of its SSE-forwarding behavior.

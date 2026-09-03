@@ -69,7 +69,7 @@ export class AgentClient extends EventEmitter {
     socket.on('close', handleDisconnect);
   }
 
-  sendControl(message: { type: 'pause' | 'resume' }): void {
+  sendControl(message: { type: 'pause' | 'resume' } | { type: 'trace_route'; targetIp: string }): void {
     this.socket?.write(JSON.stringify(message) + '\n');
   }
 

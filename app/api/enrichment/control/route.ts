@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getEnrichmentClient } from '@/app/api/stream/route';
+import { getEnrichmentClient } from '@/lib/stream-response';
 
 const VALID_ACTIONS = ['enable', 'enable_background', 'disable', 'disable_background', 'clear'] as const;
 
