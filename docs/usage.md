@@ -21,9 +21,17 @@ The live socket table: every active flow the agent has observed, with local/remo
 
 Note: flows currently never expire from this list for the lifetime of the agent process (tracked as [issue #28](https://github.com/usjbro/network_monitor/issues/28)) — a long-running agent will accumulate stale entries.
 
+Three additional pieces of detail live here, all read-only until you interact with them:
+
+- **JA3 fingerprint** — a short label next to a connection's encryption info once the agent has observed that flow's TLS ClientHello. Informational only; treat it as "roughly what TLS client made this connection," never as an authenticated identity (JA3 is trivially spoofable by any TLS client).
+- **Ownership lookup** — trigger a WHOIS/RDAP lookup for a connection's remote IP/domain to see the owning organization. Off by default; turn it on with `enrich on` in the command bar first (see below) — the trigger does nothing while enrichment is off.
+- **Trace Route button** — runs an on-demand ICMP traceroute to that connection's remote address and renders the result as a per-hop table (RTT, and — if you also enable it — a rough geographic location per hop). Bounded agent-side to 30 hops / 45s total; a trace that doesn't complete within that window just stops, it doesn't hang the UI.
+
 ### Packet stream (`pcap` / `packets`)
 
 A scrolling feed of the last 100 captured packets, with a hex dump of the first 64 bytes of payload. Per-layer header breakdown (parsed MACs, TLS SNI, HTTP method/path, DNS query name) is captured internally by the agent but not yet wired to this view — see [issue #29](https://github.com/usjbro/network_monitor/issues/29).
+
+**Decrypted content**: normally TLS payloads only ever show as ciphertext. If you launched the process generating this traffic through the bundled `osi-inspect` CLI (see [getting-started.md](getting-started.md#optional-features)), packets for that process's connections render their actual decrypted HTTP/HTTP2 content here instead, behind a persistent "decrypting" banner so it's always obvious when you're looking at plaintext rather than the normal ciphertext view.
 
 ### Protocol matrix (`matrix` / `topology`)
 
@@ -44,6 +52,7 @@ Type a command and press enter. Available commands:
 | `pause` | Tell the agent to pause capture (also available as a button in the header) |
 | `resume` | Tell the agent to resume capture |
 | `reset` | Clear the local connections/packets buffers (does not affect the agent) |
+| `enrich on` / `enrich off` / `enrich clear` | Turn ownership (WHOIS/RDAP) lookups on/off for the current relay session (never persisted — off again after every relay restart), or wipe the local enrichment cache and query log |
 | `install` / `macos` / `brew` / `curl` / `sw_vers` | Open the Install modal (see below) |
 
 ## Themes

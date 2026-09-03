@@ -58,3 +58,25 @@ This should not happen under normal operation — the parser is specifically har
 ## Numbers seem inflated or too fast
 
 If speeds look wildly unrealistic (many multiples of what your actual connection could sustain), you may be running a build from before the "shared clock" fix — `capture-agent/src/main.rs`'s periodic emitter previously computed elapsed time incorrectly, inflating speed metrics by roughly 1000x. Make sure you're on a current build (`git pull && cd capture-agent && cargo build --release`).
+
+## Ownership enrichment shows nothing, or is very slow
+
+- **Is it actually on?** It's off by default and never persisted — type `enrich on` in the command bar first (see [usage.md](usage.md)). Check that it didn't silently turn back off across a relay restart.
+- **First lookup for a given IP/domain is slower than subsequent ones** — results are cache-first with a 14-day TTL, so a repeat lookup should be near-instant; a fresh one goes out over the network and is deliberately rate-limited to one in-flight request with jitter between them, so a burst of lookups queues rather than firing in parallel.
+- **Some IPs never resolve an owner** — the SSRF-hardened host allowlist deliberately rejects redirects/referrals pointing at loopback/internal addresses, and private/reserved IP ranges are filtered out before any query is even made (`lib/enrichment/scope-filter.ts`). Both are expected behavior, not bugs — see `docs/superpowers/specs/2026-08-28-ownership-enrichment-design.md` for the full allowlist and threat model.
+
+## JA3 label is missing on a connection
+
+The agent can only compute a JA3 fingerprint from an observed TLS ClientHello. If a connection predates the agent starting, or its handshake happened before the agent's flow table picked it up, there's nothing to fingerprint — this is expected, not a bug. Remember the label is informational and best-effort, never an authenticated client identity (see [security.md](security.md)).
+
+## Trace Route hop table is empty or never finishes
+
+- The agent bounds every trace to 30 hops and a 45s total timeout, enforced agent-side regardless of what the relay sends — if the destination is more than 30 hops away, or a hop along the way silently drops ICMP without ever replying, the trace stops without ever reaching the destination. That's the ceiling doing its job, not a hang.
+- Some networks/firewalls rate-limit or drop ICMP Time Exceeded / Echo Reply packets entirely, which looks identical to "no hops appeared" from this app's side — try the same destination with the system `traceroute`/`ping` as an independent baseline.
+- Traceroute is on-demand only; the agent never starts one on its own, so nothing appears until you click "Trace Route" on a specific connection.
+
+## Decrypted content isn't showing in the Packet Stream
+
+- **Did you launch the process through `osi-inspect`?** This is the only way decryption ever turns on for a process — running it normally, even with the agent capturing its traffic, never decrypts anything. See [getting-started.md](getting-started.md#optional-features).
+- **Are you on a LAN/mTLS connection rather than loopback?** `lib/decrypted-payload-gate.ts` restricts rendering decrypted content to loopback or mTLS-authenticated transport — if you're seeing this from a browser accessing over plain `http://` on a non-loopback address (which shouldn't be reachable at all per this app's network posture, but worth ruling out), it's expected to stay hidden.
+- **Did the target process exit and get relaunched without `osi-inspect`?** Decrypt-eligibility is registered per-PID and unregistered on exit — a process restarted outside the wrapper needs to be relaunched through it again.

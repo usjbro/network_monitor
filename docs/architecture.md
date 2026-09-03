@@ -37,6 +37,13 @@ A standalone Rust binary, run separately from the web app. It:
 
 **Privilege model:** the agent runs as your normal user, in the macOS `access_bpf` group (one-time setup, see `capture-agent/README.md`) — never `sudo`, never root, at runtime.
 
+Three later sub-projects extended the agent in place, each opt-in and each with its own design spec under `docs/superpowers/specs/`:
+
+- **TLS visibility** (epic #25): `src/ja3.rs` fingerprints each observed TLS ClientHello (informational only — never treat it as an auth signal, it's trivially spoofable). Separately, `src/keylog.rs`'s `KeyLogWatcher` tails an ephemeral `SSLKEYLOGFILE` for one specific opted-in PID, `src/tls_decrypt.rs` decrypts that connection's TLS 1.3 records, `src/http2.rs` reassembles HTTP/2 streams and decodes HPACK, `src/redact.rs` strips sensitive headers, and `src/ring_buffer.rs` holds the resulting decrypted content in a capped, `mlock`'d, zeroed-on-evict buffer — never written to disk. Nothing decrypts unless a process was explicitly launched through `bin/osi-inspect.js` (a Node CLI, not part of the agent itself, that sets `SSLKEYLOGFILE` and registers the child PID as decrypt-eligible over the existing control channel). This is a per-process opt-in, not a blanket MITM proxy — no CA install, no traffic redirection.
+- **Network path visualization** (epic #24): `src/traceroute.rs` runs a bounded, on-demand ICMP traceroute using an unprivileged macOS ping-socket (`SOCK_DGRAM`/`IPPROTO_ICMP` — no raw-socket privilege needed, confirmed working; see `docs/superpowers/specs/2026-09-01-path-visualization-privilege-spike-result.md`), capped at 30 hops with per-hop retry/timeout and a 45s total-trace ceiling enforced agent-side.
+
+See [wire-protocol.md](wire-protocol.md) for the `decrypted_payload` and `traceroute_hop` event shapes these produce.
+
 ### 2. The Next.js relay — unprivileged
 
 - `lib/agent-client.ts` — a Node `net.Socket` client that connects to the agent, parses its NDJSON stream (handling TCP chunk boundaries splitting a JSON object across reads), and re-emits `'event'`/`'status'` on an `EventEmitter`. Reconnects automatically if the agent isn't running or drops, with a guard against the classic "both `error` and `close` fire, doubling reconnect attempts" bug.
@@ -45,6 +52,8 @@ A standalone Rust binary, run separately from the web app. It:
 
 Both routes share one `AgentClient` singleton (`global.__agentClient`) — there's one TCP connection to the agent regardless of how many browser tabs are watching.
 
+Sibling routes handle the three sub-projects: `app/api/enrichment/control/route.ts` + `app/api/enrichment/lookup/route.ts` (ownership enrichment, below), `app/api/traceroute/start/route.ts` + `app/api/geoip/control/route.ts` (path visualization, above).
+
 ### 3. `app/page.tsx` and `components/` — the browser UI
 
 `app/page.tsx` is the entire application (one client component). It opens `new EventSource('/api/stream')` in a `useEffect` and folds incoming events into React state:
@@ -52,9 +61,11 @@ Both routes share one `AgentClient` singleton (`global.__agentClient`) — there
 | Event type | Effect |
 |---|---|
 | `connection_status` | drives the "agent not connected" banner |
-| `connection_update` | upserts into the `connections` list |
+| `connection_update` | upserts into the `connections` list (now also carries `ja3Fingerprint`/`ja3Label`, see below) |
 | `packet` | prepends into a capped `packets` buffer (keeps the newest ~100: `[packet, ...prev.slice(0, 100)]`) |
 | `layer_update` | merges into `liveLayers`; `layers` is *derived* from it via `useMemo` |
+| `decrypted_payload` | mapped via `lib/decrypted-mapping.ts`, gated by `lib/decrypted-payload-gate.ts` to loopback/mTLS-authenticated transport, rendered in `PacketStreamView` |
+| `traceroute_hop` / `geo_hop_update` | folded into `lib/traceroute-state.ts`, rendered as a per-hop table in `ConnectionsView` |
 
 There is no simulation code anywhere in this path — but that's not quite the same as "every number displayed originates from the capture agent": the header bar's CPU%, memory%, hostname, and uptime are still static invented values from the original scaffold, not wired to anything (see "Known, deliberate gaps" below). `components/` holds one file per view (`DashboardView`, `LayerDetailView`, `ConnectionsView`, `PacketStreamView`, `ProtocolMatrixView`), plus chrome (`HeaderBar`, `CommandLineBar`, `InstallModal`). All are presentational — they receive `theme` and view-specific data as props; there's no separate client-side data-fetching layer.
 
@@ -63,6 +74,10 @@ There is no simulation code anywhere in this path — but that's not quite the s
 - `lib/agent-mapping.ts` — pure functions (`mapConnectionEvent`, `mapPacketEvent`, `mergeLayerStats`) translating the agent's wire JSON into the app's domain types. This is the one place that has to agree field-for-field with `capture-agent/src/wire.rs` — see [wire-protocol.md](wire-protocol.md).
 - `lib/types.ts` — all domain types (`OSILayerInfo`, `NetworkConnection`, `PacketFrame`, `SystemStats`, `ThemeConfig`).
 - `lib/osi-engine.ts` — `THEMES` (10 color schemes), `STATIC_LAYER_INFO` (per-layer *descriptive* metadata — name, PDU, protocol list, badge colors; not live values), and formatting helpers (`formatSpeed`, `formatBytes`).
+- `lib/enrichment.ts` + `lib/enrichment/` (`bootstrap.ts`, `cache.ts`, `query-log.ts`, `rdap-client.ts`, `referral-allowlist.ts`, `request-queue.ts`, `reverse-dns.ts`, `scope-filter.ts`, `whois-client.ts`, `types.ts`) + `lib/enrichment-mapping.ts` — **ownership enrichment** (epic #23): opt-in-only (`enrich on` in the command bar, never persisted across a relay restart) WHOIS/RDAP lookups attributing a remote IP/domain to an owning organization. Cache-first, rate-limited, SSRF-hardened against a reviewed RDAP/registrar host allowlist. See [enrichment-protocol.md](enrichment-protocol.md).
+- `lib/decrypted-mapping.ts` + `lib/decrypted-payload-gate.ts` — map and transport-gate the TLS-visibility sub-project's `decrypted_payload` event (see above).
+- `lib/geoip.ts` + `lib/geoip-mapping.ts` + `lib/traceroute-state.ts` — client-side state for the path-visualization sub-project (see above). See [geoip-protocol.md](geoip-protocol.md).
+- `bin/osi-inspect.js` — the standalone CLI (published via `package.json`'s `bin` field) that is the *only* way TLS decryption (above) ever turns on for a process.
 
 ## Why this shape
 

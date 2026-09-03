@@ -77,6 +77,20 @@ A few sanity checks, if you want to confirm this isn't fake data before trusting
    ```
    You should see a stream of `data: {"type":"connection_update",...}` / `"type":"packet"` / `"type":"layer_update"` lines.
 
+## Optional features
+
+Everything above is the core live-capture pipeline. Three further features exist, all opt-in and off by default:
+
+- **Ownership enrichment** — type `enrich on` in the command bar to turn on WHOIS/RDAP lookups (who owns a remote IP/domain) for the current relay session. This is a runtime-only toggle: it's off again after every relay restart, and it makes outbound queries to public registrar/RIR servers, so only turn it on if you're comfortable with that. `enrich off` turns it back off; `enrich clear` wipes the local lookup cache. See [usage.md](usage.md) and [enrichment-protocol.md](enrichment-protocol.md).
+- **Network path visualization** — click "Trace Route" on any connection in the Connections view to run an on-demand ICMP traceroute to it, rendered as a per-hop table. No setup needed: it uses an unprivileged macOS ping-socket, the same mechanism the base capture already relies on for its privilege model, confirmed working without `sudo` (see `docs/superpowers/specs/2026-09-01-path-visualization-privilege-spike-result.md`). Per-hop geoIP (rough location) is a further opt-in on top of that — see [geoip-protocol.md](geoip-protocol.md).
+- **Decrypted TLS content** — normally the Packet Stream only ever shows ciphertext for HTTPS traffic. To see one process's actual decrypted content, launch that process through the bundled CLI instead of directly, with both the agent and relay already running:
+
+  ```bash
+  npx osi-inspect /path/to/your/app --any --args --it --normally --takes
+  ```
+
+  (Launching a browser this way needs an extra `--yes-decrypt-entire-browser` flag, since that decrypts everything the browser does, not just one request.) This sets `SSLKEYLOGFILE` to a fresh, ephemeral file for just that child process and registers it with the agent as decrypt-eligible — nothing else on your machine is affected, no CA is installed, and decrypted content is never written to disk. See [usage.md](usage.md#packet-stream-pcap--packets).
+
 ## Stopping
 
 Ctrl-C both processes. Nothing runs in the background or as a system service — there's no persistent install step beyond the one-time `access_bpf` group membership.
@@ -85,4 +99,5 @@ Ctrl-C both processes. Nothing runs in the background or as a system service —
 
 - [usage.md](usage.md) — what each view shows, the command bar, themes
 - [architecture.md](architecture.md) — how the pieces fit together
+- [enrichment-protocol.md](enrichment-protocol.md) / [geoip-protocol.md](geoip-protocol.md) — the wire/control contracts for the two opt-in features above
 - [troubleshooting.md](troubleshooting.md) — common problems and what they mean
