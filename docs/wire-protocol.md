@@ -131,6 +131,27 @@ Field notes:
 
 Only ever produced for a captured TCP payload that itself begins with a TLS `application_data` record (`0x17`) — a record split across multiple TCP segments, or any record after the first one sent under a given logged secret (this module has no per-record sequence-number tracking), is silently not decrypted rather than partially/incorrectly shown. See `capture-agent/src/main.rs`'s `try_decrypt_and_emit` doc comment for the full list of named limitations.
 
+### `traceroute_hop`
+
+Sent once per resolved hop, progressively, as a `trace_route` control message's trace runs — never automatically, and never more than once per hop (see the `trace_route` control message below for what triggers a trace at all).
+
+```json
+{
+  "type": "traceroute_hop",
+  "targetIp": "93.184.216.34",
+  "hopNumber": 4,
+  "hopIp": "12.122.1.1",
+  "rttMs": 18.4
+}
+```
+
+Maps to `TracerouteHop` (`lib/types.ts`) via `mapTracerouteHopEvent` (`lib/agent-mapping.ts`).
+
+Field notes:
+- `hopIp`/`rttMs` are both **omitted from the JSON entirely** (not `null`) when that hop got no reply within its retry budget — this is expected, real trace data ("no response at this hop"), not an error. See the design spec's Error handling & lifecycle section.
+- `hopNumber` never exceeds the hop ceiling (30); a trace stops early once `hopIp` equals `targetIp` (destination reached) or the total-trace timeout (45s) elapses.
+- `targetIp` is repeated on every hop of a given trace so the relay/browser can correlate hops to the trace that produced them without tracking a separate trace-id — see `docs/geoip-protocol.md` for how the relay uses this same field to attach geoIP results.
+
 ## Relay → browser (SSE, not the raw agent protocol)
 
 `app/api/stream/route.ts` re-wraps agent events as Server-Sent Events (`data: <json>\n\n`) and adds one synthetic event type the agent itself never sends:
@@ -155,6 +176,14 @@ Tagged by `"type"` (snake_case).
 Sent by `app/api/control/route.ts` (POST endpoint, called by the UI's `pause`/`resume` command-bar commands and the header pause button) over the same TCP socket the agent uses to send events. `pause` stops the capture loop from processing new packets (existing flow state is retained, not cleared); `resume` restarts it.
 
 `register_decrypt_eligible`/`unregister_decrypt_eligible` (Tier B) add/remove a PID from the agent's in-memory `KeyLogWatcher` (`capture-agent/src/keylog.rs`) — `bin/osi-inspect.js` sends these itself: `register_decrypt_eligible` as soon as the wrapped process's PID is known (right after spawn), `unregister_decrypt_eligible` when that process exits, for whatever reason. `keylogPath` must point at a key-log file the agent can read (normally the one `bin/osi-inspect.js` created). Decrypt-eligibility state is in-memory only and never persists across an agent restart. If the relay is unreachable when `osi-inspect` tries to register, it warns to stderr and still runs the wrapped process — decryption just won't be active for that run.
+
+### `trace_route`
+
+```json
+{"type": "trace_route", "targetIp": "93.184.216.34"}
+```
+
+Sent by `app/api/traceroute/start/route.ts` (POST endpoint, called by `ConnectionsView`'s "Trace Route" button — see `docs/geoip-protocol.md` and this repo's `CLAUDE.md` for the rest of the UI wiring). On-demand only; the agent never starts a trace on its own. Triggers `traceroute::run_traceroute` (`capture-agent/src/traceroute.rs`) on a dedicated task per trace, bounded by a 30-hop ceiling, a 1s-per-hop-attempt timeout with up to 3 retries per hop, and a 45s total-trace timeout — these bounds are enforced agent-side regardless of what the relay sends. Each resolved hop streams back as its own `traceroute_hop` event (above) as soon as it's known, not batched until the trace completes.
 
 ## Adding a new field or event type
 

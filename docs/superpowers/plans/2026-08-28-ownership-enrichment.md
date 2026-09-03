@@ -2546,7 +2546,7 @@ Everything below is additive on top of core tier — no core-tier file from Task
   ```
   Consumed by `lib/enrichment.ts`'s extended-tier lookup path (this task's Step 5) to populate `remoteHostname` before attempting a domain RDAP/WHOIS lookup.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/enrichment-reverse-dns.test.ts
@@ -2574,12 +2574,12 @@ describe('reverseDnsLookup', () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/enrichment-reverse-dns.test.ts`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement `lib/enrichment/reverse-dns.ts`**
+- [x] **Step 3: Implement `lib/enrichment/reverse-dns.ts`**
 
 ```typescript
 // lib/enrichment/reverse-dns.ts
@@ -2607,16 +2607,16 @@ export async function reverseDnsLookup(
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/enrichment-reverse-dns.test.ts`
 Expected: all tests PASS.
 
-- [ ] **Step 5: Wire the extended-tier trigger into `lib/enrichment.ts`**
+- [x] **Step 5: Wire the extended-tier trigger into `lib/enrichment.ts`**
 
 In `EnrichmentClient`'s private `lookup()` method, after a successful core-tier RDAP result (or in parallel — implementer's call, but document the choice), add: if `record.org` resolved successfully and no domain-level data exists yet, call `reverseDnsLookup(remoteAddr)`; if it resolves, proceed to Task 13/14's domain RDAP/WHOIS chain (added in those tasks) and merge `registrant` onto the same `EnrichmentRecord` before emitting `'result'`. This task only adds the reverse-DNS step itself and a `remoteHostname` result field passthrough — the domain-RDAP call site is added in Task 13, so at the end of *this* task `lookup()` resolves a hostname but doesn't yet do anything further with it beyond making it available. Leave a `// TODO(Task 13): domain RDAP lookup goes here` comment marking the exact insertion point so Task 13's diff is a small, obvious addition rather than a rewrite.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/enrichment/reverse-dns.ts lib/__tests__/enrichment-reverse-dns.test.ts lib/enrichment.ts
@@ -2652,7 +2652,7 @@ git commit -m "feat(enrichment): add reverse-DNS resolution (extended tier, step
   export function extractDomainRdap(json: unknown): { registrant?: string; country?: string }; // org-level fields ONLY
   ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/enrichment-referral-allowlist.test.ts
@@ -2730,12 +2730,12 @@ describe('extractDomainRdap — registrant extraction drops personal/vCard/posta
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/enrichment-referral-allowlist.test.ts lib/__tests__/enrichment-bootstrap.test.ts lib/__tests__/enrichment-mapping.test.ts`
 Expected: the new/added cases FAIL — the new exports don't exist yet.
 
-- [ ] **Step 3: Implement `lib/enrichment/referral-allowlist.ts`**
+- [x] **Step 3: Implement `lib/enrichment/referral-allowlist.ts`**
 
 ```typescript
 // lib/enrichment/referral-allowlist.ts
@@ -2763,7 +2763,7 @@ export function isAllowedReferralHost(url: string): boolean {
 }
 ```
 
-- [ ] **Step 4: Extend `lib/enrichment/bootstrap.ts` with domain routing**
+- [x] **Step 4: Extend `lib/enrichment/bootstrap.ts` with domain routing**
 
 ```typescript
 // lib/enrichment/bootstrap.ts additions
@@ -2828,7 +2828,7 @@ export async function loadDomainBootstrap(
 
 (`readJsonIfExists`/`atomicWriteJson` are already imported at the top of this file from Task 5 — no new import needed beyond what's already there.)
 
-- [ ] **Step 5: Add `extractDomainRdap` to `lib/enrichment-mapping.ts`**
+- [x] **Step 5: Add `extractDomainRdap` to `lib/enrichment-mapping.ts`**
 
 ```typescript
 // lib/enrichment-mapping.ts addition
@@ -2865,7 +2865,7 @@ export function extractDomainRdap(json: unknown): { registrant?: string; country
 }
 ```
 
-- [ ] **Step 6: Add referral-following to `lib/enrichment/rdap-client.ts`**
+- [x] **Step 6: Add referral-following to `lib/enrichment/rdap-client.ts`**
 
 Add an optional second step to `RdapClient#fetch` (or a new `fetchWithReferral` method — implementer's choice, but keep the base `fetch` unchanged so Tasks 6/8's existing tests and call sites don't need to change): after a successful response, inspect `json.links` (RDAP `rel: 'related'` entries, per RFC 7484-style referral) and, separately, `json.port43`/`json.notices[].links` per the spec. For each candidate URL found, call `isAllowedReferralHost(url)`; if true, issue a second `fetch(url)` through the same hardened path (timeout/size-cap/backoff apply identically) and prefer its result; if false, treat the lookup as `unavailable` for registrant purposes without ever dialing that host. Add tests mirroring Task 6's structure:
 
@@ -2901,12 +2901,12 @@ it('never dials a referral to a non-allowlisted host, including a loopback addre
 });
 ```
 
-- [ ] **Step 7: Run all affected tests to verify they pass**
+- [x] **Step 7: Run all affected tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/enrichment-referral-allowlist.test.ts lib/__tests__/enrichment-bootstrap.test.ts lib/__tests__/enrichment-mapping.test.ts lib/__tests__/enrichment-rdap-client.test.ts`
 Expected: all PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add lib/enrichment/bootstrap.ts lib/enrichment/referral-allowlist.ts lib/enrichment-mapping.ts lib/enrichment/rdap-client.ts lib/__tests__/enrichment-referral-allowlist.test.ts lib/__tests__/enrichment-bootstrap.test.ts lib/__tests__/enrichment-mapping.test.ts lib/__tests__/enrichment-rdap-client.test.ts
@@ -2939,7 +2939,7 @@ git commit -m "feat(enrichment): add domain RDAP bootstrap + registrar referral 
   export function extractWhois(text: string, entry: WhoisAllowlistEntry): { org?: string; registrant?: string };
   ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```typescript
 // lib/__tests__/enrichment-whois-client.test.ts
@@ -3028,12 +3028,12 @@ describe('extractWhois — only allowlisted org-level field patterns are ever ex
 });
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/enrichment-whois-client.test.ts lib/__tests__/enrichment-mapping.test.ts`
 Expected: new cases FAIL — modules/exports don't exist yet.
 
-- [ ] **Step 3: Implement `lib/enrichment/whois-client.ts`**
+- [x] **Step 3: Implement `lib/enrichment/whois-client.ts`**
 
 ```typescript
 // lib/enrichment/whois-client.ts
@@ -3098,7 +3098,7 @@ export function queryWhois(
 }
 ```
 
-- [ ] **Step 4: Add `extractWhois` to `lib/enrichment-mapping.ts`**
+- [x] **Step 4: Add `extractWhois` to `lib/enrichment-mapping.ts`**
 
 ```typescript
 // lib/enrichment-mapping.ts addition
@@ -3127,12 +3127,12 @@ export function extractWhois(text: string, entry: WhoisAllowlistEntry): { org?: 
 }
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [x] **Step 5: Run tests to verify they pass**
 
 Run: `npx vitest run lib/__tests__/enrichment-whois-client.test.ts lib/__tests__/enrichment-mapping.test.ts`
 Expected: all tests PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/enrichment/whois-client.ts lib/enrichment-mapping.ts lib/__tests__/enrichment-whois-client.test.ts lib/__tests__/enrichment-mapping.test.ts
@@ -3152,7 +3152,7 @@ git commit -m "feat(enrichment): add narrow legacy WHOIS fallback client (extend
 - Consumes: everything from Tasks 12–14.
 - Produces: the fully-wired extended tier — this is the last task in the plan.
 
-- [ ] **Step 1: Write the failing integration test**
+- [x] **Step 1: Write the failing integration test**
 
 ```typescript
 // addition to lib/__tests__/enrichment-client.test.ts
@@ -3192,12 +3192,12 @@ it('extended tier: reverse-DNS failure leaves the core-tier result intact, no re
 
 The second stub test needs the same `vi.mock('node:dns', ...)` treatment as the first — write both fully rather than leaving the second as an empty body; it's flagged as a stub here only to keep this plan's own code block from duplicating the mock-setup boilerplate twice.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `npx vitest run lib/__tests__/enrichment-client.test.ts`
 Expected: the new extended-tier case FAILs — `lookup()` doesn't chain into domain RDAP yet.
 
-- [ ] **Step 3: Complete the chain in `lib/enrichment.ts`**
+- [x] **Step 3: Complete the chain in `lib/enrichment.ts`**
 
 Replace the `// TODO(Task 13): domain RDAP lookup goes here` marker from Task 12 Step 5 with:
 
@@ -3242,11 +3242,11 @@ if (hostname) {
 
 (Add the corresponding imports — `reverseDnsLookup`, `loadDomainBootstrap`, `resolveRdapBaseForDomain`, `extractDomainRdap`, `WHOIS_ALLOWLIST`, `queryWhois`, `extractWhois` — and a `domainBootstrapPromise`/`domainBootstrapCachePath` field pair mirroring the existing IP-bootstrap ones from Task 8.)
 
-- [ ] **Step 4: Confirm the "Unavailable" UI state is reachable**
+- [x] **Step 4: Confirm the "Unavailable" UI state is reachable**
 
 `ConnectionsView`'s Ownership section (Task 10 Step 4) currently branches only on `!selectedConn.enrichment` vs. present. Add the fifth state: when a lookup has completed (i.e. the connection is no longer in the `lookingUpIds` set from Task 10) but produced no `org`/`asn`/`registrant` at all, render `"Unavailable."` instead of an empty `Org: — · ASN: —` line — the spec draws a distinction between "an ASN can legitimately be blank while org is present" (fine, shown as `—`) and "nothing came back at all" (shown as `Unavailable`, a different message). Add a short-circuit check for `!enrichment.org && !enrichment.asn && !enrichment.registrant` before the normal render path.
 
-- [ ] **Step 5: Run the full test suite and manual end-to-end check**
+- [x] **Step 5: Run the full test suite and manual end-to-end check**
 
 Run: `npx vitest run`
 Expected: every test in this plan passes, including the extended-tier chain.
@@ -3256,7 +3256,7 @@ Expected: both succeed with no new errors/warnings.
 
 Manually (with the capture agent and `npm run dev` both running, real network access): `enrich on` in the command bar, select a connection to a domain you expect to have RDAP-visible registrant data (e.g. one resolving to a `.com`/`.org` you control or know), expand Ownership, and confirm `Registrant: ...` appears after the on-demand lookup completes.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/enrichment.ts components/ConnectionsView.tsx lib/__tests__/enrichment-client.test.ts
@@ -3273,7 +3273,7 @@ git commit -m "feat(enrichment): wire extended-tier reverse-DNS + domain RDAP/WH
 **Interfaces:**
 - Produces: an accurate security posture doc — no code change.
 
-- [ ] **Step 1: Replace the stale bullet**
+- [x] **Step 1: Replace the stale bullet**
 
 In the "What's explicitly NOT done yet" section, replace:
 
@@ -3283,7 +3283,7 @@ with a short description of what actually shipped — default-off, runtime-only 
 
 Also add a new bullet (or extend the existing "no authentication" framing) noting the relay-wide (not per-viewer) scope of the enrichment opt-in, per the spec's named "Explicitly out of scope" limitation — this matters more once epic #22 (LAN access) lands and multiple devices can see the same relay.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 git add docs/security.md
@@ -3294,13 +3294,13 @@ git commit -m "docs(security): update posture doc for ownership enrichment (epic
 
 ## Post-plan verification
 
-- [ ] `npx vitest run` — every test in this plan (Tasks 1–15) passes
-- [ ] `npx tsc --noEmit` — no new type errors
+- [x] `npx vitest run` — every test in this plan (Tasks 1–15) passes
+- [x] `npx tsc --noEmit` — no new type errors
 - [ ] `npm run lint` — no new lint errors
-- [ ] `npm run build` — Next.js production build succeeds
-- [ ] `grep -rn "dangerouslySetInnerHTML\|\.innerHTML\s*=" app/ components/ lib/` — still empty (Task 11's regression test already enforces this, but worth a manual final check)
+- [x] `npm run build` — Next.js production build succeeds
+- [x] `grep -rn "dangerouslySetInnerHTML\|\.innerHTML\s*=" app/ components/ lib/` — still empty (Task 11's regression test already enforces this, but worth a manual final check)
 - [ ] Manual end-to-end check (Task 9 Step 6 and Task 15 Step 5): `enrich on`, `enrich background on`, `enrich clear`, and on-demand per-connection lookup all work against a running agent + relay with real network access; the disclosure banner reappears every time enrichment is (re-)enabled, not just the first time
-- [ ] Confirm no file under `capture-agent/` changed — this whole plan is relay+browser only, per the spec's architecture
+- [x] Confirm no file under `capture-agent/` changed — this whole plan is relay+browser only, per the spec's architecture
 - [ ] Confirm `.data/enrichment/cache.json` and `.data/enrichment/query-log.ndjson` are created with `0600` permissions on a real run (`ls -la .data/enrichment/`)
 
 **Next plan:** sub-project 3 (network path visualization — on-demand traceroute + per-hop geoIP, consuming this sub-project's cached ASN/org data as hop context) — not yet written; per `CONTRIBUTING.md`'s spec-then-plan process, write its design spec first once this plan's software is working end-to-end and epic #23 is closed.

@@ -3,6 +3,7 @@ pub mod l7;
 pub mod flow;
 pub mod process_lookup;
 pub mod rate_limit;
+pub mod traceroute;
 pub mod wire;
 pub mod ja3;
 pub mod core_limits;

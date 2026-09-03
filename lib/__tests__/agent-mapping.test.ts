@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent } from '../agent-mapping';
+import { mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mapTracerouteHopEvent } from '../agent-mapping';
 
 describe('mapConnectionEvent', () => {
   it('maps agent wire JSON to a NetworkConnection', () => {
@@ -176,5 +176,20 @@ describe('mapPacketEvent', () => {
     };
 
     expect(() => mapPacketEvent(wire)).toThrow();
+  });
+});
+
+describe('mapTracerouteHopEvent', () => {
+  it('maps a hop with a response', () => {
+    const event = { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4 };
+    const hop = mapTracerouteHopEvent(event);
+    expect(hop).toEqual({ targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4, location: undefined });
+  });
+
+  it('maps a no-response hop with hopIp/rttMs undefined, not throwing', () => {
+    const event = { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 5 };
+    const hop = mapTracerouteHopEvent(event);
+    expect(hop.hopIp).toBeUndefined();
+    expect(hop.rttMs).toBeUndefined();
   });
 });

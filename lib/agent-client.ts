@@ -74,8 +74,13 @@ export class AgentClient extends EventEmitter {
       | { type: 'pause' | 'resume' }
       | { type: 'register_decrypt_eligible'; pid: number; keylogPath: string }
       | { type: 'unregister_decrypt_eligible'; pid: number }
+      | { type: 'trace_route'; targetIp: string }
   ): void {
     this.socket?.write(JSON.stringify(message) + '\n');
+  }
+
+  isConnected(): boolean {
+    return this.socket !== null;
   }
 
   stop(): void {

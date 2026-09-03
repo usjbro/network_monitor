@@ -53,6 +53,20 @@ export interface NetworkConnection {
   sparkline: number[];
   ja3Fingerprint?: string;
   ja3Label?: string;
+  // Populated only when the user has opted into ownership enrichment
+  // (docs/superpowers/specs/2026-08-28-ownership-enrichment-design.md).
+  // `undefined` unambiguously means "never looked up" — a single presence
+  // check gates whether the Ownership section shows anything but its
+  // disabled/not-yet-looked-up state.
+  enrichment?: {
+    org?: string;
+    asn?: string;    // best-effort RIR registry data, NOT BGP-observed routing data — see spec Scope
+    asnOrg?: string;
+    country?: string;
+    registrant?: string; // extended tier only (domain registrant)
+    source: 'rdap' | 'whois' | 'cache';
+    fetchedAt: string;
+  };
 }
 
 export interface PacketFrame {
@@ -88,6 +102,20 @@ export interface DecryptedPayloadSegment {
   streamId?: number;
   text: string;
   redacted: boolean;
+}
+
+// A single traceroute hop, as reported by capture-agent's `traceroute_hop`
+// wire event (docs/wire-protocol.md) and, once resolved, enriched by the
+// relay's `geo_hop_update` SSE event (docs/geoip-protocol.md). `hopIp`/
+// `rttMs` are both absent — not an error state — when that hop got no
+// reply within its retry budget. `location` starts undefined and is filled
+// in later, separately, only if geoIP is enabled.
+export interface TracerouteHop {
+  targetIp: string;
+  hopNumber: number;
+  hopIp?: string;
+  rttMs?: number;
+  location?: { city?: string; country?: string };
 }
 
 export type TerminalTheme = 'sophisticated' | 'macos_pro' | 'macos_homebrew' | 'iterm_snazzy' | 'matrix' | 'dracula' | 'amber' | 'cyberpunk' | 'catppuccin' | 'nord';

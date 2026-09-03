@@ -1,4 +1,4 @@
-import { NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame } from './types';
+import { NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -33,6 +33,17 @@ export function mapConnectionEvent(json: unknown): NetworkConnection {
     sparkline: requireField(w, 'sparkline'),
     ja3Fingerprint: w.ja3Fingerprint as string | undefined,
     ja3Label: w.ja3Label as string | undefined,
+  };
+}
+
+export function mapTracerouteHopEvent(json: unknown): TracerouteHop {
+  const w = json as Record<string, unknown>;
+  return {
+    targetIp: requireField(w, 'targetIp'),
+    hopNumber: requireField(w, 'hopNumber'),
+    hopIp: w.hopIp as string | undefined,
+    rttMs: w.rttMs as number | undefined,
+    location: undefined,
   };
 }
 

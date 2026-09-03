@@ -75,6 +75,12 @@ export const CommandLineBar: React.FC<CommandLineBarProps> = ({
             <div><strong className="text-emerald-400">install / macos / brew</strong>: Open macOS Terminal installer & PWA</div>
             <div><strong className="text-emerald-400">theme [sophisticated|macos_pro|matrix]</strong>: Switch visual theme</div>
             <div><strong className="text-emerald-400">pause / resume</strong>: Pause or resume the capture agent</div>
+            <div><strong className="text-emerald-400">enrich on / off</strong>: Toggle on-demand ownership lookups (RDAP)</div>
+            <div><strong className="text-emerald-400">enrich background on / off</strong>: Toggle whole-table background lookups</div>
+            <div><strong className="text-emerald-400">enrich clear</strong>: Wipe enrichment cache + query log, disable</div>
+            <div><strong className="text-emerald-400">geoip enable</strong>: Opt in to geoIP lookups for traceroute hops</div>
+            <div><strong className="text-emerald-400">geoip disable</strong>: Turn geoIP lookups back off</div>
+            <div><strong className="text-emerald-400">geoip clear</strong>: Erase the on-disk geoIP cache</div>
           </div>
         </div>
       )}
