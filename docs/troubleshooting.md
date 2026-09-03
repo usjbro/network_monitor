@@ -20,7 +20,17 @@ If it says something else — `ap1`, `awdl0`, `lo0`, `utun0`, etc. — that's th
 route -n get default
 ```
 
-Look at the `interface:` line. The agent runs the same command internally and cross-references it against available capture devices (`pcap::Device::list()`), falling back to `pcap::Device::lookup()`'s own guess only if that fails. If your `route -n get default` output doesn't show a usable interface name (e.g. you're on a VPN with an unusual routing setup), the agent has no way to guess correctly — there's currently no manual override flag; this would be a reasonable small feature to add if you hit it.
+Look at the `interface:` line. The agent runs the same command internally and cross-references it against available capture devices (`pcap::Device::list()`), falling back to `pcap::Device::lookup()`'s own guess only if that fails.
+
+**A VPN client is a common, deceptive case of this**: when a VPN is connected, it commonly becomes your actual default-route interface (a `utun*` device) — `route -n get default` genuinely reports it, and the agent picks it up correctly per its own logic, so nothing above looks wrong. But `utun*` tunnel interfaces are typically not visible to packet capture the way a real Wi-Fi/Ethernet interface is: the agent starts and reports "using interface utun8" with no error, then silently captures zero packets — every layer/connection stat stays at 0 indefinitely. Confirm this is what's happening with `curl -N http://127.0.0.1:3000/api/stream` (see [getting-started.md](getting-started.md#verifying-its-really-working)): if you only ever see `layer_update` events with everything zeroed, and no `packet`/`connection_update` events at all, this is almost certainly it.
+
+**Override the auto-detected interface** by setting `CAPTURE_INTERFACE` before starting the agent — this always wins over auto-detection, and fails loudly (listing the interfaces it actually found) if you name one that doesn't exist, rather than silently falling back:
+
+```bash
+CAPTURE_INTERFACE=en0 cargo run --release
+```
+
+Use `ifconfig -l` or the `route -n get default` output from *before* your VPN connected to find your real interface name.
 
 ## No packets/connections appear at all, even though the agent says it's listening
 

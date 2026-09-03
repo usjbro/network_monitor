@@ -202,11 +202,38 @@ fn default_route_interface_name() -> Option<String> {
         .map(|name| name.to_string())
 }
 
+fn find_device_by_name<'a>(devices: &'a [pcap::Device], name: &str) -> Option<&'a pcap::Device> {
+    devices.iter().find(|d| d.name == name)
+}
+
+/// `CAPTURE_INTERFACE`, when set, always wins over auto-detection — this is
+/// the escape hatch for exactly the case auto-detection can't handle: the
+/// OS's default route pointing at an interface (e.g. a VPN's `utun*`
+/// tunnel) that `route -n get default` correctly reports but that pcap
+/// can't actually capture real traffic on. An override naming an interface
+/// that doesn't exist fails loudly, listing what's actually available,
+/// rather than silently falling back to auto-detection — a silent fallback
+/// would defeat the entire point of setting the override in the first
+/// place (see docs/troubleshooting.md's "Wrong interface detected").
 fn detect_interface() -> pcap::Device {
+    if let Ok(name) = std::env::var("CAPTURE_INTERFACE") {
+        let devices = pcap::Device::list()
+            .unwrap_or_else(|e| panic!("CAPTURE_INTERFACE={name} set, but failed to list capture devices: {e}"));
+        return find_device_by_name(&devices, &name)
+            .cloned()
+            .unwrap_or_else(|| {
+                let available: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+                panic!(
+                    "CAPTURE_INTERFACE={name} does not match any capture-capable interface. Available: {}",
+                    available.join(", ")
+                )
+            });
+    }
+
     if let Some(name) = default_route_interface_name() {
         if let Ok(devices) = pcap::Device::list() {
-            if let Some(device) = devices.into_iter().find(|d| d.name == name) {
-                return device;
+            if let Some(device) = find_device_by_name(&devices, &name) {
+                return device.clone();
             }
         }
     }
@@ -625,7 +652,36 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::find_device_by_name;
     use tokio::sync::broadcast;
+
+    fn fake_device(name: &str) -> pcap::Device {
+        pcap::Device {
+            name: name.to_string(),
+            desc: None,
+            addresses: vec![],
+            flags: pcap::DeviceFlags::empty(),
+        }
+    }
+
+    #[test]
+    fn find_device_by_name_returns_the_matching_device() {
+        let devices = vec![fake_device("lo0"), fake_device("en0"), fake_device("utun8")];
+        let found = find_device_by_name(&devices, "en0");
+        assert_eq!(found.map(|d| d.name.as_str()), Some("en0"));
+    }
+
+    #[test]
+    fn find_device_by_name_returns_none_for_an_unknown_name() {
+        let devices = vec![fake_device("lo0"), fake_device("en0")];
+        assert!(find_device_by_name(&devices, "en99").is_none());
+    }
+
+    #[test]
+    fn find_device_by_name_returns_none_for_an_empty_list() {
+        let devices: Vec<pcap::Device> = vec![];
+        assert!(find_device_by_name(&devices, "en0").is_none());
+    }
 
     /// Proves the Lagged branch is reachable and recoverable: a slow
     /// receiver that falls behind a broadcast channel's capacity gets
