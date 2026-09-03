@@ -37,16 +37,26 @@ impl DecryptedRingBuffer {
         self.used_bytes += data.len();
         self.entries.push_back(data);
         while self.used_bytes > self.capacity_bytes {
-            if let Some(mut oldest) = self.entries.pop_front() {
-                self.used_bytes -= oldest.len();
-                unsafe {
-                    libc::munlock(oldest.as_ptr() as *const libc::c_void, oldest.len());
-                }
-                oldest.zeroize(); // explicit zeroing primitive, not reliance on Drop alone
-            } else {
+            if self.evict_oldest().is_none() {
                 break;
             }
         }
+    }
+
+    /// Pops the oldest entry, munlocks it, and zeroizes it in place before
+    /// returning it to the caller — explicit zeroing, not reliance on Drop
+    /// alone (spec Components §3). Returning the already-zeroized buffer
+    /// (rather than dropping it here) lets tests inspect the zeroed bytes
+    /// directly instead of reading a pointer into memory this function
+    /// already freed, which would be a use-after-free.
+    fn evict_oldest(&mut self) -> Option<Vec<u8>> {
+        let mut oldest = self.entries.pop_front()?;
+        self.used_bytes -= oldest.len();
+        unsafe {
+            libc::munlock(oldest.as_ptr() as *const libc::c_void, oldest.len());
+        }
+        oldest.zeroize();
+        Some(oldest)
     }
 
     /// Returns every entry currently held after the given cursor (this
@@ -63,11 +73,6 @@ impl DecryptedRingBuffer {
 
     pub fn mlock_engaged(&self) -> bool {
         self.mlock_engaged
-    }
-
-    #[cfg(test)]
-    fn debug_first_entry_ptr(&self) -> *const u8 {
-        self.entries.front().map(|e| e.as_ptr()).unwrap_or(std::ptr::null())
     }
 }
 
@@ -105,13 +110,13 @@ mod tests {
     #[test]
     fn evicted_entries_are_actually_overwritten_not_merely_dropped() {
         // Verifies the zeroing primitive is invoked, not relying on Drop
-        // alone (spec Components §3). Exercised via a capacity that forces
-        // an eviction and a spy that records what was written where the
-        // evicted bytes lived.
+        // alone (spec Components §3). Calls evict_oldest() directly so the
+        // zeroized buffer can be inspected while still alive, rather than
+        // reading a pointer into memory that would already be freed had we
+        // gone through push()'s normal capacity-triggered eviction path.
         let mut buf = DecryptedRingBuffer::new(5);
         buf.push(vec![0xAA; 5]);
-        let ptr_before = buf.debug_first_entry_ptr(); // test-only accessor exposed under #[cfg(test)]
-        buf.push(vec![0xBB; 5]); // forces eviction of the 0xAA entry
-        assert_ne!(unsafe { *ptr_before }, 0xAA, "evicted memory must be zeroed, not left with stale plaintext");
+        let evicted = buf.evict_oldest().expect("an entry should have been evicted");
+        assert!(evicted.iter().all(|&b| b == 0), "evicted memory must be zeroed, not left with stale plaintext");
     }
 }
