@@ -22,7 +22,22 @@ the interface carrying your default route (via `route -n get default`,
 cross-referenced against `pcap::Device::list()`) — check the startup log
 line ("using interface en0") to confirm it picked the right one; see
 [../docs/troubleshooting.md](../docs/troubleshooting.md#wrong-interface-detected)
-if not.
+if not (a VPN client is a common cause — it becomes your default route but
+usually isn't visible to packet capture).
+
+To force a specific interface instead of auto-detecting, set
+`CAPTURE_INTERFACE` (an empty/blank value is treated as unset):
+
+    CAPTURE_INTERFACE=en0 cargo run --release
+
+This wins over auto-detection, and fails loudly rather than silently
+falling back to it — including if the name doesn't match any interface
+pcap can see, or matches one with no assigned address (which would
+otherwise silently capture nothing: see `flow.rs`'s `FlowTable::is_local`).
+The error lists what pcap actually found, except when listing itself is
+what failed. Note `pcap::Device::list()` is the authority here, not
+`ifconfig -l` — they're usually the same set, but `access_bpf` scoping can
+make them differ.
 
 See [../docs/wire-protocol.md](../docs/wire-protocol.md) for the full JSON
 event contract this binary produces.

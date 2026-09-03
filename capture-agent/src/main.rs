@@ -202,7 +202,77 @@ fn default_route_interface_name() -> Option<String> {
         .map(|name| name.to_string())
 }
 
+fn find_device_by_name<'a>(devices: &'a [pcap::Device], name: &str) -> Option<&'a pcap::Device> {
+    devices.iter().find(|d| d.name == name)
+}
+
+/// A device with no assigned addresses can still be *found* by name, but
+/// FlowTable::is_local (flow.rs) — which decides whether an observed
+/// packet's src/dst IP counts as "this machine" — checks membership in
+/// exactly this addresses list. An addressless device therefore silently
+/// captures nothing: every packet's key_for() returns None and observe()
+/// no-ops, with no error at all. Rejecting it here, loudly, at startup
+/// turns that into an immediate, diagnosable failure instead of a repeat
+/// of the exact "starts cleanly, captures zero packets forever" bug this
+/// whole override exists to let users escape.
+fn is_capturable(device: &pcap::Device) -> bool {
+    !device.addresses.is_empty()
+}
+
+/// Treats an empty or whitespace-only `CAPTURE_INTERFACE` value the same as
+/// unset (falls through to auto-detection) rather than as an explicit,
+/// confusing "" override — e.g. a templated launch script or CI config
+/// that defines the variable but leaves it blank shouldn't produce
+/// `CAPTURE_INTERFACE= does not match any capture-capable interface`.
+fn is_meaningful_override(raw: &str) -> bool {
+    !raw.trim().is_empty()
+}
+
+/// `CAPTURE_INTERFACE`, when set to a non-empty value, always wins over
+/// auto-detection — this is the escape hatch for exactly the case
+/// auto-detection can't handle: the OS's default route pointing at an
+/// interface (e.g. a VPN's `utun*` tunnel) that `route -n get default`
+/// correctly reports but that pcap can't actually capture real traffic on.
+/// An override naming an interface that doesn't exist or isn't capturable
+/// fails loudly rather than silently falling back to auto-detection — a
+/// silent fallback would defeat the entire point of setting the override
+/// in the first place (see docs/troubleshooting.md's "Wrong interface
+/// detected"). A value that fails to decode as UTF-8 is treated the same
+/// way, not silently ignored — `std::env::var`'s `Result` alone would
+/// quietly treat that case as "unset."
 fn detect_interface() -> pcap::Device {
+    if let Some(raw) = std::env::var_os("CAPTURE_INTERFACE") {
+        let name = raw
+            .into_string()
+            .unwrap_or_else(|invalid| panic!("CAPTURE_INTERFACE is set but not valid UTF-8: {invalid:?}"));
+        if is_meaningful_override(&name) {
+            let devices = pcap::Device::list().unwrap_or_else(|e| {
+                panic!("CAPTURE_INTERFACE={name} set, but failed to list capture devices: {e}")
+            });
+            let available: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+            let device = find_device_by_name(&devices, &name).unwrap_or_else(|| {
+                panic!(
+                    "CAPTURE_INTERFACE={name} does not match any capture-capable interface. Available: {}",
+                    available.join(", ")
+                )
+            });
+            if !is_capturable(device) {
+                panic!(
+                    "CAPTURE_INTERFACE={name} matches an interface with no assigned address, so \
+                     captured packets can't be attributed as local/remote and nothing will be \
+                     recorded. Interfaces with an address: {}",
+                    devices
+                        .iter()
+                        .filter(|d| is_capturable(d))
+                        .map(|d| d.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            return device.clone();
+        }
+    }
+
     if let Some(name) = default_route_interface_name() {
         if let Ok(devices) = pcap::Device::list() {
             if let Some(device) = devices.into_iter().find(|d| d.name == name) {
@@ -625,7 +695,75 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{find_device_by_name, is_capturable, is_meaningful_override};
     use tokio::sync::broadcast;
+
+    fn fake_device(name: &str) -> pcap::Device {
+        pcap::Device {
+            name: name.to_string(),
+            desc: None,
+            addresses: vec![],
+            flags: pcap::DeviceFlags::empty(),
+        }
+    }
+
+    #[test]
+    fn find_device_by_name_returns_the_matching_device() {
+        let devices = vec![fake_device("lo0"), fake_device("en0"), fake_device("utun8")];
+        let found = find_device_by_name(&devices, "en0");
+        assert_eq!(found.map(|d| d.name.as_str()), Some("en0"));
+    }
+
+    #[test]
+    fn find_device_by_name_returns_none_for_an_unknown_name() {
+        let devices = vec![fake_device("lo0"), fake_device("en0")];
+        assert!(find_device_by_name(&devices, "en99").is_none());
+    }
+
+    #[test]
+    fn find_device_by_name_returns_none_for_an_empty_list() {
+        let devices: Vec<pcap::Device> = vec![];
+        assert!(find_device_by_name(&devices, "en0").is_none());
+    }
+
+    fn fake_device_with_addr(name: &str) -> pcap::Device {
+        pcap::Device {
+            name: name.to_string(),
+            desc: None,
+            addresses: vec![pcap::Address {
+                addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 100)),
+                netmask: None,
+                broadcast_addr: None,
+                dst_addr: None,
+            }],
+            flags: pcap::DeviceFlags::empty(),
+        }
+    }
+
+    #[test]
+    fn device_has_addresses_is_true_for_a_device_with_an_assigned_address() {
+        assert!(is_capturable(&fake_device_with_addr("en0")));
+    }
+
+    #[test]
+    fn device_has_addresses_is_false_for_an_addressless_device() {
+        // A name-matching but addressless interface (e.g. a VPN adapter
+        // that exists but isn't connected, or an unused bridge) would
+        // otherwise be accepted by CAPTURE_INTERFACE and then silently
+        // capture nothing: FlowTable::is_local (flow.rs) checks membership
+        // in exactly this addresses list, so every packet's key_for()
+        // would return None and observe() would no-op forever, with no
+        // error — reproducing the exact bug this override exists to fix.
+        assert!(!is_capturable(&fake_device("utun9")));
+    }
+
+    #[test]
+    fn is_meaningful_override_rejects_empty_and_whitespace_only_values() {
+        assert!(!is_meaningful_override(""));
+        assert!(!is_meaningful_override("   "));
+        assert!(is_meaningful_override("en0"));
+        assert!(is_meaningful_override("  en0  "));
+    }
 
     /// Proves the Lagged branch is reachable and recoverable: a slow
     /// receiver that falls behind a broadcast channel's capacity gets
