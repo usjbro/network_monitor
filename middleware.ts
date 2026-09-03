@@ -1,17 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { buildCsp } from '@/lib/csp';
 
 export function middleware(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
-  const csp = [
-    `default-src 'self'`,
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
-    `style-src 'self'`,
-    `img-src 'self' data:`,
-    `connect-src 'self'`,
-    `frame-ancestors 'none'`,
-    `base-uri 'self'`,
-    `object-src 'none'`,
-  ].join('; ');
+  const csp = buildCsp(nonce, request);
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('x-nonce', nonce);

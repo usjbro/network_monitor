@@ -9,17 +9,11 @@ export default function manifest(): MetadataRoute.Manifest {
     display: 'standalone',
     background_color: '#0a0a0b',
     theme_color: '#0a0a0b',
-    icons: [
-      {
-        src: 'https://picsum.photos/seed/osimon192/192/192',
-        sizes: '192x192',
-        type: 'image/png',
-      },
-      {
-        src: 'https://picsum.photos/seed/osimon512/512/512',
-        sizes: '512x512',
-        type: 'image/png',
-      },
-    ],
+    // No real app icon exists in this repo yet — these previously pointed
+    // at Picsum Photos placeholder URLs (random stock photos, a leftover
+    // from the original Google AI Studio scaffold), which the CSP's
+    // `img-src 'self' data:` correctly blocks anyway. Omitting `icons`
+    // rather than pointing at a fabricated one; add a real local icon here
+    // (e.g. via app/icon.tsx) when one exists.
   };
 }
