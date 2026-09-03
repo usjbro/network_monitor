@@ -13,7 +13,7 @@ Built with Next.js 16 (App Router), React 19, and Tailwind v4 on the frontend, a
 - **Connections view** — live active socket table (TCP/UDP) with per-connection speed, latency, process attribution, encryption info, and JA3 TLS-client fingerprint (informational only, not an auth signal)
 - **Packet stream** — a scrolling feed of real captured packets with header breakdowns and hex dumps
 - **Protocol matrix / topology view**
-- **Network path visualization** — on-demand ICMP traceroute per connection, designed to render as a hop table with opt-in per-hop geoIP lookups; **currently non-functional in the UI** due to a known client-side bug ([#46](https://github.com/usjbro/network_monitor/issues/46)) — the agent-side probing works, the hop table just never populates
+- **Network path visualization** — on-demand ICMP traceroute per connection, rendered as a hop table, with opt-in per-hop geoIP lookups
 - **Ownership enrichment** *(opt-in, off by default — `enrich on`)* — WHOIS/RDAP lookups that attribute a remote IP/domain to an owning organization, cached locally and rate-limited against public registrar/RIR servers
 - **TLS content visibility** *(opt-in, per-process only)* — launch any single process via the bundled `osi-inspect` CLI to decrypt and inspect that process's own HTTPS/HTTP2 traffic in the packet stream; nothing is decrypted unless you explicitly launch it this way — no CA, no cert forging, no blanket MITM
 - **10 terminal color themes** (sophisticated, macOS Pro, macOS Homebrew, iTerm Snazzy, Matrix, Dracula, Amber, Cyberpunk, Catppuccin, Nord)

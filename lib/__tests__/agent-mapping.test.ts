@@ -180,16 +180,25 @@ describe('mapPacketEvent', () => {
 });
 
 describe('mapTracerouteHopEvent', () => {
+  // Real wire shape (capture-agent/src/wire.rs's `TracerouteHop { hop:
+  // Box<TracerouteHopJson> }`): fields nest under `hop`, not flat on the
+  // event — see docs/wire-protocol.md. A flat fixture here is exactly what
+  // let issue #46 (traceroute_hop events silently dropped) ship undetected.
   it('maps a hop with a response', () => {
-    const event = { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4 };
+    const event = { type: 'traceroute_hop', hop: { targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4 } };
     const hop = mapTracerouteHopEvent(event);
     expect(hop).toEqual({ targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4, location: undefined });
   });
 
   it('maps a no-response hop with hopIp/rttMs undefined, not throwing', () => {
-    const event = { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 5 };
+    const event = { type: 'traceroute_hop', hop: { targetIp: '93.184.216.34', hopNumber: 5 } };
     const hop = mapTracerouteHopEvent(event);
     expect(hop.hopIp).toBeUndefined();
     expect(hop.rttMs).toBeUndefined();
+  });
+
+  it('throws on an event with no "hop" field at all', () => {
+    const event = { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 4 };
+    expect(() => mapTracerouteHopEvent(event)).toThrow('missing "hop" field');
   });
 });

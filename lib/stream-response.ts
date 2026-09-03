@@ -16,6 +16,7 @@ import { EnrichmentClient, EnrichmentMode } from './enrichment';
 import { GeoIpClient } from './geoip';
 import { buildGeoHopEvent } from './geoip-mapping';
 import { isDecryptedPayloadAllowed } from './decrypted-payload-gate';
+import { mapTracerouteHopEvent } from './agent-mapping';
 import { join } from 'node:path';
 
 declare global {
@@ -180,9 +181,18 @@ export function buildStreamResponse(deps: StreamRouteDeps = {}): Response {
       // (targetIp, hopNumber) produced a given hopIp, and kicking off a
       // lookup for it when geoIP is enabled.
       onTracerouteHop = (event: unknown) => {
-        const hop = event as { type?: string; targetIp?: string; hopNumber?: number; hopIp?: string };
-        if (hop.type !== 'traceroute_hop') return;
-        if (hop.hopIp && hop.targetIp !== undefined && hop.hopNumber !== undefined) {
+        if ((event as { type?: string }).type !== 'traceroute_hop') return;
+        // mapTracerouteHopEvent owns the wire event's envelope/`hop`-field
+        // unwrap (see lib/agent-mapping.ts) — a malformed event here isn't
+        // this listener's problem to diagnose, just skip it; `onEvent`
+        // above still forwards the raw event to the browser regardless.
+        let hop;
+        try {
+          hop = mapTracerouteHopEvent(event);
+        } catch {
+          return;
+        }
+        if (hop.hopIp) {
           hopContextByIp.set(hop.hopIp, { targetIp: hop.targetIp, hopNumber: hop.hopNumber });
           if (geoIpClient.getMode() === 'on') {
             geoIpClient.lookup(hop.hopIp);

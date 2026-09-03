@@ -34,7 +34,10 @@ describe('traceroute_hop and geo_hop_update relay', () => {
     const reader = response.body!.getReader();
     await reader.read(); // discard the initial connection_status event
 
-    agent.emit('event', { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4 });
+    // Real wire shape (capture-agent/src/wire.rs's `TracerouteHop { hop:
+    // Box<TracerouteHopJson> }`): fields nest under `hop`, not flat on the
+    // event — a flat fixture here would silently mask a relay-side bug.
+    agent.emit('event', { type: 'traceroute_hop', hop: { targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4 } });
     const { value } = await reader.read();
     const text = new TextDecoder().decode(value);
     expect(text).toContain('"type":"traceroute_hop"');
@@ -49,7 +52,7 @@ describe('traceroute_hop and geo_hop_update relay', () => {
     const reader = response.body!.getReader();
     await reader.read(); // discard the initial connection_status event
 
-    agent.emit('event', { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4 });
+    agent.emit('event', { type: 'traceroute_hop', hop: { targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4 } });
     await reader.read(); // discard the traceroute_hop pass-through
 
     geoip.emit('result', { ip: '12.122.1.1', location: { city: 'Ashburn', country: 'US', source: 'geoip' } });
