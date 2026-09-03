@@ -25,7 +25,7 @@ Three additional pieces of detail live here, all read-only until you interact wi
 
 - **JA3 fingerprint** — a short label next to a connection's encryption info once the agent has observed that flow's TLS ClientHello. Informational only; treat it as "roughly what TLS client made this connection," never as an authenticated identity (JA3 is trivially spoofable by any TLS client).
 - **Ownership lookup** — trigger a WHOIS/RDAP lookup for a connection's remote IP/domain to see the owning organization. Off by default; turn it on with `enrich on` in the command bar first (see below) — the trigger does nothing while enrichment is off.
-- **Trace Route button** — runs an on-demand ICMP traceroute to that connection's remote address and renders the result as a per-hop table (RTT, and — if you also enable it — a rough geographic location per hop). Bounded agent-side to 30 hops / 45s total; a trace that doesn't complete within that window just stops, it doesn't hang the UI.
+- **Trace Route button** — runs an on-demand ICMP traceroute to that connection's remote address and renders the result as a per-hop table (RTT, and — if you also enable it — a rough geographic location per hop). Bounded agent-side to 30 hops / 45s total; a trace that doesn't complete within that window just stops, it doesn't hang the UI. Per-hop location is a **separate** opt-in from ownership enrichment — every hop shows "location unavailable" until you run `geoip enable` in the command bar. Note this only affects *new* hop events: enabling it doesn't retroactively backfill locations for a trace that already finished, so click Trace Route again after enabling.
 
 ### Packet stream (`pcap` / `packets`)
 
@@ -52,7 +52,9 @@ Type a command and press enter. Available commands:
 | `pause` | Tell the agent to pause capture (also available as a button in the header) |
 | `resume` | Tell the agent to resume capture |
 | `reset` | Clear the local connections/packets buffers (does not affect the agent) |
-| `enrich on` / `enrich off` / `enrich clear` | Turn ownership (WHOIS/RDAP) lookups on/off for the current relay session (never persisted — off again after every relay restart), or wipe the local enrichment cache and query log |
+| `enrich on` / `enrich off` / `enrich clear` | Turn on-demand ownership (WHOIS/RDAP) lookups on/off for the current relay session (never persisted — off again after every relay restart), or wipe the local enrichment cache and query log |
+| `enrich background on` / `enrich background off` | Turn whole-table background ownership lookups on/off, instead of only on-demand per-connection |
+| `geoip enable` / `geoip disable` / `geoip clear` | Turn per-hop geoIP location lookups on/off for Trace Route (separate opt-in from `enrich`, also session-only), or wipe the on-disk geoIP cache |
 | `install` / `macos` / `brew` / `curl` / `sw_vers` | Open the Install modal (see below) |
 
 ## Themes

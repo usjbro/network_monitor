@@ -75,6 +75,10 @@ The agent can only compute a JA3 fingerprint from an observed TLS ClientHello. I
 - Some networks/firewalls rate-limit or drop ICMP Time Exceeded / Echo Reply packets entirely, which looks identical to "no hops appeared" from this app's side — try the same destination with the system `traceroute`/`ping` as an independent baseline.
 - Traceroute is on-demand only; the agent never starts one on its own, so nothing appears until you click "Trace Route" on a specific connection.
 
+## Trace Route hop table populates, but every row says "location unavailable"
+
+This is expected, not a bug — per-hop geoIP is a **separate** opt-in from both Trace Route itself and ownership enrichment (`enrich`). Type `geoip enable` in the command bar, then **click Trace Route again** on that connection: enabling geoIP only affects hop events from a trace that runs *after* you enable it, it doesn't retroactively backfill locations onto a trace that already finished. See [usage.md](usage.md) and [geoip-protocol.md](geoip-protocol.md).
+
 ## Decrypted content isn't showing in the Packet Stream
 
 - **Did you launch the process through `osi-inspect`?** This is the only way decryption ever turns on for a process — running it normally, even with the agent capturing its traffic, never decrypts anything. See [getting-started.md](getting-started.md#optional-features).
