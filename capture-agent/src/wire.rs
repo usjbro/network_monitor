@@ -250,6 +250,40 @@ pub enum AgentEvent {
     AgentStatus { interface: String, capturing: bool },
     DecryptedPayload { payload: Box<DecryptedPayloadJson> },
     TracerouteHop { hop: Box<TracerouteHopJson> },
+    CaptureStats { stats: CaptureStatsJson },
+}
+
+/// Capture health, sent once per tick (~1s) alongside `layer_update`. Two
+/// independent loss sources, both real and both distinct from the
+/// retransmit-derived `packetLoss` reported per connection in
+/// `ConnectionJson`: `dropped`/`ifDropped` come from the kernel/driver
+/// (packets that never reached this process at all — see
+/// `pcap::Capture::stats()`), while `relayLaggedEvents` counts *this
+/// process's own* broadcast channel falling behind a slow SSE client (see
+/// `main.rs`'s `RecvError::Lagged` handling). A connection's retransmit-based
+/// loss percentage is only trustworthy when both of these read zero — a
+/// capture with either non-zero has silently missed data upstream of
+/// wherever that percentage gets computed. See issue #61 and
+/// docs/wire-protocol.md.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureStatsJson {
+    /// Total packets received by the capture handle since it opened, per
+    /// the OS packet-filter driver's own count (`pcap::Stat::received`).
+    pub received: u32,
+    /// Packets dropped because the kernel/driver's capture buffer filled
+    /// up before this process could read them (`pcap::Stat::dropped`).
+    pub dropped: u32,
+    /// Packets dropped by the network interface driver itself, upstream of
+    /// the capture buffer (`pcap::Stat::if_dropped`) — `0` on platforms
+    /// that don't report this separately from `dropped`.
+    pub if_dropped: u32,
+    /// Cumulative count of discrete `Packet`/`decrypted_payload` wire
+    /// events this process has silently skipped delivering to a lagging
+    /// SSE client, across the agent's lifetime (not per-tick). Unrelated to
+    /// `dropped`/`if_dropped` above — this is the relay's own outbound
+    /// backlog, not a capture-side loss.
+    pub relay_lagged_events: u64,
 }
 
 #[derive(Serialize)]
@@ -600,5 +634,24 @@ mod tests {
         assert!(!line.contains("\"layer1\""));
         assert!(!line.contains("\"layer5\""));
         assert!(!line.contains("\"layer6\""));
+    }
+
+    #[test]
+    fn encodes_capture_stats_as_one_json_line_camel_case() {
+        let event = AgentEvent::CaptureStats {
+            stats: CaptureStatsJson {
+                received: 1000,
+                dropped: 3,
+                if_dropped: 1,
+                relay_lagged_events: 42,
+            },
+        };
+        let line = encode_event(&event);
+        assert!(line.ends_with('\n'));
+        assert!(line.contains("\"type\":\"capture_stats\""));
+        assert!(line.contains("\"received\":1000"));
+        assert!(line.contains("\"dropped\":3"));
+        assert!(line.contains("\"ifDropped\":1"));
+        assert!(line.contains("\"relayLaggedEvents\":42"));
     }
 }

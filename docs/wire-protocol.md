@@ -101,6 +101,31 @@ Only layers 3, 4, and 7 are ever present — the agent has no independent way to
 
 `rxPacketsPerSec`/`txPacketsPerSec` are always `0` currently — not implemented.
 
+### `capture_stats`
+
+Sent once per tick (~1 second), immediately after that tick's `layer_update`. Reports capture health — issue #61.
+
+```json
+{
+  "type": "capture_stats",
+  "stats": {
+    "received": 40213,
+    "dropped": 0,
+    "ifDropped": 0,
+    "relayLaggedEvents": 0
+  }
+}
+```
+
+Note the nesting: fields sit under a `stats` key, not flat on the event — same shape as `traceroute_hop`'s `hop` key (`capture-agent/src/wire.rs`'s `CaptureStats { stats: CaptureStatsJson }`). `mapCaptureStatsEvent` (`lib/agent-mapping.ts`) owns this unwrap; pass it the full event, not `event.stats`.
+
+Field notes:
+- `received`, `dropped`, `if_dropped` come straight from `pcap::Capture::stats()` (`ps_recv`/`ps_drop`/`ps_ifdrop`) — cumulative since the capture handle opened, not per-tick deltas. `dropped` is the kernel/driver's capture buffer filling up before the agent could read from it; `if_dropped` is the network interface driver dropping frames upstream of that buffer (`0` on platforms that don't report it separately). Both are `0` until the capture thread's first successful poll (roughly one second after the agent starts).
+- `relayLaggedEvents` is unrelated to the three fields above: it's this relay process's own outbound backlog — a cumulative count (since agent start, not per-tick) of discrete `packet`/`decrypted_payload` events silently dropped for an SSE client that fell behind the broadcast channel (see `RecvError::Lagged` in `main.rs`). A capture can have `dropped: 0` and still have a nonzero `relayLaggedEvents` if the browser tab itself is slow to consume events.
+- All four counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
+
+Any connection's `packetLoss` (in `connection_update`) is derived purely from observed TCP retransmits — it has no way to know about packets the kernel or the relay itself lost before ever reaching that computation. A nonzero `dropped`/`ifDropped`/`relayLaggedEvents` here means `packetLoss` figures elsewhere in this same tick may under-report actual loss; the UI treats these two as independent signals (see `app/page.tsx`'s capture-degraded banner and `ConnectionsView`'s loss-column caveat) rather than trying to merge them into one number.
+
 ### `agent_status`
 
 Defined in the wire protocol (`interface: String, capturing: bool`) but **never actually sent** by the current agent — the relay synthesizes its own `connection_status` event from the TCP connection state instead (see below). This is dead wire protocol surface; a future task should either wire it up (so the UI can display which interface is active) or remove it.
