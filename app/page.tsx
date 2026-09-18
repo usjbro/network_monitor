@@ -9,6 +9,7 @@ import {
   Radio,
 } from 'lucide-react';
 import {
+  CaptureConfig,
   CaptureStats,
   DecryptedPayloadSegment,
   OSILayerInfo,
@@ -22,6 +23,8 @@ import {
 } from '@/lib/types';
 import { THEMES } from '@/lib/osi-engine';
 import {
+  mapCaptureConfigErrorEvent,
+  mapCaptureConfigEvent,
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
@@ -68,6 +71,15 @@ export default function TerminalApp() {
   // a placeholder. HeaderBar/DashboardView render an explicit "—" for
   // anything not yet received.
   const [stats, setStats] = useState<SystemStats | null>(null);
+
+  // Capture-time controls (issue #68) — null until the agent's first
+  // capture_config tick arrives, same "no placeholder" discipline as
+  // `stats` above. `captureConfigError` is a one-off signal (an invalid
+  // filter/snaplen), not a persistent snapshot — cleared on the next
+  // successful capture_config so it never lingers past a since-corrected
+  // change.
+  const [captureConfig, setCaptureConfig] = useState<CaptureConfig | null>(null);
+  const [captureConfigError, setCaptureConfigError] = useState<string | null>(null);
 
   // Connections & Packets State (populated from the live capture stream)
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
@@ -159,6 +171,19 @@ export default function TerminalApp() {
         }
         if (data.type === 'system_stats') {
           setStats(mapSystemStatsEvent(data));
+        }
+        if (data.type === 'capture_config') {
+          // Sent once per tick regardless of whether anything changed (so a
+          // client that just reconnected sees current values immediately —
+          // issue #68's "always visible" requirement) — never auto-clears
+          // captureConfigError below, since an unrelated periodic re-send
+          // of the same still-unchanged config isn't evidence the earlier
+          // rejection was resolved. The error banner is dismissed
+          // explicitly instead (see its button).
+          setCaptureConfig(mapCaptureConfigEvent(data));
+        }
+        if (data.type === 'capture_config_error') {
+          setCaptureConfigError(mapCaptureConfigErrorEvent(data));
         }
         if (data.type === 'connection_enrichment') {
           setConnections((prev) => applyEnrichmentEvent(prev, data));
@@ -307,6 +332,24 @@ export default function TerminalApp() {
     });
   };
 
+  // Capture-time controls (issue #68) — routed through the same
+  // /api/control endpoint as pause/resume, since both are just control
+  // messages forwarded to the agent's existing control channel.
+  const sendCaptureFilter = (filter: string) => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'set_capture_filter', filter }),
+    });
+  };
+  const sendSnaplen = (bytes: number) => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'set_snaplen', bytes }),
+    });
+  };
+
   // Command Line Handler
   const handleExecuteCommand = (cmdStr: string) => {
     const parts = cmdStr.toLowerCase().split(' ');
@@ -360,6 +403,19 @@ export default function TerminalApp() {
       enrichmentControl('disable_background');
     } else if (mainCmd === 'enrich' && arg1 === 'clear') {
       enrichmentControl('clear');
+    } else if (mainCmd === 'filter' && arg1 === 'clear') {
+      sendCaptureFilter('');
+    } else if (mainCmd === 'filter' && arg1) {
+      // The BPF expression's case matters (e.g. a hostname in `host
+      // Example.com`), so this is sliced off the ORIGINAL cmdStr, not the
+      // lowercased `parts` used for command routing above.
+      const filterExpr = cmdStr.slice(cmdStr.indexOf(' ') + 1).trim();
+      if (filterExpr) sendCaptureFilter(filterExpr);
+    } else if (mainCmd === 'snaplen' && arg1 === 'full') {
+      sendSnaplen(65535);
+    } else if (mainCmd === 'snaplen' && arg1) {
+      const bytes = parseInt(arg1, 10);
+      if (Number.isInteger(bytes) && bytes > 0) sendSnaplen(bytes);
     }
   };
 
@@ -407,6 +463,23 @@ export default function TerminalApp() {
         </div>
       )}
 
+      {/* A rejected `filter`/`snaplen` command bar action (issue #68) —
+          dismissible rather than auto-cleared, since the next periodic
+          capture_config tick re-sends the same (unchanged, still rejected)
+          config and isn't itself evidence the operator has fixed it. */}
+      {captureConfigError && (
+        <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2 flex items-start justify-between gap-3">
+          <span>capture config rejected — {captureConfigError}</span>
+          <button
+            onClick={() => setCaptureConfigError(null)}
+            className="shrink-0 text-red-200 hover:text-white font-bold"
+            aria-label="Dismiss capture config error"
+          >
+            [CLOSE]
+          </button>
+        </div>
+      )}
+
       {/* Ownership enrichment disclosure — re-shown on every "enrich on" /
           "enrich background on", per spec §1. Simple dismissible banner,
           consistent with the "agent not connected" banner's styling above,
@@ -431,6 +504,7 @@ export default function TerminalApp() {
         {/* Header Navigation Bar */}
         <HeaderBar
           stats={stats}
+          captureConfig={captureConfig}
           theme={themeConfig}
           onSelectTheme={setSelectedTheme}
           isPaused={isPaused}

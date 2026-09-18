@@ -170,3 +170,16 @@ export interface SystemStats {
   txPpsTotal: number;
   totalPacketsCaptured: number;
 }
+
+// The capture-time controls currently in effect, from the agent's
+// `capture_config` wire event (docs/wire-protocol.md), sent once per tick
+// alongside capture_stats/system_stats — issue #68. `filter: null` means no
+// BPF filter is active (every frame is captured); `snaplen` is the number
+// of bytes retained per frame before the kernel truncates the rest.
+// Consumers hold this as `CaptureConfig | null` — `null` until the first
+// tick arrives, matching the same "no placeholder" discipline as
+// `SystemStats`/`CaptureStats` above.
+export interface CaptureConfig {
+  filter: string | null;
+  snaplen: number;
+}

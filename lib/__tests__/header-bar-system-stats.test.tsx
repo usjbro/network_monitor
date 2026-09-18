@@ -10,7 +10,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { HeaderBar } from '@/components/HeaderBar';
 import { THEMES } from '@/lib/osi-engine';
-import { SystemStats } from '@/lib/types';
+import { CaptureConfig, SystemStats } from '@/lib/types';
 
 afterEach(() => {
   cleanup();
@@ -27,6 +27,7 @@ const baseProps = {
   crtEnabled: false,
   onToggleCrt: noop,
   onOpenInstall: noop,
+  captureConfig: null as CaptureConfig | null,
 };
 
 const liveStats: SystemStats = {

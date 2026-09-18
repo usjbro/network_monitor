@@ -1,4 +1,4 @@
-import { CaptureStats, NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
+import { CaptureConfig, CaptureStats, NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -99,6 +99,29 @@ export function mapSystemStatsEvent(json: unknown): SystemStats {
     txPpsTotal: requireField(w, 'txPpsTotal'),
     totalPacketsCaptured: requireField(w, 'totalPacketsCaptured'),
   };
+}
+
+// Same nested-envelope shape as mapCaptureStatsEvent/mapSystemStatsEvent
+// above — see issue #68 and docs/wire-protocol.md. `filter` is `null`
+// (present, not omitted) when no filter is active, so requireField's
+// undefined-only check correctly lets it through as a real value.
+export function mapCaptureConfigEvent(json: unknown): CaptureConfig {
+  const envelope = json as { config?: Record<string, unknown> };
+  const w = envelope.config;
+  if (!w) {
+    throw new Error('malformed capture_config event: missing "config" field');
+  }
+  return {
+    filter: requireField(w, 'filter'),
+    snaplen: requireField(w, 'snaplen'),
+  };
+}
+
+// capture_config_error is flat (no nested envelope) — a one-off signal,
+// not a per-tick snapshot, so it carries just the message.
+export function mapCaptureConfigErrorEvent(json: unknown): string {
+  const w = json as Record<string, unknown>;
+  return requireField(w, 'message');
 }
 
 export function mapPacketEvent(json: unknown): PacketFrame {
