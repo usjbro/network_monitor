@@ -3,6 +3,8 @@
 **Status:** product input, not a commitment. Written 2026-09-18 against commit `c966340` (post PR #51).
 **Baseline document:** *Wireshark — Technical Design Document* (feature/capability specification, rev 18).
 **Audience:** whoever picks the next epic after #23/#24/#25 closed out the original roadmap in issue #26.
+**Tracked as:** roadmap issue #99, seven epics (#54–#60) and 38 task issues. The map from the F-numbers
+below to those issues is in "Issue tracking" at the end of this file.
 
 ## How to read this
 
@@ -367,19 +369,19 @@ closing warning is that teams get into trouble trying to make an inspection tool
 
 Six epics, in dependency order. This is a recommendation, not a decision.
 
-| # | Epic | Contents | Size | Why here |
-| --- | --- | --- | --- | --- |
-| A | Capture fidelity and control | F2, F3, F20, F23 | M | Small, independent, fixes the two places the UI currently overstates what it knows. Best first epic. |
-| B | Capture files and offline analysis | F1, F5, F14, F27 | XL | Unblocks Tier 2 and makes everything testable against fixtures. |
-| C | Field model and display filters | F4, F13, F9 | XL | The keystone. Every later surface gets cheaper; F22 is impossible without it. |
-| D | Analysis surfaces | F7, F6, F11, F8, F10, F12 | XL | The visible payoff of B and C. Ship F7 first — best value per week in the whole list. |
-| E | Dissector breadth | F15, F16, F17, F18, F19 | L | Gated on F25's spike: do not grow the hostile-parser surface inside the privileged process first. |
-| F | Headless and configuration | F21, F22, F24 | L | Last; both depend on C. |
-| — | Security hardening (continuous) | F25 spike, F26 | S–L | F26 lands this week; F25's spike belongs before epic E. |
+| Epic | Contents | Size | Why here |
+| --- | --- | --- | --- |
+| #54 Capture fidelity and control | F2, F3, F11a, F16a, F16b, F20, F23 | M | Small, independent; five of its seven items are honesty bugs. Best first epic. |
+| #55 Capture files and offline analysis | F1, F5, F14, F27 | XL | Unblocks Tier 2 and makes everything testable against fixtures. |
+| #56 Field model and display filters | F4, F9, F13 | XL | The keystone. Every later surface gets cheaper; F22 is impossible without it. |
+| #57 Analysis surfaces | F6, F7, F8, F10, F11, F12 | XL | The visible payoff of B and C. Ship F7 first — best value per week in the whole list. |
+| #58 Dissector breadth | F15, F16c, F17, F18, F19 | L | Gated on F25's spike: do not grow the hostile-parser surface inside the privileged process first. |
+| #59 Headless and configuration | F21, F22, F24 | L | Last; both depend on the field model. |
+| #60 Security and CI hardening (continuous) | F25 spike, F26 | S–L | F26 lands this week; F25's spike belongs before epic #58. |
 
-If only one thing gets picked up: **epic A**, then **F7** out of order. A is days of work and removes two
-honesty problems (invisible drops, placeholder dashboard stats); F7 is the feature that makes the product
-answer the question its users actually have.
+If only one thing gets picked up: **epic #54**, then **F7** (#80) out of order. #54 is days of work and
+removes three honesty problems (invisible drops, placeholder dashboard stats, phantom VLAN support); F7 is
+the feature that makes the product answer the question its users actually have.
 
 ## Open questions for the product owner
 
@@ -393,3 +395,49 @@ answer the question its users actually have.
    or disk (F1, and a data-sensitivity conversation).
 4. **Does Linux support matter this year?** F24 is a real epic and is cheaper to design for now than to retrofit
    after E adds more platform-specific parsing.
+
+## Issue tracking
+
+Filed 2026-09-18. Roadmap: #99. Epics: #54 (capture control), #55 (files), #56 (field model),
+#57 (analysis), #58 (dissectors), #59 (headless/config), #60 (security/CI).
+
+Five items in this analysis were filed as **bugs** rather than features, because each is a place the
+shipped product claims more than it knows rather than a capability it lacks.
+
+| This file | Issue | Kind | Epic |
+| --- | --- | --- | --- |
+| F1 | #70 (writer), #71 (replay) | feature | #55 |
+| F2 | #68 | feature | #54 |
+| F3 | #61 | **bug** | #54 |
+| F4 | #76 (field model), #77 (filter language) | feature | #56 |
+| F5 | #73 | feature | #55 |
+| F6 | #81 | feature | #57 |
+| F7 | #80 | feature | #57 |
+| F8 | #83 (reassembly), #84 (Follow Stream) | feature | #57 |
+| F9 | #79 | feature | #56 |
+| F10 | #85 (IO graph), #86 (TCP graphs) | feature | #57 |
+| F11 | #82 (matching + SRT), #65 (dead `status_or_code` field) | feature + **bug** | #57, #54 |
+| F12 | #87 | feature | #57 |
+| F13 | #78 | feature | #56 |
+| F14 | #74 | feature | #55 |
+| F15 | #88 (DNS/HTTP responses), #89 (QUIC), #90 (DHCP/mDNS/ARP/ICMP) | feature | #58 |
+| F16 | #62 (VLAN advertised, never parsed), #63 (non-Ethernet link types dropped), #93 (tunnels) | **bug** ×2 + feature | #54, #58 |
+| F17 | #94 | feature | #58 |
+| F18 | #95 | feature | #58 |
+| F19 | #92 | feature | #58 |
+| F20 | #69 | feature | #54 |
+| F21 | #97 | feature | #59 |
+| F22 | #96 | feature | #59 |
+| F23 | #64 | **bug** | #54 |
+| F24 | #98 | feature | #59 |
+| F25 | #91 (spike) | security | #60 |
+| F26 | #66 | **bug** | #60 |
+| F27 | #75 | docs | #55 |
+
+One issue has no F-number: #67, the permanently-red `github-advanced-security` PR check, found while
+filing the rest. It is a repo-settings decision, not a code change.
+
+Where an F-number split into several issues, the split is deliberate: a file *writer* and a file *reader*
+are independently useful and independently reviewable, as are a field registry and the filter language
+built on it. Where two F-numbers merged (F11's request/response matching subsumes F11a's dead wire field),
+the issue says so.
