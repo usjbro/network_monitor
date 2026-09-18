@@ -57,6 +57,7 @@ Type a command and press enter. Available commands:
 | `geoip enable` / `geoip disable` / `geoip clear` | Turn per-hop geoIP location lookups on/off for Trace Route (separate opt-in from `enrich`, also session-only), or wipe the on-disk geoIP cache |
 | `filter <bpf expression>` / `filter clear` | Set (or clear) a BPF capture filter at the agent, e.g. `filter tcp port 443` — narrows what's captured at the source, applied live with no interruption. An invalid expression is rejected with libpcap's own error shown in a dismissible banner; the previous filter keeps running. Active filter always shown in the header. |
 | `snaplen <bytes>` / `snaplen full` | Set (or restore, via `full`) the capture snap length in bytes, e.g. `snaplen 96` — truncates each captured frame past this many bytes, keeping headers while discarding payload. Applying this briefly reopens the capture (logged, expected). Active snap length always shown in the header. |
+| `iface list` / `iface <name>` | List capturable interfaces (also available from the header's interface picker, which lazily loads the same list), or switch capture to one at runtime — no agent restart needed. Switching resets the active filter/snap length to their defaults and clears tracked connections (every existing flow belonged to the interface that just stopped being captured). An interface with no assigned address, or one this agent can't parse the link type of, is rejected rather than silently accepted. |
 | `install` / `macos` / `brew` / `curl` / `sw_vers` | Open the Install modal (see below) |
 
 ## Themes

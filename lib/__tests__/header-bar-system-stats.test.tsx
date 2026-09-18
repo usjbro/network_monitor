@@ -28,6 +28,9 @@ const baseProps = {
   onToggleCrt: noop,
   onOpenInstall: noop,
   captureConfig: null as CaptureConfig | null,
+  availableInterfaces: [],
+  onListInterfaces: noop,
+  onSelectInterface: noop,
 };
 
 const liveStats: SystemStats = {

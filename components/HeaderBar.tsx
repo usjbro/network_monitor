@@ -10,7 +10,7 @@ import {
   Tv,
   Apple,
 } from 'lucide-react';
-import { CaptureConfig, SystemStats, TerminalTheme, ThemeConfig } from '@/lib/types';
+import { CaptureConfig, NetworkInterface, SystemStats, TerminalTheme, ThemeConfig } from '@/lib/types';
 import { THEMES, formatSpeed } from '@/lib/osi-engine';
 
 interface HeaderBarProps {
@@ -24,6 +24,13 @@ interface HeaderBarProps {
   // must never be unsure whether they're seeing everything, so this is
   // always rendered once known, not tucked behind a menu.
   captureConfig: CaptureConfig | null;
+  // Empty until an `interface_list` event arrives (issue #69) — populated
+  // on demand via `onListInterfaces`, not fetched automatically. The
+  // currently-active interface (from `stats.interfaceName`) is always
+  // selectable even before this list has ever loaded.
+  availableInterfaces: NetworkInterface[];
+  onListInterfaces: () => void;
+  onSelectInterface: (name: string) => void;
   theme: ThemeConfig;
   onSelectTheme: (themeKey: TerminalTheme) => void;
   isPaused: boolean;
@@ -37,6 +44,9 @@ interface HeaderBarProps {
 export const HeaderBar: React.FC<HeaderBarProps> = ({
   stats,
   captureConfig,
+  availableInterfaces,
+  onListInterfaces,
+  onSelectInterface,
   theme,
   onSelectTheme,
   isPaused,
@@ -46,6 +56,14 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   onToggleCrt,
   onOpenInstall,
 }) => {
+  // The current interface must always be a valid <select> option even
+  // before onListInterfaces has ever populated availableInterfaces (or if
+  // the current one, for any reason, isn't in that list) — otherwise the
+  // browser would silently fall back to selecting the first <option>,
+  // which could show the WRONG interface as "active".
+  const interfaceOptions = stats?.interfaceName && !availableInterfaces.some((i) => i.name === stats.interfaceName)
+    ? [{ name: stats.interfaceName, addresses: [] }, ...availableInterfaces]
+    : availableInterfaces;
   return (
     <header className={`border-b ${theme.border} ${theme.cardBg} px-3 py-2 text-xs font-mono select-none`}>
       {/* Top Banner Row */}
@@ -63,9 +81,25 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             <span className="opacity-40">@</span>
             <span className={theme.promptHost}>{stats?.hostname || '—'}</span>
             <span className="opacity-40">:</span>
-            <span className="bg-slate-800/80 px-1.5 py-0.5 rounded text-[10px] text-slate-300 font-semibold border border-slate-700">
-              {stats?.interfaceName || '—'}
-            </span>
+            {/* Interface picker (issue #69) — lazily populated: the list
+                is requested when the dropdown is opened, not on load. */}
+            <select
+              value={stats?.interfaceName || ''}
+              onFocus={onListInterfaces}
+              onMouseDown={onListInterfaces}
+              onChange={(e) => onSelectInterface(e.target.value)}
+              disabled={!stats}
+              title="Capture interface — switching resets the active filter/snap length and clears tracked connections"
+              className="bg-slate-800/80 border border-slate-700 px-1.5 py-0.5 rounded text-[10px] text-slate-300 font-semibold focus:outline-none disabled:opacity-60"
+            >
+              {!stats && <option value="">—</option>}
+              {interfaceOptions.map((iface) => (
+                <option key={iface.name} value={iface.name} className="bg-slate-900">
+                  {iface.name}
+                  {iface.addresses.length > 0 ? ` (${iface.addresses[0]})` : ''}
+                </option>
+              ))}
+            </select>
           </div>
 
           {/* Active capture filter/snap length (issue #68) — always

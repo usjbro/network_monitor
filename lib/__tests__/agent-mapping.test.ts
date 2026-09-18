@@ -5,6 +5,8 @@ import {
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
+  mapInterfaceErrorEvent,
+  mapInterfaceListEvent,
   mapPacketEvent,
   mapSystemStatsEvent,
   mapTracerouteHopEvent,
@@ -385,5 +387,44 @@ describe('mapCaptureConfigErrorEvent', () => {
   it('throws on an event with no "message" field at all', () => {
     const event = { type: 'capture_config_error' };
     expect(() => mapCaptureConfigErrorEvent(event)).toThrow('missing required field "message"');
+  });
+});
+
+describe('mapInterfaceListEvent', () => {
+  it('maps a list of capturable interfaces with their addresses', () => {
+    const event = {
+      type: 'interface_list',
+      interfaces: [
+        { name: 'en0', addresses: ['192.168.1.104'] },
+        { name: 'lo0', addresses: ['127.0.0.1', '::1'] },
+      ],
+    };
+    const interfaces = mapInterfaceListEvent(event);
+    expect(interfaces).toEqual([
+      { name: 'en0', addresses: ['192.168.1.104'] },
+      { name: 'lo0', addresses: ['127.0.0.1', '::1'] },
+    ]);
+  });
+
+  it('maps an empty list without throwing (no capturable interfaces)', () => {
+    const event = { type: 'interface_list', interfaces: [] };
+    expect(mapInterfaceListEvent(event)).toEqual([]);
+  });
+
+  it('throws on an event with no "interfaces" field at all', () => {
+    const event = { type: 'interface_list' };
+    expect(() => mapInterfaceListEvent(event)).toThrow('missing "interfaces" field');
+  });
+});
+
+describe('mapInterfaceErrorEvent', () => {
+  it('extracts the error message', () => {
+    const event = { type: 'interface_error', message: 'no such interface: en9' };
+    expect(mapInterfaceErrorEvent(event)).toBe('no such interface: en9');
+  });
+
+  it('throws on an event with no "message" field at all', () => {
+    const event = { type: 'interface_error' };
+    expect(() => mapInterfaceErrorEvent(event)).toThrow('missing required field "message"');
   });
 });

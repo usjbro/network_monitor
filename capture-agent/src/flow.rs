@@ -373,6 +373,20 @@ impl FlowTable {
 
         evicted
     }
+
+    /// Discards every tracked flow and replaces the local-address list used
+    /// to decide packet direction — for a runtime interface switch (issue
+    /// #69), not idle eviction. Every existing flow belonged to the
+    /// interface that just stopped being captured; leaving it in the table
+    /// with a now-wrong `local_addrs` frame of reference is exactly the
+    /// silent-direction-flip bug that issue calls out as the error-prone
+    /// part of switching interfaces. Returns the keys of everything
+    /// discarded, so the caller can emit an explicit close event per
+    /// removed flow — same contract as `evict_stale`.
+    pub fn reset(&mut self, local_addrs: Vec<String>) -> Vec<FlowKey> {
+        self.local_addrs = local_addrs;
+        self.flows.drain().map(|(key, _)| key).collect()
+    }
 }
 
 #[cfg(test)]
@@ -596,6 +610,59 @@ mod tests {
         let remaining = table.snapshot(now);
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].key.remote_port, 8443);
+    }
+
+    #[test]
+    fn reset_discards_every_flow_and_returns_their_keys() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let syn_a = tcp_packet_to(true, TcpFlags { syn: true, ..Default::default() }, 443);
+        let syn_b = tcp_packet_to(true, TcpFlags { syn: true, ..Default::default() }, 8443);
+        table.observe(&syn_a, &L7Info::None, 0);
+        table.observe(&syn_b, &L7Info::None, 0);
+        assert_eq!(table.snapshot(0).len(), 2);
+
+        let closed = table.reset(vec!["10.0.0.5".to_string()]);
+
+        assert_eq!(closed.len(), 2);
+        let closed_ports: std::collections::HashSet<u16> = closed.iter().map(|k| k.remote_port).collect();
+        assert_eq!(closed_ports, [443, 8443].into_iter().collect());
+        assert!(table.snapshot(0).is_empty(), "reset must leave no flows behind");
+    }
+
+    #[test]
+    fn reset_replaces_local_addrs_so_direction_is_correct_for_the_new_interface() {
+        // Regression test for issue #69's called-out risk: a stale
+        // local_addrs after switching interfaces would make every packet's
+        // direction wrong. Old local address (192.168.1.10) must no longer
+        // count as local after reset; the new one (10.0.0.5) must.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.reset(vec!["10.0.0.5".to_string()]);
+
+        // A packet whose source is the NEW local address, observed after
+        // reset, must be attributed as outbound (i.e. actually recognized
+        // as local) — snapshot's local_addr field on the resulting flow
+        // confirms which side FlowTable decided was "this machine".
+        let outbound = ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: "10.0.0.5".to_string(),
+            dst_ip: "93.184.216.34".to_string(),
+            protocol: TransportProtocol::Tcp,
+            src_port: Some(51000),
+            dst_port: Some(443),
+            tcp_flags: Some(TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }),
+            seq: Some(1000),
+            ttl: 64,
+            total_len: 60,
+            payload: vec![],
+            ip_version: 4,
+            ip_checksum: Some(0),
+            vlan_tag: None,
+        };
+        table.observe(&outbound, &L7Info::None, 0);
+        let snap = table.snapshot(0);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].key.local_addr, "10.0.0.5");
     }
 
     #[test]

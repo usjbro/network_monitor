@@ -183,3 +183,13 @@ export interface CaptureConfig {
   filter: string | null;
   snaplen: number;
 }
+
+// One capturable network interface, from the agent's `interface_list` wire
+// event (docs/wire-protocol.md) — issue #69. Only interfaces with at least
+// one assigned address are ever included: an addressless one can't be
+// attributed as local/remote by FlowTable and would silently capture
+// nothing if selected, so it's never offered as a choice at all.
+export interface NetworkInterface {
+  name: string;
+  addresses: string[];
+}

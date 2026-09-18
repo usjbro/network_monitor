@@ -301,29 +301,43 @@ fn local_addrs_for(device: &pcap::Device) -> Vec<String> {
 
 /// Maps an opened capture handle's reported datalink type
 /// (`pcap::Capture::get_datalink()`) to the `parse::LinkType` this agent's
-/// parser knows how to decode. Panics for anything else: a link type
+/// parser knows how to decode, or `None` if it's a link type
+/// `parse::parse_packet` can't handle at all. Pure and non-panicking on
+/// purpose: `resolve_link_type` below is the panicking startup wrapper
+/// around this, but issue #69's runtime interface switch also needs this
+/// same mapping *without* panicking — a user picking an interface with an
+/// unsupported link type from the picker must get a rejected request, not
+/// a crashed agent.
+fn datalink_to_link_type(datalink: pcap::Linktype) -> Option<parse::LinkType> {
+    match datalink {
+        pcap::Linktype::ETHERNET => Some(parse::LinkType::Ethernet),
+        pcap::Linktype::NULL | pcap::Linktype::LOOP => Some(parse::LinkType::NullLoopback),
+        pcap::Linktype::RAW => Some(parse::LinkType::Raw),
+        _ => None,
+    }
+}
+
+/// Panicking startup wrapper around `datalink_to_link_type`. A link type
 /// `parse::parse_packet` can't handle means it would reject every single
 /// captured frame, and the agent would otherwise start up looking healthy
 /// (interface found, listening on 9990) while silently showing an idle
 /// network forever — the exact bug class issue #63 exists to close. Failing
 /// here, loudly, naming the interface and its link type, matches the
-/// `CAPTURE_INTERFACE` precedent from #51 (docs/troubleshooting.md).
+/// `CAPTURE_INTERFACE` precedent from #51 (docs/troubleshooting.md). Only
+/// ever called at startup — issue #69's runtime interface switch calls
+/// `datalink_to_link_type` directly instead, since panicking there would
+/// crash the whole agent over a user's interface choice.
 fn resolve_link_type(datalink: pcap::Linktype, interface_name: &str) -> parse::LinkType {
-    match datalink {
-        pcap::Linktype::ETHERNET => parse::LinkType::Ethernet,
-        pcap::Linktype::NULL | pcap::Linktype::LOOP => parse::LinkType::NullLoopback,
-        pcap::Linktype::RAW => parse::LinkType::Raw,
-        other => {
-            let name = other.get_name().unwrap_or_else(|_| format!("{other:?}"));
-            panic!(
-                "capture-agent: interface {interface_name} uses link type {name} (dlt={}), \
-                 which this agent doesn't know how to parse. Supported: Ethernet, loopback \
-                 (DLT_NULL/DLT_LOOP), and raw IP (DLT_RAW). Refusing to start rather than \
-                 silently showing an idle network.",
-                other.0
-            )
-        }
-    }
+    datalink_to_link_type(datalink).unwrap_or_else(|| {
+        let name = datalink.get_name().unwrap_or_else(|_| format!("{datalink:?}"));
+        panic!(
+            "capture-agent: interface {interface_name} uses link type {name} (dlt={}), \
+             which this agent doesn't know how to parse. Supported: Ethernet, loopback \
+             (DLT_NULL/DLT_LOOP), and raw IP (DLT_RAW). Refusing to start rather than \
+             silently showing an idle network.",
+            datalink.0
+        )
+    })
 }
 
 /// Maximum accepted length for a browser-supplied BPF filter expression, in
@@ -339,17 +353,28 @@ const MAX_CAPTURE_FILTER_LEN: usize = 1024;
 /// can shrink this at runtime; `snaplen full` restores exactly this value.
 const DEFAULT_SNAPLEN: i32 = 65535;
 
-/// A capture-time control change requested over the wire (issue #68),
-/// queued from the async control-message-handling task into the capture
-/// thread via an `std::sync::mpsc` channel — the open `pcap::Capture`
-/// handle only ever lives on the capture thread (same reason
-/// `capture_stats` polling has to happen there, see
-/// `build_capture_stats_json`'s doc comment), so applying either kind of
-/// change has to happen there too, not in the async task that received the
-/// control message.
+/// Maximum accepted length for a browser-supplied interface name, in bytes
+/// — same "bound new attacker-reachable input before it touches anything"
+/// discipline as `MAX_CAPTURE_FILTER_LEN` (issue #68). Real interface names
+/// (`en0`, `lo0`, `utun8`, ...) are a handful of bytes; this is generous
+/// while still rejecting an obviously-bogus request outright.
+const MAX_INTERFACE_NAME_LEN: usize = 256;
+
+/// A capture-time control change requested over the wire (issues #68 and
+/// #69), queued from the async control-message-handling task into the
+/// capture thread via an `std::sync::mpsc` channel — the open
+/// `pcap::Capture` handle only ever lives on the capture thread (same
+/// reason `capture_stats` polling has to happen there, see
+/// `build_capture_stats_json`'s doc comment), so applying any of these has
+/// to happen there too, not in the async task that received the control
+/// message. `SetFilter`/`SetSnaplen` are applied by
+/// `apply_capture_config_request`; `SwitchInterface` needs a wider set of
+/// shared state (link type, local addresses, the flow table) and gets its
+/// own `apply_interface_switch_request`.
 enum CaptureConfigRequest {
     SetFilter(String),
     SetSnaplen(u32),
+    SwitchInterface(String),
 }
 
 /// Validates a browser-supplied BPF filter expression's length before it
@@ -474,7 +499,146 @@ fn apply_capture_config_request(
             println!("capture-agent: snap length changed to {bytes} bytes (capture briefly reopened)");
             let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig { config: snapshot }));
         }
+        CaptureConfigRequest::SwitchInterface(_) => {
+            unreachable!(
+                "the capture thread's drain loop dispatches SwitchInterface to \
+                 apply_interface_switch_request directly, never to this function"
+            )
+        }
     }
+}
+
+/// Validates a browser-supplied interface name's length before it's ever
+/// looked up against `pcap::Device::list()` — pure and unit-testable, same
+/// discipline as `validate_capture_filter_len`.
+fn validate_interface_name_len(name: &str) -> Result<(), String> {
+    if name.len() > MAX_INTERFACE_NAME_LEN {
+        Err(format!(
+            "interface name rejected: {} bytes exceeds the {MAX_INTERFACE_NAME_LEN}-byte limit",
+            name.len()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Applies a `SetInterface` request (issue #69) — switches which physical
+/// interface the agent captures on, without restarting the process. Unlike
+/// `apply_capture_config_request` (issue #68), this touches nearly every
+/// piece of per-interface state the capture thread and periodic emitter
+/// share: the open capture handle, the device used for any future
+/// snaplen-triggered reopen, the resolved link type (a different interface
+/// can have a different link type entirely — e.g. switching from `en0`
+/// (Ethernet) to `lo0` (loopback)), the local-address list `FlowTable` uses
+/// to decide packet direction, and the identity `system_stats` reports.
+///
+/// A rejected switch — an oversized name, no such interface, an
+/// addressless (uncapturable) interface, a device-list/open failure, or an
+/// unsupported link type — leaves every one of those exactly as it was,
+/// same "never a half-applied state" discipline as #68; `new_cap` (if one
+/// was even opened) is simply dropped, closing it, while `*cap` keeps
+/// running untouched. On success, the existing flow table is entirely
+/// reset (every previously-tracked flow belonged to the interface that
+/// just stopped being captured — an old flow lingering with a
+/// now-wrong local-address frame of reference is exactly the
+/// direction-flips-silently bug this issue calls out as "the one
+/// genuinely error-prone part of the change"), and the active capture
+/// filter/snap length reset to their defaults, since a filter tuned for
+/// one interface may not even be meaningful on another.
+#[allow(clippy::too_many_arguments)]
+fn apply_interface_switch_request(
+    name: &str,
+    cap: &mut pcap::Capture<pcap::Active>,
+    device_for_reopen: &mut pcap::Device,
+    link_type: &mut parse::LinkType,
+    local_addrs: &mut Vec<String>,
+    current_interface: &Mutex<(String, String)>,
+    capture_config_state: &Mutex<wire::CaptureConfigJson>,
+    flow_table: &Mutex<FlowTable>,
+    tx: &broadcast::Sender<String>,
+) {
+    if let Err(message) = validate_interface_name_len(name) {
+        let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError { message }));
+        return;
+    }
+    let devices = match pcap::Device::list() {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
+                message: format!("failed to list capture devices: {e}"),
+            }));
+            return;
+        }
+    };
+    let Some(device) = find_device_by_name(&devices, name) else {
+        let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
+            message: format!("no such interface: {name}"),
+        }));
+        return;
+    };
+    if !is_capturable(device) {
+        let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
+            message: format!(
+                "{name} has no assigned address, so captured packets can't be attributed as \
+                 local/remote and nothing would be recorded"
+            ),
+        }));
+        return;
+    }
+
+    let reopened = pcap::Capture::from_device(device.clone())
+        .and_then(|c| c.promisc(true).snaplen(DEFAULT_SNAPLEN).timeout(1000).immediate_mode(true).open());
+    let new_cap = match reopened {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
+                message: format!("failed to open {name}: {e}"),
+            }));
+            return;
+        }
+    };
+    let Some(new_link_type) = datalink_to_link_type(new_cap.get_datalink()) else {
+        let datalink = new_cap.get_datalink();
+        let dl_name = datalink.get_name().unwrap_or_else(|_| format!("{datalink:?}"));
+        let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
+            message: format!(
+                "{name} uses link type {dl_name}, which this agent doesn't know how to parse"
+            ),
+        }));
+        return; // new_cap drops here, closing it — *cap is never touched
+    };
+
+    let new_local_addrs = local_addrs_for(device);
+    let new_ip_address = new_local_addrs.first().cloned().unwrap_or_default();
+    let new_device = device.clone();
+
+    // Every previously-tracked flow belonged to the interface that just
+    // stopped being captured — reset rather than let them linger with a
+    // now-wrong local-address frame of reference (see this fn's doc
+    // comment).
+    let closed_ids: Vec<String> = {
+        let mut ft = flow_table.lock().unwrap();
+        ft.reset(new_local_addrs.clone()).into_iter().map(|k| k.connection_id()).collect()
+    };
+    for id in closed_ids {
+        let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed { id }));
+    }
+
+    *cap = new_cap;
+    *device_for_reopen = new_device;
+    *link_type = new_link_type;
+    *local_addrs = new_local_addrs;
+    *current_interface.lock().unwrap() = (name.to_string(), new_ip_address.clone());
+    // A filter/snaplen tuned for the previous interface may not even be
+    // meaningful on this one — reset to defaults rather than carry it
+    // forward silently.
+    *capture_config_state.lock().unwrap() =
+        wire::CaptureConfigJson { filter: None, snaplen: DEFAULT_SNAPLEN as u32 };
+
+    println!("capture-agent: switched capture interface to {name}");
+    let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceChanged {
+        interface: wire::InterfaceChangedJson { name: name.to_string(), ip_address: new_ip_address },
+    }));
 }
 
 /// Builds the `capture_stats` wire event from the latest kernel-side
@@ -594,11 +758,11 @@ async fn main() -> std::io::Result<()> {
     let link_type = resolve_link_type(datalink, &interface_name);
     println!("capture-agent: link type {datalink:?} on {interface_name}");
 
-    // Both read once at startup and never change for the life of this
-    // process — computed here, not per-tick, since neither can change
-    // without restarting the agent (a new interface needs a restart; the
-    // OS hostname isn't re-read either, matching that same "identity is
-    // fixed at startup" assumption already made for `interface_name`).
+    // Hostname is read once at startup and never changes for the life of
+    // this process — the OS hostname isn't re-read at runtime.
+    // `interface_name`/`ip_address`, by contrast, CAN change at runtime as
+    // of issue #69 (a `set_interface` control message) — the initial
+    // values computed here just seed `current_interface` below.
     let hostname = host_stats::hostname();
     let ip_address = local_addrs.first().cloned().unwrap_or_default();
 
@@ -667,6 +831,16 @@ async fn main() -> std::io::Result<()> {
     // rather than applied directly — see `CaptureConfigRequest`'s doc
     // comment.
     let (capture_config_tx, capture_config_rx) = mpsc::channel::<CaptureConfigRequest>();
+    // Current interface identity (issue #69) — (name, ip_address). Written
+    // by the capture thread on a successful `set_interface`, read every
+    // tick by the periodic emitter so `system_stats.interfaceName`/
+    // `ipAddress` reflect a switch immediately rather than only after a
+    // restart. Deliberately NOT behind the same lock as the hot per-packet
+    // hostname/local_addrs path (see the capture thread's own `local_addrs`/
+    // `link_type`/`device_for_reopen` locals below) — only the periodic
+    // emitter (once/sec) and a switch (rare, user-initiated) ever touch
+    // this, so a small dedicated Mutex costs nothing on the capture loop.
+    let current_interface = Arc::new(Mutex::new((interface_name.clone(), ip_address.clone())));
 
     let (tx, _rx) = broadcast::channel::<String>(1024);
 
@@ -702,8 +876,19 @@ async fn main() -> std::io::Result<()> {
         let total_tx_packets = total_tx_packets.clone();
         let capture_config_state = capture_config_state.clone();
         let device_for_reopen = device_for_reopen.clone();
+        let current_interface = current_interface.clone();
         std::thread::spawn(move || {
             let mut cap = cap;
+            // Mutable locals, not Arc<Mutex<_>>: only this thread ever
+            // reads or writes them, and this is the hot per-packet path —
+            // `local_addrs` in particular is checked on every captured
+            // packet (see the direction checks below), so a lock here
+            // would mean contending for it thousands of times a second.
+            // They only change on a successful `set_interface` (issue
+            // #69), applied in the drain loop below, on this same thread.
+            let mut local_addrs = local_addrs;
+            let mut link_type = link_type;
+            let mut device_for_reopen = device_for_reopen;
             // Caps discrete Packet events to the browser at 100/sec — the UI
             // only keeps the last 100 anyway (app/page.tsx's
             // `prev.slice(0, 100)`), so anything above that is pure waste.
@@ -723,13 +908,30 @@ async fn main() -> std::io::Result<()> {
                 // takes effect within about a second, not indefinitely
                 // delayed behind a quiet capture (issue #68).
                 while let Ok(request) = capture_config_rx.try_recv() {
-                    apply_capture_config_request(
-                        request,
-                        &mut cap,
-                        &device_for_reopen,
-                        &capture_config_state,
-                        &tx,
-                    );
+                    match request {
+                        CaptureConfigRequest::SwitchInterface(name) => {
+                            apply_interface_switch_request(
+                                &name,
+                                &mut cap,
+                                &mut device_for_reopen,
+                                &mut link_type,
+                                &mut local_addrs,
+                                &current_interface,
+                                &capture_config_state,
+                                &flow_table,
+                                &tx,
+                            );
+                        }
+                        other => {
+                            apply_capture_config_request(
+                                other,
+                                &mut cap,
+                                &device_for_reopen,
+                                &capture_config_state,
+                                &tx,
+                            );
+                        }
+                    }
                 }
                 if paused.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(200));
@@ -847,8 +1049,7 @@ async fn main() -> std::io::Result<()> {
         let total_rx_packets = total_rx_packets.clone();
         let total_tx_packets = total_tx_packets.clone();
         let hostname = hostname.clone();
-        let interface_name = interface_name.clone();
-        let ip_address = ip_address.clone();
+        let current_interface = current_interface.clone();
         let capture_config_state = capture_config_state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -1015,10 +1216,11 @@ async fn main() -> std::io::Result<()> {
                 let rx_packets_now = total_rx_packets.load(Ordering::Relaxed);
                 let tx_packets_now = total_tx_packets.load(Ordering::Relaxed);
                 let total_packets_captured = stat.map(|s| s.received).unwrap_or(0);
+                let (current_name, current_ip) = current_interface.lock().unwrap().clone();
                 let system_stats_json = build_system_stats_json(
                     &hostname,
-                    &interface_name,
-                    &ip_address,
+                    &current_name,
+                    &current_ip,
                     rx_bytes_now.saturating_sub(prev_rx_bytes),
                     tx_bytes_now.saturating_sub(prev_tx_bytes),
                     rx_packets_now.saturating_sub(prev_rx_packets),
@@ -1118,6 +1320,34 @@ async fn main() -> std::io::Result<()> {
                                     Some(wire::ControlMessage::SetSnaplen { bytes }) => {
                                         let _ = capture_config_tx.send(CaptureConfigRequest::SetSnaplen(bytes));
                                     }
+                                    Some(wire::ControlMessage::ListInterfaces) => {
+                                        // Doesn't touch the open capture
+                                        // handle at all — just enumerates
+                                        // devices, so this runs directly
+                                        // here rather than round-tripping
+                                        // through the capture thread.
+                                        let interfaces = pcap::Device::list()
+                                            .map(|devices| {
+                                                devices
+                                                    .iter()
+                                                    .filter(|d| is_capturable(d))
+                                                    .map(|d| wire::InterfaceJson {
+                                                        name: d.name.clone(),
+                                                        addresses: local_addrs_for(d),
+                                                    })
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
+                                        let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::InterfaceList { interfaces }));
+                                    }
+                                    Some(wire::ControlMessage::SetInterface { name }) => {
+                                        // Reopening the capture handle and
+                                        // reassigning FlowTable's local_addrs
+                                        // (issue #69) both need to happen on
+                                        // the capture thread, same reason as
+                                        // SetCaptureFilter/SetSnaplen above.
+                                        let _ = capture_config_tx.send(CaptureConfigRequest::SwitchInterface(name));
+                                    }
                                     None => {}
                                 }
                             }
@@ -1148,9 +1378,9 @@ async fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_capture_stats_json, build_system_stats_json, find_device_by_name, is_capturable,
-        is_meaningful_override, resolve_link_type, validate_capture_filter_len, validate_snaplen,
-        MAX_CAPTURE_FILTER_LEN,
+        build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
+        is_capturable, is_meaningful_override, resolve_link_type, validate_capture_filter_len,
+        validate_interface_name_len, validate_snaplen, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::parse::LinkType;
     use tokio::sync::broadcast;
@@ -1240,6 +1470,23 @@ mod tests {
     }
 
     #[test]
+    fn datalink_to_link_type_maps_the_three_supported_datalinks() {
+        assert_eq!(datalink_to_link_type(pcap::Linktype::ETHERNET), Some(LinkType::Ethernet));
+        assert_eq!(datalink_to_link_type(pcap::Linktype::NULL), Some(LinkType::NullLoopback));
+        assert_eq!(datalink_to_link_type(pcap::Linktype::LOOP), Some(LinkType::NullLoopback));
+        assert_eq!(datalink_to_link_type(pcap::Linktype::RAW), Some(LinkType::Raw));
+    }
+
+    #[test]
+    fn datalink_to_link_type_returns_none_rather_than_panicking_for_an_unsupported_datalink() {
+        // Unlike resolve_link_type (startup, fails loudly), this is called
+        // from the runtime interface-switch path (issue #69) where a user
+        // picking an interface with an unsupported link type must get a
+        // rejected request, not a crashed agent.
+        assert_eq!(datalink_to_link_type(pcap::Linktype(113)), None); // DLT_LINUX_SLL
+    }
+
+    #[test]
     fn validate_capture_filter_len_accepts_a_normal_expression() {
         assert!(validate_capture_filter_len("tcp port 443").is_ok());
         assert!(validate_capture_filter_len("").is_ok(), "empty (clear) must always be accepted");
@@ -1256,6 +1503,23 @@ mod tests {
     fn validate_capture_filter_len_accepts_exactly_at_the_limit() {
         let exact = "a".repeat(MAX_CAPTURE_FILTER_LEN);
         assert!(validate_capture_filter_len(&exact).is_ok());
+    }
+
+    #[test]
+    fn validate_interface_name_len_accepts_a_normal_name() {
+        assert!(validate_interface_name_len("en0").is_ok());
+    }
+
+    #[test]
+    fn validate_interface_name_len_rejects_an_oversized_name() {
+        let oversized = "a".repeat(MAX_INTERFACE_NAME_LEN + 1);
+        assert!(validate_interface_name_len(&oversized).is_err());
+    }
+
+    #[test]
+    fn validate_interface_name_len_accepts_exactly_at_the_limit() {
+        let exact = "a".repeat(MAX_INTERFACE_NAME_LEN);
+        assert!(validate_interface_name_len(&exact).is_ok());
     }
 
     #[test]

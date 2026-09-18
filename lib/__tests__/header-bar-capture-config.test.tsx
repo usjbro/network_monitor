@@ -27,6 +27,9 @@ const baseProps = {
   crtEnabled: false,
   onToggleCrt: noop,
   onOpenInstall: noop,
+  availableInterfaces: [],
+  onListInterfaces: noop,
+  onSelectInterface: noop,
 };
 
 describe('HeaderBar capture_config rendering', () => {
