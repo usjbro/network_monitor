@@ -1,6 +1,7 @@
 use base64::Engine;
 use capture_agent::{
     flow::{FlowKey, FlowTable},
+    host_stats,
     http2::{FrameOutcome, Http2Reassembler},
     keylog::KeyLogWatcher,
     l7, parse, process_lookup,
@@ -317,6 +318,55 @@ fn build_capture_stats_json(stat: Option<pcap::Stat>, relay_lagged_events: u64) 
     }
 }
 
+/// Builds the `system_stats` wire event from this tick's inputs: identity
+/// values that never change after startup (hostname/interface/address),
+/// this tick's byte/packet deltas (already computed by the caller as
+/// `this_tick - previous_tick` over the byte/packet counters the capture
+/// loop maintains), and the same cumulative `received` count
+/// `capture_stats` reports. A small pure function for the same reason as
+/// `build_capture_stats_json`: unit-testable without a running capture loop
+/// or tokio runtime — see issue #64.
+#[allow(clippy::too_many_arguments)]
+fn build_system_stats_json(
+    hostname: &str,
+    interface_name: &str,
+    ip_address: &str,
+    rx_bytes_delta: u64,
+    tx_bytes_delta: u64,
+    rx_packets_delta: u64,
+    tx_packets_delta: u64,
+    tick_seconds: f64,
+    total_packets_captured: u32,
+) -> wire::SystemStatsJson {
+    // Bits/sec / 1_000_000 = Mbps. tick_seconds is always the emitter's
+    // fixed 1s interval in production; taken as a parameter (rather than
+    // hard-coded) so a test can assert the arithmetic independent of that
+    // constant, and so a paused/delayed tick (a longer-than-1s gap) still
+    // reports an honest rate instead of quietly assuming exactly 1s elapsed.
+    let mbps = |bytes_delta: u64| -> f64 {
+        if tick_seconds <= 0.0 {
+            return 0.0;
+        }
+        (bytes_delta as f64 * 8.0) / tick_seconds / 1_000_000.0
+    };
+    let pps = |packets_delta: u64| -> f64 {
+        if tick_seconds <= 0.0 {
+            return 0.0;
+        }
+        packets_delta as f64 / tick_seconds
+    };
+    wire::SystemStatsJson {
+        hostname: hostname.to_string(),
+        interface_name: interface_name.to_string(),
+        ip_address: ip_address.to_string(),
+        rx_total_mbps: mbps(rx_bytes_delta),
+        tx_total_mbps: mbps(tx_bytes_delta),
+        rx_pps_total: pps(rx_packets_delta),
+        tx_pps_total: pps(tx_packets_delta),
+        total_packets_captured,
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     if let Err(e) = capture_agent::core_limits::disable_core_dumps() {
@@ -327,6 +377,13 @@ async fn main() -> std::io::Result<()> {
     let interface_name = device.name.clone();
     let local_addrs = local_addrs_for(&device);
     println!("capture-agent: using interface {interface_name}");
+    // Both read once at startup and never change for the life of this
+    // process — computed here, not per-tick, since neither can change
+    // without restarting the agent (a new interface needs a restart; the
+    // OS hostname isn't re-read either, matching that same "identity is
+    // fixed at startup" assumption already made for `interface_name`).
+    let hostname = host_stats::hostname();
+    let ip_address = local_addrs.first().cloned().unwrap_or_default();
 
     // Shared clock: both the capture thread and the periodic emitter need
     // `now_ms` to mean "milliseconds since agent start" on the SAME clock —
@@ -361,6 +418,16 @@ async fn main() -> std::io::Result<()> {
     // per-tick, so a lag that already happened is never un-reported once
     // the client catches up.
     let relay_lagged_events = Arc::new(AtomicU64::new(0));
+    // Aggregate interface throughput (issue #64), updated per-packet in the
+    // capture loop. Cumulative counters, never reset — the periodic emitter
+    // computes a per-tick delta from them, rather than summing live flows'
+    // own totals the way the old layer_update aggregation does, because a
+    // flow leaving the table (eviction) would otherwise look like a drop in
+    // throughput even though nothing about the wire changed.
+    let total_rx_bytes = Arc::new(AtomicU64::new(0));
+    let total_tx_bytes = Arc::new(AtomicU64::new(0));
+    let total_rx_packets = Arc::new(AtomicU64::new(0));
+    let total_tx_packets = Arc::new(AtomicU64::new(0));
 
     let (tx, _rx) = broadcast::channel::<String>(1024);
 
@@ -387,6 +454,10 @@ async fn main() -> std::io::Result<()> {
         let decrypt_state = decrypt_state.clone();
         let decrypt_event_limiter = decrypt_event_limiter.clone();
         let capture_stats = capture_stats.clone();
+        let total_rx_bytes = total_rx_bytes.clone();
+        let total_tx_bytes = total_tx_bytes.clone();
+        let total_rx_packets = total_rx_packets.clone();
+        let total_tx_packets = total_tx_packets.clone();
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
                 .and_then(|c| {
@@ -437,6 +508,22 @@ async fn main() -> std::io::Result<()> {
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
                         flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+
+                        // Aggregate throughput counters (issue #64) — same
+                        // src/dst-vs-local_addrs direction check
+                        // local_port_of/build_flow_key use elsewhere in this
+                        // file. A packet matching neither (e.g. broadcast/
+                        // multicast traffic captured in promiscuous mode)
+                        // counts toward neither total, same as it's excluded
+                        // from FlowTable's own local/remote attribution.
+                        let len = parsed.total_len as u64;
+                        if local_addrs.iter().any(|a| a == &parsed.src_ip) {
+                            total_tx_bytes.fetch_add(len, Ordering::Relaxed);
+                            total_tx_packets.fetch_add(1, Ordering::Relaxed);
+                        } else if local_addrs.iter().any(|a| a == &parsed.dst_ip) {
+                            total_rx_bytes.fetch_add(len, Ordering::Relaxed);
+                            total_rx_packets.fetch_add(1, Ordering::Relaxed);
+                        }
 
                         // Tier B: best-effort, entirely opt-in — a no-op for
                         // the overwhelming majority of packets (see
@@ -511,8 +598,25 @@ async fn main() -> std::io::Result<()> {
         let tx = tx.clone();
         let capture_stats = capture_stats.clone();
         let relay_lagged_events = relay_lagged_events.clone();
+        let total_rx_bytes = total_rx_bytes.clone();
+        let total_tx_bytes = total_tx_bytes.clone();
+        let total_rx_packets = total_rx_packets.clone();
+        let total_tx_packets = total_tx_packets.clone();
+        let hostname = hostname.clone();
+        let interface_name = interface_name.clone();
+        let ip_address = ip_address.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
+            // Previous tick's cumulative counter readings, so each tick can
+            // report this-tick-only deltas (see build_system_stats_json's
+            // doc comment for why a delta rather than a live-flow sum).
+            // Starts at 0, so the very first tick's rate is measured from
+            // agent start, not from some earlier baseline.
+            let mut prev_rx_bytes = 0u64;
+            let mut prev_tx_bytes = 0u64;
+            let mut prev_rx_packets = 0u64;
+            let mut prev_tx_packets = 0u64;
+            let mut prev_tick_at = Instant::now();
             loop {
                 interval.tick().await;
                 let now_ms = start.elapsed().as_millis() as u64;
@@ -652,6 +756,35 @@ async fn main() -> std::io::Result<()> {
                 let lagged = relay_lagged_events.load(Ordering::Relaxed);
                 let stats_json = build_capture_stats_json(stat, lagged);
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats { stats: stats_json }));
+
+                // System/throughput stats (issue #64) — reuses `stat.received`
+                // above as this event's total_packets_captured rather than a
+                // separate counter, and this tick's actual elapsed wall time
+                // (not assumed to be exactly 1s) as the rate denominator, so
+                // a delayed tick still reports an honest, not inflated, rate.
+                let tick_elapsed = prev_tick_at.elapsed().as_secs_f64();
+                prev_tick_at = Instant::now();
+                let rx_bytes_now = total_rx_bytes.load(Ordering::Relaxed);
+                let tx_bytes_now = total_tx_bytes.load(Ordering::Relaxed);
+                let rx_packets_now = total_rx_packets.load(Ordering::Relaxed);
+                let tx_packets_now = total_tx_packets.load(Ordering::Relaxed);
+                let total_packets_captured = stat.map(|s| s.received).unwrap_or(0);
+                let system_stats_json = build_system_stats_json(
+                    &hostname,
+                    &interface_name,
+                    &ip_address,
+                    rx_bytes_now.saturating_sub(prev_rx_bytes),
+                    tx_bytes_now.saturating_sub(prev_tx_bytes),
+                    rx_packets_now.saturating_sub(prev_rx_packets),
+                    tx_packets_now.saturating_sub(prev_tx_packets),
+                    tick_elapsed,
+                    total_packets_captured,
+                );
+                prev_rx_bytes = rx_bytes_now;
+                prev_tx_bytes = tx_bytes_now;
+                prev_rx_packets = rx_packets_now;
+                prev_tx_packets = tx_packets_now;
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::SystemStats { stats: system_stats_json }));
             }
         });
     }
@@ -747,7 +880,10 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_capture_stats_json, find_device_by_name, is_capturable, is_meaningful_override};
+    use super::{
+        build_capture_stats_json, build_system_stats_json, find_device_by_name, is_capturable,
+        is_meaningful_override,
+    };
     use tokio::sync::broadcast;
 
     fn fake_device(name: &str) -> pcap::Device {
@@ -867,5 +1003,48 @@ mod tests {
         assert_eq!(json.dropped, 0);
         assert_eq!(json.if_dropped, 0);
         assert_eq!(json.relay_lagged_events, 0);
+    }
+
+    #[test]
+    fn build_system_stats_json_computes_mbps_and_pps_over_a_one_second_tick() {
+        // 1,250,000 bytes/sec = 10 Mbps exactly (bytes * 8 / 1_000_000).
+        let json = build_system_stats_json(
+            "osi-gw-01",
+            "en0",
+            "192.168.1.104",
+            1_250_000,
+            125_000,
+            500,
+            50,
+            1.0,
+            184_200,
+        );
+        assert_eq!(json.hostname, "osi-gw-01");
+        assert_eq!(json.interface_name, "en0");
+        assert_eq!(json.ip_address, "192.168.1.104");
+        assert!((json.rx_total_mbps - 10.0).abs() < 1e-9, "got {}", json.rx_total_mbps);
+        assert!((json.tx_total_mbps - 1.0).abs() < 1e-9, "got {}", json.tx_total_mbps);
+        assert!((json.rx_pps_total - 500.0).abs() < 1e-9);
+        assert!((json.tx_pps_total - 50.0).abs() < 1e-9);
+        assert_eq!(json.total_packets_captured, 184_200);
+    }
+
+    #[test]
+    fn build_system_stats_json_halves_the_rate_over_a_two_second_tick() {
+        // Same byte delta as the 1s case above, but spread over 2 elapsed
+        // seconds — the rate must come out half as large, proving this
+        // divides by actual elapsed time rather than assuming a fixed 1s
+        // tick (a delayed tick must not report an inflated rate).
+        let json = build_system_stats_json("h", "en0", "10.0.0.1", 1_250_000, 0, 0, 0, 2.0, 0);
+        assert!((json.rx_total_mbps - 5.0).abs() < 1e-9, "got {}", json.rx_total_mbps);
+    }
+
+    #[test]
+    fn build_system_stats_json_reports_zero_rate_rather_than_dividing_by_zero() {
+        let json = build_system_stats_json("h", "en0", "10.0.0.1", 1_000, 1_000, 10, 10, 0.0, 0);
+        assert_eq!(json.rx_total_mbps, 0.0);
+        assert_eq!(json.tx_total_mbps, 0.0);
+        assert_eq!(json.rx_pps_total, 0.0);
+        assert_eq!(json.tx_pps_total, 0.0);
     }
 }

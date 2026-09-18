@@ -1,4 +1,4 @@
-import { CaptureStats, NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame, TracerouteHop } from './types';
+import { CaptureStats, NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -77,6 +77,26 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     dropped: requireField(w, 'dropped'),
     ifDropped: requireField(w, 'ifDropped'),
     relayLaggedEvents: requireField(w, 'relayLaggedEvents'),
+  };
+}
+
+// Same nested-envelope shape as mapCaptureStatsEvent/mapTracerouteHopEvent
+// above — see issue #64 and docs/wire-protocol.md.
+export function mapSystemStatsEvent(json: unknown): SystemStats {
+  const envelope = json as { stats?: Record<string, unknown> };
+  const w = envelope.stats;
+  if (!w) {
+    throw new Error('malformed system_stats event: missing "stats" field');
+  }
+  return {
+    hostname: requireField(w, 'hostname'),
+    interfaceName: requireField(w, 'interfaceName'),
+    ipAddress: requireField(w, 'ipAddress'),
+    rxTotalMbps: requireField(w, 'rxTotalMbps'),
+    txTotalMbps: requireField(w, 'txTotalMbps'),
+    rxPpsTotal: requireField(w, 'rxPpsTotal'),
+    txPpsTotal: requireField(w, 'txPpsTotal'),
+    totalPacketsCaptured: requireField(w, 'totalPacketsCaptured'),
   };
 }
 

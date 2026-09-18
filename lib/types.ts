@@ -149,16 +149,18 @@ export interface ThemeConfig {
   promptPath: string;
 }
 
+// From the agent's `system_stats` wire event (docs/wire-protocol.md), sent
+// once per tick alongside layer_update/capture_stats. Every field here is a
+// real measurement — issue #64 removed the placeholder shape this used to
+// be (interfaceSpeedMbps, duplexMode, macAddress, cpuUsagePct, memUsagePct,
+// uptimeSeconds) rather than wiring those up or faking them; none of them
+// are measurable from this agent today. Consumers hold this as
+// `SystemStats | null` — `null` until the first tick arrives, distinct
+// from a genuine zero once at least one tick has been received.
 export interface SystemStats {
   hostname: string;
   interfaceName: string;
-  interfaceSpeedMbps: number;
-  duplexMode: string;
   ipAddress: string;
-  macAddress: string;
-  cpuUsagePct: number;
-  memUsagePct: number;
-  uptimeSeconds: number;
   rxTotalMbps: number;
   txTotalMbps: number;
   rxPpsTotal: number;

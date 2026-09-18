@@ -251,6 +251,7 @@ pub enum AgentEvent {
     DecryptedPayload { payload: Box<DecryptedPayloadJson> },
     TracerouteHop { hop: Box<TracerouteHopJson> },
     CaptureStats { stats: CaptureStatsJson },
+    SystemStats { stats: SystemStatsJson },
 }
 
 /// Capture health, sent once per tick (~1s) alongside `layer_update`. Two
@@ -284,6 +285,43 @@ pub struct CaptureStatsJson {
     /// `dropped`/`if_dropped` above — this is the relay's own outbound
     /// backlog, not a capture-side loss.
     pub relay_lagged_events: u64,
+}
+
+/// Host/interface identity and aggregate throughput, sent once per tick
+/// (~1s) alongside `layer_update`/`capture_stats`. Replaces the placeholder
+/// values `SystemStats` used to be seeded with client-side (issue #64) —
+/// every field here is a real measurement, never a fabricated number.
+/// Deliberately narrower than the old placeholder shape: host CPU/memory/
+/// uptime and interface speed/duplex are not included at all rather than
+/// faked, since none of them are measurable from this agent today (see the
+/// issue for why they were dropped instead of wired up).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemStatsJson {
+    /// This machine's hostname, from `gethostname(2)`. Empty string if the
+    /// lookup failed for any reason (never fabricated).
+    pub hostname: String,
+    /// The interface this agent is actually capturing on — the same value
+    /// `detect_interface()` resolved at startup, not user-editable.
+    pub interface_name: String,
+    /// The first address assigned to the capture interface, if any. Empty
+    /// string if the interface has no assigned address (shouldn't happen in
+    /// practice — `is_capturable` rejects such an interface at startup —
+    /// but reported honestly rather than assumed).
+    pub ip_address: String,
+    /// Aggregate inbound/outbound throughput across the whole interface,
+    /// computed from a byte counter delta between ticks — not a sum over
+    /// currently-live flows, which would move when a flow evicts even
+    /// though no throughput actually changed.
+    pub rx_total_mbps: f64,
+    pub tx_total_mbps: f64,
+    pub rx_pps_total: f64,
+    pub tx_pps_total: f64,
+    /// Total packets received by the capture handle since it opened — the
+    /// same `pcap::Stat::received` count `capture_stats` reports, repeated
+    /// here so this event is self-contained. Cumulative, not a per-tick
+    /// delta.
+    pub total_packets_captured: u32,
 }
 
 #[derive(Serialize)]
@@ -653,5 +691,32 @@ mod tests {
         assert!(line.contains("\"dropped\":3"));
         assert!(line.contains("\"ifDropped\":1"));
         assert!(line.contains("\"relayLaggedEvents\":42"));
+    }
+
+    #[test]
+    fn encodes_system_stats_as_one_json_line_camel_case() {
+        let event = AgentEvent::SystemStats {
+            stats: SystemStatsJson {
+                hostname: "osi-gw-01".to_string(),
+                interface_name: "en0".to_string(),
+                ip_address: "192.168.1.104".to_string(),
+                rx_total_mbps: 12.5,
+                tx_total_mbps: 3.25,
+                rx_pps_total: 480.0,
+                tx_pps_total: 220.0,
+                total_packets_captured: 184200,
+            },
+        };
+        let line = encode_event(&event);
+        assert!(line.ends_with('\n'));
+        assert!(line.contains("\"type\":\"system_stats\""));
+        assert!(line.contains("\"hostname\":\"osi-gw-01\""));
+        assert!(line.contains("\"interfaceName\":\"en0\""));
+        assert!(line.contains("\"ipAddress\":\"192.168.1.104\""));
+        assert!(line.contains("\"rxTotalMbps\":12.5"));
+        assert!(line.contains("\"txTotalMbps\":3.25"));
+        assert!(line.contains("\"rxPpsTotal\":480.0"));
+        assert!(line.contains("\"txPpsTotal\":220.0"));
+        assert!(line.contains("\"totalPacketsCaptured\":184200"));
     }
 }
