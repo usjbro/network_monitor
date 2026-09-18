@@ -216,7 +216,7 @@ pub fn build_header_breakdown(parsed: &ParsedPacket, l7: &L7Info) -> HeaderBreak
                 6 => "IPv6".to_string(),
                 _ => "Unknown".to_string(),
             },
-            vlan_tag: None,
+            vlan_tag: parsed.vlan_tag.clone(),
         }),
     }
 }
@@ -567,6 +567,7 @@ mod tests {
             payload,
             ip_version: 4,
             ip_checksum: Some(0xbeef),
+            vlan_tag: None,
         }
     }
 
@@ -586,6 +587,7 @@ mod tests {
             payload,
             ip_version: 4,
             ip_checksum: Some(0xdead),
+            vlan_tag: None,
         }
     }
 

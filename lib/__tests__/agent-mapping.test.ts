@@ -159,6 +159,36 @@ describe('mapPacketEvent', () => {
     expect(packet.hexDump).toBe('00 01 02');
     expect(packet.headerBreakdown.layer4?.windowSize).toBe(65535);
     expect(packet.headerBreakdown.layer7).toBeUndefined();
+    // Untagged frame in this fixture — vlanTag must be absent, not a
+    // fabricated value (see issue #62).
+    expect(packet.headerBreakdown.layer2?.vlanTag).toBeUndefined();
+  });
+
+  it('carries the 802.1Q VLAN tag through when the frame was tagged', () => {
+    const wire = {
+      id: 'pkt-2',
+      timestamp: '2026-08-26T00:00:00.000Z',
+      relativeTimeMs: 42,
+      layer: 4,
+      protocol: 'TCP',
+      src: '192.168.1.10:51000',
+      dst: '93.184.216.34:443',
+      length: 60,
+      summary: 'TCP SYN',
+      hexDump: '00 01 02',
+      headerBreakdown: {
+        layer2: {
+          srcMac: '00:01:02:03:04:05',
+          dstMac: '06:07:08:09:0a:0b',
+          ethType: 'IPv4',
+          vlanTag: '100',
+        },
+      },
+    };
+
+    const packet = mapPacketEvent(wire);
+
+    expect(packet.headerBreakdown.layer2?.vlanTag).toBe('100');
   });
 
   it('throws when headerBreakdown is missing rather than defaulting to {}', () => {

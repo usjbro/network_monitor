@@ -1,4 +1,4 @@
-use etherparse::{SlicedPacket, NetSlice, TransportSlice};
+use etherparse::{LinkExtSlice, NetSlice, SlicedPacket, TransportSlice};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportProtocol {
@@ -37,6 +37,13 @@ pub struct ParsedPacket {
     /// IPv4 header checksum. Always `None` for IPv6, which has no header
     /// checksum field — that is a protocol fact, not a gap.
     pub ip_checksum: Option<u16>,
+    /// The 802.1Q VLAN identifier (0-4094), as a decimal string, if this
+    /// frame carried a VLAN tag between its Ethernet header and network
+    /// layer. `None` for untagged frames — not a gap: most traffic on a
+    /// typical access-port capture is untagged, and that is the correct,
+    /// honest value for it. Only the outermost tag is reported when a frame
+    /// is double-tagged (QinQ); see `docs/wire-protocol.md`.
+    pub vlan_tag: Option<String>,
 }
 
 fn mac_to_string(mac: [u8; 6]) -> String {
@@ -58,6 +65,15 @@ pub fn parse_packet(data: &[u8]) -> Option<ParsedPacket> {
         }
         _ => return None,
     };
+
+    // The outermost 802.1Q tag, if this frame is VLAN-tagged — `link_exts`
+    // also carries MACsec headers, which aren't a VLAN tag, so this only
+    // matches the `Vlan` variant. A double-tagged (QinQ) frame reports only
+    // its first/outer tag, matching the single `vlan_tag` field's shape.
+    let vlan_tag = sliced.link_exts.iter().find_map(|ext| match ext {
+        LinkExtSlice::Vlan(vlan) => Some(vlan.vlan_identifier().value().to_string()),
+        _ => None,
+    });
 
     let (src_ip, dst_ip, ttl, ip_version, ip_checksum) = match &sliced.net {
         Some(NetSlice::Ipv4(ipv4)) => (
@@ -123,13 +139,14 @@ pub fn parse_packet(data: &[u8]) -> Option<ParsedPacket> {
         payload,
         ip_version,
         ip_checksum,
+        vlan_tag,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etherparse::PacketBuilder;
+    use etherparse::{PacketBuilder, VlanId};
 
     #[test]
     fn parses_a_tcp_syn_packet() {
@@ -155,11 +172,34 @@ mod tests {
         assert_eq!(parsed.ttl, 64);
         assert_eq!(parsed.ip_version, 4);
         assert!(parsed.ip_checksum.is_some());
+        // Untagged frame — must read as absent, not a fabricated 0/default,
+        // and not confused with "unparsed" (see issue #62).
+        assert_eq!(parsed.vlan_tag, None);
     }
 
     #[test]
     fn returns_none_for_garbage_bytes() {
         let garbage = [0u8, 1, 2, 3, 4];
         assert!(parse_packet(&garbage).is_none());
+    }
+
+    #[test]
+    fn parses_the_802_1q_vlan_tag_when_present() {
+        let builder = PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
+            .single_vlan(VlanId::try_new(100).unwrap())
+            .ipv4([192, 168, 1, 10], [93, 184, 216, 34], 64)
+            .tcp(51000, 443, 1000, 65535)
+            .syn();
+        let payload: &[u8] = &[];
+        let mut data = Vec::new();
+        builder.write(&mut data, payload).unwrap();
+
+        let parsed = parse_packet(&data).expect("should parse a VLAN-tagged TCP/IP packet");
+
+        assert_eq!(parsed.vlan_tag.as_deref(), Some("100"));
+        // The tag must not disturb parsing of anything past it.
+        assert_eq!(parsed.src_ip, "192.168.1.10");
+        assert_eq!(parsed.protocol, TransportProtocol::Tcp);
+        assert_eq!(parsed.dst_port, Some(443));
     }
 }
