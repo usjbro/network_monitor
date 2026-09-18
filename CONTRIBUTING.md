@@ -59,6 +59,12 @@ If you change anything in `capture-agent/src/wire.rs`, you must also update `lib
 
 Anything touching the capture agent's privilege model, the network binding of either process, authentication, or dependency additions in security-adjacent areas should be treated with extra scrutiny — see [docs/security.md](docs/security.md) for the current posture, including the residual risks called out for the mTLS/LAN-access design (epic #22) and the newer TLS-visibility and ownership-enrichment opt-in features. Do not casually expose either process beyond loopback.
 
+## CI checks
+
+- `Rust (capture-agent)` and `Web (Next.js)` (`.github/workflows/ci.yml`) are required status checks on `main`.
+- CodeQL default-setup scanning (`Analyze (actions)`, `Analyze (javascript-typescript)`, `Analyze (rust)`) is enabled and free on this public repo; it isn't a committed workflow file, it's configured under repo Settings → Code security.
+- **Copilot Autofix / "Code scanning AI findings" is deliberately disabled**, not required, and shouldn't be re-enabled without first confirming Copilot plan access. It rode along with CodeQL default-setup and failed on every PR with an upstream `400 The requested model is not supported` error — its underlying SWE-agent requests a premium model (Claude Opus) that this repo's Copilot Free plan doesn't have access to, not a bug in repo code. See issue #67 for the investigation. It can be reconsidered if this account's Copilot plan is upgraded.
+
 ## Commit and PR conventions
 
 - Commit messages: imperative mood, explain *why* not just *what* where the reasoning isn't obvious from the diff.
