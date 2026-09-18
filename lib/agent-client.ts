@@ -77,6 +77,8 @@ export class AgentClient extends EventEmitter {
       | { type: 'trace_route'; targetIp: string }
       | { type: 'set_capture_filter'; filter: string }
       | { type: 'set_snaplen'; bytes: number }
+      | { type: 'list_interfaces' }
+      | { type: 'set_interface'; name: string }
   ): void {
     this.socket?.write(JSON.stringify(message) + '\n');
   }

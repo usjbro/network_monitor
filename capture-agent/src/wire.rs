@@ -261,6 +261,34 @@ pub enum AgentEvent {
     SystemStats { stats: SystemStatsJson },
     CaptureConfig { config: CaptureConfigJson },
     CaptureConfigError { message: String },
+    InterfaceList { interfaces: Vec<InterfaceJson> },
+    InterfaceChanged { interface: InterfaceChangedJson },
+    InterfaceError { message: String },
+}
+
+/// One capturable network interface, as reported in response to a
+/// `list_interfaces` control message (issue #69). Only interfaces
+/// `is_capturable` accepts (i.e. have at least one assigned address) are
+/// ever included — an addressless interface can't be attributed as
+/// local/remote and would silently capture nothing if selected, so it's
+/// never offered as a choice in the first place.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InterfaceJson {
+    pub name: String,
+    pub addresses: Vec<String>,
+}
+
+/// Sent once, immediately, on a successful `set_interface` (issue #69) —
+/// an ack for UI responsiveness (e.g. closing the picker) rather than
+/// waiting for the next `system_stats` tick, which also carries the same
+/// `interfaceName`/`ipAddress` values every tick thereafter as the
+/// enduring source of truth.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InterfaceChangedJson {
+    pub name: String,
+    pub ip_address: String,
 }
 
 /// The capture-time controls currently in effect — a BPF capture filter
@@ -400,6 +428,12 @@ pub enum ControlMessage {
     },
     SetSnaplen {
         bytes: u32,
+    },
+    /// Issue #69. No payload — the response is an `InterfaceList` event
+    /// carrying every currently-capturable interface.
+    ListInterfaces,
+    SetInterface {
+        name: String,
     },
 }
 
@@ -547,6 +581,64 @@ mod tests {
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"capture_config_error\""));
         assert!(line.contains("\"message\":\"invalid capture filter: syntax error\""));
+    }
+
+    #[test]
+    fn decodes_list_interfaces_and_set_interface() {
+        assert!(matches!(
+            decode_control("{\"type\":\"list_interfaces\"}"),
+            Some(ControlMessage::ListInterfaces)
+        ));
+
+        let msg = decode_control("{\"type\":\"set_interface\",\"name\":\"en1\"}");
+        match msg {
+            Some(ControlMessage::SetInterface { name }) => assert_eq!(name, "en1"),
+            other => panic!("expected SetInterface, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encodes_interface_list_with_addresses_per_interface() {
+        let event = AgentEvent::InterfaceList {
+            interfaces: vec![
+                InterfaceJson { name: "en0".to_string(), addresses: vec!["192.168.1.10".to_string()] },
+                InterfaceJson {
+                    name: "en1".to_string(),
+                    addresses: vec!["10.0.0.5".to_string(), "fe80::1".to_string()],
+                },
+            ],
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"interface_list\""));
+        assert!(line.contains("\"name\":\"en0\""));
+        assert!(line.contains("\"addresses\":[\"192.168.1.10\"]"));
+        assert!(line.contains("\"addresses\":[\"10.0.0.5\",\"fe80::1\"]"));
+    }
+
+    #[test]
+    fn encodes_interface_list_as_an_empty_array_when_nothing_is_capturable() {
+        let event = AgentEvent::InterfaceList { interfaces: vec![] };
+        let line = encode_event(&event);
+        assert!(line.contains("\"interfaces\":[]"));
+    }
+
+    #[test]
+    fn encodes_interface_changed_with_camel_case_ip_address() {
+        let event = AgentEvent::InterfaceChanged {
+            interface: InterfaceChangedJson { name: "en1".to_string(), ip_address: "10.0.0.5".to_string() },
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"interface_changed\""));
+        assert!(line.contains("\"name\":\"en1\""));
+        assert!(line.contains("\"ipAddress\":\"10.0.0.5\""));
+    }
+
+    #[test]
+    fn encodes_interface_error_with_type_tag() {
+        let event = AgentEvent::InterfaceError { message: "no such interface: en9".to_string() };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"interface_error\""));
+        assert!(line.contains("\"message\":\"no such interface: en9\""));
     }
 
     #[test]

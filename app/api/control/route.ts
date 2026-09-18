@@ -5,12 +5,13 @@ declare global {
   var __agentClient: AgentClient | undefined;
 }
 
-// Matches capture-agent/src/main.rs's MAX_CAPTURE_FILTER_LEN — the agent
-// is the authoritative enforcer (issue #68's security considerations
-// target it, the privileged process), but rejecting an oversized filter
-// here too means a bogus/hostile request never even reaches the agent
-// process's control channel.
+// Matches capture-agent/src/main.rs's MAX_CAPTURE_FILTER_LEN/
+// MAX_INTERFACE_NAME_LEN — the agent is the authoritative enforcer (issues
+// #68/#69's security considerations target it, the privileged process),
+// but rejecting an oversized value here too means a bogus/hostile request
+// never even reaches the agent process's control channel.
 const MAX_CAPTURE_FILTER_LEN = 1024;
+const MAX_INTERFACE_NAME_LEN = 256;
 
 export async function POST(request: NextRequest) {
   const body = await request.json();
@@ -21,6 +22,8 @@ export async function POST(request: NextRequest) {
     'unregister_decrypt_eligible',
     'set_capture_filter',
     'set_snaplen',
+    'list_interfaces',
+    'set_interface',
   ];
   if (!allowedTypes.includes(body.type)) {
     return NextResponse.json({ error: 'invalid control message type' }, { status: 400 });
@@ -33,6 +36,11 @@ export async function POST(request: NextRequest) {
   if (body.type === 'set_snaplen') {
     if (typeof body.bytes !== 'number' || !Number.isInteger(body.bytes) || body.bytes <= 0) {
       return NextResponse.json({ error: 'invalid snap length' }, { status: 400 });
+    }
+  }
+  if (body.type === 'set_interface') {
+    if (typeof body.name !== 'string' || body.name.length === 0 || body.name.length > MAX_INTERFACE_NAME_LEN) {
+      return NextResponse.json({ error: 'invalid interface name' }, { status: 400 });
     }
   }
   if (!global.__agentClient) {

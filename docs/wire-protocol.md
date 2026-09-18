@@ -248,6 +248,42 @@ Sent once, immediately, when a `set_capture_filter`/`set_snaplen` control messag
 
 The rejected change never takes effect — the previous, still-active `filter`/`snaplen` keeps running, and the *next* `capture_config` tick reports that unchanged previous state, not anything derived from the rejected request. The UI (`app/page.tsx`) treats this as a dismissible banner rather than auto-clearing it on the next `capture_config` tick, since that tick re-sending the same still-unchanged config isn't evidence the rejection was resolved.
 
+### `interface_list`
+
+Sent on-demand, once, in response to a `list_interfaces` control message (below) — issue #69. Unlike `capture_config`/`system_stats`, this is not a per-tick snapshot; the header's interface picker requests it lazily (when opened), not automatically.
+
+```json
+{
+  "type": "interface_list",
+  "interfaces": [
+    { "name": "en0", "addresses": ["192.168.1.104"] },
+    { "name": "lo0", "addresses": ["127.0.0.1", "::1"] }
+  ]
+}
+```
+
+Only interfaces `is_capturable` accepts (at least one assigned address) are ever included — an addressless interface can't be attributed as local/remote by `FlowTable` and would silently capture nothing if selected, so it's filtered out before the browser ever sees it as a choice, same principle as the `CAPTURE_INTERFACE` startup override's own rejection of one. `interfaces` can be an empty array (no capturable interfaces found) — that's reported honestly, not treated as an error.
+
+### `interface_changed`
+
+Sent once, immediately, on a successful `set_interface` — an ack for UI responsiveness (e.g. closing the picker, clearing an earlier `interface_error`) rather than waiting for the next `system_stats` tick, which also carries the same `interfaceName`/`ipAddress` every tick thereafter as the enduring source of truth.
+
+```json
+{"type": "interface_changed", "interface": {"name": "lo0", "ipAddress": "127.0.0.1"}}
+```
+
+Note the nesting: fields sit under an `interface` key, same shape as `capture_config`'s `config`/`traceroute_hop`'s `hop` — not flat on the event.
+
+### `interface_error`
+
+Sent once, immediately, when a `set_interface` control message is rejected — an oversized name, no matching interface, an addressless (uncapturable) interface, a device-list/open failure, or an unsupported link type on the target interface. Same flat, one-off shape as `capture_config_error`.
+
+```json
+{"type": "interface_error", "message": "no such interface: en9"}
+```
+
+The rejected switch never takes effect: the previous capture handle, link type, local-address list, and `FlowTable` all keep running exactly as they were — nothing is torn down speculatively before the new interface is confirmed to actually work. Unlike `capture_config_error`, the UI clears this banner automatically once `interface_changed` arrives, since that event only ever fires on a *successful* switch — real evidence the rejection was resolved, not just an unrelated periodic re-send.
+
 ## Relay → browser (SSE, not the raw agent protocol)
 
 `app/api/stream/route.ts` re-wraps agent events as Server-Sent Events (`data: <json>\n\n`) and adds one synthetic event type the agent itself never sends:
@@ -295,6 +331,24 @@ Both are queued from the async connection-handling task into the capture thread 
 Validation happens both relay-side (`app/api/control/route.ts` rejects a non-string/oversized filter or a non-positive-integer snap length with `400` before ever reaching the agent) and agent-side (the authoritative check: `MAX_CAPTURE_FILTER_LEN` = 1024 bytes, `validate_snaplen` rejects `0` and anything not representable as a positive `i32`). Either layer rejecting a request emits `capture_config_error` (above) and leaves the previous capture configuration running unchanged — never a half-applied state.
 
 A BPF filter expression is new attacker-reachable input to this privileged process (it arrives from the browser and is compiled by libpcap in the agent), even though it's not a shell string and libpcap's own compiler is what parses it — see `docs/security.md`.
+
+### `list_interfaces` / `set_interface`
+
+```json
+{"type": "list_interfaces"}
+{"type": "set_interface", "name": "en1"}
+```
+
+Sent by `app/api/control/route.ts` (same POST endpoint as `pause`/`resume`/`set_capture_filter`), called by the command bar's `iface list` / `iface <name>` commands and the header's interface picker — issue #69. `list_interfaces` triggers an `interface_list` response; it doesn't touch the open capture handle at all, so it's handled directly in the async connection-handling task rather than round-tripping through the capture thread.
+
+`set_interface` is queued into the capture thread the same way `set_capture_filter`/`set_snaplen` are (the open `pcap::Capture` handle only ever lives there) via `apply_interface_switch_request` (`capture-agent/src/main.rs`). A successful switch:
+
+1. Looks up the named device via `pcap::Device::list()`, rejecting (via `interface_error`) if it doesn't exist or has no assigned address — same validation `CAPTURE_INTERFACE` already applies at startup.
+2. Opens a new capture handle on it (at the default snap length — a filter/snaplen tuned for the previous interface may not even be meaningful on this one, so both reset to their defaults rather than carrying forward silently) and re-resolves its link type, since a different interface can use an entirely different one (e.g. switching from `en0`, Ethernet, to `lo0`, loopback). An unsupported link type is rejected the same way `resolve_link_type` would reject it at startup, except non-fatally here — `datalink_to_link_type` (the non-panicking primitive `resolve_link_type` wraps) — a bad interface choice at runtime must never crash the whole agent.
+3. Resets `FlowTable` entirely (`FlowTable::reset`, `capture-agent/src/flow.rs`) — every previously-tracked flow belonged to the interface that just stopped being captured, and leaving one behind with a now-wrong local-address frame of reference is exactly the silent-direction-flip bug this issue calls out as the error-prone part of switching interfaces. Each flow discarded this way emits its own `connection_closed` event, same as normal idle eviction.
+4. Only once all of the above succeeds does it replace the live capture handle, link type, local-address list, and `capture_config`/`system_stats`-reported identity — a failure at any step leaves every one of those exactly as it was.
+
+`CAPTURE_INTERFACE` still wins at startup and is unaffected by any of this — it's read once, before the TCP listener even binds; `set_interface` only ever changes the *runtime* selection made after that.
 
 ## Adding a new field or event type
 

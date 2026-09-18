@@ -14,6 +14,7 @@ import {
   DecryptedPayloadSegment,
   OSILayerInfo,
   NetworkConnection,
+  NetworkInterface,
   PacketFrame,
   SystemStats,
   TerminalTheme,
@@ -28,6 +29,8 @@ import {
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
+  mapInterfaceErrorEvent,
+  mapInterfaceListEvent,
   mapPacketEvent,
   mapSystemStatsEvent,
   mapTracerouteHopEvent,
@@ -75,11 +78,21 @@ export default function TerminalApp() {
   // Capture-time controls (issue #68) — null until the agent's first
   // capture_config tick arrives, same "no placeholder" discipline as
   // `stats` above. `captureConfigError` is a one-off signal (an invalid
-  // filter/snaplen), not a persistent snapshot — cleared on the next
-  // successful capture_config so it never lingers past a since-corrected
-  // change.
+  // filter/snaplen) — dismissed explicitly (see its banner's button), not
+  // auto-cleared by the next capture_config tick, since that tick re-sends
+  // the same still-unchanged config regardless of whether an error just
+  // happened and isn't itself evidence the rejection was resolved.
   const [captureConfig, setCaptureConfig] = useState<CaptureConfig | null>(null);
   const [captureConfigError, setCaptureConfigError] = useState<string | null>(null);
+
+  // Interface selection (issue #69) — `availableInterfaces` starts empty
+  // and is populated on-demand by an explicit `iface list` (or opening the
+  // header's picker), not fetched automatically on load, matching this
+  // app's existing "opt-in trigger" pattern for enrichment/geoip.
+  // `interfaceError` is a one-off rejection signal, same dismiss-don't-
+  // auto-clear discipline as `captureConfigError` above.
+  const [availableInterfaces, setAvailableInterfaces] = useState<NetworkInterface[]>([]);
+  const [interfaceError, setInterfaceError] = useState<string | null>(null);
 
   // Connections & Packets State (populated from the live capture stream)
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
@@ -184,6 +197,20 @@ export default function TerminalApp() {
         }
         if (data.type === 'capture_config_error') {
           setCaptureConfigError(mapCaptureConfigErrorEvent(data));
+        }
+        if (data.type === 'interface_list') {
+          setAvailableInterfaces(mapInterfaceListEvent(data));
+        }
+        if (data.type === 'interface_changed') {
+          // system_stats (above) is the enduring source of truth for the
+          // active interfaceName/ipAddress — this event exists only so a
+          // successful switch clears any earlier rejection right away,
+          // rather than leaving a stale error banner up for another ~1s
+          // until the next system_stats tick would otherwise imply it.
+          setInterfaceError(null);
+        }
+        if (data.type === 'interface_error') {
+          setInterfaceError(mapInterfaceErrorEvent(data));
         }
         if (data.type === 'connection_enrichment') {
           setConnections((prev) => applyEnrichmentEvent(prev, data));
@@ -350,6 +377,25 @@ export default function TerminalApp() {
     });
   };
 
+  // Interface selection (issue #69). Listing is on-demand only (the header
+  // picker requests it when opened; `iface list` does the same from the
+  // command bar) — never fetched automatically, matching this app's
+  // existing opt-in-trigger pattern for enrichment/geoip.
+  const sendListInterfaces = () => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'list_interfaces' }),
+    });
+  };
+  const sendSetInterface = (name: string) => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'set_interface', name }),
+    });
+  };
+
   // Command Line Handler
   const handleExecuteCommand = (cmdStr: string) => {
     const parts = cmdStr.toLowerCase().split(' ');
@@ -416,6 +462,14 @@ export default function TerminalApp() {
     } else if (mainCmd === 'snaplen' && arg1) {
       const bytes = parseInt(arg1, 10);
       if (Number.isInteger(bytes) && bytes > 0) sendSnaplen(bytes);
+    } else if (mainCmd === 'iface' && arg1 === 'list') {
+      sendListInterfaces();
+    } else if (mainCmd === 'iface' && arg1) {
+      // Interface names (en0, lo0, utun8, ...) are conventionally already
+      // lowercase, so the pre-lowercased `arg1` is fine here — unlike a
+      // free-text filter expression, there's no case-sensitive content to
+      // preserve.
+      sendSetInterface(arg1);
     }
   };
 
@@ -480,6 +534,24 @@ export default function TerminalApp() {
         </div>
       )}
 
+      {/* A rejected `iface <name>` switch (issue #69) — dismissible, same
+          reasoning as the capture-config error above. Cleared automatically
+          on a successful switch (interface_changed), unlike that one,
+          since interface_changed only ever fires on success — real
+          evidence the rejection was resolved. */}
+      {interfaceError && (
+        <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2 flex items-start justify-between gap-3">
+          <span>interface switch rejected — {interfaceError}</span>
+          <button
+            onClick={() => setInterfaceError(null)}
+            className="shrink-0 text-red-200 hover:text-white font-bold"
+            aria-label="Dismiss interface error"
+          >
+            [CLOSE]
+          </button>
+        </div>
+      )}
+
       {/* Ownership enrichment disclosure — re-shown on every "enrich on" /
           "enrich background on", per spec §1. Simple dismissible banner,
           consistent with the "agent not connected" banner's styling above,
@@ -505,6 +577,9 @@ export default function TerminalApp() {
         <HeaderBar
           stats={stats}
           captureConfig={captureConfig}
+          availableInterfaces={availableInterfaces}
+          onListInterfaces={sendListInterfaces}
+          onSelectInterface={sendSetInterface}
           theme={themeConfig}
           onSelectTheme={setSelectedTheme}
           isPaused={isPaused}

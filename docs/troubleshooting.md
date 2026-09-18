@@ -32,6 +32,8 @@ CAPTURE_INTERFACE=en0 cargo run --release
 
 Use the `route -n get default` output from *before* your VPN connected to find your real interface name (or `ifconfig -l` as a starting point — usually the same set `pcap::Device::list()` sees, but not guaranteed).
 
+**You don't have to restart the agent to try a different interface.** `CAPTURE_INTERFACE` still wins at startup and needs a restart to change — it's the right tool for "always start on this interface." But for a quick "let me just try another one" without killing the process, use the header's interface picker (or `iface list` / `iface <name>` in the command bar) — issue #69. Switching takes effect within about a second, no restart needed, though it does reset the active `filter`/`snaplen` to their defaults and clears tracked connections (every existing flow belonged to the interface that just stopped being captured). Same validation as `CAPTURE_INTERFACE`: an addressless interface, or one this agent can't parse the link type of, is rejected with a clear error rather than silently accepted.
+
 ## Capturing on `lo0` (loopback), or the agent panics with "uses link type ... which this agent doesn't know how to parse"
 
 Loopback (`lo0`) and raw-IP interfaces don't use Ethernet framing, so the agent reads the capture handle's actual link type at startup (`pcap::Capture::get_datalink()`) rather than assuming Ethernet. It understands three shapes: Ethernet II (`DLT_EN10MB`), BSD loopback (`DLT_NULL`/`DLT_LOOP`), and raw IP (`DLT_RAW`) — see `capture-agent/src/parse.rs`'s `LinkType` and issue #63. Loopback and raw-IP frames have no real MAC addresses; the agent reports `00:00:00:00:00:00` for both rather than fabricating or omitting them.

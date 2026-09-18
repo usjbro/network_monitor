@@ -1,4 +1,4 @@
-import { CaptureConfig, CaptureStats, NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
+import { CaptureConfig, CaptureStats, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -120,6 +120,31 @@ export function mapCaptureConfigEvent(json: unknown): CaptureConfig {
 // capture_config_error is flat (no nested envelope) — a one-off signal,
 // not a per-tick snapshot, so it carries just the message.
 export function mapCaptureConfigErrorEvent(json: unknown): string {
+  const w = json as Record<string, unknown>;
+  return requireField(w, 'message');
+}
+
+// Accepts the full `interface_list` event envelope — issue #69. Sent
+// on-demand in response to a `list_interfaces` control message (the "iface
+// list" command), not per-tick, so a malformed/missing `interfaces` array
+// throws rather than silently returning an empty list a caller can't tell
+// apart from "no capturable interfaces exist".
+export function mapInterfaceListEvent(json: unknown): NetworkInterface[] {
+  const w = json as { interfaces?: unknown[] };
+  if (!w.interfaces) {
+    throw new Error('malformed interface_list event: missing "interfaces" field');
+  }
+  return w.interfaces.map((entry) => {
+    const e = entry as Record<string, unknown>;
+    return {
+      name: requireField<string>(e, 'name'),
+      addresses: requireField<string[]>(e, 'addresses'),
+    };
+  });
+}
+
+// interface_error is flat, same shape as capture_config_error above.
+export function mapInterfaceErrorEvent(json: unknown): string {
   const w = json as Record<string, unknown>;
   return requireField(w, 'message');
 }
