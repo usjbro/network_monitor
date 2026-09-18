@@ -1,5 +1,28 @@
 use etherparse::{LinkExtSlice, NetSlice, SlicedPacket, TransportSlice};
 
+/// The link-layer framing a captured frame's raw bytes are in, matching the
+/// open capture handle's datalink type (`pcap::Capture::get_datalink()`,
+/// read once at startup in `main.rs` and passed into every `parse_packet`
+/// call). Before this existed, `parse_packet` unconditionally assumed
+/// Ethernet II framing and silently rejected every frame from a loopback or
+/// raw-IP interface — indistinguishable from an idle network (issue #63).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkType {
+    /// Standard Ethernet II framing (`DLT_EN10MB`) — real source/destination
+    /// MAC addresses precede the network-layer header.
+    Ethernet,
+    /// BSD loopback framing (`DLT_NULL`/`DLT_LOOP`): a 4-byte
+    /// address-family header, then a bare IP packet. No real MAC addresses
+    /// exist on a loopback interface. The address-family value itself is
+    /// never inspected — the IP header right after it is self-describing
+    /// (its version nibble is 4 or 6) — so skipping exactly 4 bytes is
+    /// correct regardless of which byte order that platform used for it.
+    NullLoopback,
+    /// Raw IP framing (`DLT_RAW`): the frame *is* the IP packet, with no
+    /// link header at all.
+    Raw,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransportProtocol {
     Tcp,
@@ -53,28 +76,63 @@ fn mac_to_string(mac: [u8; 6]) -> String {
         .join(":")
 }
 
+/// Reported for a frame captured on a link type with no real link-layer
+/// addresses at all (loopback, raw IP) — an honest, visibly-synthetic
+/// all-zero value rather than omitting the field or fabricating a
+/// plausible-looking one.
+const NO_MAC: &str = "00:00:00:00:00:00";
+
+/// Byte length of the BSD loopback header (`DLT_NULL`/`DLT_LOOP`): a single
+/// 4-byte address-family value, immediately followed by the IP packet.
+const NULL_LOOPBACK_HEADER_LEN: usize = 4;
+
 /// Never panics on malformed input — returns None instead. This function
 /// is exercised by the cargo-fuzz target in `fuzz/fuzz_targets/parse_packet.rs`
-/// specifically because it runs on untrusted, attacker-reachable bytes.
-pub fn parse_packet(data: &[u8]) -> Option<ParsedPacket> {
-    let sliced = SlicedPacket::from_ethernet(data).ok()?;
-
-    let (src_mac, dst_mac) = match &sliced.link {
-        Some(etherparse::LinkSlice::Ethernet2(eth)) => {
-            (mac_to_string(eth.source()), mac_to_string(eth.destination()))
+/// specifically because it runs on untrusted, attacker-reachable bytes, for
+/// every `LinkType`.
+pub fn parse_packet(data: &[u8], link_type: LinkType) -> Option<ParsedPacket> {
+    match link_type {
+        LinkType::Ethernet => {
+            let sliced = SlicedPacket::from_ethernet(data).ok()?;
+            let (src_mac, dst_mac) = match &sliced.link {
+                Some(etherparse::LinkSlice::Ethernet2(eth)) => {
+                    (mac_to_string(eth.source()), mac_to_string(eth.destination()))
+                }
+                _ => return None,
+            };
+            // The outermost 802.1Q tag, if this frame is VLAN-tagged —
+            // `link_exts` also carries MACsec headers, which aren't a VLAN
+            // tag, so this only matches the `Vlan` variant. A double-tagged
+            // (QinQ) frame reports only its first/outer tag, matching the
+            // single `vlan_tag` field's shape.
+            let vlan_tag = sliced.link_exts.iter().find_map(|ext| match ext {
+                LinkExtSlice::Vlan(vlan) => Some(vlan.vlan_identifier().value().to_string()),
+                _ => None,
+            });
+            build_parsed_packet(&sliced, src_mac, dst_mac, vlan_tag, data.len())
         }
-        _ => return None,
-    };
+        LinkType::NullLoopback => {
+            let ip_data = data.get(NULL_LOOPBACK_HEADER_LEN..)?;
+            let sliced = SlicedPacket::from_ip(ip_data).ok()?;
+            build_parsed_packet(&sliced, NO_MAC.to_string(), NO_MAC.to_string(), None, data.len())
+        }
+        LinkType::Raw => {
+            let sliced = SlicedPacket::from_ip(data).ok()?;
+            build_parsed_packet(&sliced, NO_MAC.to_string(), NO_MAC.to_string(), None, data.len())
+        }
+    }
+}
 
-    // The outermost 802.1Q tag, if this frame is VLAN-tagged — `link_exts`
-    // also carries MACsec headers, which aren't a VLAN tag, so this only
-    // matches the `Vlan` variant. A double-tagged (QinQ) frame reports only
-    // its first/outer tag, matching the single `vlan_tag` field's shape.
-    let vlan_tag = sliced.link_exts.iter().find_map(|ext| match ext {
-        LinkExtSlice::Vlan(vlan) => Some(vlan.vlan_identifier().value().to_string()),
-        _ => None,
-    });
-
+/// Shared network/transport-layer parsing for every `LinkType` above — only
+/// how `src_mac`/`dst_mac`/`vlan_tag` are obtained (or synthesized) differs
+/// between them.
+fn build_parsed_packet(
+    sliced: &SlicedPacket,
+    src_mac: String,
+    dst_mac: String,
+    vlan_tag: Option<String>,
+    total_len: usize,
+) -> Option<ParsedPacket> {
     let (src_ip, dst_ip, ttl, ip_version, ip_checksum) = match &sliced.net {
         Some(NetSlice::Ipv4(ipv4)) => (
             ipv4.header().source_addr().to_string(),
@@ -135,7 +193,7 @@ pub fn parse_packet(data: &[u8]) -> Option<ParsedPacket> {
         tcp_flags,
         seq,
         ttl,
-        total_len: data.len() as u16,
+        total_len: total_len as u16,
         payload,
         ip_version,
         ip_checksum,
@@ -158,7 +216,8 @@ mod tests {
         let mut data = Vec::new();
         builder.write(&mut data, payload).unwrap();
 
-        let parsed = parse_packet(&data).expect("should parse a valid TCP/IP packet");
+        let parsed =
+            parse_packet(&data, LinkType::Ethernet).expect("should parse a valid TCP/IP packet");
 
         assert_eq!(parsed.src_ip, "192.168.1.10");
         assert_eq!(parsed.dst_ip, "93.184.216.34");
@@ -180,7 +239,7 @@ mod tests {
     #[test]
     fn returns_none_for_garbage_bytes() {
         let garbage = [0u8, 1, 2, 3, 4];
-        assert!(parse_packet(&garbage).is_none());
+        assert!(parse_packet(&garbage, LinkType::Ethernet).is_none());
     }
 
     #[test]
@@ -194,12 +253,71 @@ mod tests {
         let mut data = Vec::new();
         builder.write(&mut data, payload).unwrap();
 
-        let parsed = parse_packet(&data).expect("should parse a VLAN-tagged TCP/IP packet");
+        let parsed = parse_packet(&data, LinkType::Ethernet)
+            .expect("should parse a VLAN-tagged TCP/IP packet");
 
         assert_eq!(parsed.vlan_tag.as_deref(), Some("100"));
         // The tag must not disturb parsing of anything past it.
         assert_eq!(parsed.src_ip, "192.168.1.10");
         assert_eq!(parsed.protocol, TransportProtocol::Tcp);
         assert_eq!(parsed.dst_port, Some(443));
+    }
+
+    #[test]
+    fn parses_a_null_loopback_encapsulated_frame() {
+        // DLT_NULL/DLT_LOOP: 4-byte address-family header, then a bare IP
+        // packet — build the IP+TCP bytes with etherparse (no link header),
+        // then prepend a 4-byte header exactly like the real BSD loopback
+        // framing this variant exists to handle (see issue #63). The header
+        // value itself is irrelevant to parsing (never inspected), only its
+        // length matters, so an arbitrary non-zero value here also proves
+        // that.
+        let builder = PacketBuilder::ipv4([127, 0, 0, 1], [127, 0, 0, 1], 64)
+            .tcp(51000, 8080, 1000, 65535)
+            .syn();
+        let payload: &[u8] = &[];
+        let mut ip_packet = Vec::new();
+        builder.write(&mut ip_packet, payload).unwrap();
+        let mut data = vec![2, 0, 0, 0]; // AF_INET, arbitrary byte order
+        data.extend_from_slice(&ip_packet);
+
+        let parsed = parse_packet(&data, LinkType::NullLoopback)
+            .expect("should parse a loopback-encapsulated TCP/IP packet");
+
+        assert_eq!(parsed.src_ip, "127.0.0.1");
+        assert_eq!(parsed.dst_ip, "127.0.0.1");
+        assert_eq!(parsed.protocol, TransportProtocol::Tcp);
+        assert_eq!(parsed.dst_port, Some(8080));
+        // No real MAC addresses exist on loopback — must be the honest
+        // synthetic all-zero value, not fabricated-looking or absent.
+        assert_eq!(parsed.src_mac, "00:00:00:00:00:00");
+        assert_eq!(parsed.dst_mac, "00:00:00:00:00:00");
+    }
+
+    #[test]
+    fn returns_none_for_a_null_loopback_frame_shorter_than_its_own_header() {
+        let data = [1u8, 2, 3];
+        assert!(parse_packet(&data, LinkType::NullLoopback).is_none());
+    }
+
+    #[test]
+    fn parses_a_raw_ip_frame() {
+        // DLT_RAW: no link header at all — the frame bytes are the IP
+        // packet directly.
+        let builder = PacketBuilder::ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64).udp(53, 12345);
+        let payload: &[u8] = &[9, 9, 9];
+        let mut data = Vec::new();
+        builder.write(&mut data, payload).unwrap();
+
+        let parsed =
+            parse_packet(&data, LinkType::Raw).expect("should parse a raw IPv4/UDP packet");
+
+        assert_eq!(parsed.src_ip, "10.0.0.1");
+        assert_eq!(parsed.dst_ip, "10.0.0.2");
+        assert_eq!(parsed.protocol, TransportProtocol::Udp);
+        assert_eq!(parsed.src_port, Some(53));
+        assert_eq!(parsed.dst_port, Some(12345));
+        assert_eq!(parsed.src_mac, "00:00:00:00:00:00");
+        assert_eq!(parsed.dst_mac, "00:00:00:00:00:00");
     }
 }

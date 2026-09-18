@@ -77,6 +77,7 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     dropped: requireField(w, 'dropped'),
     ifDropped: requireField(w, 'ifDropped'),
     relayLaggedEvents: requireField(w, 'relayLaggedEvents'),
+    unparseableFrames: requireField(w, 'unparseableFrames'),
   };
 }
 
