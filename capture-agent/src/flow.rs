@@ -198,7 +198,7 @@ impl FlowTable {
         }
 
         match l7 {
-            L7Info::Http { .. } => state.app_layer_protocol = "HTTP".to_string(),
+            L7Info::Http { .. } | L7Info::HttpResponse { .. } => state.app_layer_protocol = "HTTP".to_string(),
             L7Info::Dns { .. } => state.app_layer_protocol = "DNS".to_string(),
             L7Info::TlsClientHello { ja3, ja3_label, client_random, .. } => {
                 state.app_layer_protocol = "HTTPS/TLS".to_string();

@@ -166,6 +166,13 @@ pub fn build_header_breakdown(parsed: &ParsedPacket, l7: &L7Info) -> HeaderBreak
             status_or_code: None,
             payload_bytes: parsed.payload.len() as u32,
         }),
+        L7Info::HttpResponse { status } => Some(Layer7Json {
+            app: "HTTP".to_string(),
+            method_or_type: "RESPONSE".to_string(),
+            path_or_query: String::new(),
+            status_or_code: Some(status.clone()),
+            payload_bytes: parsed.payload.len() as u32,
+        }),
         L7Info::Dns { query_name } => Some(Layer7Json {
             app: "DNS".to_string(),
             method_or_type: "QUERY".to_string(),
@@ -610,6 +617,22 @@ mod tests {
         assert_eq!(layer4.src_port, 51000);
         assert_eq!(layer4.window_size, 65535);
         assert!(layer4.flags.contains("SYN"));
+    }
+
+    #[test]
+    fn build_header_breakdown_fills_layer7_status_or_code_for_http_response() {
+        // Regression coverage for issue #65: status_or_code was declared on
+        // the wire and never populated by anything.
+        let parsed = sample_tcp_packet(b"irrelevant".to_vec());
+        let l7 = L7Info::HttpResponse { status: "404".to_string() };
+
+        let breakdown = build_header_breakdown(&parsed, &l7);
+
+        let layer7 = breakdown.layer7.expect("layer7 should be present for an HTTP response");
+        assert_eq!(layer7.app, "HTTP");
+        assert_eq!(layer7.method_or_type, "RESPONSE");
+        assert_eq!(layer7.path_or_query, "");
+        assert_eq!(layer7.status_or_code.as_deref(), Some("404"));
     }
 
     #[test]

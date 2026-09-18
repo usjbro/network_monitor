@@ -191,6 +191,34 @@ describe('mapPacketEvent', () => {
     expect(packet.headerBreakdown.layer2?.vlanTag).toBe('100');
   });
 
+  it('carries statusOrCode through for an HTTP response (issue #65)', () => {
+    const wire = {
+      id: 'pkt-3',
+      timestamp: '2026-08-26T00:00:00.000Z',
+      relativeTimeMs: 42,
+      layer: 4,
+      protocol: 'TCP',
+      src: '93.184.216.34:443',
+      dst: '192.168.1.10:51000',
+      length: 60,
+      summary: 'TCP',
+      hexDump: '00 01 02',
+      headerBreakdown: {
+        layer7: {
+          app: 'HTTP',
+          methodOrType: 'RESPONSE',
+          pathOrQuery: '',
+          statusOrCode: '404',
+          payloadBytes: 10,
+        },
+      },
+    };
+
+    const packet = mapPacketEvent(wire);
+
+    expect(packet.headerBreakdown.layer7?.statusOrCode).toBe('404');
+  });
+
   it('throws when headerBreakdown is missing rather than defaulting to {}', () => {
     const wire = {
       id: 'pkt-1',
