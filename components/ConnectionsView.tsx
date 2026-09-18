@@ -25,6 +25,10 @@ interface ConnectionsViewProps {
   traceroute?: Record<string, TracerouteHop[]>;
   traceInFlight?: Record<string, boolean>;
   onTraceRoute?: (connectionId: string, remoteAddr: string) => void;
+  // True when the agent's capture_stats event (issue #61) reports nonzero
+  // kernel/driver drops or relay lag — the per-connection loss % below is
+  // retransmit-derived and only trustworthy when this is false.
+  captureDegraded?: boolean;
 }
 
 export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
@@ -37,6 +41,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   traceroute,
   traceInFlight,
   onTraceRoute,
+  captureDegraded,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [protocolFilter, setProtocolFilter] = useState<string>('ALL');
@@ -162,7 +167,10 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   {/* Latency */}
                   <td className="p-2.5 text-center text-slate-300">
                     <div>{conn.latencyMs} ms</div>
-                    <div className="text-[10px] text-slate-500">{conn.packetLoss.toFixed(2)}% loss</div>
+                    <div className={`text-[10px] ${captureDegraded ? 'text-amber-500' : 'text-slate-500'}`}>
+                      {conn.packetLoss.toFixed(2)}% loss
+                      {captureDegraded && <span title="Capture is dropping frames — this figure may under-report actual loss">*</span>}
+                    </div>
                   </td>
 
                   {/* Status */}

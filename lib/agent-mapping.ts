@@ -1,4 +1,4 @@
-import { NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame, TracerouteHop } from './types';
+import { CaptureStats, NetworkConnection, OSILayerInfo, OSILayerNumber, PacketFrame, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -61,6 +61,23 @@ export function mapTracerouteHopEvent(json: unknown): TracerouteHop {
 export function mapConnectionClosedEvent(json: unknown): string {
   const w = json as Record<string, unknown>;
   return requireField(w, 'id');
+}
+
+// Accepts the full `capture_stats` event envelope, not just its `stats`
+// payload — mirrors mapTracerouteHopEvent's shape above, for the same
+// reason (see issue #61 and docs/wire-protocol.md).
+export function mapCaptureStatsEvent(json: unknown): CaptureStats {
+  const envelope = json as { stats?: Record<string, unknown> };
+  const w = envelope.stats;
+  if (!w) {
+    throw new Error('malformed capture_stats event: missing "stats" field');
+  }
+  return {
+    received: requireField(w, 'received'),
+    dropped: requireField(w, 'dropped'),
+    ifDropped: requireField(w, 'ifDropped'),
+    relayLaggedEvents: requireField(w, 'relayLaggedEvents'),
+  };
 }
 
 export function mapPacketEvent(json: unknown): PacketFrame {

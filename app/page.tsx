@@ -9,6 +9,7 @@ import {
   Radio,
 } from 'lucide-react';
 import {
+  CaptureStats,
   DecryptedPayloadSegment,
   OSILayerInfo,
   NetworkConnection,
@@ -21,6 +22,7 @@ import {
 } from '@/lib/types';
 import { THEMES } from '@/lib/osi-engine';
 import {
+  mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
   mapPacketEvent,
@@ -50,6 +52,12 @@ export default function TerminalApp() {
   const [agentConnected, setAgentConnected] = useState(false);
   const [liveLayers, setLiveLayers] = useState<Record<OSILayerNumber, Partial<OSILayerInfo>>>({} as never);
   const layers = useMemo(() => mergeLayerStats(liveLayers), [liveLayers]);
+  // Capture health (issue #61) — null until the agent's first capture_stats
+  // tick arrives, distinct from "zero drops so far" (a real, healthy state).
+  const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
+  const captureDegraded =
+    captureStats !== null &&
+    (captureStats.dropped > 0 || captureStats.ifDropped > 0 || captureStats.relayLaggedEvents > 0);
 
   // System Stats State
   const [stats, setStats] = useState<SystemStats>({
@@ -156,6 +164,9 @@ export default function TerminalApp() {
             }
             return next;
           });
+        }
+        if (data.type === 'capture_stats') {
+          setCaptureStats(mapCaptureStatsEvent(data));
         }
         if (data.type === 'connection_enrichment') {
           setConnections((prev) => applyEnrichmentEvent(prev, data));
@@ -383,6 +394,20 @@ export default function TerminalApp() {
         </div>
       )}
 
+      {/* Capture-side loss (issue #61): kernel/driver drops or a lagging
+          relay both mean data never reached this UI at all — distinct from,
+          and a precondition for trusting, any connection's own loss %
+          below. Shown whenever any of the three counters is nonzero;
+          persistent (not dismissible) since it stays true until the
+          underlying cause does. */}
+      {captureDegraded && captureStats && (
+        <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2">
+          capture degraded — {captureStats.dropped + captureStats.ifDropped} frame(s) dropped by the kernel/driver
+          {captureStats.relayLaggedEvents > 0 && `, ${captureStats.relayLaggedEvents} event(s) dropped for a lagging client`}
+          {' '}— per-connection loss figures below may under-report
+        </div>
+      )}
+
       {isDecrypting && (
         <div className="w-full bg-amber-900/40 border-b border-amber-700 text-amber-200 text-sm px-4 py-2">
           Decrypting traffic for: {decryptingConnectionIds.size} connection(s) — Tier B opt-in content visible in LIVE PCAP
@@ -531,6 +556,7 @@ export default function TerminalApp() {
               traceroute={traceroute}
               traceInFlight={traceInFlight}
               onTraceRoute={handleTraceRoute}
+              captureDegraded={captureDegraded}
             />
           )}
 

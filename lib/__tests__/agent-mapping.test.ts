@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mapTracerouteHopEvent } from '../agent-mapping';
+import { mapCaptureStatsEvent, mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mapTracerouteHopEvent } from '../agent-mapping';
 
 describe('mapConnectionEvent', () => {
   it('maps agent wire JSON to a NetworkConnection', () => {
@@ -200,5 +200,28 @@ describe('mapTracerouteHopEvent', () => {
   it('throws on an event with no "hop" field at all', () => {
     const event = { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 4 };
     expect(() => mapTracerouteHopEvent(event)).toThrow('missing "hop" field');
+  });
+});
+
+describe('mapCaptureStatsEvent', () => {
+  // Same nested-envelope shape as traceroute_hop (capture-agent/src/wire.rs's
+  // `CaptureStats { stats: CaptureStatsJson }`) — see issue #61.
+  it('maps capture stats with nonzero drops and lag', () => {
+    const event = { type: 'capture_stats', stats: { received: 5000, dropped: 12, ifDropped: 3, relayLaggedEvents: 7 } };
+    const stats = mapCaptureStatsEvent(event);
+    expect(stats).toEqual({ received: 5000, dropped: 12, ifDropped: 3, relayLaggedEvents: 7 });
+  });
+
+  it('maps healthy zero-drop stats', () => {
+    const event = { type: 'capture_stats', stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0 } };
+    const stats = mapCaptureStatsEvent(event);
+    expect(stats.dropped).toBe(0);
+    expect(stats.ifDropped).toBe(0);
+    expect(stats.relayLaggedEvents).toBe(0);
+  });
+
+  it('throws on an event with no "stats" field at all', () => {
+    const event = { type: 'capture_stats', received: 5000 };
+    expect(() => mapCaptureStatsEvent(event)).toThrow('missing "stats" field');
   });
 });

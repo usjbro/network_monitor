@@ -298,6 +298,25 @@ fn local_addrs_for(device: &pcap::Device) -> Vec<String> {
         .collect()
 }
 
+/// Builds the `capture_stats` wire event from the latest kernel-side
+/// `pcap::Stat` snapshot (or `None` if the capture thread hasn't polled one
+/// yet) and the cumulative relay-lag counter. Kept as a small pure function,
+/// separate from the periodic-emitter loop that calls it, so the mapping
+/// from these two inputs to the wire shape is unit-testable without a real
+/// capture handle or a running tokio runtime — see issue #61.
+fn build_capture_stats_json(stat: Option<pcap::Stat>, relay_lagged_events: u64) -> wire::CaptureStatsJson {
+    let (received, dropped, if_dropped) = match stat {
+        Some(s) => (s.received, s.dropped, s.if_dropped),
+        None => (0, 0, 0),
+    };
+    wire::CaptureStatsJson {
+        received,
+        dropped,
+        if_dropped,
+        relay_lagged_events,
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     if let Err(e) = capture_agent::core_limits::disable_core_dumps() {
@@ -331,6 +350,17 @@ async fn main() -> std::io::Result<()> {
     // millisecond would otherwise get identical IDs — and the TS side uses
     // pkt.id as a React list key, so a collision causes a rendering bug.
     let packet_seq = Arc::new(AtomicU64::new(0));
+    // Latest kernel-side capture stats (issue #61) — written by the capture
+    // thread roughly once a second (see below), read by the periodic
+    // emitter. `None` until the capture thread's first successful poll.
+    let capture_stats: Arc<Mutex<Option<pcap::Stat>>> = Arc::new(Mutex::new(None));
+    // Cumulative count of discrete events this process has ever silently
+    // dropped for a lagging SSE client (RecvError::Lagged, below) — a
+    // relay-side loss source distinct from capture_stats above. Summed
+    // across all connected clients over the agent's lifetime, not reset
+    // per-tick, so a lag that already happened is never un-reported once
+    // the client catches up.
+    let relay_lagged_events = Arc::new(AtomicU64::new(0));
 
     let (tx, _rx) = broadcast::channel::<String>(1024);
 
@@ -356,6 +386,7 @@ async fn main() -> std::io::Result<()> {
         let keylog_watcher = keylog_watcher.clone();
         let decrypt_state = decrypt_state.clone();
         let decrypt_event_limiter = decrypt_event_limiter.clone();
+        let capture_stats = capture_stats.clone();
         std::thread::spawn(move || {
             let mut cap = match pcap::Capture::from_device(device)
                 .and_then(|c| {
@@ -383,10 +414,22 @@ async fn main() -> std::io::Result<()> {
             // Connection/layer aggregates below are unaffected: `observe()`
             // runs on every packet regardless of this limiter.
             let mut packet_event_limiter = PacketEventLimiter::new(100, 1000);
+            // `cap` (the pcap handle) only ever lives on this thread, so
+            // polling pcap_stats() has to happen here rather than from the
+            // periodic emitter task — see build_capture_stats_json's doc
+            // comment for why this is split into a separate pure function.
+            let mut last_stats_poll = Instant::now();
             loop {
                 if paused.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(200));
                     continue;
+                }
+                if last_stats_poll.elapsed() >= Duration::from_secs(1) {
+                    last_stats_poll = Instant::now();
+                    match cap.stats() {
+                        Ok(stat) => *capture_stats.lock().unwrap() = Some(stat),
+                        Err(e) => eprintln!("capture-agent: failed to read capture stats: {e}"),
+                    }
                 }
                 match cap.next_packet() {
                     Ok(packet) => {
@@ -466,6 +509,8 @@ async fn main() -> std::io::Result<()> {
         let process_map = process_map.clone();
         let decrypt_state = decrypt_state.clone();
         let tx = tx.clone();
+        let capture_stats = capture_stats.clone();
+        let relay_lagged_events = relay_lagged_events.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             loop {
@@ -602,6 +647,11 @@ async fn main() -> std::io::Result<()> {
                     },
                 ];
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::LayerUpdate { layers }));
+
+                let stat = *capture_stats.lock().unwrap();
+                let lagged = relay_lagged_events.load(Ordering::Relaxed);
+                let stats_json = build_capture_stats_json(stat, lagged);
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats { stats: stats_json }));
             }
         });
     }
@@ -621,6 +671,7 @@ async fn main() -> std::io::Result<()> {
         let paused = paused.clone();
         let keylog_watcher = keylog_watcher.clone();
         let trace_tx = tx.clone();
+        let relay_lagged_events = relay_lagged_events.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half).lines();
@@ -682,6 +733,7 @@ async fn main() -> std::io::Result<()> {
                             }
                             Err(broadcast::error::RecvError::Lagged(skipped)) => {
                                 eprintln!("capture-agent: client lagged, dropped {skipped} events");
+                                relay_lagged_events.fetch_add(skipped, Ordering::Relaxed);
                                 continue;
                             }
                             Err(broadcast::error::RecvError::Closed) => break,
@@ -695,7 +747,7 @@ async fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_device_by_name, is_capturable, is_meaningful_override};
+    use super::{build_capture_stats_json, find_device_by_name, is_capturable, is_meaningful_override};
     use tokio::sync::broadcast;
 
     fn fake_device(name: &str) -> pcap::Device {
@@ -789,5 +841,31 @@ mod tests {
         // The channel should be usable again after Lagged, not stuck.
         let next = rx.recv().await;
         assert!(next.is_ok(), "recv after Lagged should succeed, got {next:?}");
+    }
+
+    #[test]
+    fn build_capture_stats_json_carries_stat_fields_and_lag_counter_through() {
+        let stat = pcap::Stat {
+            received: 500,
+            dropped: 7,
+            if_dropped: 2,
+        };
+        let json = build_capture_stats_json(Some(stat), 15);
+        assert_eq!(json.received, 500);
+        assert_eq!(json.dropped, 7);
+        assert_eq!(json.if_dropped, 2);
+        assert_eq!(json.relay_lagged_events, 15);
+    }
+
+    #[test]
+    fn build_capture_stats_json_reports_zero_capture_counts_before_first_poll() {
+        // The capture thread hasn't successfully called cap.stats() yet
+        // (e.g. right at agent startup) — this must report honest zeros,
+        // not panic and not fabricate a nonzero drop count.
+        let json = build_capture_stats_json(None, 0);
+        assert_eq!(json.received, 0);
+        assert_eq!(json.dropped, 0);
+        assert_eq!(json.if_dropped, 0);
+        assert_eq!(json.relay_lagged_events, 0);
     }
 }
