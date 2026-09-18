@@ -259,6 +259,29 @@ pub enum AgentEvent {
     TracerouteHop { hop: Box<TracerouteHopJson> },
     CaptureStats { stats: CaptureStatsJson },
     SystemStats { stats: SystemStatsJson },
+    CaptureConfig { config: CaptureConfigJson },
+    CaptureConfigError { message: String },
+}
+
+/// The capture-time controls currently in effect — a BPF capture filter
+/// (narrows what's captured at the source, cheapest possible volume
+/// control) and the capture snap length (truncates each frame past this
+/// many bytes, keeping headers while discarding payload). Sent once per
+/// tick alongside `capture_stats`/`system_stats`, so a client that just
+/// (re)connected always has the current values, not only a client that
+/// happened to be connected at the moment a `set_capture_filter`/
+/// `set_snaplen` control message was applied. See issue #68.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureConfigJson {
+    /// `None` when no filter is active (the default) — every frame the
+    /// interface hands the kernel is captured.
+    pub filter: Option<String>,
+    /// Bytes of each frame actually retained; anything beyond this is
+    /// truncated by the kernel before this process ever sees it. `65535`
+    /// (the agent's startup default) is effectively "full frame" for any
+    /// real interface's MTU.
+    pub snaplen: u32,
 }
 
 /// Capture health, sent once per tick (~1s) alongside `layer_update`. Three
@@ -367,6 +390,17 @@ pub enum ControlMessage {
         #[serde(rename = "targetIp")]
         target_ip: String,
     },
+    /// An empty `filter` means "clear the active filter" (compiles to an
+    /// unconditional-match BPF program, equivalent to no filter at all) —
+    /// there is no separate clear variant, matching how the command bar's
+    /// `filter clear` and `SetCaptureFilter` are meant to be one and the
+    /// same request. See issue #68.
+    SetCaptureFilter {
+        filter: String,
+    },
+    SetSnaplen {
+        bytes: u32,
+    },
 }
 
 pub fn encode_event(event: &AgentEvent) -> String {
@@ -466,6 +500,53 @@ mod tests {
         assert!(matches!(decode_control("{\"type\":\"pause\"}"), Some(ControlMessage::Pause)));
         assert!(matches!(decode_control("{\"type\":\"resume\"}"), Some(ControlMessage::Resume)));
         assert!(decode_control("not json").is_none());
+    }
+
+    #[test]
+    fn decodes_set_capture_filter_and_set_snaplen() {
+        let msg = decode_control("{\"type\":\"set_capture_filter\",\"filter\":\"tcp port 443\"}");
+        match msg {
+            Some(ControlMessage::SetCaptureFilter { filter }) => assert_eq!(filter, "tcp port 443"),
+            other => panic!("expected SetCaptureFilter, got {other:?}"),
+        }
+
+        // An empty filter is the "clear" request — no separate variant.
+        let msg = decode_control("{\"type\":\"set_capture_filter\",\"filter\":\"\"}");
+        match msg {
+            Some(ControlMessage::SetCaptureFilter { filter }) => assert_eq!(filter, ""),
+            other => panic!("expected SetCaptureFilter, got {other:?}"),
+        }
+
+        let msg = decode_control("{\"type\":\"set_snaplen\",\"bytes\":96}");
+        match msg {
+            Some(ControlMessage::SetSnaplen { bytes }) => assert_eq!(bytes, 96),
+            other => panic!("expected SetSnaplen, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encodes_capture_config_with_and_without_an_active_filter() {
+        let with_filter = AgentEvent::CaptureConfig {
+            config: CaptureConfigJson { filter: Some("tcp port 443".to_string()), snaplen: 96 },
+        };
+        let line = encode_event(&with_filter);
+        assert!(line.contains("\"type\":\"capture_config\""));
+        assert!(line.contains("\"filter\":\"tcp port 443\""));
+        assert!(line.contains("\"snaplen\":96"));
+
+        let without_filter = AgentEvent::CaptureConfig {
+            config: CaptureConfigJson { filter: None, snaplen: 65535 },
+        };
+        let line = encode_event(&without_filter);
+        assert!(line.contains("\"filter\":null"), "no active filter must be explicit null, not omitted");
+    }
+
+    #[test]
+    fn encodes_capture_config_error_with_type_tag() {
+        let event = AgentEvent::CaptureConfigError { message: "invalid capture filter: syntax error".to_string() };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"capture_config_error\""));
+        assert!(line.contains("\"message\":\"invalid capture filter: syntax error\""));
     }
 
     #[test]

@@ -10,7 +10,7 @@ import {
   Tv,
   Apple,
 } from 'lucide-react';
-import { SystemStats, TerminalTheme, ThemeConfig } from '@/lib/types';
+import { CaptureConfig, SystemStats, TerminalTheme, ThemeConfig } from '@/lib/types';
 import { THEMES, formatSpeed } from '@/lib/osi-engine';
 
 interface HeaderBarProps {
@@ -19,6 +19,11 @@ interface HeaderBarProps {
   // at least one tick has been received. Every field this component reads
   // from `stats` is a live measurement; nothing here is a placeholder.
   stats: SystemStats | null;
+  // `null` until the agent's first `capture_config` tick arrives (issue
+  // #68) — same "no placeholder" discipline as `stats` above. An operator
+  // must never be unsure whether they're seeing everything, so this is
+  // always rendered once known, not tucked behind a menu.
+  captureConfig: CaptureConfig | null;
   theme: ThemeConfig;
   onSelectTheme: (themeKey: TerminalTheme) => void;
   isPaused: boolean;
@@ -31,6 +36,7 @@ interface HeaderBarProps {
 
 export const HeaderBar: React.FC<HeaderBarProps> = ({
   stats,
+  captureConfig,
   theme,
   onSelectTheme,
   isPaused,
@@ -59,6 +65,32 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             <span className="opacity-40">:</span>
             <span className="bg-slate-800/80 px-1.5 py-0.5 rounded text-[10px] text-slate-300 font-semibold border border-slate-700">
               {stats?.interfaceName || '—'}
+            </span>
+          </div>
+
+          {/* Active capture filter/snap length (issue #68) — always
+              visible, never tucked behind a menu, so an operator can never
+              be unsure whether they're seeing everything. */}
+          <div className="hidden lg:flex items-center space-x-2 border-l border-slate-700/60 pl-3">
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
+                captureConfig?.filter
+                  ? 'bg-amber-950/60 border-amber-700 text-amber-300'
+                  : 'bg-slate-800/80 border-slate-700 text-slate-400'
+              }`}
+              title={captureConfig?.filter ? `Capture filter: ${captureConfig.filter}` : 'No capture filter active'}
+            >
+              filter: {captureConfig?.filter || 'none'}
+            </span>
+            <span
+              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold border ${
+                captureConfig && captureConfig.snaplen < 65535
+                  ? 'bg-amber-950/60 border-amber-700 text-amber-300'
+                  : 'bg-slate-800/80 border-slate-700 text-slate-400'
+              }`}
+              title="Capture snap length — bytes retained per frame before the kernel truncates the rest"
+            >
+              snaplen: {captureConfig ? `${captureConfig.snaplen}B` : '—'}
             </span>
           </div>
         </div>

@@ -55,6 +55,8 @@ Type a command and press enter. Available commands:
 | `enrich on` / `enrich off` / `enrich clear` | Turn on-demand ownership (WHOIS/RDAP) lookups on/off for the current relay session (never persisted — off again after every relay restart), or wipe the local enrichment cache and query log |
 | `enrich background on` / `enrich background off` | Turn whole-table background ownership lookups on/off, instead of only on-demand per-connection |
 | `geoip enable` / `geoip disable` / `geoip clear` | Turn per-hop geoIP location lookups on/off for Trace Route (separate opt-in from `enrich`, also session-only), or wipe the on-disk geoIP cache |
+| `filter <bpf expression>` / `filter clear` | Set (or clear) a BPF capture filter at the agent, e.g. `filter tcp port 443` — narrows what's captured at the source, applied live with no interruption. An invalid expression is rejected with libpcap's own error shown in a dismissible banner; the previous filter keeps running. Active filter always shown in the header. |
+| `snaplen <bytes>` / `snaplen full` | Set (or restore, via `full`) the capture snap length in bytes, e.g. `snaplen 96` — truncates each captured frame past this many bytes, keeping headers while discarding payload. Applying this briefly reopens the capture (logged, expected). Active snap length always shown in the header. |
 | `install` / `macos` / `brew` / `curl` / `sw_vers` | Open the Install modal (see below) |
 
 ## Themes

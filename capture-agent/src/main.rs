@@ -13,7 +13,7 @@ use capture_agent::{
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -326,6 +326,157 @@ fn resolve_link_type(datalink: pcap::Linktype, interface_name: &str) -> parse::L
     }
 }
 
+/// Maximum accepted length for a browser-supplied BPF filter expression, in
+/// bytes — rejected before it ever reaches libpcap's compiler. Generous for
+/// any real filter (see http://biot.com/capstats/bpf.html) while bounding
+/// this new attacker-reachable input to the privileged capture process, per
+/// issue #68's security considerations.
+const MAX_CAPTURE_FILTER_LEN: usize = 1024;
+
+/// Snap length the agent opens its capture handle with at startup — large
+/// enough to hold any real interface's full MTU, so nothing is truncated
+/// until an operator explicitly narrows it. `snaplen <bytes>` (issue #68)
+/// can shrink this at runtime; `snaplen full` restores exactly this value.
+const DEFAULT_SNAPLEN: i32 = 65535;
+
+/// A capture-time control change requested over the wire (issue #68),
+/// queued from the async control-message-handling task into the capture
+/// thread via an `std::sync::mpsc` channel — the open `pcap::Capture`
+/// handle only ever lives on the capture thread (same reason
+/// `capture_stats` polling has to happen there, see
+/// `build_capture_stats_json`'s doc comment), so applying either kind of
+/// change has to happen there too, not in the async task that received the
+/// control message.
+enum CaptureConfigRequest {
+    SetFilter(String),
+    SetSnaplen(u32),
+}
+
+/// Validates a browser-supplied BPF filter expression's length before it
+/// ever reaches libpcap's compiler — pure and unit-testable, unlike the
+/// actual `cap.filter()` call below, which needs a live capture handle.
+fn validate_capture_filter_len(filter: &str) -> Result<(), String> {
+    if filter.len() > MAX_CAPTURE_FILTER_LEN {
+        Err(format!(
+            "capture filter rejected: {} bytes exceeds the {MAX_CAPTURE_FILTER_LEN}-byte limit",
+            filter.len()
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Validates and converts a browser-supplied snap length into the `i32`
+/// libpcap's `Capture::snaplen()` builder expects — pure and
+/// unit-testable. `0` is rejected (not a meaningful capture request);
+/// anything not representable as a positive `i32` is rejected outright
+/// rather than silently truncated or wrapped.
+fn validate_snaplen(bytes: u32) -> Result<i32, String> {
+    let snaplen = i32::try_from(bytes).map_err(|_| format!("snap length {bytes} is out of range"))?;
+    if snaplen <= 0 {
+        return Err("snap length must be greater than zero".to_string());
+    }
+    Ok(snaplen)
+}
+
+/// Applies one queued `CaptureConfigRequest` against the live capture
+/// handle, updating `state` and emitting a `CaptureConfig`/
+/// `CaptureConfigError` wire event to reflect the outcome. A filter change
+/// is applied live (`Capture::filter` compiles and installs a new BPF
+/// program on the already-open handle); a snap length change has no live
+/// equivalent in libpcap, so it closes and reopens the handle entirely —
+/// `*cap` is replaced in place, and the capture loop's very next
+/// `next_packet()` call transparently picks up the new handle. Any
+/// currently-active filter is reapplied to a reopened handle, since filter
+/// state doesn't survive a reopen — and if that reapply itself fails, the
+/// whole snap length change is rejected rather than silently installing a
+/// broader, unfiltered handle in its place: a snap length change must
+/// never widen what gets captured as a side effect.
+///
+/// On failure (an invalid filter, a length that fails validation, a reopen
+/// error, or a post-reopen filter-reapply failure), `state` and `*cap` are
+/// left exactly as they were — the previous capture configuration keeps
+/// running uninterrupted — per issue #68's acceptance criteria that a
+/// rejected change must never leave the agent in a half-applied state.
+fn apply_capture_config_request(
+    request: CaptureConfigRequest,
+    cap: &mut pcap::Capture<pcap::Active>,
+    device: &pcap::Device,
+    state: &Mutex<wire::CaptureConfigJson>,
+    tx: &broadcast::Sender<String>,
+) {
+    match request {
+        CaptureConfigRequest::SetFilter(filter) => {
+            if let Err(message) = validate_capture_filter_len(&filter) {
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError { message }));
+                return;
+            }
+            match cap.filter(&filter, true) {
+                Ok(()) => {
+                    let mut s = state.lock().unwrap();
+                    s.filter = if filter.is_empty() { None } else { Some(filter) };
+                    let snapshot = s.clone();
+                    drop(s);
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig { config: snapshot }));
+                }
+                Err(e) => {
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
+                        message: format!("invalid capture filter: {e}"),
+                    }));
+                }
+            }
+        }
+        CaptureConfigRequest::SetSnaplen(bytes) => {
+            let snaplen = match validate_snaplen(bytes) {
+                Ok(snaplen) => snaplen,
+                Err(message) => {
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError { message }));
+                    return;
+                }
+            };
+            let reopened = pcap::Capture::from_device(device.clone())
+                .and_then(|c| c.promisc(true).snaplen(snaplen).timeout(1000).immediate_mode(true).open());
+            let mut new_cap = match reopened {
+                Ok(new_cap) => new_cap,
+                Err(e) => {
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
+                        message: format!("failed to apply snap length {bytes}: {e}"),
+                    }));
+                    return;
+                }
+            };
+            let existing_filter = state.lock().unwrap().filter.clone();
+            if let Some(ref expr) = existing_filter {
+                // This expression already compiled successfully once (or it
+                // couldn't have become the active filter), so a failure
+                // here would mean the reopened handle rejects it for some
+                // other reason. Reject the whole snap length change rather
+                // than silently install a broader, unfiltered `new_cap` in
+                // its place — a snap length change must never widen what
+                // gets captured as a side effect. `new_cap` is dropped here
+                // (closing that handle); `*cap` is never touched, so the
+                // previous snap length AND filter both keep running exactly
+                // as before.
+                if let Err(e) = new_cap.filter(expr, true) {
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
+                        message: format!(
+                            "snap length {bytes} rejected: the active capture filter could not be reapplied after reopening ({e}) — keeping the previous configuration"
+                        ),
+                    }));
+                    return;
+                }
+            }
+            *cap = new_cap;
+            let mut s = state.lock().unwrap();
+            s.snaplen = bytes;
+            let snapshot = s.clone();
+            drop(s);
+            println!("capture-agent: snap length changed to {bytes} bytes (capture briefly reopened)");
+            let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig { config: snapshot }));
+        }
+    }
+}
+
 /// Builds the `capture_stats` wire event from the latest kernel-side
 /// `pcap::Stat` snapshot (or `None` if the capture thread hasn't polled one
 /// yet), the cumulative relay-lag counter, and the cumulative count of
@@ -414,6 +565,10 @@ async fn main() -> std::io::Result<()> {
     let interface_name = device.name.clone();
     let local_addrs = local_addrs_for(&device);
     println!("capture-agent: using interface {interface_name}");
+    // Kept around for the life of the process so a later `snaplen <bytes>`
+    // control message (issue #68) can reopen the same device — `device`
+    // itself is consumed by `Capture::from_device` immediately below.
+    let device_for_reopen = device.clone();
 
     // Opened synchronously here, before anything else starts (including the
     // TCP listener below), rather than inside the capture thread: this is a
@@ -424,7 +579,7 @@ async fn main() -> std::io::Result<()> {
     let cap = pcap::Capture::from_device(device)
         .and_then(|c| {
             c.promisc(true)
-                .snaplen(65535)
+                .snaplen(DEFAULT_SNAPLEN)
                 .timeout(1000)
                 // Without this, macOS BPF only flushes its buffer to
                 // userspace once it's full, which on a normal-traffic
@@ -499,6 +654,19 @@ async fn main() -> std::io::Result<()> {
     let total_tx_bytes = Arc::new(AtomicU64::new(0));
     let total_rx_packets = Arc::new(AtomicU64::new(0));
     let total_tx_packets = Arc::new(AtomicU64::new(0));
+    // Active capture filter/snap length (issue #68) — written by the
+    // capture thread whenever a `set_capture_filter`/`set_snaplen` control
+    // message is successfully applied, read every tick by the periodic
+    // emitter so a client that only just (re)connected sees the current
+    // values immediately, not only a client that was connected at the
+    // moment the change happened.
+    let capture_config_state = Arc::new(Mutex::new(wire::CaptureConfigJson { filter: None, snaplen: DEFAULT_SNAPLEN as u32 }));
+    // The open `pcap::Capture` handle only ever lives on the capture
+    // thread, so a capture-config change requested from the async
+    // control-message task below has to be queued across this channel
+    // rather than applied directly — see `CaptureConfigRequest`'s doc
+    // comment.
+    let (capture_config_tx, capture_config_rx) = mpsc::channel::<CaptureConfigRequest>();
 
     let (tx, _rx) = broadcast::channel::<String>(1024);
 
@@ -532,6 +700,8 @@ async fn main() -> std::io::Result<()> {
         let total_tx_bytes = total_tx_bytes.clone();
         let total_rx_packets = total_rx_packets.clone();
         let total_tx_packets = total_tx_packets.clone();
+        let capture_config_state = capture_config_state.clone();
+        let device_for_reopen = device_for_reopen.clone();
         std::thread::spawn(move || {
             let mut cap = cap;
             // Caps discrete Packet events to the browser at 100/sec — the UI
@@ -546,6 +716,21 @@ async fn main() -> std::io::Result<()> {
             // comment for why this is split into a separate pure function.
             let mut last_stats_poll = Instant::now();
             loop {
+                // Non-blocking: applies at most whatever has queued up since
+                // the last iteration. `cap.next_packet()`'s 1s timeout below
+                // (and every real packet arrival) guarantees this runs
+                // frequently, so a `filter`/`snaplen` command bar action
+                // takes effect within about a second, not indefinitely
+                // delayed behind a quiet capture (issue #68).
+                while let Ok(request) = capture_config_rx.try_recv() {
+                    apply_capture_config_request(
+                        request,
+                        &mut cap,
+                        &device_for_reopen,
+                        &capture_config_state,
+                        &tx,
+                    );
+                }
                 if paused.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(200));
                     continue;
@@ -664,6 +849,7 @@ async fn main() -> std::io::Result<()> {
         let hostname = hostname.clone();
         let interface_name = interface_name.clone();
         let ip_address = ip_address.clone();
+        let capture_config_state = capture_config_state.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             // Previous tick's cumulative counter readings, so each tick can
@@ -845,6 +1031,14 @@ async fn main() -> std::io::Result<()> {
                 prev_rx_packets = rx_packets_now;
                 prev_tx_packets = tx_packets_now;
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::SystemStats { stats: system_stats_json }));
+
+                // Active capture filter/snap length (issue #68) — sent every
+                // tick, same as capture_stats/system_stats above, so a
+                // client that only just (re)connected sees the current
+                // values immediately rather than only a client that was
+                // connected at the moment a filter/snaplen change happened.
+                let config_snapshot = capture_config_state.lock().unwrap().clone();
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig { config: config_snapshot }));
             }
         });
     }
@@ -865,6 +1059,7 @@ async fn main() -> std::io::Result<()> {
         let keylog_watcher = keylog_watcher.clone();
         let trace_tx = tx.clone();
         let relay_lagged_events = relay_lagged_events.clone();
+        let capture_config_tx = capture_config_tx.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half).lines();
@@ -911,6 +1106,18 @@ async fn main() -> std::io::Result<()> {
                                             }
                                         });
                                     }
+                                    Some(wire::ControlMessage::SetCaptureFilter { filter }) => {
+                                        // Actually applying this needs the
+                                        // live `pcap::Capture` handle, which
+                                        // only ever lives on the capture
+                                        // thread — queue it there rather
+                                        // than touch `cap` from this async
+                                        // task (see CaptureConfigRequest).
+                                        let _ = capture_config_tx.send(CaptureConfigRequest::SetFilter(filter));
+                                    }
+                                    Some(wire::ControlMessage::SetSnaplen { bytes }) => {
+                                        let _ = capture_config_tx.send(CaptureConfigRequest::SetSnaplen(bytes));
+                                    }
                                     None => {}
                                 }
                             }
@@ -942,7 +1149,8 @@ async fn main() -> std::io::Result<()> {
 mod tests {
     use super::{
         build_capture_stats_json, build_system_stats_json, find_device_by_name, is_capturable,
-        is_meaningful_override, resolve_link_type,
+        is_meaningful_override, resolve_link_type, validate_capture_filter_len, validate_snaplen,
+        MAX_CAPTURE_FILTER_LEN,
     };
     use capture_agent::parse::LinkType;
     use tokio::sync::broadcast;
@@ -1029,6 +1237,43 @@ mod tests {
         // can't decode (see issue #63) — fail at startup instead, naming
         // the interface so the failure is immediately diagnosable.
         resolve_link_type(pcap::Linktype(113), "utun8"); // DLT_LINUX_SLL
+    }
+
+    #[test]
+    fn validate_capture_filter_len_accepts_a_normal_expression() {
+        assert!(validate_capture_filter_len("tcp port 443").is_ok());
+        assert!(validate_capture_filter_len("").is_ok(), "empty (clear) must always be accepted");
+    }
+
+    #[test]
+    fn validate_capture_filter_len_rejects_an_oversized_expression() {
+        let oversized = "a".repeat(MAX_CAPTURE_FILTER_LEN + 1);
+        let err = validate_capture_filter_len(&oversized).expect_err("should reject");
+        assert!(err.contains(&(MAX_CAPTURE_FILTER_LEN + 1).to_string()));
+    }
+
+    #[test]
+    fn validate_capture_filter_len_accepts_exactly_at_the_limit() {
+        let exact = "a".repeat(MAX_CAPTURE_FILTER_LEN);
+        assert!(validate_capture_filter_len(&exact).is_ok());
+    }
+
+    #[test]
+    fn validate_snaplen_accepts_a_normal_value() {
+        assert_eq!(validate_snaplen(96), Ok(96));
+        assert_eq!(validate_snaplen(65535), Ok(65535));
+    }
+
+    #[test]
+    fn validate_snaplen_rejects_zero() {
+        assert!(validate_snaplen(0).is_err());
+    }
+
+    #[test]
+    fn validate_snaplen_rejects_a_value_too_large_for_i32() {
+        // pcap's snaplen() builder takes an i32 — a u32 past i32::MAX must
+        // be rejected outright, not silently truncated or wrapped negative.
+        assert!(validate_snaplen(u32::MAX).is_err());
     }
 
     #[test]

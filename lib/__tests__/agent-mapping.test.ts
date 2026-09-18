@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { mapCaptureStatsEvent, mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mapSystemStatsEvent, mapTracerouteHopEvent } from '../agent-mapping';
+import {
+  mapCaptureConfigErrorEvent,
+  mapCaptureConfigEvent,
+  mapCaptureStatsEvent,
+  mapConnectionClosedEvent,
+  mapConnectionEvent,
+  mapPacketEvent,
+  mapSystemStatsEvent,
+  mapTracerouteHopEvent,
+} from '../agent-mapping';
 
 describe('mapConnectionEvent', () => {
   it('maps agent wire JSON to a NetworkConnection', () => {
@@ -342,5 +351,39 @@ describe('mapSystemStatsEvent', () => {
   it('throws on an event with no "stats" field at all', () => {
     const event = { type: 'system_stats', hostname: 'osi-gw-01' };
     expect(() => mapSystemStatsEvent(event)).toThrow('missing "stats" field');
+  });
+});
+
+describe('mapCaptureConfigEvent', () => {
+  // Same nested-envelope shape as mapCaptureStatsEvent/mapSystemStatsEvent
+  // above — see issue #68.
+  it('maps an active filter and narrowed snap length', () => {
+    const event = { type: 'capture_config', config: { filter: 'tcp port 443', snaplen: 96 } };
+    const config = mapCaptureConfigEvent(event);
+    expect(config).toEqual({ filter: 'tcp port 443', snaplen: 96 });
+  });
+
+  it('maps an explicit null filter (no filter active) rather than throwing on it', () => {
+    const event = { type: 'capture_config', config: { filter: null, snaplen: 65535 } };
+    const config = mapCaptureConfigEvent(event);
+    expect(config.filter).toBeNull();
+    expect(config.snaplen).toBe(65535);
+  });
+
+  it('throws on an event with no "config" field at all', () => {
+    const event = { type: 'capture_config', filter: 'tcp port 443' };
+    expect(() => mapCaptureConfigEvent(event)).toThrow('missing "config" field');
+  });
+});
+
+describe('mapCaptureConfigErrorEvent', () => {
+  it('extracts the error message', () => {
+    const event = { type: 'capture_config_error', message: 'invalid capture filter: syntax error' };
+    expect(mapCaptureConfigErrorEvent(event)).toBe('invalid capture filter: syntax error');
+  });
+
+  it('throws on an event with no "message" field at all', () => {
+    const event = { type: 'capture_config_error' };
+    expect(() => mapCaptureConfigErrorEvent(event)).toThrow('missing required field "message"');
   });
 });

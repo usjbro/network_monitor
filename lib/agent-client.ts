@@ -75,6 +75,8 @@ export class AgentClient extends EventEmitter {
       | { type: 'register_decrypt_eligible'; pid: number; keylogPath: string }
       | { type: 'unregister_decrypt_eligible'; pid: number }
       | { type: 'trace_route'; targetIp: string }
+      | { type: 'set_capture_filter'; filter: string }
+      | { type: 'set_snaplen'; bytes: number }
   ): void {
     this.socket?.write(JSON.stringify(message) + '\n');
   }

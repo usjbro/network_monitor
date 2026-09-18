@@ -218,6 +218,36 @@ Field notes:
 - `hopNumber` never exceeds the hop ceiling (30); a trace stops early once `hopIp` equals `targetIp` (destination reached) or the total-trace timeout (45s) elapses.
 - `targetIp` is repeated on every hop of a given trace so the relay/browser can correlate hops to the trace that produced them without tracking a separate trace-id — see `docs/geoip-protocol.md` for how the relay uses this same field to attach geoIP results.
 
+### `capture_config`
+
+Sent once per tick (~1 second), reporting the capture-time controls currently in effect — issue #68. Unlike `traceroute_hop`, this isn't triggered by a control message arriving; it's a persistent snapshot, resent every tick regardless of whether anything changed, so a browser tab that only just (re)connected sees the current values immediately rather than only a tab that happened to be connected at the moment a `set_capture_filter`/`set_snaplen` control message was applied.
+
+```json
+{
+  "type": "capture_config",
+  "config": {
+    "filter": "tcp port 443",
+    "snaplen": 96
+  }
+}
+```
+
+Note the nesting: fields sit under a `config` key, same shape as `capture_stats`'s `stats`/`traceroute_hop`'s `hop` — not flat on the event. `mapCaptureConfigEvent` (`lib/agent-mapping.ts`) owns this unwrap.
+
+Field notes:
+- `filter` — the active BPF capture filter expression, or **explicit `null`** (not omitted) when no filter is active, the default. `requireField`'s undefined-only check lets `null` through as a real, present value rather than throwing.
+- `snaplen` — bytes retained per captured frame; anything beyond this is truncated by the kernel before the agent ever sees it. `65535` (`DEFAULT_SNAPLEN` in `capture-agent/src/main.rs`) at startup — effectively "full frame" for any real interface's MTU.
+
+### `capture_config_error`
+
+Sent once, immediately, when a `set_capture_filter`/`set_snaplen` control message is rejected — an invalid BPF expression, an oversized filter, an out-of-range snap length, or a reopen failure. Unlike `capture_config` above, this is a one-off signal, not a per-tick snapshot: it carries no nested envelope.
+
+```json
+{"type": "capture_config_error", "message": "invalid capture filter: syntax error"}
+```
+
+The rejected change never takes effect — the previous, still-active `filter`/`snaplen` keeps running, and the *next* `capture_config` tick reports that unchanged previous state, not anything derived from the rejected request. The UI (`app/page.tsx`) treats this as a dismissible banner rather than auto-clearing it on the next `capture_config` tick, since that tick re-sending the same still-unchanged config isn't evidence the rejection was resolved.
+
 ## Relay → browser (SSE, not the raw agent protocol)
 
 `app/api/stream/route.ts` re-wraps agent events as Server-Sent Events (`data: <json>\n\n`) and adds one synthetic event type the agent itself never sends:
@@ -250,6 +280,21 @@ Sent by `app/api/control/route.ts` (POST endpoint, called by the UI's `pause`/`r
 ```
 
 Sent by `app/api/traceroute/start/route.ts` (POST endpoint, called by `ConnectionsView`'s "Trace Route" button — see `docs/geoip-protocol.md` and this repo's `CLAUDE.md` for the rest of the UI wiring). On-demand only; the agent never starts a trace on its own. Triggers `traceroute::run_traceroute` (`capture-agent/src/traceroute.rs`) on a dedicated task per trace, bounded by a 30-hop ceiling, a 1s-per-hop-attempt timeout with up to 3 retries per hop, and a 45s total-trace timeout — these bounds are enforced agent-side regardless of what the relay sends. Each resolved hop streams back as its own `traceroute_hop` event (above) as soon as it's known, not batched until the trace completes.
+
+### `set_capture_filter` / `set_snaplen`
+
+```json
+{"type": "set_capture_filter", "filter": "tcp port 443"}
+{"type": "set_snaplen", "bytes": 96}
+```
+
+Sent by `app/api/control/route.ts` (same POST endpoint as `pause`/`resume`), called by the command bar's `filter <bpf expression>` / `filter clear` / `snaplen <bytes>` / `snaplen full` commands — issue #68. `filter clear` sends `{"filter": ""}`; an empty string is not a separate variant, it's the same request as any other filter, and compiles (via `pcap_compile`) to an unconditional-match BPF program, which is exactly "no filter."
+
+Both are queued from the async connection-handling task into the capture thread (the only place the open `pcap::Capture` handle lives) via an in-process channel — `CaptureConfigRequest` in `capture-agent/src/main.rs`. `set_capture_filter` is applied live (`Capture::filter` recompiles and installs a new BPF program on the already-open handle, no capture interruption). `set_snaplen` has no live equivalent in libpcap: applying it closes and reopens the capture handle entirely (a brief, expected gap — logged, not hidden), then reapplies whatever filter was already active, since filter state doesn't survive a reopen. If that reapply itself fails, the whole snap length change is rejected — the agent never silently swaps in a reopened-but-unfiltered handle, since that would widen what gets captured as an unannounced side effect of a request that only asked to change the snap length.
+
+Validation happens both relay-side (`app/api/control/route.ts` rejects a non-string/oversized filter or a non-positive-integer snap length with `400` before ever reaching the agent) and agent-side (the authoritative check: `MAX_CAPTURE_FILTER_LEN` = 1024 bytes, `validate_snaplen` rejects `0` and anything not representable as a positive `i32`). Either layer rejecting a request emits `capture_config_error` (above) and leaves the previous capture configuration running unchanged — never a half-applied state.
+
+A BPF filter expression is new attacker-reachable input to this privileged process (it arrives from the browser and is compiled by libpcap in the agent), even though it's not a shell string and libpcap's own compiler is what parses it — see `docs/security.md`.
 
 ## Adding a new field or event type
 
