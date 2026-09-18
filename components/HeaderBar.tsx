@@ -3,8 +3,6 @@
 import React from 'react';
 import {
   Activity,
-  Cpu,
-  HardDrive,
   Pause,
   Play,
   RotateCcw,
@@ -16,7 +14,11 @@ import { SystemStats, TerminalTheme, ThemeConfig } from '@/lib/types';
 import { THEMES, formatSpeed } from '@/lib/osi-engine';
 
 interface HeaderBarProps {
-  stats: SystemStats;
+  // `null` until the agent's first `system_stats` tick arrives (issue #64)
+  // — distinct from "zero throughput so far," a real, healthy state once
+  // at least one tick has been received. Every field this component reads
+  // from `stats` is a live measurement; nothing here is a placeholder.
+  stats: SystemStats | null;
   theme: ThemeConfig;
   onSelectTheme: (themeKey: TerminalTheme) => void;
   isPaused: boolean;
@@ -38,13 +40,6 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   onToggleCrt,
   onOpenInstall,
 }) => {
-  const formatUptime = (sec: number) => {
-    const hrs = Math.floor(sec / 3600);
-    const mins = Math.floor((sec % 3600) / 60);
-    const secs = sec % 60;
-    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-
   return (
     <header className={`border-b ${theme.border} ${theme.cardBg} px-3 py-2 text-xs font-mono select-none`}>
       {/* Top Banner Row */}
@@ -60,10 +55,10 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
           <div className="hidden sm:flex items-center space-x-2 border-l border-slate-700/60 pl-3">
             <span className={theme.promptUser}>sysadmin</span>
             <span className="opacity-40">@</span>
-            <span className={theme.promptHost}>{stats.hostname}</span>
+            <span className={theme.promptHost}>{stats?.hostname || '—'}</span>
             <span className="opacity-40">:</span>
             <span className="bg-slate-800/80 px-1.5 py-0.5 rounded text-[10px] text-slate-300 font-semibold border border-slate-700">
-              {stats.interfaceName} [{stats.interfaceSpeedMbps >= 1000 ? `${stats.interfaceSpeedMbps / 1000}G` : `${stats.interfaceSpeedMbps}M`}]
+              {stats?.interfaceName || '—'}
             </span>
           </div>
         </div>
@@ -73,29 +68,17 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
           <div className="flex items-center space-x-1">
             <Activity className="h-3.5 w-3.5 text-emerald-400 animate-pulse" />
             <span className="opacity-70">RX:</span>
-            <span className="font-bold text-emerald-400">{formatSpeed(stats.rxTotalMbps * 1024 * 1024)}</span>
+            <span className="font-bold text-emerald-400">
+              {stats ? formatSpeed(stats.rxTotalMbps * 1024 * 1024) : '—'}
+            </span>
           </div>
 
           <div className="flex items-center space-x-1">
             <Activity className="h-3.5 w-3.5 text-sky-400 animate-pulse" />
             <span className="opacity-70">TX:</span>
-            <span className="font-bold text-sky-400">{formatSpeed(stats.txTotalMbps * 1024 * 1024)}</span>
-          </div>
-
-          <div className="flex items-center space-x-1">
-            <Cpu className="h-3.5 w-3.5 text-amber-400" />
-            <span className="opacity-70">CPU:</span>
-            <span className="font-bold">{stats.cpuUsagePct.toFixed(1)}%</span>
-          </div>
-
-          <div className="flex items-center space-x-1">
-            <HardDrive className="h-3.5 w-3.5 text-indigo-400" />
-            <span className="opacity-70">MEM:</span>
-            <span className="font-bold">{stats.memUsagePct.toFixed(1)}%</span>
-          </div>
-
-          <div className="hidden lg:block text-slate-400">
-            <span className="opacity-70">UPTIME:</span> {formatUptime(stats.uptimeSeconds)}
+            <span className="font-bold text-sky-400">
+              {stats ? formatSpeed(stats.txTotalMbps * 1024 * 1024) : '—'}
+            </span>
           </div>
         </div>
 

@@ -126,6 +126,36 @@ Field notes:
 
 Any connection's `packetLoss` (in `connection_update`) is derived purely from observed TCP retransmits — it has no way to know about packets the kernel or the relay itself lost before ever reaching that computation. A nonzero `dropped`/`ifDropped`/`relayLaggedEvents` here means `packetLoss` figures elsewhere in this same tick may under-report actual loss; the UI treats these two as independent signals (see `app/page.tsx`'s capture-degraded banner and `ConnectionsView`'s loss-column caveat) rather than trying to merge them into one number.
 
+### `system_stats`
+
+Sent once per tick (~1 second), immediately after that tick's `capture_stats`. Host/interface identity and aggregate throughput — issue #64. Replaces the placeholder `SystemStats` values the UI used to seed itself with client-side; every field here is a real measurement.
+
+```json
+{
+  "type": "system_stats",
+  "stats": {
+    "hostname": "osi-gw-01",
+    "interfaceName": "en0",
+    "ipAddress": "192.168.1.104",
+    "rxTotalMbps": 4.68,
+    "txTotalMbps": 3.7,
+    "rxPpsTotal": 480.0,
+    "txPpsTotal": 220.0,
+    "totalPacketsCaptured": 184200
+  }
+}
+```
+
+Note the nesting: fields sit under a `stats` key, same shape as `capture_stats`'s `stats` and `traceroute_hop`'s `hop` — not flat on the event.
+
+Field notes:
+- `hostname` — from `gethostname(2)`, read once at agent startup (not re-read per tick). Empty string if the syscall failed, never fabricated.
+- `interfaceName`, `ipAddress` — the interface `detect_interface()` resolved at startup and its first assigned address; both fixed for the life of the process (restart the agent, e.g. after `CAPTURE_INTERFACE` changes, to pick up a different value). `ipAddress` is empty if the interface has no assigned address.
+- `rxTotalMbps`/`txTotalMbps`/`rxPpsTotal`/`txPpsTotal` — aggregate interface throughput, computed from a **cumulative byte/packet counter delta between ticks**, divided by the tick's *actual* elapsed wall time (not assumed to be exactly 1s — a delayed tick still reports an honest rate). Deliberately not a sum over currently-live flows the way `layer_update`'s L3/L4 aggregates are: summing live flows moves when a flow evicts from the table even though nothing about the wire traffic changed, which would show as a throughput drop that never happened.
+- `totalPacketsCaptured` — the same cumulative `pcap::Stat::received` count as `capture_stats.received` (see above), repeated here so this event is self-contained; not a separate counter.
+
+What this event does **not** carry, and why: the placeholder `SystemStats` shape this replaces also had `interfaceSpeedMbps`, `duplexMode`, `macAddress`, `cpuUsagePct`, `memUsagePct`, and `uptimeSeconds`. None of these are measurable from this agent today — interface speed/duplex and the NIC's own hardware MAC would need additional, fiddlier platform-specific lookups; host CPU/memory/uptime are host-monitoring, not network-monitoring, and out of this agent's scope. Per issue #64's resolution, these are omitted entirely rather than wired up or faked — the UI renders an explicit "not wired" state for anything this event doesn't carry, never a zero formatted as a measurement.
+
 ### `agent_status`
 
 Defined in the wire protocol (`interface: String, capturing: bool`) but **never actually sent** by the current agent — the relay synthesizes its own `connection_status` event from the TCP connection state instead (see below). This is dead wire protocol surface; a future task should either wire it up (so the UI can display which interface is active) or remove it.

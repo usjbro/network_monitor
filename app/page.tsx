@@ -26,6 +26,7 @@ import {
   mapConnectionClosedEvent,
   mapConnectionEvent,
   mapPacketEvent,
+  mapSystemStatsEvent,
   mapTracerouteHopEvent,
   mergeLayerStats,
 } from '@/lib/agent-mapping';
@@ -59,26 +60,11 @@ export default function TerminalApp() {
     captureStats !== null &&
     (captureStats.dropped > 0 || captureStats.ifDropped > 0 || captureStats.relayLaggedEvents > 0);
 
-  // System Stats State
-  const [stats, setStats] = useState<SystemStats>({
-    hostname: 'osi-gw-01',
-    interfaceName: 'eth0',
-    interfaceSpeedMbps: 10000,
-    duplexMode: 'Full Duplex',
-    ipAddress: '192.168.1.104',
-    macAddress: 'a4:83:e7:21:9b:10',
-    cpuUsagePct: 14.2,
-    memUsagePct: 38.5,
-    uptimeSeconds: 84920,
-    // No wire event currently carries system-level throughput stats (that's
-    // tracked separately as future work) — seed at zero rather than
-    // fabricating a "live" number.
-    rxTotalMbps: 0,
-    txTotalMbps: 0,
-    rxPpsTotal: 1480,
-    txPpsTotal: 740,
-    totalPacketsCaptured: 184200,
-  });
+  // System Stats State (issue #64) — null until the agent's first
+  // system_stats tick arrives; every field is then a real measurement, not
+  // a placeholder. HeaderBar/DashboardView render an explicit "—" for
+  // anything not yet received.
+  const [stats, setStats] = useState<SystemStats | null>(null);
 
   // Connections & Packets State (populated from the live capture stream)
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
@@ -167,6 +153,9 @@ export default function TerminalApp() {
         }
         if (data.type === 'capture_stats') {
           setCaptureStats(mapCaptureStatsEvent(data));
+        }
+        if (data.type === 'system_stats') {
+          setStats(mapSystemStatsEvent(data));
         }
         if (data.type === 'connection_enrichment') {
           setConnections((prev) => applyEnrichmentEvent(prev, data));

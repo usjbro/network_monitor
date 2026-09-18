@@ -16,7 +16,10 @@ import { formatBytes, formatSpeed } from '@/lib/osi-engine';
 
 interface DashboardViewProps {
   layers: OSILayerInfo[];
-  stats: SystemStats;
+  // `null` until the agent's first `system_stats` tick arrives (issue #64)
+  // — every field this view reads from `stats` renders an explicit "—"
+  // while null, never a zero formatted as if it were a measurement.
+  stats: SystemStats | null;
   theme: ThemeConfig;
   onSelectLayer: (layerNum: OSILayerNumber) => void;
   historyRx: number[];
@@ -67,11 +70,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
           <div className="text-lg font-bold text-emerald-400 tracking-tight">
-            {formatSpeed(stats.rxTotalMbps * 1024 * 1024)}
+            {stats ? formatSpeed(stats.rxTotalMbps * 1024 * 1024) : '—'}
           </div>
           <div className="flex justify-between items-center text-[10px] text-slate-400 pt-1 border-t border-slate-800">
-            <span>Packets: {stats.rxPpsTotal.toLocaleString()} pps</span>
-            <span>Total: {formatBytes(stats.rxTotalMbps * 1024 * 1024 * 60)}</span>
+            <span>Packets: {stats ? stats.rxPpsTotal.toLocaleString() : '—'} pps</span>
+            <span>Total: {stats ? formatBytes(stats.rxTotalMbps * 1024 * 1024 * 60) : '—'}</span>
           </div>
         </div>
 
@@ -84,11 +87,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </span>
           </div>
           <div className="text-lg font-bold text-sky-400 tracking-tight">
-            {formatSpeed(stats.txTotalMbps * 1024 * 1024)}
+            {stats ? formatSpeed(stats.txTotalMbps * 1024 * 1024) : '—'}
           </div>
           <div className="flex justify-between items-center text-[10px] text-slate-400 pt-1 border-t border-slate-800">
-            <span>Packets: {stats.txPpsTotal.toLocaleString()} pps</span>
-            <span>Total: {formatBytes(stats.txTotalMbps * 1024 * 1024 * 60)}</span>
+            <span>Packets: {stats ? stats.txPpsTotal.toLocaleString() : '—'} pps</span>
+            <span>Total: {stats ? formatBytes(stats.txTotalMbps * 1024 * 1024 * 60) : '—'}</span>
           </div>
         </div>
 
@@ -105,8 +108,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             {totalSockets} <span className="text-xs font-normal opacity-70">open streams</span>
           </div>
           <div className="flex justify-between items-center text-[10px] text-slate-400 pt-1 border-t border-slate-800">
-            <span>Interface: {stats.interfaceName}</span>
-            <span>Captured: {stats.totalPacketsCaptured.toLocaleString()}</span>
+            <span>Interface: {stats?.interfaceName || '—'}</span>
+            <span>Captured: {stats ? stats.totalPacketsCaptured.toLocaleString() : '—'}</span>
           </div>
         </div>
 

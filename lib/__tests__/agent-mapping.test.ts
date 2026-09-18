@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapCaptureStatsEvent, mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mapTracerouteHopEvent } from '../agent-mapping';
+import { mapCaptureStatsEvent, mapConnectionClosedEvent, mapConnectionEvent, mapPacketEvent, mapSystemStatsEvent, mapTracerouteHopEvent } from '../agent-mapping';
 
 describe('mapConnectionEvent', () => {
   it('maps agent wire JSON to a NetworkConnection', () => {
@@ -223,5 +223,59 @@ describe('mapCaptureStatsEvent', () => {
   it('throws on an event with no "stats" field at all', () => {
     const event = { type: 'capture_stats', received: 5000 };
     expect(() => mapCaptureStatsEvent(event)).toThrow('missing "stats" field');
+  });
+});
+
+describe('mapSystemStatsEvent', () => {
+  // Same nested-envelope shape as capture_stats/traceroute_hop — see issue #64.
+  it('maps a full system_stats event', () => {
+    const event = {
+      type: 'system_stats',
+      stats: {
+        hostname: 'osi-gw-01',
+        interfaceName: 'en0',
+        ipAddress: '192.168.1.104',
+        rxTotalMbps: 4.68,
+        txTotalMbps: 3.7,
+        rxPpsTotal: 480,
+        txPpsTotal: 220,
+        totalPacketsCaptured: 184200,
+      },
+    };
+    const stats = mapSystemStatsEvent(event);
+    expect(stats).toEqual({
+      hostname: 'osi-gw-01',
+      interfaceName: 'en0',
+      ipAddress: '192.168.1.104',
+      rxTotalMbps: 4.68,
+      txTotalMbps: 3.7,
+      rxPpsTotal: 480,
+      txPpsTotal: 220,
+      totalPacketsCaptured: 184200,
+    });
+  });
+
+  it('maps an all-zero (healthy, idle) system_stats event without throwing', () => {
+    const event = {
+      type: 'system_stats',
+      stats: {
+        hostname: '',
+        interfaceName: 'en0',
+        ipAddress: '',
+        rxTotalMbps: 0,
+        txTotalMbps: 0,
+        rxPpsTotal: 0,
+        txPpsTotal: 0,
+        totalPacketsCaptured: 0,
+      },
+    };
+    const stats = mapSystemStatsEvent(event);
+    expect(stats.hostname).toBe('');
+    expect(stats.rxTotalMbps).toBe(0);
+  });
+
+  it('throws on an event with no "stats" field at all', () => {
+    const event = { type: 'system_stats', hostname: 'osi-gw-01' };
+    expect(() => mapSystemStatsEvent(event)).toThrow('missing "stats" field');
   });
 });
