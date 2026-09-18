@@ -183,6 +183,11 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                     <div className="text-[10px] text-slate-300">
                       Method: {selectedPacket.headerBreakdown.layer7.methodOrType} | Path: {selectedPacket.headerBreakdown.layer7.pathOrQuery}
                     </div>
+                    {selectedPacket.headerBreakdown.layer7.statusOrCode && (
+                      <div className="text-[10px] text-slate-300">
+                        Status: {selectedPacket.headerBreakdown.layer7.statusOrCode}
+                      </div>
+                    )}
                   </div>
                 )}
 

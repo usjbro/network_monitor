@@ -3,6 +3,16 @@ use crate::ja3::{compute_ja3, label_for_ja3, ClientHelloFields};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum L7Info {
     Http { method: String, path: String },
+    /// An HTTP response's status line (e.g. the "200" in `HTTP/1.1 200 OK`).
+    /// Kept as its own variant rather than an optional field on `Http`
+    /// above — a request has a method and a path but no status, a response
+    /// has a status but no method or path; the two never overlap on one
+    /// packet. Populates `Layer7Json.status_or_code`, which was previously
+    /// declared on the wire but never produced by anything — see issue #65.
+    /// Request/response *correlation* (matching this to the request it
+    /// answers, service-time timing) is explicitly out of scope here; that
+    /// is epic #57's #82.
+    HttpResponse { status: String },
     Dns { query_name: String },
     TlsClientHello {
         sni: String,
@@ -29,6 +39,29 @@ fn sniff_http(payload: &[u8]) -> Option<L7Info> {
             method: method.to_string(),
             path: path.to_string(),
         })
+    } else {
+        None
+    }
+}
+
+/// Recognizes an HTTP response's status line — `HTTP/<version> <3-digit
+/// status> <reason phrase>` — e.g. `HTTP/1.1 200 OK`. Deliberately narrow:
+/// only the status code is extracted, not the reason phrase, headers, or
+/// body, and this makes no attempt to associate the response with the
+/// request it answers (that's #82's job). A response line is what a
+/// request line is not — this and `sniff_http` above never both match the
+/// same payload.
+fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let first_line = text.lines().next()?;
+    let mut parts = first_line.split_whitespace();
+    let version = parts.next()?;
+    if !version.starts_with("HTTP/") {
+        return None;
+    }
+    let status = parts.next()?;
+    if status.len() == 3 && status.bytes().all(|b| b.is_ascii_digit()) {
+        Some(L7Info::HttpResponse { status: status.to_string() })
     } else {
         None
     }
@@ -155,7 +188,10 @@ pub fn sniff_l7(payload: &[u8], dst_port: Option<u16>) -> L7Info {
     let info = match dst_port {
         Some(53) => sniff_dns(payload),
         Some(443) => sniff_tls_client_hello(payload),
-        _ => sniff_http(payload).or_else(|| sniff_dns(payload)).or_else(|| sniff_tls_client_hello(payload)),
+        _ => sniff_http(payload)
+            .or_else(|| sniff_http_response(payload))
+            .or_else(|| sniff_dns(payload))
+            .or_else(|| sniff_tls_client_hello(payload)),
     };
     info.unwrap_or(L7Info::None)
 }
@@ -174,6 +210,43 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn detects_http_response_status_line() {
+        let payload = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html></html>";
+        match sniff_l7(payload, Some(51000)) {
+            L7Info::HttpResponse { status } => assert_eq!(status, "200"),
+            other => panic!("expected HttpResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detects_http_error_response_status_line() {
+        let payload = b"HTTP/1.1 404 Not Found\r\n\r\n";
+        match sniff_l7(payload, Some(51000)) {
+            L7Info::HttpResponse { status } => assert_eq!(status, "404"),
+            other => panic!("expected HttpResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn does_not_misparse_a_request_as_a_response_or_vice_versa() {
+        // A request line's method never starts with "HTTP/", and a response
+        // line's version token is never a known request method — the two
+        // sniffers are mutually exclusive on any real traffic.
+        let request = b"GET / HTTP/1.1\r\n\r\n";
+        assert!(matches!(sniff_l7(request, Some(80)), L7Info::Http { .. }));
+
+        let response = b"HTTP/1.1 301 Moved Permanently\r\nLocation: /new\r\n\r\n";
+        assert!(matches!(sniff_l7(response, Some(51000)), L7Info::HttpResponse { .. }));
+    }
+
+    #[test]
+    fn returns_none_for_a_status_line_with_a_non_numeric_or_wrong_length_code() {
+        assert!(matches!(sniff_l7(b"HTTP/1.1 OK\r\n\r\n", Some(51000)), L7Info::None));
+        assert!(matches!(sniff_l7(b"HTTP/1.1 20 OK\r\n\r\n", Some(51000)), L7Info::None));
+        assert!(matches!(sniff_l7(b"HTTP/1.1 20000 OK\r\n\r\n", Some(51000)), L7Info::None));
     }
 
     #[test]
