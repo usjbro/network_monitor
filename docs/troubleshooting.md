@@ -32,6 +32,14 @@ CAPTURE_INTERFACE=en0 cargo run --release
 
 Use the `route -n get default` output from *before* your VPN connected to find your real interface name (or `ifconfig -l` as a starting point — usually the same set `pcap::Device::list()` sees, but not guaranteed).
 
+## Capturing on `lo0` (loopback), or the agent panics with "uses link type ... which this agent doesn't know how to parse"
+
+Loopback (`lo0`) and raw-IP interfaces don't use Ethernet framing, so the agent reads the capture handle's actual link type at startup (`pcap::Capture::get_datalink()`) rather than assuming Ethernet. It understands three shapes: Ethernet II (`DLT_EN10MB`), BSD loopback (`DLT_NULL`/`DLT_LOOP`), and raw IP (`DLT_RAW`) — see `capture-agent/src/parse.rs`'s `LinkType` and issue #63. Loopback and raw-IP frames have no real MAC addresses; the agent reports `00:00:00:00:00:00` for both rather than fabricating or omitting them.
+
+If `CAPTURE_INTERFACE` (or auto-detection) points at an interface whose link type isn't one of those three, the agent panics at startup rather than starting up and silently showing an idle network forever — the panic message names both the interface and the link type it saw. This is deliberate, matching the `CAPTURE_INTERFACE` "fail loudly" precedent above: a link type this agent can't decode would otherwise reject every single frame with zero visible signal.
+
+If you're deliberately capturing on `lo0` and it isn't working, check `capture_stats.unparseableFrames` (`docs/wire-protocol.md`) — a nonzero, climbing count there means frames are arriving but something about their shape isn't matching what's expected (e.g. a platform whose `DLT_NULL` header isn't exactly 4 bytes), which is a different problem from the interface being silently wrong.
+
 ## No packets/connections appear at all, even though the agent says it's listening
 
 - **Confirm real traffic is happening**: open a new website in a browser tab while watching the Connections view.

@@ -261,18 +261,19 @@ pub enum AgentEvent {
     SystemStats { stats: SystemStatsJson },
 }
 
-/// Capture health, sent once per tick (~1s) alongside `layer_update`. Two
-/// independent loss sources, both real and both distinct from the
+/// Capture health, sent once per tick (~1s) alongside `layer_update`. Three
+/// independent loss sources, all real and all distinct from the
 /// retransmit-derived `packetLoss` reported per connection in
 /// `ConnectionJson`: `dropped`/`ifDropped` come from the kernel/driver
 /// (packets that never reached this process at all — see
-/// `pcap::Capture::stats()`), while `relayLaggedEvents` counts *this
-/// process's own* broadcast channel falling behind a slow SSE client (see
-/// `main.rs`'s `RecvError::Lagged` handling). A connection's retransmit-based
-/// loss percentage is only trustworthy when both of these read zero — a
-/// capture with either non-zero has silently missed data upstream of
-/// wherever that percentage gets computed. See issue #61 and
-/// docs/wire-protocol.md.
+/// `pcap::Capture::stats()`), `relayLaggedEvents` counts *this process's
+/// own* broadcast channel falling behind a slow SSE client (see
+/// `main.rs`'s `RecvError::Lagged` handling), and `unparseableFrames`
+/// counts frames this process *did* receive but couldn't decode at all
+/// (see issue #63). A connection's retransmit-based loss percentage is
+/// only trustworthy when all of these read zero — a capture with any
+/// non-zero has silently missed data upstream of wherever that percentage
+/// gets computed. See issue #61 and docs/wire-protocol.md.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureStatsJson {
@@ -292,6 +293,13 @@ pub struct CaptureStatsJson {
     /// `dropped`/`if_dropped` above — this is the relay's own outbound
     /// backlog, not a capture-side loss.
     pub relay_lagged_events: u64,
+    /// Cumulative count of frames this process received from the capture
+    /// handle but `parse::parse_packet` couldn't decode at all — an
+    /// unsupported or malformed link-layer/network-layer shape. Unrelated
+    /// to `dropped`/`if_dropped` (which never even reached this process)
+    /// and to `relay_lagged_events` (a purely relay-side backlog) — see
+    /// issue #63.
+    pub unparseable_frames: u64,
 }
 
 /// Host/interface identity and aggregate throughput, sent once per tick
@@ -707,6 +715,7 @@ mod tests {
                 dropped: 3,
                 if_dropped: 1,
                 relay_lagged_events: 42,
+                unparseable_frames: 5,
             },
         };
         let line = encode_event(&event);
@@ -716,6 +725,7 @@ mod tests {
         assert!(line.contains("\"dropped\":3"));
         assert!(line.contains("\"ifDropped\":1"));
         assert!(line.contains("\"relayLaggedEvents\":42"));
+        assert!(line.contains("\"unparseableFrames\":5"));
     }
 
     #[test]

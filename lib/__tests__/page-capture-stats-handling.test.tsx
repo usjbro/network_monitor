@@ -70,7 +70,7 @@ describe('TerminalApp capture_stats stream handling', () => {
       source.onmessage!({
         data: JSON.stringify({
           type: 'capture_stats',
-          stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0 },
+          stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0 },
         }),
       } as MessageEvent);
     });
@@ -88,7 +88,7 @@ describe('TerminalApp capture_stats stream handling', () => {
       source.onmessage!({
         data: JSON.stringify({
           type: 'capture_stats',
-          stats: { received: 5000, dropped: 12, ifDropped: 0, relayLaggedEvents: 0 },
+          stats: { received: 5000, dropped: 12, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0 },
         }),
       } as MessageEvent);
     });
@@ -110,11 +110,26 @@ describe('TerminalApp capture_stats stream handling', () => {
       source.onmessage!({
         data: JSON.stringify({
           type: 'capture_stats',
-          stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 9 },
+          stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 9, unparseableFrames: 0 },
         }),
       } as MessageEvent);
     });
     expect(bannerText()).toMatch(/capture degraded/i);
     expect(bannerText()).toMatch(/9 event\(s\) dropped for a lagging client/i);
+  });
+
+  it('shows the degraded-capture banner and mentions unparseable frames when unparseableFrames is nonzero', () => {
+    render(<TerminalApp />);
+    const source = FakeEventSource.instances[0];
+    act(() => {
+      source.onmessage!({
+        data: JSON.stringify({
+          type: 'capture_stats',
+          stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 6 },
+        }),
+      } as MessageEvent);
+    });
+    expect(bannerText()).toMatch(/capture degraded/i);
+    expect(bannerText()).toMatch(/6 frame\(s\) could not be parsed/i);
   });
 });

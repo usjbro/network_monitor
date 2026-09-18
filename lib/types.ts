@@ -122,7 +122,9 @@ export interface TracerouteHop {
 // (docs/wire-protocol.md), sent once per tick alongside layer_update.
 // `dropped`/`ifDropped` are kernel/driver-side losses (packets that never
 // reached the agent process at all); `relayLaggedEvents` is this relay's
-// own outbound backlog to a slow SSE client. Both are independent of, and a
+// own outbound backlog to a slow SSE client; `unparseableFrames` is frames
+// the agent did receive but couldn't decode at all (e.g. an unsupported
+// link-layer shape — see issue #63). All three are independent of, and a
 // precondition for trusting, any connection's retransmit-derived
 // `packetLoss` figure — see issue #61.
 export interface CaptureStats {
@@ -130,6 +132,7 @@ export interface CaptureStats {
   dropped: number;
   ifDropped: number;
   relayLaggedEvents: number;
+  unparseableFrames: number;
 }
 
 export type TerminalTheme = 'sophisticated' | 'macos_pro' | 'macos_homebrew' | 'iterm_snazzy' | 'matrix' | 'dracula' | 'amber' | 'cyberpunk' | 'catppuccin' | 'nord';

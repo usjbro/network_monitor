@@ -117,7 +117,8 @@ Sent once per tick (~1 second), immediately after that tick's `layer_update`. Re
     "received": 40213,
     "dropped": 0,
     "ifDropped": 0,
-    "relayLaggedEvents": 0
+    "relayLaggedEvents": 0,
+    "unparseableFrames": 0
   }
 }
 ```
@@ -127,9 +128,10 @@ Note the nesting: fields sit under a `stats` key, not flat on the event — same
 Field notes:
 - `received`, `dropped`, `if_dropped` come straight from `pcap::Capture::stats()` (`ps_recv`/`ps_drop`/`ps_ifdrop`) — cumulative since the capture handle opened, not per-tick deltas. `dropped` is the kernel/driver's capture buffer filling up before the agent could read from it; `if_dropped` is the network interface driver dropping frames upstream of that buffer (`0` on platforms that don't report it separately). Both are `0` until the capture thread's first successful poll (roughly one second after the agent starts).
 - `relayLaggedEvents` is unrelated to the three fields above: it's this relay process's own outbound backlog — a cumulative count (since agent start, not per-tick) of discrete `packet`/`decrypted_payload` events silently dropped for an SSE client that fell behind the broadcast channel (see `RecvError::Lagged` in `main.rs`). A capture can have `dropped: 0` and still have a nonzero `relayLaggedEvents` if the browser tab itself is slow to consume events.
-- All four counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
+- `unparseableFrames` is a fourth, independent signal: a cumulative count of frames the agent *did* receive from the capture handle but `parse::parse_packet` couldn't decode at all (an unsupported or malformed link-layer/network-layer shape — see issue #63 and `capture-agent/src/parse.rs`'s `LinkType`). Unlike `dropped`/`if_dropped`, these frames did reach this process; unlike `relayLaggedEvents`, this has nothing to do with the relay's outbound side.
+- All five counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
 
-Any connection's `packetLoss` (in `connection_update`) is derived purely from observed TCP retransmits — it has no way to know about packets the kernel or the relay itself lost before ever reaching that computation. A nonzero `dropped`/`ifDropped`/`relayLaggedEvents` here means `packetLoss` figures elsewhere in this same tick may under-report actual loss; the UI treats these two as independent signals (see `app/page.tsx`'s capture-degraded banner and `ConnectionsView`'s loss-column caveat) rather than trying to merge them into one number.
+Any connection's `packetLoss` (in `connection_update`) is derived purely from observed TCP retransmits — it has no way to know about packets the kernel or the relay itself lost before ever reaching that computation. A nonzero `dropped`/`ifDropped`/`relayLaggedEvents`/`unparseableFrames` here means `packetLoss` figures elsewhere in this same tick may under-report actual loss; the UI treats these two as independent signals (see `app/page.tsx`'s capture-degraded banner and `ConnectionsView`'s loss-column caveat) rather than trying to merge them into one number.
 
 ### `system_stats`
 

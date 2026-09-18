@@ -299,13 +299,49 @@ fn local_addrs_for(device: &pcap::Device) -> Vec<String> {
         .collect()
 }
 
+/// Maps an opened capture handle's reported datalink type
+/// (`pcap::Capture::get_datalink()`) to the `parse::LinkType` this agent's
+/// parser knows how to decode. Panics for anything else: a link type
+/// `parse::parse_packet` can't handle means it would reject every single
+/// captured frame, and the agent would otherwise start up looking healthy
+/// (interface found, listening on 9990) while silently showing an idle
+/// network forever — the exact bug class issue #63 exists to close. Failing
+/// here, loudly, naming the interface and its link type, matches the
+/// `CAPTURE_INTERFACE` precedent from #51 (docs/troubleshooting.md).
+fn resolve_link_type(datalink: pcap::Linktype, interface_name: &str) -> parse::LinkType {
+    match datalink {
+        pcap::Linktype::ETHERNET => parse::LinkType::Ethernet,
+        pcap::Linktype::NULL | pcap::Linktype::LOOP => parse::LinkType::NullLoopback,
+        pcap::Linktype::RAW => parse::LinkType::Raw,
+        other => {
+            let name = other.get_name().unwrap_or_else(|_| format!("{other:?}"));
+            panic!(
+                "capture-agent: interface {interface_name} uses link type {name} (dlt={}), \
+                 which this agent doesn't know how to parse. Supported: Ethernet, loopback \
+                 (DLT_NULL/DLT_LOOP), and raw IP (DLT_RAW). Refusing to start rather than \
+                 silently showing an idle network.",
+                other.0
+            )
+        }
+    }
+}
+
 /// Builds the `capture_stats` wire event from the latest kernel-side
 /// `pcap::Stat` snapshot (or `None` if the capture thread hasn't polled one
-/// yet) and the cumulative relay-lag counter. Kept as a small pure function,
-/// separate from the periodic-emitter loop that calls it, so the mapping
-/// from these two inputs to the wire shape is unit-testable without a real
-/// capture handle or a running tokio runtime — see issue #61.
-fn build_capture_stats_json(stat: Option<pcap::Stat>, relay_lagged_events: u64) -> wire::CaptureStatsJson {
+/// yet), the cumulative relay-lag counter, and the cumulative count of
+/// frames the capture thread received but couldn't parse at all (issue
+/// #63) — a third, independent loss source distinct from both `dropped`
+/// (kernel/driver never delivered the frame to this process) and
+/// `relay_lagged_events` (this process's own outbound backlog to a slow
+/// client). Kept as a small pure function, separate from the
+/// periodic-emitter loop that calls it, so the mapping from these inputs to
+/// the wire shape is unit-testable without a real capture handle or a
+/// running tokio runtime — see issue #61.
+fn build_capture_stats_json(
+    stat: Option<pcap::Stat>,
+    relay_lagged_events: u64,
+    unparseable_frames: u64,
+) -> wire::CaptureStatsJson {
     let (received, dropped, if_dropped) = match stat {
         Some(s) => (s.received, s.dropped, s.if_dropped),
         None => (0, 0, 0),
@@ -315,6 +351,7 @@ fn build_capture_stats_json(stat: Option<pcap::Stat>, relay_lagged_events: u64) 
         dropped,
         if_dropped,
         relay_lagged_events,
+        unparseable_frames,
     }
 }
 
@@ -377,6 +414,31 @@ async fn main() -> std::io::Result<()> {
     let interface_name = device.name.clone();
     let local_addrs = local_addrs_for(&device);
     println!("capture-agent: using interface {interface_name}");
+
+    // Opened synchronously here, before anything else starts (including the
+    // TCP listener below), rather than inside the capture thread: this is a
+    // startup precondition, and both failure modes below (device won't
+    // open, or opens with a link type this agent can't parse — issue #63)
+    // need to fail the whole process loudly and immediately, not leave a
+    // dead capture thread behind a process that otherwise looks healthy.
+    let cap = pcap::Capture::from_device(device)
+        .and_then(|c| {
+            c.promisc(true)
+                .snaplen(65535)
+                .timeout(1000)
+                // Without this, macOS BPF only flushes its buffer to
+                // userspace once it's full, which on a normal-traffic
+                // interface can mean no packets are delivered for a very
+                // long time. Immediate mode delivers each packet as soon as
+                // it arrives instead.
+                .immediate_mode(true)
+                .open()
+        })
+        .unwrap_or_else(|e| panic!("capture-agent: failed to open capture device {interface_name}: {e}"));
+    let datalink = cap.get_datalink();
+    let link_type = resolve_link_type(datalink, &interface_name);
+    println!("capture-agent: link type {datalink:?} on {interface_name}");
+
     // Both read once at startup and never change for the life of this
     // process — computed here, not per-tick, since neither can change
     // without restarting the agent (a new interface needs a restart; the
@@ -418,6 +480,15 @@ async fn main() -> std::io::Result<()> {
     // per-tick, so a lag that already happened is never un-reported once
     // the client catches up.
     let relay_lagged_events = Arc::new(AtomicU64::new(0));
+    // Cumulative count of frames the capture thread received but couldn't
+    // parse at all (`parse::parse_packet` returned `None`) — an
+    // unsupported/malformed link-layer or network-layer shape, distinct
+    // from both `capture_stats.dropped` (the kernel/driver never delivered
+    // the frame to this process at all) and `relay_lagged_events` above
+    // (this process's own outbound backlog). Before this counter existed,
+    // an unparseable frame vanished with zero signal anywhere — see issue
+    // #63.
+    let unparseable_frames = Arc::new(AtomicU64::new(0));
     // Aggregate interface throughput (issue #64), updated per-packet in the
     // capture loop. Cumulative counters, never reset — the periodic emitter
     // computes a per-tick delta from them, rather than summing live flows'
@@ -441,11 +512,13 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
-    // Blocking capture loop on a dedicated OS thread.
+    // Blocking capture loop on a dedicated OS thread. `cap`/`link_type` were
+    // already resolved synchronously in main(), above — opening the device
+    // and reading its link type are startup preconditions, not something
+    // that can fail silently mid-thread (see issue #63).
     {
         let flow_table = flow_table.clone();
         let paused = paused.clone();
-        let device = device.clone();
         let tx = tx.clone();
         let packet_seq = packet_seq.clone();
         let local_addrs = local_addrs_for_capture;
@@ -454,31 +527,13 @@ async fn main() -> std::io::Result<()> {
         let decrypt_state = decrypt_state.clone();
         let decrypt_event_limiter = decrypt_event_limiter.clone();
         let capture_stats = capture_stats.clone();
+        let unparseable_frames = unparseable_frames.clone();
         let total_rx_bytes = total_rx_bytes.clone();
         let total_tx_bytes = total_tx_bytes.clone();
         let total_rx_packets = total_rx_packets.clone();
         let total_tx_packets = total_tx_packets.clone();
         std::thread::spawn(move || {
-            let mut cap = match pcap::Capture::from_device(device)
-                .and_then(|c| {
-                    c.promisc(true)
-                        .snaplen(65535)
-                        .timeout(1000)
-                        // Without this, macOS BPF only flushes its buffer to
-                        // userspace once it's full, which on a normal-traffic
-                        // interface can mean no packets are delivered for a
-                        // very long time. Immediate mode delivers each packet
-                        // as soon as it arrives instead.
-                        .immediate_mode(true)
-                        .open()
-                })
-            {
-                Ok(cap) => cap,
-                Err(e) => {
-                    eprintln!("capture-agent: failed to open capture device: {e}");
-                    return;
-                }
-            };
+            let mut cap = cap;
             // Caps discrete Packet events to the browser at 100/sec — the UI
             // only keeps the last 100 anyway (app/page.tsx's
             // `prev.slice(0, 100)`), so anything above that is pure waste.
@@ -504,7 +559,10 @@ async fn main() -> std::io::Result<()> {
                 }
                 match cap.next_packet() {
                     Ok(packet) => {
-                        let Some(parsed) = parse::parse_packet(packet.data) else { continue };
+                        let Some(parsed) = parse::parse_packet(packet.data, link_type) else {
+                            unparseable_frames.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
                         flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
@@ -598,6 +656,7 @@ async fn main() -> std::io::Result<()> {
         let tx = tx.clone();
         let capture_stats = capture_stats.clone();
         let relay_lagged_events = relay_lagged_events.clone();
+        let unparseable_frames = unparseable_frames.clone();
         let total_rx_bytes = total_rx_bytes.clone();
         let total_tx_bytes = total_tx_bytes.clone();
         let total_rx_packets = total_rx_packets.clone();
@@ -754,7 +813,8 @@ async fn main() -> std::io::Result<()> {
 
                 let stat = *capture_stats.lock().unwrap();
                 let lagged = relay_lagged_events.load(Ordering::Relaxed);
-                let stats_json = build_capture_stats_json(stat, lagged);
+                let unparseable = unparseable_frames.load(Ordering::Relaxed);
+                let stats_json = build_capture_stats_json(stat, lagged, unparseable);
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats { stats: stats_json }));
 
                 // System/throughput stats (issue #64) — reuses `stat.received`
@@ -882,8 +942,9 @@ async fn main() -> std::io::Result<()> {
 mod tests {
     use super::{
         build_capture_stats_json, build_system_stats_json, find_device_by_name, is_capturable,
-        is_meaningful_override,
+        is_meaningful_override, resolve_link_type,
     };
+    use capture_agent::parse::LinkType;
     use tokio::sync::broadcast;
 
     fn fake_device(name: &str) -> pcap::Device {
@@ -946,6 +1007,31 @@ mod tests {
     }
 
     #[test]
+    fn resolve_link_type_maps_ethernet() {
+        assert_eq!(resolve_link_type(pcap::Linktype::ETHERNET, "en0"), LinkType::Ethernet);
+    }
+
+    #[test]
+    fn resolve_link_type_maps_null_and_loop_to_null_loopback() {
+        assert_eq!(resolve_link_type(pcap::Linktype::NULL, "lo0"), LinkType::NullLoopback);
+        assert_eq!(resolve_link_type(pcap::Linktype::LOOP, "lo0"), LinkType::NullLoopback);
+    }
+
+    #[test]
+    fn resolve_link_type_maps_raw() {
+        assert_eq!(resolve_link_type(pcap::Linktype::RAW, "tun0"), LinkType::Raw);
+    }
+
+    #[test]
+    #[should_panic(expected = "utun8")]
+    fn resolve_link_type_panics_loudly_naming_the_interface_for_an_unsupported_link_type() {
+        // Never silently drop every frame from a link type this parser
+        // can't decode (see issue #63) — fail at startup instead, naming
+        // the interface so the failure is immediately diagnosable.
+        resolve_link_type(pcap::Linktype(113), "utun8"); // DLT_LINUX_SLL
+    }
+
+    #[test]
     fn is_meaningful_override_rejects_empty_and_whitespace_only_values() {
         assert!(!is_meaningful_override(""));
         assert!(!is_meaningful_override("   "));
@@ -986,11 +1072,12 @@ mod tests {
             dropped: 7,
             if_dropped: 2,
         };
-        let json = build_capture_stats_json(Some(stat), 15);
+        let json = build_capture_stats_json(Some(stat), 15, 4);
         assert_eq!(json.received, 500);
         assert_eq!(json.dropped, 7);
         assert_eq!(json.if_dropped, 2);
         assert_eq!(json.relay_lagged_events, 15);
+        assert_eq!(json.unparseable_frames, 4);
     }
 
     #[test]
@@ -998,11 +1085,29 @@ mod tests {
         // The capture thread hasn't successfully called cap.stats() yet
         // (e.g. right at agent startup) — this must report honest zeros,
         // not panic and not fabricate a nonzero drop count.
-        let json = build_capture_stats_json(None, 0);
+        let json = build_capture_stats_json(None, 0, 0);
         assert_eq!(json.received, 0);
         assert_eq!(json.dropped, 0);
         assert_eq!(json.if_dropped, 0);
         assert_eq!(json.relay_lagged_events, 0);
+        assert_eq!(json.unparseable_frames, 0);
+    }
+
+    #[test]
+    fn build_capture_stats_json_carries_unparseable_frames_independent_of_other_counters() {
+        // A capture with zero kernel drops and zero relay lag can still
+        // have nonzero unparseable frames (e.g. a link type this parser
+        // only partially understands) — the three counters are independent
+        // signals, not one derived from another (see issue #63).
+        let stat = pcap::Stat {
+            received: 100,
+            dropped: 0,
+            if_dropped: 0,
+        };
+        let json = build_capture_stats_json(Some(stat), 0, 9);
+        assert_eq!(json.dropped, 0);
+        assert_eq!(json.relay_lagged_events, 0);
+        assert_eq!(json.unparseable_frames, 9);
     }
 
     #[test]

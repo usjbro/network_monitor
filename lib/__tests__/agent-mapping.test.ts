@@ -265,17 +265,24 @@ describe('mapCaptureStatsEvent', () => {
   // Same nested-envelope shape as traceroute_hop (capture-agent/src/wire.rs's
   // `CaptureStats { stats: CaptureStatsJson }`) — see issue #61.
   it('maps capture stats with nonzero drops and lag', () => {
-    const event = { type: 'capture_stats', stats: { received: 5000, dropped: 12, ifDropped: 3, relayLaggedEvents: 7 } };
+    const event = {
+      type: 'capture_stats',
+      stats: { received: 5000, dropped: 12, ifDropped: 3, relayLaggedEvents: 7, unparseableFrames: 2 },
+    };
     const stats = mapCaptureStatsEvent(event);
-    expect(stats).toEqual({ received: 5000, dropped: 12, ifDropped: 3, relayLaggedEvents: 7 });
+    expect(stats).toEqual({ received: 5000, dropped: 12, ifDropped: 3, relayLaggedEvents: 7, unparseableFrames: 2 });
   });
 
   it('maps healthy zero-drop stats', () => {
-    const event = { type: 'capture_stats', stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0 } };
+    const event = {
+      type: 'capture_stats',
+      stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0 },
+    };
     const stats = mapCaptureStatsEvent(event);
     expect(stats.dropped).toBe(0);
     expect(stats.ifDropped).toBe(0);
     expect(stats.relayLaggedEvents).toBe(0);
+    expect(stats.unparseableFrames).toBe(0);
   });
 
   it('throws on an event with no "stats" field at all', () => {
