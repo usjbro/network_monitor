@@ -38,6 +38,7 @@ Full roadmap, epics, and individual tasks are tracked as GitHub issues in this r
 - Epic #24 — Network Path Visualization (traceroute + geoIP) — done (see `capture-agent/src/traceroute.rs`, `docs/geoip-protocol.md`)
 - Epic #25 — TLS Visibility (JA3 fingerprinting + opt-in per-process decryption) — done. Landed as a narrower, lower-risk design than originally scoped: not a MITM proxy — no CA install, no traffic redirection, no certificate pinning broken. Decryption only happens for a process explicitly launched via `bin/osi-inspect.js`, which points `SSLKEYLOGFILE` at a fresh ephemeral file and registers that one PID as decrypt-eligible with the agent. See `docs/superpowers/specs/2026-08-29-tls-interception-design.md`.
 - Issues #27, #28, #29 — known, real gaps in the current implementation (uncapped packet stream, flows never expiring, `headerBreakdown` never reaching the wire)
+- [docs/feature-gap-analysis.md](docs/feature-gap-analysis.md) — product gap analysis against the Wireshark design baseline, written after the original roadmap's four sub-projects closed. Candidate input for the next epic; nothing in it is committed work.
 
 Labels: `epic` (tracking issues), `rust`, `web`, `security`, `not-speced` (blocked on a design pass before it can be broken into real tasks — none of the current epics carry this label).
 
