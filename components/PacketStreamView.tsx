@@ -223,6 +223,11 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                     <div className="text-[10px] text-slate-300">
                       MAC: {selectedPacket.headerBreakdown.layer2.srcMac} → {selectedPacket.headerBreakdown.layer2.dstMac}
                     </div>
+                    {selectedPacket.headerBreakdown.layer2.vlanTag && (
+                      <div className="text-[10px] text-slate-300">
+                        802.1Q VLAN: {selectedPacket.headerBreakdown.layer2.vlanTag}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

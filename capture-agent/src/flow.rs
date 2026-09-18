@@ -411,6 +411,7 @@ mod tests {
             payload,
             ip_version: 4,
             ip_checksum: Some(0),
+            vlan_tag: None,
         }
     }
 
@@ -514,6 +515,7 @@ mod tests {
             payload: vec![],
             ip_version: 4,
             ip_checksum: Some(0),
+            vlan_tag: None,
         }
     }
 
@@ -657,6 +659,7 @@ mod tests {
             payload: vec![],
             ip_version: 4,
             ip_checksum: Some(0),
+            vlan_tag: None,
         };
         table.observe(&udp_packet, &L7Info::None, 0);
 
@@ -760,6 +763,7 @@ mod tests {
             payload: vec![],
             ip_version: 4,
             ip_checksum: Some(0),
+            vlan_tag: None,
         };
         table.observe(&udp_packet, &L7Info::None, 0);
 

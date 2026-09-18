@@ -73,12 +73,17 @@ Sent once per captured packet, immediately (not batched).
     "dst": "93.184.216.34:443",
     "length": 60,
     "summary": "Tcp 192.168.1.10 -> 93.184.216.34",
-    "hexDump": "00 01 02 ..."
+    "hexDump": "00 01 02 ...",
+    "headerBreakdown": {
+      "layer4": { "transport": "TCP", "srcPort": 51000, "dstPort": 443, "flags": "SYN", "windowSize": 65535, "seqAck": "seq=1000 ack=0" },
+      "layer3": { "ipVersion": "IPv4", "srcIp": "192.168.1.10", "dstIp": "93.184.216.34", "ttl": 64, "protocolNum": 6, "checksum": "0xbeef" },
+      "layer2": { "srcMac": "00:01:02:03:04:05", "dstMac": "06:07:08:09:0a:0b", "ethType": "IPv4" }
+    }
   }
 }
 ```
 
-Maps to `PacketFrame` via `mapPacketEvent`. Note `PacketJson` (`capture-agent/src/wire.rs`) has **no `header_breakdown` field at all** — it isn't sent on the wire in any form, empty or otherwise. The `{}` you see on the TypeScript side is `mapPacketEvent`'s own fallback (`lib/agent-mapping.ts`, `?? {}`) for a key that's simply absent from the JSON. The underlying per-layer detail (parsed MACs/TTL/flags in `parse.rs`, TLS SNI/HTTP method+path/DNS query name in `l7.rs`) does exist transiently inside the agent's capture loop, but is discarded before `PacketJson` gets constructed — nothing currently threads it through. See [issue #29](https://github.com/usjbro/network_monitor/issues/29). `timestamp` is epoch milliseconds as a string, not ISO-8601.
+Maps to `PacketFrame` via `mapPacketEvent`, which throws if `headerBreakdown` is missing entirely rather than defaulting it to `{}` — see [issue #29](https://github.com/usjbro/network_monitor/issues/29) (closed): `PacketJson` (`capture-agent/src/wire.rs`) does carry a `header_breakdown` field, built by `wire::build_header_breakdown` from `ParsedPacket` + `L7Info` at the point each `Packet` event is constructed in `main.rs`'s capture loop. `layer2`/`layer3`/`layer4` are always present (every captured packet has an Ethernet/IP/transport header by construction); `layer7` is present only when the payload matched a recognized application protocol; `layer1`/`layer5`/`layer6` are never present — no PHY, session, or TLS-version/cipher data is extracted anywhere in this agent, and fabricating it would contradict the rest of this document's "report zero/absent rather than invent a number" convention. `layer2.vlanTag` (optional) is present only for an 802.1Q-tagged frame — see `parse.rs`'s `vlan_tag` field and [issue #62](https://github.com/usjbro/network_monitor/issues/62); a double-tagged (QinQ) frame reports only its outermost tag. `timestamp` is epoch milliseconds as a string, not ISO-8601.
 
 **No rate limiting yet** — every captured packet gets its own event ([issue #27](https://github.com/usjbro/network_monitor/issues/27)). On a busy interface this can mean thousands of these per second.
 
