@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install libpcap
-        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev libcap2-bin
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -45,6 +45,36 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      # Issue #114 / JAM-52: the tests above never open a real pcap::Capture
+      # handle or run the real TCP listener main.rs binds — only fixture
+      # bytes passed straight to parse_packet/sniff_l7. This exercises the
+      # actual compiled binary against a real loopback capture instead.
+      # Opening a live capture needs CAP_NET_RAW/CAP_NET_ADMIN, so this test
+      # is #[ignore]d by default (a plain `cargo test`, including the step
+      # above, never needs elevated privilege) and run explicitly here.
+      #
+      # Granting the capability to the built binary via `setcap` (rather
+      # than running `cargo test` itself under sudo) keeps the privilege
+      # scoped to exactly the one binary that needs it, and avoids a
+      # sudo-owned cargo target/ directory breaking the unprivileged
+      # clippy/audit steps that follow. `--no-run` first compiles and links
+      # the binary without executing anything (no privilege needed yet);
+      # the second invocation is then a no-op rebuild (nothing changed),
+      # so it reuses the same already-capability-granted binary on disk
+      # rather than relinking over it. This is the same trust boundary the
+      # runner already grants for `apt-get install` above — a passwordless
+      # sudo on a single-job ephemeral VM — but it's a new *use* of that
+      # privilege (actually capturing traffic), called out explicitly here
+      # rather than added quietly.
+      - name: Build live-loopback integration test (no run)
+        run: cargo test --locked --test live_loopback --no-run
+
+      - name: Grant the capture-agent test binary CAP_NET_RAW/CAP_NET_ADMIN
+        run: sudo setcap cap_net_raw,cap_net_admin=eip target/debug/capture-agent
+
+      - name: Live-loopback packet-capture integration test
+        run: cargo test --locked --test live_loopback -- --ignored --test-threads=1
 
       - name: Clippy (warnings deny)
         run: cargo clippy --all-targets --locked -- -D warnings

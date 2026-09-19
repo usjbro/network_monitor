@@ -25,9 +25,25 @@ npx vitest run        # or: npm test
 npx tsc --noEmit
 npm run lint
 npm run build
+npx playwright test   # real-browser smoke test — see e2e/smoke.spec.ts
 ```
 
-All five TypeScript checks and both Rust checks should pass before opening a PR. CI enforces the two `cargo fuzz` commands, `cargo audit`, and `npm audit` above itself now (issues #66, #111, #112) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, or `capture-agent/fuzz/**` will fail CI if either fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock`/`package-lock.json` carries a dependency with a known advisory (RustSec for Rust, `high` severity or above for npm), same as running these locally would show.
+All checks above should pass before opening a PR. CI enforces the two `cargo fuzz` commands, `cargo audit`, and `npm audit` above itself now (issues #66, #111, #112) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, or `capture-agent/fuzz/**` will fail CI if either fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock`/`package-lock.json` carries a dependency with a known advisory (RustSec for Rust, `high` severity or above for npm), same as running these locally would show.
+
+### Live-loopback packet-capture integration test (issue #114)
+
+`cargo test` above never opens a real `pcap::Capture` handle — every existing Rust test (including the fixture corpus in `tests/protocol_regression.rs`) passes fixture bytes straight to `parse_packet`/`sniff_l7`. `tests/live_loopback.rs` closes that gap: it spawns the actual compiled `capture-agent` binary against the real `lo` interface, drives real TCP traffic across it, and asserts on the resulting wire events.
+
+Opening a live capture needs `CAP_NET_RAW`/`CAP_NET_ADMIN` (or root), so this test is `#[ignore]`d by default — a plain `cargo test` never needs elevated privilege, and neither does any other check in this list. To run it locally:
+
+```bash
+cd capture-agent
+cargo test --locked --test live_loopback --no-run        # build only, no privilege needed yet
+sudo setcap cap_net_raw,cap_net_admin=eip target/debug/capture-agent
+cargo test --locked --test live_loopback -- --ignored --test-threads=1
+```
+
+CI runs the same three steps (`.github/workflows/ci.yml`'s `rust` job) — granting the capability to the built test binary via `setcap` rather than running all of `cargo test` under `sudo`, so the elevated privilege stays scoped to exactly the one binary that needs it.
 
 ## Project roadmap
 
