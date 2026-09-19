@@ -33,6 +33,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/advisory-db
             capture-agent/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('capture-agent/Cargo.lock') }}
           restore-keys: |
@@ -46,6 +48,12 @@ jobs:
 
       - name: Clippy (warnings deny)
         run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Install cargo-audit
+        run: command -v cargo-audit || cargo install cargo-audit --locked
+
+      - name: Audit dependencies (RustSec advisory-db)
+        run: cargo audit --db ~/.cargo/advisory-db
 
   fuzz:
     name: Fuzz targets (capture-agent)

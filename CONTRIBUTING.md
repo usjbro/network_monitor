@@ -17,6 +17,7 @@ cd capture-agent
 cargo test
 cargo fuzz run parse_packet -- -max_total_time=30      # if touching parse.rs
 cargo fuzz run http2_reassembly -- -max_total_time=30  # if touching http2.rs
+cargo audit                                            # checks Cargo.lock against RustSec advisory-db
 
 # TypeScript
 npx vitest run        # or: npm test
@@ -25,7 +26,7 @@ npm run lint
 npm run build
 ```
 
-All four TypeScript checks and both Rust checks should pass before opening a PR. CI enforces the two `cargo fuzz` commands above itself now (issue #66) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, or `capture-agent/fuzz/**` will fail CI if either target finds a crash, same as running them locally would show.
+All four TypeScript checks and both Rust checks should pass before opening a PR. CI enforces the two `cargo fuzz` commands and `cargo audit` above itself now (issues #66, #111) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, or `capture-agent/fuzz/**` will fail CI if either fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock` carries a dependency with a known RustSec advisory, same as running these locally would show.
 
 ## Project roadmap
 
