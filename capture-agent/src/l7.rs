@@ -362,7 +362,9 @@ mod tests {
             // A truncated ClientHello may still yield no SNI at all (existing
             // behavior) or, if the truncation lands after SNI is already
             // parsed, still produce SNI with ja3: None rather than panicking.
-            L7Info::TlsClientHello { ja3, .. } => assert!(ja3.is_none() || true),
+            L7Info::TlsClientHello { ja3, .. } => {
+                let _ = ja3; // either value is acceptable, see comment above
+            }
             L7Info::None => {} // also acceptable — existing tolerance for malformed input
             other => panic!("unexpected variant: {other:?}"),
         }
