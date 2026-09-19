@@ -4,7 +4,7 @@
 
 See [docs/architecture.md](docs/architecture.md) for how the pieces fit together before making changes. Broadly:
 
-- `capture-agent/` — Rust, the privileged capture agent. Own `Cargo.toml`, own test suite (`cargo test`), two fuzz targets (`cargo fuzz run parse_packet`, `cargo fuzz run http2_reassembly`).
+- `capture-agent/` — Rust, the privileged capture agent. Own `Cargo.toml`, own test suite (`cargo test`), two fuzz targets (`cargo fuzz run parse_packet`, `cargo fuzz run http2_reassembly`) — CI now runs both (30s each) on every push to `main` and on any PR touching `capture-agent/src/parse.rs`, `capture-agent/src/http2.rs`, or `capture-agent/fuzz/**` (issue #66).
 - `app/`, `components/`, `lib/` — Next.js/React/TypeScript, the relay and UI. Own test suite (`npx vitest run` / `npm test`).
 - `docs/` — user-facing documentation (this file's sibling).
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and implementation plans for each sub-project, written before implementation. If you're planning substantial new work, look at the existing ones for the expected shape and level of detail.
@@ -25,7 +25,7 @@ npm run lint
 npm run build
 ```
 
-All four TypeScript checks and both Rust checks should pass before opening a PR.
+All four TypeScript checks and both Rust checks should pass before opening a PR. CI enforces the two `cargo fuzz` commands above itself now (issue #66) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, or `capture-agent/fuzz/**` will fail CI if either target finds a crash, same as running them locally would show.
 
 ## Project roadmap
 

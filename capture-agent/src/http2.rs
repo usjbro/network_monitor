@@ -85,14 +85,19 @@ impl Http2Reassembler {
                 // dependency (see the crate-choice note in this plan's
                 // final report) — fuzzing (Task 15) found it can `panic!`
                 // (not just `Err`) on certain malformed dynamic-table-size
-                // update encodings. Isolating that panic behind
-                // `catch_unwind` and treating it exactly like a decode
-                // `Err` (whole-connection desync, never propagated) is
-                // safe here specifically because every path below already
-                // permanently desyncs this `Http2Reassembler` instance on
-                // any decode failure and never calls into `self.hpack`
-                // again afterward — a poisoned/inconsistent decoder state
-                // post-panic is never observed.
+                // update encodings. That specific panic is now fixed at
+                // the source (vendor/fluke-hpack, issue #66 — CI fuzzing
+                // caught it again once it actually ran), but this
+                // `catch_unwind` stays as defense-in-depth against any
+                // *other* panic in an unmaintained crate we haven't found
+                // yet. Isolating a caught panic and treating it exactly
+                // like a decode `Err` (whole-connection desync, never
+                // propagated) is safe here specifically because every path
+                // below already permanently desyncs this
+                // `Http2Reassembler` instance on any decode failure and
+                // never calls into `self.hpack` again afterward — a
+                // poisoned/inconsistent decoder state post-panic is never
+                // observed.
                 let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.hpack.decode(&payload)));
                 match decode_result {
                     Ok(Ok(pairs)) => {
@@ -250,13 +255,16 @@ mod tests {
     fn a_malformed_hpack_dynamic_table_size_update_desyncs_instead_of_panicking() {
         // Regression test for a real panic `cargo +nightly fuzz run
         // http2_reassembly` found within one fuzzing pass (Task 15): this
-        // exact byte sequence reaches `Option::unwrap()` on `None` inside
+        // exact byte sequence reached `Option::unwrap()` on `None` inside
         // fluke_hpack::Decoder::update_max_dynamic_size (a third-party
         // dependency bug, not this crate's), which previously aborted the
-        // whole capture-agent process. `Http2Reassembler::feed` must
-        // isolate that panic and degrade to `DesyncFallback`, per this
-        // module's existing "never propagate a decode failure as a crash"
-        // invariant — see the `catch_unwind` usage in `feed` above.
+        // whole capture-agent process. That bug is now fixed at the source
+        // (vendor/fluke-hpack, issue #66), so this input now degrades via
+        // an ordinary `Err` rather than a caught panic — but the assertion
+        // (DesyncFallback, not a panic or a silently-swallowed frame) is
+        // exactly the same contract either way, so this test still stands
+        // as the regression guard for both the fix and `feed`'s
+        // `catch_unwind` fallback for any panic it doesn't yet cover.
         let crash_input: &[u8] = &[0, 0, 1, 1, 1, 0, 0, 32, 0, 63, 0, 1, 1, 32, 0, 0, 0, 0, 0];
         let mut r = Http2Reassembler::new();
         let outcomes = r.feed(0, crash_input);

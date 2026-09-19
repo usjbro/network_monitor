@@ -47,6 +47,84 @@ jobs:
       - name: Clippy (warnings deny)
         run: cargo clippy --all-targets --locked -- -D warnings
 
+  fuzz:
+    name: Fuzz targets (capture-agent)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: capture-agent
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the path filter below can diff a PR's head
+          # against its actual merge-base, not just the checked-out tip.
+          fetch-depth: 0
+
+      - name: Decide whether this run needs to fuzz
+        id: filter
+        run: |
+          # Issue #66: fuzzing is slow (2 x 30s per run, plus a nightly
+          # toolchain + cargo-fuzz install) relative to the rest of CI, so
+          # an ordinary PR only pays that cost when it touches the two
+          # files these targets actually cover or the fuzz harness itself.
+          # Every push to main always fuzzes regardless of paths, so a
+          # regression can never land unobserved via an unrelated path
+          # (e.g. a dependency bump, like this same issue's own fix).
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run_fuzz=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          merge_base="$(git merge-base ${{ github.event.pull_request.base.sha }} ${{ github.sha }})"
+          changed="$(git diff --name-only "$merge_base" ${{ github.sha }})"
+          echo "Changed files vs merge-base:"
+          echo "$changed"
+          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|fuzz/)'; then
+            echo "run_fuzz=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_fuzz=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install libpcap
+        if: steps.filter.outputs.run_fuzz == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
+      - name: Install nightly Rust toolchain
+        if: steps.filter.outputs.run_fuzz == 'true'
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry and fuzz build output
+        if: steps.filter.outputs.run_fuzz == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-fuzz
+            capture-agent/fuzz/target
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('capture-agent/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-
+
+      - name: Install cargo-fuzz
+        if: steps.filter.outputs.run_fuzz == 'true'
+        run: command -v cargo-fuzz || cargo install cargo-fuzz --locked
+
+      - name: Fuzz parse_packet
+        if: steps.filter.outputs.run_fuzz == 'true'
+        run: cargo +nightly fuzz run parse_packet -- -max_total_time=30
+
+      - name: Fuzz http2_reassembly
+        if: steps.filter.outputs.run_fuzz == 'true'
+        run: cargo +nightly fuzz run http2_reassembly -- -max_total_time=30
+
+      - name: Upload crash artifacts
+        if: failure() && steps.filter.outputs.run_fuzz == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-artifacts
+          path: capture-agent/fuzz/artifacts/
+          if-no-files-found: ignore
+
   web:
     name: Web (Next.js)
     runs-on: ubuntu-latest
