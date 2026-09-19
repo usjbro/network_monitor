@@ -148,6 +148,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit dependencies (npm advisory database)
+        run: npm audit --audit-level=high
+
       - name: Type check
         run: npx tsc --noEmit
 
