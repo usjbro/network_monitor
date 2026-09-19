@@ -61,4 +61,27 @@ describe('AgentClient', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(statuses).toHaveLength(1);
   });
+
+  it('reassembles a JSON line split across two separate socket writes', async () => {
+    // Exercises the `this.buffer.indexOf('\n')` accumulation loop itself,
+    // not just whole-line writes — a real TCP stream gives no guarantee a
+    // JSON line arrives in a single `data` chunk.
+    const line = '{"type":"agent_status","interface":"en0","capturing":true}\n';
+    const splitAt = 20; // lands mid-object, well before the trailing newline
+    server = net.createServer((socket) => {
+      socket.write(line.slice(0, splitAt));
+      setTimeout(() => socket.write(line.slice(splitAt)), 20);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    port = (server.address() as net.AddressInfo).port;
+
+    const client = new AgentClient('127.0.0.1', port);
+    const received = await new Promise((resolve) => {
+      client.on('event', resolve);
+      client.start();
+    });
+
+    expect(received).toEqual({ type: 'agent_status', interface: 'en0', capturing: true });
+    client.stop();
+  });
 });
