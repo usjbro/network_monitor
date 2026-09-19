@@ -27,3 +27,14 @@ base64 = "0.23.1"
 
 [dev-dependencies]
 etherparse = { version = "0.20", features = ["std"] }
+
+[patch.crates-io]
+# fluke-hpack 0.3.1's update_max_dynamic_size() panics (`.ok().unwrap()`)
+# on a malformed/truncated dynamic-table-size-update encoding, reachable
+# straight from attacker-controlled decrypted TLS bytes via http2.rs's
+# HEADERS-frame handling. Found by this repo's own fuzzing (issue #66);
+# see vendor/fluke-hpack/src/decoder.rs for the one-line fix. No newer
+# crates.io release exists (0.3.1 is current as of writing) and upstream
+# is the "historically-unmaintained" crate http2.rs already calls out, so
+# this vendors a locally-patched copy rather than waiting on a release.
+fluke-hpack = { path = "vendor/fluke-hpack" }

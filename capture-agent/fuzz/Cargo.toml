@@ -26,3 +26,9 @@ path = "fuzz_targets/http2_reassembly.rs"
 test = false
 doc = false
 bench = false
+
+[patch.crates-io]
+# Mirrors capture-agent/Cargo.toml's patch (this fuzz crate is its own
+# Cargo workspace, with its own lockfile, so the parent's [patch] section
+# doesn't apply here — see that file's comment for why this exists).
+fluke-hpack = { path = "../vendor/fluke-hpack" }
