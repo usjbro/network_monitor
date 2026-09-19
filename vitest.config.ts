@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   resolve: {
@@ -13,6 +13,12 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    // e2e/ holds Playwright specs (run via `npm run test:e2e`), which use
+    // @playwright/test's own test()/expect() — vitest's default include
+    // glob would otherwise also pick up e2e/smoke.spec.ts and fail trying
+    // to run it under the wrong test runner. Extends (not replaces)
+    // vitest's own default exclude list.
+    exclude: [...configDefaults.exclude, 'e2e/**'],
     // Registers jest-dom's matchers (toBeInTheDocument, etc.) globally for
     // every test file, including ones running under the per-file
     // `// @vitest-environment jsdom` override (e.g.

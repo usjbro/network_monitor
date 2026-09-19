@@ -162,3 +162,50 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  e2e:
+    name: E2E smoke test (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright Chromium
+        # GitHub-hosted runners have no pre-installed browser (unlike this
+        # repo's own dev sandbox, which points playwright.config.ts at a
+        # fixed local path instead) — fetch the exact revision this pinned
+        # @playwright/test version expects. --with-deps only on a cache
+        # miss: the OS-level dependencies it installs aren't cached, but
+        # they're already present on this image after the first run within
+        # a cache-key's lifetime pulled the browser itself.
+        run: npx playwright install --with-deps chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+      - name: Install Playwright Chromium (browser only, deps already present)
+        run: npx playwright install chromium
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+
+      - name: Run Playwright smoke test
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
