@@ -4,14 +4,14 @@ use capture_agent::{
     host_stats,
     http2::{FrameOutcome, Http2Reassembler},
     keylog::KeyLogWatcher,
-    l7, parse, process_lookup,
+    l7, parse, pcapng, process_lookup,
     rate_limit::PacketEventLimiter,
     ring_buffer::DecryptedRingBuffer,
     tls_decrypt::{self, DecryptOutcome},
     wire,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -377,6 +377,66 @@ enum CaptureConfigRequest {
     SwitchInterface(String),
 }
 
+/// A command queued to the dedicated pcapng-writer thread (epic #55,
+/// JAM-132/GitHub #70) — `Packet`/`Stats` come from the hot capture-loop
+/// thread via a bounded channel (so a slow disk backs up this queue rather
+/// than ever blocking packet processing), while `Start`/`Stop` come from
+/// the async control-message task. Routing all four through one channel,
+/// rather than a separate signal for start/stop, means they're naturally
+/// serialized with in-flight packet writes — no risk of a `Stop` racing a
+/// `Packet` that was queued just before it.
+enum WriterCommand {
+    Start {
+        path: PathBuf,
+        idb: pcapng::InterfaceDescriptionBlock,
+        hostname: String,
+        agent_version: String,
+    },
+    Stop,
+    Packet {
+        timestamp: std::time::SystemTime,
+        direction: pcapng::Direction,
+        data: Vec<u8>,
+    },
+    Stats {
+        received: u32,
+        dropped: u32,
+    },
+}
+
+/// Bounded at 4096 — generous relative to this agent's existing 100/sec
+/// discrete `packet` wire-event rate limit (every captured frame reaches
+/// this queue, not just the ones that pass that limiter), sized so a brief
+/// disk hiccup doesn't immediately start dropping, while still bounding
+/// memory if the disk stalls for longer than that.
+const WRITER_QUEUE_CAPACITY: usize = 4096;
+
+/// Validates and resolves an operator-supplied capture-file path (epic #55,
+/// JAM-132/GitHub #70) before ever opening it: refuses a path that resolves
+/// inside `cwd` (this agent's own working directory — source, `.data/`,
+/// and other small ephemeral metadata, never multi-gigabyte capture
+/// artifacts an operator explicitly asked to keep) or that names a `.data/`
+/// component anywhere, per the design spec's Components §1. Pure and
+/// unit-testable: takes `cwd` as a parameter rather than calling
+/// `std::env::current_dir()` itself.
+fn validate_capture_file_path(path: &str, cwd: &Path) -> Result<PathBuf, String> {
+    if path.trim().is_empty() {
+        return Err("capture file path must not be empty".to_string());
+    }
+    if path.contains(".data/") || path.contains(".data\\") {
+        return Err(format!("capture file path rejected: {path} must not be inside .data/"));
+    }
+    let candidate = Path::new(path);
+    let resolved = if candidate.is_absolute() { candidate.to_path_buf() } else { cwd.join(candidate) };
+    if resolved.starts_with(cwd) {
+        return Err(format!(
+            "capture file path rejected: {path} resolves inside this agent's working directory ({}) — choose a location outside it",
+            cwd.display()
+        ));
+    }
+    Ok(resolved)
+}
+
 /// Validates a browser-supplied BPF filter expression's length before it
 /// ever reaches libpcap's compiler — pure and unit-testable, unlike the
 /// actual `cap.filter()` call below, which needs a live capture handle.
@@ -553,6 +613,7 @@ fn apply_interface_switch_request(
     link_type: &mut parse::LinkType,
     local_addrs: &mut Vec<String>,
     current_interface: &Mutex<(String, String)>,
+    current_link_type: &Mutex<parse::LinkType>,
     capture_config_state: &Mutex<wire::CaptureConfigJson>,
     flow_table: &Mutex<FlowTable>,
     tx: &broadcast::Sender<String>,
@@ -629,6 +690,7 @@ fn apply_interface_switch_request(
     *link_type = new_link_type;
     *local_addrs = new_local_addrs;
     *current_interface.lock().unwrap() = (name.to_string(), new_ip_address.clone());
+    *current_link_type.lock().unwrap() = new_link_type;
     // A filter/snaplen tuned for the previous interface may not even be
     // meaningful on this one — reset to defaults rather than carry it
     // forward silently.
@@ -841,8 +903,87 @@ async fn main() -> std::io::Result<()> {
     // emitter (once/sec) and a switch (rare, user-initiated) ever touch
     // this, so a small dedicated Mutex costs nothing on the capture loop.
     let current_interface = Arc::new(Mutex::new((interface_name.clone(), ip_address.clone())));
+    // Mirrors `link_type` (a capture-thread-local, updated on a successful
+    // `set_interface`) for the async control-message task, which needs the
+    // *current* link type to build a `start_capture_file` request's
+    // Interface Description Block but never touches the live `pcap::Capture`
+    // handle itself. Same "small dedicated Mutex, rarely written, cheap to
+    // read" shape as `current_interface` just above.
+    let current_link_type = Arc::new(Mutex::new(link_type));
 
     let (tx, _rx) = broadcast::channel::<String>(1024);
+
+    // Capture-to-file (epic #55, JAM-132/GitHub #70) shared state: never on
+    // by default. `writer_active` is the hot capture loop's single cheap
+    // check per packet; `writer_bytes_written`/`writer_path` feed the
+    // per-tick `capture_file_status` event; `writer_backpressure_drops` is
+    // written by the capture loop (a full queue) and never reset. The
+    // `Writer` itself lives only inside the dedicated writer thread below —
+    // nothing else ever touches an open file handle.
+    let writer_active = Arc::new(AtomicBool::new(false));
+    let writer_bytes_written = Arc::new(AtomicU64::new(0));
+    let writer_backpressure_drops = Arc::new(AtomicU64::new(0));
+    let writer_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let (writer_tx, writer_rx) = mpsc::sync_channel::<WriterCommand>(WRITER_QUEUE_CAPACITY);
+
+    // Dedicated OS thread owning the only `pcapng::Writer` this process ever
+    // opens — a slow disk therefore only ever backs up this thread's own
+    // queue, never the hot capture loop (which only ever does a bounded
+    // `try_send`, above). `current` is a plain local, not behind a Mutex:
+    // this is the only thread that ever reads or writes it.
+    {
+        let tx = tx.clone();
+        let writer_active = writer_active.clone();
+        let writer_bytes_written = writer_bytes_written.clone();
+        let writer_path = writer_path.clone();
+        std::thread::spawn(move || {
+            let mut current: Option<pcapng::Writer> = None;
+            while let Ok(cmd) = writer_rx.recv() {
+                match cmd {
+                    WriterCommand::Start { path, idb, hostname, agent_version } => {
+                        match pcapng::Writer::create(&path, &idb, &hostname, &agent_version) {
+                            Ok(writer) => {
+                                current = Some(writer);
+                                *writer_path.lock().unwrap() = Some(path.display().to_string());
+                                writer_bytes_written.store(0, Ordering::Relaxed);
+                                writer_active.store(true, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError {
+                                    message: format!("could not open {}: {e}", path.display()),
+                                }));
+                            }
+                        }
+                    }
+                    WriterCommand::Stop => {
+                        writer_active.store(false, Ordering::Relaxed);
+                        if let Some(writer) = current.take() {
+                            if let Err(e) = writer.finish() {
+                                eprintln!("capture-agent: error closing capture file: {e}");
+                            }
+                        }
+                    }
+                    WriterCommand::Packet { timestamp, direction, data } => {
+                        if let Some(writer) = current.as_mut() {
+                            // I/O errors here surface via the next tick's
+                            // capture_file_status simply reporting a stalled
+                            // bytesWritten, not panicked on — matching this
+                            // writer thread's own "never take the process
+                            // down over a disk problem" posture.
+                            if writer.write_packet(timestamp, direction, &data).is_ok() {
+                                writer_bytes_written.store(writer.bytes_written(), Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    WriterCommand::Stats { received, dropped } => {
+                        if let Some(writer) = current.as_mut() {
+                            let _ = writer.write_interface_stats(received as u64, dropped as u64);
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     // Background: refresh the process-attribution map every 3s.
     {
@@ -877,6 +1018,10 @@ async fn main() -> std::io::Result<()> {
         let capture_config_state = capture_config_state.clone();
         let device_for_reopen = device_for_reopen.clone();
         let current_interface = current_interface.clone();
+        let current_link_type = current_link_type.clone();
+        let writer_tx = writer_tx.clone();
+        let writer_active = writer_active.clone();
+        let writer_backpressure_drops = writer_backpressure_drops.clone();
         std::thread::spawn(move || {
             let mut cap = cap;
             // Mutable locals, not Arc<Mutex<_>>: only this thread ever
@@ -917,6 +1062,7 @@ async fn main() -> std::io::Result<()> {
                                 &mut link_type,
                                 &mut local_addrs,
                                 &current_interface,
+                                &current_link_type,
                                 &capture_config_state,
                                 &flow_table,
                                 &tx,
@@ -940,7 +1086,12 @@ async fn main() -> std::io::Result<()> {
                 if last_stats_poll.elapsed() >= Duration::from_secs(1) {
                     last_stats_poll = Instant::now();
                     match cap.stats() {
-                        Ok(stat) => *capture_stats.lock().unwrap() = Some(stat),
+                        Ok(stat) => {
+                            *capture_stats.lock().unwrap() = Some(stat);
+                            if writer_active.load(Ordering::Relaxed) {
+                                let _ = writer_tx.try_send(WriterCommand::Stats { received: stat.received, dropped: stat.dropped });
+                            }
+                        }
                         Err(e) => eprintln!("capture-agent: failed to read capture stats: {e}"),
                     }
                 }
@@ -962,12 +1113,35 @@ async fn main() -> std::io::Result<()> {
                         // counts toward neither total, same as it's excluded
                         // from FlowTable's own local/remote attribution.
                         let len = parsed.total_len as u64;
-                        if local_addrs.iter().any(|a| a == &parsed.src_ip) {
+                        let direction = if local_addrs.iter().any(|a| a == &parsed.src_ip) {
                             total_tx_bytes.fetch_add(len, Ordering::Relaxed);
                             total_tx_packets.fetch_add(1, Ordering::Relaxed);
+                            pcapng::Direction::Outbound
                         } else if local_addrs.iter().any(|a| a == &parsed.dst_ip) {
                             total_rx_bytes.fetch_add(len, Ordering::Relaxed);
                             total_rx_packets.fetch_add(1, Ordering::Relaxed);
+                            pcapng::Direction::Inbound
+                        } else {
+                            pcapng::Direction::Unknown
+                        };
+
+                        // Capture-to-file (epic #55, JAM-132/GitHub #70):
+                        // never on by default, and a cheap atomic check when
+                        // it's off (the overwhelming majority of the time) —
+                        // only clones the raw frame and touches the writer's
+                        // channel when a capture is actually active. A full
+                        // queue means the writer thread can't keep up (e.g. a
+                        // slow disk); counted, never silently dropped, and
+                        // never blocks this hot path (`try_send`, not `send`).
+                        if writer_active.load(Ordering::Relaxed) {
+                            let cmd = WriterCommand::Packet {
+                                timestamp: std::time::SystemTime::now(),
+                                direction,
+                                data: packet.data.to_vec(),
+                            };
+                            if writer_tx.try_send(cmd).is_err() {
+                                writer_backpressure_drops.fetch_add(1, Ordering::Relaxed);
+                            }
                         }
 
                         // Tier B: best-effort, entirely opt-in — a no-op for
@@ -1051,6 +1225,10 @@ async fn main() -> std::io::Result<()> {
         let hostname = hostname.clone();
         let current_interface = current_interface.clone();
         let capture_config_state = capture_config_state.clone();
+        let writer_active = writer_active.clone();
+        let writer_bytes_written = writer_bytes_written.clone();
+        let writer_path = writer_path.clone();
+        let writer_backpressure_drops = writer_backpressure_drops.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             // Previous tick's cumulative counter readings, so each tick can
@@ -1241,6 +1419,18 @@ async fn main() -> std::io::Result<()> {
                 // connected at the moment a filter/snaplen change happened.
                 let config_snapshot = capture_config_state.lock().unwrap().clone();
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig { config: config_snapshot }));
+
+                // Capture-to-file status (epic #55, JAM-132/GitHub #70) —
+                // same "sent every tick, always current" pattern as
+                // capture_stats/capture_config above, so a client that just
+                // (re)connected sees the current state immediately.
+                let capture_file_status = wire::CaptureFileStatusJson {
+                    writing: writer_active.load(Ordering::Relaxed),
+                    path: writer_path.lock().unwrap().clone(),
+                    bytes_written: writer_bytes_written.load(Ordering::Relaxed),
+                    backpressure_drops: writer_backpressure_drops.load(Ordering::Relaxed),
+                };
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileStatus { status: capture_file_status }));
             }
         });
     }
@@ -1262,6 +1452,12 @@ async fn main() -> std::io::Result<()> {
         let trace_tx = tx.clone();
         let relay_lagged_events = relay_lagged_events.clone();
         let capture_config_tx = capture_config_tx.clone();
+        let writer_tx = writer_tx.clone();
+        let writer_active = writer_active.clone();
+        let capture_config_state = capture_config_state.clone();
+        let current_interface = current_interface.clone();
+        let current_link_type = current_link_type.clone();
+        let hostname = hostname.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half).lines();
@@ -1348,6 +1544,46 @@ async fn main() -> std::io::Result<()> {
                                         // SetCaptureFilter/SetSnaplen above.
                                         let _ = capture_config_tx.send(CaptureConfigRequest::SwitchInterface(name));
                                     }
+                                    Some(wire::ControlMessage::StartCaptureFile { path, ring, autostop }) => {
+                                        if ring.is_some() || autostop.is_some() {
+                                            let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError {
+                                                message: "ring/autostop are not supported yet — this build only writes a single, non-rotating capture file".to_string(),
+                                            }));
+                                        } else if writer_active.load(Ordering::Relaxed) {
+                                            let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError {
+                                                message: "a capture file is already active — stop it first".to_string(),
+                                            }));
+                                        } else {
+                                            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                                            match validate_capture_file_path(&path, &cwd) {
+                                                Ok(resolved) => {
+                                                    let idb = pcapng::InterfaceDescriptionBlock {
+                                                        interface_name: current_interface.lock().unwrap().0.clone(),
+                                                        link_type: *current_link_type.lock().unwrap(),
+                                                        snaplen: capture_config_state.lock().unwrap().snaplen,
+                                                        timestamp_resolution_exponent: 9,
+                                                    };
+                                                    let _ = writer_tx.send(WriterCommand::Start {
+                                                        path: resolved,
+                                                        idb,
+                                                        hostname: hostname.clone(),
+                                                        agent_version: env!("CARGO_PKG_VERSION").to_string(),
+                                                    });
+                                                }
+                                                Err(message) => {
+                                                    let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError { message }));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Some(wire::ControlMessage::StopCaptureFile) => {
+                                        // Idempotent, matching pause/resume's
+                                        // existing tolerance for a redundant
+                                        // call — the writer thread's Stop
+                                        // handler already no-ops when there's
+                                        // no writer open.
+                                        let _ = writer_tx.send(WriterCommand::Stop);
+                                    }
                                     None => {}
                                 }
                             }
@@ -1379,10 +1615,12 @@ async fn main() -> std::io::Result<()> {
 mod tests {
     use super::{
         build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
-        is_capturable, is_meaningful_override, resolve_link_type, validate_capture_filter_len,
-        validate_interface_name_len, validate_snaplen, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
+        is_capturable, is_meaningful_override, resolve_link_type, validate_capture_file_path,
+        validate_capture_filter_len, validate_interface_name_len, validate_snaplen, MAX_CAPTURE_FILTER_LEN,
+        MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::parse::LinkType;
+    use std::path::Path;
     use tokio::sync::broadcast;
 
     fn fake_device(name: &str) -> pcap::Device {
@@ -1660,5 +1898,51 @@ mod tests {
         assert_eq!(json.tx_total_mbps, 0.0);
         assert_eq!(json.rx_pps_total, 0.0);
         assert_eq!(json.tx_pps_total, 0.0);
+    }
+
+    #[test]
+    fn validate_capture_file_path_rejects_an_empty_path() {
+        assert!(validate_capture_file_path("", Path::new("/home/user/network_monitor/capture-agent")).is_err());
+    }
+
+    #[test]
+    fn validate_capture_file_path_rejects_a_relative_path_resolving_inside_cwd() {
+        let cwd = Path::new("/home/user/network_monitor/capture-agent");
+        let err = validate_capture_file_path("captures/run1.pcapng", cwd).unwrap_err();
+        assert!(err.contains("working directory"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_capture_file_path_rejects_an_absolute_path_inside_cwd() {
+        let cwd = Path::new("/home/user/network_monitor/capture-agent");
+        assert!(validate_capture_file_path("/home/user/network_monitor/capture-agent/run1.pcapng", cwd).is_err());
+    }
+
+    #[test]
+    fn validate_capture_file_path_rejects_any_dot_data_component() {
+        let cwd = Path::new("/home/user/network_monitor/capture-agent");
+        let err = validate_capture_file_path("/home/user/network_monitor/.data/run1.pcapng", cwd).unwrap_err();
+        assert!(err.contains(".data/"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_capture_file_path_accepts_an_absolute_path_outside_cwd() {
+        let cwd = Path::new("/home/user/network_monitor/capture-agent");
+        let resolved = validate_capture_file_path("/Users/me/captures/run1.pcapng", cwd).unwrap();
+        assert_eq!(resolved, Path::new("/Users/me/captures/run1.pcapng"));
+    }
+
+    #[test]
+    fn validate_capture_file_path_rejects_a_dot_dot_relative_path_even_when_semantically_outside_cwd() {
+        // This resolves to cwd.join("../captures/run1.pcapng") — lexically
+        // (not semantically) still prefixed by cwd's own components, since
+        // this function never canonicalizes (the target file doesn't exist
+        // yet, so canonicalize can't work anyway). Erring toward rejecting a
+        // path this function can't be sure about is the safe default for a
+        // security boundary, matching every other validator in this file
+        // (e.g. an oversized filter is rejected outright, never "probably
+        // fine").
+        let cwd = Path::new("/home/user/network_monitor/capture-agent");
+        assert!(validate_capture_file_path("../captures/run1.pcapng", cwd).is_err());
     }
 }

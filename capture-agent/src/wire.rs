@@ -264,6 +264,15 @@ pub enum AgentEvent {
     InterfaceList { interfaces: Vec<InterfaceJson> },
     InterfaceChanged { interface: InterfaceChangedJson },
     InterfaceError { message: String },
+    CaptureFileStatus { status: CaptureFileStatusJson },
+    /// Sent once, immediately, when a `start_capture_file` control message
+    /// is rejected — an unsafe/empty path, ring/autostop options not yet
+    /// supported, or a capture already active. Same flat, one-off shape as
+    /// `capture_config_error`/`interface_error` (issues #68/#69) — a
+    /// dedicated event per control-message domain rather than reusing one
+    /// generic error type across them, matching this file's existing
+    /// convention.
+    CaptureFileError { message: String },
 }
 
 /// One capturable network interface, as reported in response to a
@@ -289,6 +298,32 @@ pub struct InterfaceJson {
 pub struct InterfaceChangedJson {
     pub name: String,
     pub ip_address: String,
+}
+
+/// Sent every tick alongside `capture_stats`/`capture_config`, same
+/// "always-current snapshot" pattern used throughout this wire protocol.
+/// `path`/`bytesWritten` keep reporting the most recently active capture
+/// file's last known values even after `writing` goes back to `false`, so a
+/// client sees the run's actual end state rather than the field just
+/// disappearing — they're only reset by the next successful
+/// `start_capture_file`. `ringFile`/`ringTotal`/`autostopReason` fields a
+/// later ring-buffer rotation task (epic #55) will add are deliberately not
+/// present yet — this task only implements a single, non-rotating capture
+/// file.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureFileStatusJson {
+    pub writing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub bytes_written: u64,
+    /// Cumulative count of packets the writer's bounded queue couldn't
+    /// accept because the writer thread was falling behind (e.g. a slow
+    /// disk) — never silently dropped from the operator's view even though
+    /// the frame itself is gone. Distinct from `capture_stats`' existing
+    /// `dropped`/`unparseableFrames` counters, which are about the kernel
+    /// and the parser respectively, not this writer.
+    pub backpressure_drops: u64,
 }
 
 /// The capture-time controls currently in effect — a BPF capture filter
@@ -435,6 +470,35 @@ pub enum ControlMessage {
     SetInterface {
         name: String,
     },
+    /// Starts writing the live capture to `path` as a pcapng file —
+    /// operator-triggered only, never automatic (epic #55, JAM-132/GitHub
+    /// #70). `ring`/`autostop` are accepted on the wire now (so a client
+    /// built against the eventual full contract doesn't need a later
+    /// breaking change) but always rejected with `capture_file_error` until
+    /// the ring-buffer rotation task lands — this task implements a single,
+    /// non-rotating capture file only.
+    StartCaptureFile {
+        path: String,
+        #[serde(default)]
+        ring: Option<RingConfigJson>,
+        #[serde(default)]
+        autostop: Option<AutostopConfigJson>,
+    },
+    StopCaptureFile,
+}
+
+#[derive(Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RingConfigJson {
+    pub mode: String,
+    pub threshold: u64,
+}
+
+#[derive(Deserialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutostopConfigJson {
+    pub mode: String,
+    pub threshold: u64,
 }
 
 pub fn encode_event(event: &AgentEvent) -> String {
@@ -639,6 +703,72 @@ mod tests {
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"interface_error\""));
         assert!(line.contains("\"message\":\"no such interface: en9\""));
+    }
+
+    #[test]
+    fn decodes_start_capture_file_with_ring_and_autostop() {
+        let json = r#"{"type":"start_capture_file","path":"/Users/me/captures/run1.pcapng","ring":{"mode":"size","threshold":104857600},"autostop":{"mode":"duration","threshold":3600}}"#;
+        match decode_control(json) {
+            Some(ControlMessage::StartCaptureFile { path, ring, autostop }) => {
+                assert_eq!(path, "/Users/me/captures/run1.pcapng");
+                assert_eq!(ring, Some(RingConfigJson { mode: "size".into(), threshold: 104_857_600 }));
+                assert_eq!(autostop, Some(AutostopConfigJson { mode: "duration".into(), threshold: 3600 }));
+            }
+            other => panic!("expected StartCaptureFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_start_capture_file_with_no_ring_or_autostop() {
+        let json = r#"{"type":"start_capture_file","path":"/tmp/one-shot.pcapng"}"#;
+        match decode_control(json) {
+            Some(ControlMessage::StartCaptureFile { path, ring, autostop }) => {
+                assert_eq!(path, "/tmp/one-shot.pcapng");
+                assert!(ring.is_none());
+                assert!(autostop.is_none());
+            }
+            other => panic!("expected StartCaptureFile, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_stop_capture_file() {
+        assert!(matches!(decode_control(r#"{"type":"stop_capture_file"}"#), Some(ControlMessage::StopCaptureFile)));
+    }
+
+    #[test]
+    fn encodes_capture_file_status_omitting_absent_path() {
+        let event = AgentEvent::CaptureFileStatus {
+            status: CaptureFileStatusJson { writing: false, path: None, bytes_written: 0, backpressure_drops: 0 },
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"capture_file_status\""));
+        assert!(line.contains("\"writing\":false"));
+        assert!(!line.contains("\"path\""), "absent Option fields must be omitted, not null");
+    }
+
+    #[test]
+    fn encodes_capture_file_status_including_present_path() {
+        let event = AgentEvent::CaptureFileStatus {
+            status: CaptureFileStatusJson {
+                writing: true,
+                path: Some("/tmp/capture.pcapng".to_string()),
+                bytes_written: 4096,
+                backpressure_drops: 2,
+            },
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"path\":\"/tmp/capture.pcapng\""));
+        assert!(line.contains("\"bytesWritten\":4096"));
+        assert!(line.contains("\"backpressureDrops\":2"));
+    }
+
+    #[test]
+    fn encodes_capture_file_error_with_type_tag() {
+        let event = AgentEvent::CaptureFileError { message: "refused: already active".to_string() };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"capture_file_error\""));
+        assert!(line.contains("\"message\":\"refused: already active\""));
     }
 
     #[test]
