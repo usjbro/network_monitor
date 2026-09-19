@@ -8,3 +8,5 @@ coverage/
 *.tsbuildinfo
 .worktrees/
 .data/
+/test-results/
+/playwright-report/
