@@ -1,7 +1,7 @@
 # Capture Files and Offline Analysis — Design Spec
 
 **Sub-project:** Phase 2, epic B (Linear JAM-125 / GitHub #55)
-**Status:** Draft, pending review
+**Status:** Approved by usjbro (jamesmbrownjr@gmail.com) on 2026-09-19
 **Date:** 2026-09-19
 **Resolves:** JAM-125 (epic) and its six constituent tasks — JAM-8/#75 (capture-handling security guidance), JAM-132/#70 (pcapng writer), JAM-133/#71 (file replay), JAM-5/#72 (ring-buffer rotation and autostop), JAM-6/#73 (configurable buffer limits and an honest horizon), JAM-7/#74 (export)
 
