@@ -1450,26 +1450,29 @@ async fn main() -> std::io::Result<()> {
                         };
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
-                        flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+                        let is_outbound = flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
 
-                        // Aggregate throughput counters (issue #64) — same
-                        // src/dst-vs-local_addrs direction check
-                        // local_port_of/build_flow_key use elsewhere in this
-                        // file. A packet matching neither (e.g. broadcast/
-                        // multicast traffic captured in promiscuous mode)
-                        // counts toward neither total, same as it's excluded
-                        // from FlowTable's own local/remote attribution.
+                        // Aggregate throughput counters (issue #64) — driven
+                        // by the same direction FlowTable::observe just
+                        // attributed this packet, rather than a separate
+                        // src/dst-vs-local_addrs check of our own that could
+                        // drift out of sync with it. A packet matching no
+                        // tracked flow (e.g. broadcast/multicast traffic
+                        // captured in promiscuous mode) counts toward
+                        // neither total, same as before.
                         let len = parsed.total_len as u64;
-                        let direction = if local_addrs.iter().any(|a| a == &parsed.src_ip) {
-                            total_tx_bytes.fetch_add(len, Ordering::Relaxed);
-                            total_tx_packets.fetch_add(1, Ordering::Relaxed);
-                            pcapng::Direction::Outbound
-                        } else if local_addrs.iter().any(|a| a == &parsed.dst_ip) {
-                            total_rx_bytes.fetch_add(len, Ordering::Relaxed);
-                            total_rx_packets.fetch_add(1, Ordering::Relaxed);
-                            pcapng::Direction::Inbound
-                        } else {
-                            pcapng::Direction::Unknown
+                        let direction = match is_outbound {
+                            Some(true) => {
+                                total_tx_bytes.fetch_add(len, Ordering::Relaxed);
+                                total_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                pcapng::Direction::Outbound
+                            }
+                            Some(false) => {
+                                total_rx_bytes.fetch_add(len, Ordering::Relaxed);
+                                total_rx_packets.fetch_add(1, Ordering::Relaxed);
+                                pcapng::Direction::Inbound
+                            }
+                            None => pcapng::Direction::Unknown,
                         };
 
                         // Capture-to-file (epic #55, JAM-132/GitHub #70):
