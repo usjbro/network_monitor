@@ -178,7 +178,32 @@ impl FlowTable {
                 },
                 false,
             ))
+        } else if self.local_addrs.is_empty() {
+            // No known local address at all (replay with no REPLAY_LOCAL_ADDRS
+            // and no IDB address option — see resolve_packet_source in
+            // main.rs) — rather than silently dropping this packet from the
+            // flow table entirely, fall back to a fixed positional
+            // convention: the packet's source is always treated as "local"
+            // for FlowKey construction. This is explicitly NOT a claim that
+            // the source actually was the local side — every consumer of
+            // this flow's direction is told so via
+            // agent_status.directionAttributionUnavailable, sent once per
+            // replay session, not silently per-flow.
+            Some((
+                FlowKey {
+                    protocol: packet.protocol,
+                    local_addr: packet.src_ip.clone(),
+                    local_port: src_port,
+                    remote_addr: packet.dst_ip.clone(),
+                    remote_port: dst_port,
+                },
+                true,
+            ))
         } else {
+            // local_addrs is non-empty but matched neither side — e.g. a
+            // capture containing third-party-to-third-party traffic captured
+            // in promiscuous mode. Unchanged existing behavior: this packet
+            // isn't part of any flow this table tracks.
             None
         }
     }
@@ -836,5 +861,49 @@ mod tests {
 
         let snap = table.snapshot(1000);
         assert_eq!(snap[0].status, "ESTABLISHED");
+    }
+
+    fn packet_between(src_ip: &str, dst_ip: &str) -> ParsedPacket {
+        ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: src_ip.to_string(),
+            dst_ip: dst_ip.to_string(),
+            protocol: TransportProtocol::Tcp,
+            src_port: Some(51000),
+            dst_port: Some(443),
+            tcp_flags: Some(TcpFlags::default()),
+            seq: Some(1000),
+            ttl: 64,
+            total_len: 60,
+            payload: vec![],
+            ip_version: 4,
+            ip_checksum: Some(0),
+            vlan_tag: None,
+        }
+    }
+
+    #[test]
+    fn with_no_local_addrs_a_packet_still_produces_a_flow_using_positional_fallback() {
+        let mut table = FlowTable::new(vec![]); // empty — the replay-with-no-hint case
+        let packet = packet_between("203.0.113.5", "198.51.100.9");
+        table.observe(&packet, &L7Info::None, 0);
+
+        let flows = table.snapshot(0);
+        assert_eq!(flows.len(), 1, "an empty local_addrs list must not silently drop every packet");
+        assert_eq!(flows[0].key.local_addr, "203.0.113.5", "positional fallback treats source as local");
+    }
+
+    #[test]
+    fn with_local_addrs_set_but_not_matching_either_side_the_packet_is_still_dropped() {
+        let mut table = FlowTable::new(vec!["10.0.0.1".to_string()]); // non-empty, but doesn't match this packet
+        let packet = packet_between("203.0.113.5", "198.51.100.9");
+        table.observe(&packet, &L7Info::None, 0);
+
+        assert_eq!(
+            table.snapshot(0).len(),
+            0,
+            "a non-empty, non-matching local_addrs list keeps its existing drop behavior — only the EMPTY case gets the new fallback"
+        );
     }
 }

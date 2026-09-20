@@ -254,7 +254,14 @@ pub enum AgentEvent {
     // above for why boxing matters for this broadcast-cloned enum.
     Packet { packet: Box<PacketJson> },
     LayerUpdate { layers: Vec<LayerStatsJson> },
-    AgentStatus { interface: String, capturing: bool },
+    // `direction_attribution_unavailable` is true only when `local_addrs`
+    // was empty at startup (replay with no REPLAY_LOCAL_ADDRS and no IDB
+    // address option) — see FlowTable::key_for's positional fallback in
+    // flow.rs. This variant isn't emitted anywhere yet; a later task wires
+    // it into the periodic emitter (`mode`/`replay_source` land on it then
+    // too) and populates this field from `resolve_packet_source`'s
+    // `local_addrs`.
+    AgentStatus { interface: String, capturing: bool, direction_attribution_unavailable: bool },
     DecryptedPayload { payload: Box<DecryptedPayloadJson> },
     TracerouteHop { hop: Box<TracerouteHopJson> },
     CaptureStats { stats: CaptureStatsJson },

@@ -1122,7 +1122,19 @@ async fn main() -> std::io::Result<()> {
     // copy of the local-address list.
     let local_addrs_for_capture = local_addrs.clone();
     let flow_table = Arc::new(Mutex::new(FlowTable::new(local_addrs)));
-    let process_map = Arc::new(Mutex::new(process_lookup::refresh()));
+    // Replay mode: `process_lookup::refresh()` walks *this* machine's live
+    // socket table, which is meaningless for a replayed capture — the
+    // processes that owned those flows may never have run on this machine
+    // at all, or have long since exited. Never populating `process_map`
+    // means every connection reports `processName: "unknown"`/`pid: 0` via
+    // the existing no-match fallback, rather than mis-attributing to
+    // whatever unrelated process happens to hold a matching local port
+    // today (spec Components §2).
+    let process_map = Arc::new(Mutex::new(if mode == "live" {
+        process_lookup::refresh()
+    } else {
+        HashMap::new()
+    }));
     // Tier B (opt-in decrypted TLS content) state — all in-memory only,
     // never persisted across a restart (spec: "opt-in never persists").
     let keylog_watcher = Arc::new(Mutex::new(KeyLogWatcher::new()));
@@ -1284,8 +1296,11 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
-    // Background: refresh the process-attribution map every 3s.
-    {
+    // Background: refresh the process-attribution map every 3s. Live mode
+    // only — in replay mode `process_map` stays permanently empty (see
+    // where it's constructed above), so refreshing it would just be wasted
+    // work re-populating a map nothing ever reads.
+    if mode == "live" {
         let process_map = process_map.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(3));
