@@ -1,5 +1,6 @@
 use crate::l7::L7Info;
 use crate::parse::{ParsedPacket, TransportProtocol};
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -99,6 +100,44 @@ pub struct FlowTable {
     flows: HashMap<FlowKey, FlowState>,
     last_snapshot_ms: u64,
     max_flows: usize,
+    /// Cumulative count of distinct flows ever observed (a repeat packet on
+    /// an already-tracked flow doesn't count again) — never reset, unlike
+    /// `flows.len()` which only reflects what's currently in the table.
+    total_flows_observed: u64,
+    /// Cumulative count of flows evicted because the table exceeded
+    /// `max_flows`, distinct from `idle_evictions` below (see
+    /// `EvictedFlows`).
+    capacity_evictions: u64,
+    /// Cumulative count of flows evicted for going idle past their
+    /// status-appropriate threshold, distinct from `capacity_evictions`.
+    idle_evictions: u64,
+}
+
+/// `evict_stale`'s result, split by eviction reason so a caller (the
+/// periodic emitter's `capture_stats` reporting) can tell an operator-facing
+/// "this connection just closed" apart from "the table is under memory
+/// pressure and dropped a still-idle-but-not-stale flow to make room" — two
+/// very different health signals that a single flat `Vec<FlowKey>` couldn't
+/// distinguish. Both kinds still get an identical `connection_closed` wire
+/// event; only the counting is reason-aware.
+#[derive(Default)]
+pub struct EvictedFlows {
+    pub idle: Vec<FlowKey>,
+    pub capacity: Vec<FlowKey>,
+}
+
+impl EvictedFlows {
+    pub fn len(&self) -> usize {
+        self.idle.len() + self.capacity.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.idle.is_empty() && self.capacity.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &FlowKey> {
+        self.idle.iter().chain(self.capacity.iter())
+    }
 }
 
 fn well_known_protocol(port: u16) -> Option<&'static str> {
@@ -145,6 +184,9 @@ impl FlowTable {
             flows: HashMap::new(),
             last_snapshot_ms: 0,
             max_flows,
+            total_flows_observed: 0,
+            capacity_evictions: 0,
+            idle_evictions: 0,
         }
     }
 
@@ -238,6 +280,10 @@ impl FlowTable {
     pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<bool> {
         let (key, is_outbound) = self.key_for(packet)?;
         let remote_port = key.remote_port;
+        let is_new = matches!(self.flows.entry(key.clone()), Entry::Vacant(_));
+        if is_new {
+            self.total_flows_observed += 1;
+        }
         let state = self.flows.entry(key).or_default();
         state.last_seen_ms = now_ms;
 
@@ -379,7 +425,7 @@ impl FlowTable {
     /// capacity, so an unbounded burst of distinct flows (SYN flood, port
     /// scan, spoofed UDP, or just many short-lived DNS queries) is bounded by
     /// entry count as well as by time.
-    pub fn evict_stale(&mut self, now_ms: u64) -> Vec<FlowKey> {
+    pub fn evict_stale(&mut self, now_ms: u64) -> EvictedFlows {
         // SYN_SENT: a connection attempt that never completes (e.g. nothing
         // is listening, or the SYN was dropped) shouldn't sit for the full
         // 30-minute ceiling — 30s is generous for even a slow handshake.
@@ -391,9 +437,9 @@ impl FlowTable {
         // time) would occupy a flow slot for the full 30-minute ceiling.
         const UDP_IDLE_MS: u64 = 60_000;
         const MAX_IDLE_MS: u64 = 1_800_000; // ceiling, any status
-        let mut evicted = Vec::new();
+        let mut idle = Vec::new();
         self.flows.retain(|key, state| {
-            let idle = now_ms.saturating_sub(state.last_seen_ms);
+            let idle_ms = now_ms.saturating_sub(state.last_seen_ms);
             let status = status_for(state, key.protocol);
             let threshold = if matches!(status, "TIME_WAIT" | "CLOSE_WAIT") {
                 CLOSING_IDLE_MS
@@ -404,13 +450,15 @@ impl FlowTable {
             } else {
                 MAX_IDLE_MS
             };
-            let stale = idle > threshold;
+            let stale = idle_ms > threshold;
             if stale {
-                evicted.push(key.clone());
+                idle.push(key.clone());
             }
             !stale
         });
+        self.idle_evictions += idle.len() as u64;
 
+        let mut capacity = Vec::new();
         if self.flows.len() > self.max_flows {
             let excess = self.flows.len() - self.max_flows;
             let mut by_age: Vec<(FlowKey, u64)> = self
@@ -421,11 +469,24 @@ impl FlowTable {
             by_age.sort_by_key(|(_, last_seen_ms)| *last_seen_ms);
             for (key, _) in by_age.into_iter().take(excess) {
                 self.flows.remove(&key);
-                evicted.push(key);
+                capacity.push(key);
             }
         }
+        self.capacity_evictions += capacity.len() as u64;
 
-        evicted
+        EvictedFlows { idle, capacity }
+    }
+
+    pub fn total_flows_observed(&self) -> u64 {
+        self.total_flows_observed
+    }
+
+    pub fn capacity_evictions(&self) -> u64 {
+        self.capacity_evictions
+    }
+
+    pub fn idle_evictions(&self) -> u64 {
+        self.idle_evictions
     }
 
     /// Discards every tracked flow and replaces the local-address list used
@@ -682,7 +743,7 @@ mod tests {
         let now = 130_005 + 1; // stale flow idle ~130_006ms (> 120_000ms), fresh flow idle ~1ms
         let evicted = table.evict_stale(now);
         assert_eq!(evicted.len(), 1);
-        assert_eq!(evicted[0].remote_port, 443);
+        assert_eq!(evicted.idle[0].remote_port, 443);
 
         let remaining = table.snapshot(now);
         assert_eq!(remaining.len(), 1);
@@ -830,7 +891,7 @@ mod tests {
         // time alone — only the capacity cap should trigger an eviction.
         let evicted = table.evict_stale(20);
         assert_eq!(evicted.len(), 1);
-        assert_eq!(evicted[0].remote_port, 1, "oldest (least-recently-seen) flow should be evicted first");
+        assert_eq!(evicted.capacity[0].remote_port, 1, "oldest (least-recently-seen) flow should be evicted first");
 
         let remaining = table.snapshot(20);
         assert_eq!(remaining.len(), 2);
@@ -962,5 +1023,46 @@ mod tests {
             0,
             "a non-empty, non-matching local_addrs list keeps its existing drop behavior — only the EMPTY case gets the new fallback"
         );
+    }
+
+    #[test]
+    fn total_flows_observed_counts_distinct_flows_not_packets() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let packet = tcp_packet(true, TcpFlags::default(), 60);
+        table.observe(&packet, &L7Info::None, 0);
+        table.observe(&packet, &L7Info::None, 100); // same flow, second packet
+        table.observe(&packet, &L7Info::None, 200); // same flow, third packet
+        assert_eq!(table.total_flows_observed(), 1, "repeated packets on the same flow must not inflate the observed count");
+    }
+
+    #[test]
+    fn capacity_and_idle_evictions_are_counted_separately() {
+        let mut table = FlowTable::new_with_capacity(vec!["10.0.0.1".to_string()], 1);
+        let a = ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "93.184.216.34".to_string(),
+            protocol: TransportProtocol::Tcp,
+            src_port: Some(51000),
+            dst_port: Some(443),
+            tcp_flags: Some(TcpFlags::default()),
+            seq: Some(1000),
+            ttl: 64,
+            total_len: 60,
+            payload: vec![],
+            ip_version: 4,
+            ip_checksum: Some(0),
+            vlan_tag: None,
+        };
+        let b = ParsedPacket { dst_port: Some(444), ..a.clone() }; // distinct key from a
+        table.observe(&a, &L7Info::None, 0);
+        table.observe(&b, &L7Info::None, 0); // exceeds capacity 1 — evicts a
+
+        let evicted = table.evict_stale(0);
+        assert_eq!(evicted.capacity.len(), 1);
+        assert_eq!(evicted.idle.len(), 0);
+        assert_eq!(table.capacity_evictions(), 1);
+        assert_eq!(table.idle_evictions(), 0);
     }
 }

@@ -254,14 +254,7 @@ pub enum AgentEvent {
     // above for why boxing matters for this broadcast-cloned enum.
     Packet { packet: Box<PacketJson> },
     LayerUpdate { layers: Vec<LayerStatsJson> },
-    // `direction_attribution_unavailable` is true only when `local_addrs`
-    // was empty at startup (replay with no REPLAY_LOCAL_ADDRS and no IDB
-    // address option) — see FlowTable::key_for's positional fallback in
-    // flow.rs. This variant isn't emitted anywhere yet; a later task wires
-    // it into the periodic emitter (`mode`/`replay_source` land on it then
-    // too) and populates this field from `resolve_packet_source`'s
-    // `local_addrs`.
-    AgentStatus { interface: String, capturing: bool, direction_attribution_unavailable: bool },
+    AgentStatus { status: AgentStatusJson },
     DecryptedPayload { payload: Box<DecryptedPayloadJson> },
     TracerouteHop { hop: Box<TracerouteHopJson> },
     CaptureStats { stats: CaptureStatsJson },
@@ -305,6 +298,26 @@ pub struct InterfaceJson {
 pub struct InterfaceChangedJson {
     pub name: String,
     pub ip_address: String,
+}
+
+/// Sent every tick alongside `capture_stats`/`system_stats`/`capture_config`
+/// — the live/replay mode indicator JAM-133 needs, resolving this event's
+/// previous "defined but never sent" state (see `docs/wire-protocol.md`
+/// history). `mode`/`replay_source` come from `resolve_packet_source`,
+/// fixed for the life of the process; `direction_attribution_unavailable`
+/// is true only when `local_addrs` was empty at startup (replay with no
+/// `REPLAY_LOCAL_ADDRS` and no IDB address option) — see
+/// `FlowTable::key_for`'s canonical-endpoint-ordering fallback in
+/// `flow.rs`.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStatusJson {
+    pub interface: String,
+    pub capturing: bool,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_source: Option<String>,
+    pub direction_attribution_unavailable: bool,
 }
 
 /// Sent every tick alongside `capture_stats`/`capture_config`, same
@@ -410,6 +423,21 @@ pub struct CaptureStatsJson {
     /// and to `relay_lagged_events` (a purely relay-side backlog) — see
     /// issue #63.
     pub unparseable_frames: u64,
+    /// Cumulative count of distinct flows this `FlowTable` has ever
+    /// observed — the "N" half of an honest "showing N of M" horizon
+    /// (JAM-6/GitHub #73). A repeat packet on an already-tracked flow never
+    /// inflates this; see `FlowTable::observe`.
+    pub total_connections_observed: u64,
+    /// Cumulative count of flows evicted because the table exceeded its
+    /// capacity ceiling, not because they went idle — see
+    /// `FlowTable::EvictedFlows`. A nonzero, growing value here means this
+    /// session is dropping still-active flows under memory pressure, a
+    /// materially different health signal from `idle_evictions` below.
+    pub capacity_evictions: u64,
+    /// Cumulative count of flows evicted for going idle past their
+    /// status-appropriate threshold — ordinary connection turnover, not a
+    /// capacity concern.
+    pub idle_evictions: u64,
 }
 
 /// Host/interface identity and aggregate throughput, sent once per tick
@@ -661,6 +689,40 @@ mod tests {
         };
         let line = encode_event(&without_filter);
         assert!(line.contains("\"filter\":null"), "no active filter must be explicit null, not omitted");
+    }
+
+    #[test]
+    fn encodes_agent_status_with_mode_and_direction_flag() {
+        let event = AgentEvent::AgentStatus {
+            status: AgentStatusJson {
+                interface: "lo".into(),
+                capturing: true,
+                mode: "replay".into(),
+                replay_source: Some("/tmp/test.pcapng".into()),
+                direction_attribution_unavailable: true,
+            },
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"agent_status\""));
+        assert!(line.contains("\"mode\":\"replay\""));
+        assert!(line.contains("\"replaySource\":\"/tmp/test.pcapng\""));
+        assert!(line.contains("\"directionAttributionUnavailable\":true"));
+    }
+
+    #[test]
+    fn agent_status_omits_replay_source_in_live_mode() {
+        let event = AgentEvent::AgentStatus {
+            status: AgentStatusJson {
+                interface: "en0".into(),
+                capturing: true,
+                mode: "live".into(),
+                replay_source: None,
+                direction_attribution_unavailable: false,
+            },
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"mode\":\"live\""));
+        assert!(!line.contains("replaySource"), "replay_source must be omitted, not null, when mode is live");
     }
 
     #[test]
@@ -1076,6 +1138,9 @@ mod tests {
                 if_dropped: 1,
                 relay_lagged_events: 42,
                 unparseable_frames: 5,
+                total_connections_observed: 17,
+                capacity_evictions: 2,
+                idle_evictions: 6,
             },
         };
         let line = encode_event(&event);
@@ -1086,6 +1151,9 @@ mod tests {
         assert!(line.contains("\"ifDropped\":1"));
         assert!(line.contains("\"relayLaggedEvents\":42"));
         assert!(line.contains("\"unparseableFrames\":5"));
+        assert!(line.contains("\"totalConnectionsObserved\":17"));
+        assert!(line.contains("\"capacityEvictions\":2"));
+        assert!(line.contains("\"idleEvictions\":6"));
     }
 
     #[test]

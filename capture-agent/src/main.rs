@@ -1011,6 +1011,9 @@ fn build_capture_stats_json(
     stat: Option<pcap::Stat>,
     relay_lagged_events: u64,
     unparseable_frames: u64,
+    total_connections_observed: u64,
+    capacity_evictions: u64,
+    idle_evictions: u64,
 ) -> wire::CaptureStatsJson {
     let (received, dropped, if_dropped) = match stat {
         Some(s) => (s.received, s.dropped, s.if_dropped),
@@ -1022,6 +1025,9 @@ fn build_capture_stats_json(
         if_dropped,
         relay_lagged_events,
         unparseable_frames,
+        total_connections_observed,
+        capacity_evictions,
+        idle_evictions,
     }
 }
 
@@ -1110,6 +1116,13 @@ async fn main() -> std::io::Result<()> {
     // values computed here just seed `current_interface` below.
     let hostname = host_stats::hostname();
     let ip_address = local_addrs.first().cloned().unwrap_or_default();
+    // Computed here, before `local_addrs` is moved into `FlowTable::new`
+    // below — true only when replay had no derivable local-address
+    // information at all, the one case where `FlowTable::key_for` falls
+    // back to its canonical-endpoint-ordering convention instead of a real
+    // local/remote determination. Fixed for the life of the process, same
+    // as `mode`/`replay_source`.
+    let direction_attribution_unavailable = local_addrs.is_empty();
 
     // Shared clock: both the capture thread and the periodic emitter need
     // `now_ms` to mean "milliseconds since agent start" on the SAME clock —
@@ -1588,6 +1601,7 @@ async fn main() -> std::io::Result<()> {
         let writer_ring_file = writer_ring_file.clone();
         let writer_autostop_reason = writer_autostop_reason.clone();
         let writer_backpressure_drops = writer_backpressure_drops.clone();
+        let paused = paused.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             // Previous tick's cumulative counter readings, so each tick can
@@ -1606,10 +1620,11 @@ async fn main() -> std::io::Result<()> {
                 // Evict first so a flow that goes stale this tick emits only
                 // a ConnectionClosed event, not also a now-stale
                 // connection_update in the same pass.
-                let (evicted, snapshots) = {
+                let (evicted, snapshots, total_flows_observed, capacity_evictions, idle_evictions) = {
                     let mut ft = flow_table.lock().unwrap();
                     let evicted = ft.evict_stale(now_ms);
-                    (evicted, ft.snapshot(now_ms))
+                    let snapshots = ft.snapshot(now_ms);
+                    (evicted, snapshots, ft.total_flows_observed(), ft.capacity_evictions(), ft.idle_evictions())
                 };
                 let processes = process_map.lock().unwrap();
 
@@ -1680,7 +1695,7 @@ async fn main() -> std::io::Result<()> {
                     let _ = tx.send(wire::encode_event(&event));
                 }
 
-                for key in evicted {
+                for key in evicted.iter() {
                     let connection_id = key.connection_id();
                     // Tear down this connection's decrypted-content ring
                     // buffer/reassembler along with the flow itself — the
@@ -1738,7 +1753,14 @@ async fn main() -> std::io::Result<()> {
                 let stat = *capture_stats.lock().unwrap();
                 let lagged = relay_lagged_events.load(Ordering::Relaxed);
                 let unparseable = unparseable_frames.load(Ordering::Relaxed);
-                let stats_json = build_capture_stats_json(stat, lagged, unparseable);
+                let stats_json = build_capture_stats_json(
+                    stat,
+                    lagged,
+                    unparseable,
+                    total_flows_observed,
+                    capacity_evictions,
+                    idle_evictions,
+                );
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats { stats: stats_json }));
 
                 // System/throughput stats (issue #64) — reuses `stat.received`
@@ -1793,6 +1815,22 @@ async fn main() -> std::io::Result<()> {
                     backpressure_drops: writer_backpressure_drops.load(Ordering::Relaxed),
                 };
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileStatus { status: capture_file_status }));
+
+                // Agent mode/direction-attribution status (issue #73/
+                // JAM-133) — same "sent every tick, always current" pattern
+                // as capture_stats/capture_config/capture_file_status
+                // above. `interface` reuses `current_name` (just computed
+                // for system_stats) rather than the frozen startup value,
+                // so a runtime interface switch (issue #69) is reflected
+                // here too, not only in system_stats.
+                let agent_status = wire::AgentStatusJson {
+                    interface: current_name.clone(),
+                    capturing: !paused.load(Ordering::Relaxed),
+                    mode: mode.to_string(),
+                    replay_source: replay_source.clone(),
+                    direction_attribution_unavailable,
+                };
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::AgentStatus { status: agent_status }));
             }
         });
     }
@@ -2241,12 +2279,15 @@ mod tests {
             dropped: 7,
             if_dropped: 2,
         };
-        let json = build_capture_stats_json(Some(stat), 15, 4);
+        let json = build_capture_stats_json(Some(stat), 15, 4, 42, 3, 1);
         assert_eq!(json.received, 500);
         assert_eq!(json.dropped, 7);
         assert_eq!(json.if_dropped, 2);
         assert_eq!(json.relay_lagged_events, 15);
         assert_eq!(json.unparseable_frames, 4);
+        assert_eq!(json.total_connections_observed, 42);
+        assert_eq!(json.capacity_evictions, 3);
+        assert_eq!(json.idle_evictions, 1);
     }
 
     #[test]
@@ -2254,12 +2295,15 @@ mod tests {
         // The capture thread hasn't successfully called cap.stats() yet
         // (e.g. right at agent startup) — this must report honest zeros,
         // not panic and not fabricate a nonzero drop count.
-        let json = build_capture_stats_json(None, 0, 0);
+        let json = build_capture_stats_json(None, 0, 0, 0, 0, 0);
         assert_eq!(json.received, 0);
         assert_eq!(json.dropped, 0);
         assert_eq!(json.if_dropped, 0);
         assert_eq!(json.relay_lagged_events, 0);
         assert_eq!(json.unparseable_frames, 0);
+        assert_eq!(json.total_connections_observed, 0);
+        assert_eq!(json.capacity_evictions, 0);
+        assert_eq!(json.idle_evictions, 0);
     }
 
     #[test]
@@ -2273,7 +2317,7 @@ mod tests {
             dropped: 0,
             if_dropped: 0,
         };
-        let json = build_capture_stats_json(Some(stat), 0, 9);
+        let json = build_capture_stats_json(Some(stat), 0, 9, 0, 0, 0);
         assert_eq!(json.dropped, 0);
         assert_eq!(json.relay_lagged_events, 0);
         assert_eq!(json.unparseable_frames, 9);
