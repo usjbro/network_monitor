@@ -14,3 +14,4 @@ pub mod ring_buffer;
 pub mod redact;
 pub mod http2;
 pub mod pcapng;
+pub mod ring;
