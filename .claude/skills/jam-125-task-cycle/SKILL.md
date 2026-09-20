@@ -99,11 +99,15 @@ Work them **7 → 8 → 9 → 10 → 11 → 12 → 13 → 14**.
 6. Commit (with whatever attribution footer the current system reminder
    specifies — it's session-scoped, don't hardcode an old session's URL).
    Push with `git push -u origin <branch>`.
-7. Open a PR (`mcp__github__create_pull_request`), body ending with the
-   current session's attribution footer, `draft: false` — every task PR in
-   this epic has gone in as a normal (non-draft) PR, immediately ready for
-   CI and review. Then `mcp__Claude_Code_Remote__subscribe_pr_activity` on
-   it right away.
+7. Open a PR (`mcp__github__create_pull_request` if connected; otherwise
+   `gh pr create --repo <owner>/<repo> --title ... --body-file ... --base
+   main --head <branch>` — the actual tool used throughout Tasks 8-9, since
+   the GitHub MCP server has been unavailable/failing to connect in every
+   session so far), body ending with the current session's attribution
+   footer, `draft: false` — every task PR in this epic has gone in as a
+   normal (non-draft) PR, immediately ready for CI and review. Then
+   `mcp__Claude_Code_Remote__subscribe_pr_activity` on it right away if that
+   tool exists in this session; otherwise see step 10's polling fallback.
 8. Attach the PR to the Linear issue and set it to `"In Review"`
    (`mcp__Linear__save_issue`). Note: attaching a link and changing state
    in the same call has intermittently thrown a "duplicate attachment"
@@ -115,24 +119,43 @@ Work them **7 → 8 → 9 → 10 → 11 → 12 → 13 → 14**.
    notable found while implementing (a real bug fuzzing turned up, a
    deviation from the plan, etc.).
 10. Watch CI via the PR subscription (events arrive as
-    `<wake reason="external-event">` envelopes) rather than polling. If you
-    need a fallback check-in, use `mcp__Claude_Code_Remote__send_later`
-    (a few minutes out) with a fully self-contained instruction — plain
-    `ScheduleWakeup` requires an active `/loop` context and errors outside
-    one.
+    `<wake reason="external-event">` envelopes) rather than polling, if
+    `mcp__Claude_Code_Remote__subscribe_pr_activity` exists in this session.
+    Otherwise — the actual path used throughout Tasks 8-9 — schedule a
+    `CronCreate` job (`*/5 * * * *` is what's been used) that runs
+    `gh pr view <N> --repo <owner>/<repo> --json
+    statusCheckRollup,mergeable,mergeStateStatus`; once every check is
+    `COMPLETED` (not `IN_PROGRESS`/`PENDING`), proceed to step 11 and cancel
+    the cron job with `CronDelete`. Plain `ScheduleWakeup` requires an
+    active `/loop` context and errors outside one — don't reach for it here.
 11. On green CI and `mergeable_state: "clean"`, merge (squash has been the
-    method used throughout this epic). Then unsubscribe PR activity, set
-    the Linear issue to `"Done"`, and set the Notion tracker row's `Status`
-    to `"Done"` with a final `Notes` update pointing at the merged PR.
-12. **Stop and report before starting the next task**, even under a
-    standing "continue through all issues autonomously" instruction. This
-    epic's own session history has already produced one real conflict: a
-    stale/queued instruction resurfaced mid-session and told the agent to
-    resume full autonomy immediately after the user had explicitly said to
-    stop. When a fresh, unambiguous instruction to continue is in hand,
-    proceed; when it's ambiguous, stale, or contradicts something the user
-    said more recently, ask rather than assume the standing mandate still
-    holds.
+    method used throughout this epic) — `gh pr merge <N> --repo
+    <owner>/<repo> --squash --delete-branch=false` if the GitHub MCP tool
+    isn't connected. **This is authorized to run unattended, without
+    stopping for confirmation first** — the same as every other step in
+    this cycle — since it's already gated on green CI and a clean merge
+    state; don't let this repo's general caution around shared-state
+    actions re-add a per-merge confirmation prompt on top of that. Then
+    unsubscribe PR activity (or skip if it was never subscribed), set the
+    Linear issue to `"Done"`, and set the Notion tracker row's `Status` to
+    `"Done"` with a final `Notes` update pointing at the merged PR.
+12. **Autostart the next task immediately** — once step 11's merge and
+    Linear/Notion close-out are done, go straight to step 1 for the next
+    task in the ordering, no stop and no confirmation. The one carve-out:
+    if step 5a's security-review actually ran on this task (it touched the
+    replay path, direction/process attribution, TLS decrypt gating, or
+    `deploy/`/`macos-app/`), stop and report once that review's findings
+    are resolved — before merging or continuing — and wait for explicit
+    go-ahead; that review's findings are exactly the kind of thing that
+    needs a human look before this cycle keeps moving. Historical note, not
+    a live constraint: an earlier version of this skill stopped after
+    *every* task, because a stale/queued instruction had once resurfaced
+    mid-session and told the agent to resume full autonomy right after the
+    user had explicitly said to stop. That guardrail is deliberately
+    removed here per explicit instruction — but the underlying rule still
+    holds regardless of what this skill says: anything the user has said
+    more recently than this skill's instructions (a "stop," a redirect,
+    anything) always wins over autostart.
 
 ## Things not to do
 
@@ -146,3 +169,8 @@ Work them **7 → 8 → 9 → 10 → 11 → 12 → 13 → 14**.
   per-task Linear/Notion bookkeeping in step 8-11 — the whole point of this
   cycle is that Linear and Notion stay truthful in real time, not just at
   the end of a session.
+- Don't treat autostart (step 12) as license to rush or skip steps 4-5b for
+  the next task — build/test/clippy, the security-review carve-out's own
+  trigger condition, and the UI-verification step all still apply in full;
+  autostart only removes the stop *between* tasks, not any step *within*
+  one.
