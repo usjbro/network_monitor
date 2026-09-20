@@ -6,6 +6,7 @@ use capture_agent::{
     keylog::KeyLogWatcher,
     l7, parse, pcapng, process_lookup,
     rate_limit::PacketEventLimiter,
+    ring,
     ring_buffer::DecryptedRingBuffer,
     tls_decrypt::{self, DecryptOutcome},
     wire,
@@ -388,6 +389,8 @@ enum CaptureConfigRequest {
 enum WriterCommand {
     Start {
         path: PathBuf,
+        ring: Option<wire::RingConfigJson>,
+        autostop: Option<wire::AutostopConfigJson>,
         idb: pcapng::InterfaceDescriptionBlock,
         hostname: String,
         agent_version: String,
@@ -435,6 +438,32 @@ fn validate_capture_file_path(path: &str, cwd: &Path) -> Result<PathBuf, String>
         ));
     }
     Ok(resolved)
+}
+
+/// Validates a `start_capture_file` request's `ring` option before it ever
+/// reaches `ring.rs` — an unknown mode or a zero threshold is rejected
+/// outright rather than silently never rotating.
+fn validate_ring_config(ring: &wire::RingConfigJson) -> Result<(), String> {
+    match ring.mode.as_str() {
+        "size" | "duration" | "count" => {}
+        other => return Err(format!("unknown ring mode {other:?} — expected \"size\", \"duration\", or \"count\"")),
+    }
+    if ring.threshold == 0 {
+        return Err("ring threshold must be greater than zero".to_string());
+    }
+    Ok(())
+}
+
+/// Same discipline as `validate_ring_config`, for the `autostop` option.
+fn validate_autostop_config(autostop: &wire::AutostopConfigJson) -> Result<(), String> {
+    match autostop.mode.as_str() {
+        "duration" | "totalSize" => {}
+        other => return Err(format!("unknown autostop mode {other:?} — expected \"duration\" or \"totalSize\"")),
+    }
+    if autostop.threshold == 0 {
+        return Err("autostop threshold must be greater than zero".to_string());
+    }
+    Ok(())
 }
 
 /// Validates a browser-supplied BPF filter expression's length before it
@@ -913,71 +942,87 @@ async fn main() -> std::io::Result<()> {
 
     let (tx, _rx) = broadcast::channel::<String>(1024);
 
-    // Capture-to-file (epic #55, JAM-132/GitHub #70) shared state: never on
-    // by default. `writer_active` is the hot capture loop's single cheap
-    // check per packet; `writer_bytes_written`/`writer_path` feed the
-    // per-tick `capture_file_status` event; `writer_backpressure_drops` is
-    // written by the capture loop (a full queue) and never reset. The
-    // `Writer` itself lives only inside the dedicated writer thread below —
-    // nothing else ever touches an open file handle.
+    // Capture-to-file (epic #55, JAM-132/JAM-5/GitHub #70/#72) shared
+    // state: never on by default. `writer_active` is the hot capture
+    // loop's single cheap check per packet; `writer_path`/
+    // `writer_bytes_written`/`writer_ring_file`/`writer_autostop_reason`
+    // feed the per-tick `capture_file_status` event; `writer_backpressure_drops`
+    // is written by the capture loop (a full queue) and never reset. The
+    // `ring::RingState` (which itself owns the only `pcapng::Writer` this
+    // process ever opens) lives only inside the dedicated writer thread
+    // below — nothing else ever touches an open file handle.
     let writer_active = Arc::new(AtomicBool::new(false));
     let writer_bytes_written = Arc::new(AtomicU64::new(0));
     let writer_backpressure_drops = Arc::new(AtomicU64::new(0));
     let writer_path: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let writer_ring_file: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+    let writer_autostop_reason: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let (writer_tx, writer_rx) = mpsc::sync_channel::<WriterCommand>(WRITER_QUEUE_CAPACITY);
 
-    // Dedicated OS thread owning the only `pcapng::Writer` this process ever
-    // opens — a slow disk therefore only ever backs up this thread's own
-    // queue, never the hot capture loop (which only ever does a bounded
-    // `try_send`, above). `current` is a plain local, not behind a Mutex:
-    // this is the only thread that ever reads or writes it.
+    // Dedicated OS thread owning the only active capture-to-file run this
+    // process ever has open — a slow disk therefore only ever backs up
+    // this thread's own queue, never the hot capture loop (which only ever
+    // does a bounded `try_send`, above). `current` is a plain local, not
+    // behind a Mutex: this is the only thread that ever reads or writes it.
+    // Rotation/autostop/disk-guard policy (JAM-5/GitHub #72) all live in
+    // `ring.rs`, called from here rather than reimplemented inline.
     {
         let tx = tx.clone();
         let writer_active = writer_active.clone();
         let writer_bytes_written = writer_bytes_written.clone();
         let writer_path = writer_path.clone();
+        let writer_ring_file = writer_ring_file.clone();
+        let writer_autostop_reason = writer_autostop_reason.clone();
         std::thread::spawn(move || {
-            let mut current: Option<pcapng::Writer> = None;
+            let mut current: Option<ring::RingState> = None;
+            let apply_status = |status: &wire::CaptureFileStatusJson,
+                                 writer_active: &AtomicBool,
+                                 writer_path: &Mutex<Option<String>>,
+                                 writer_bytes_written: &AtomicU64,
+                                 writer_ring_file: &Mutex<Option<u32>>,
+                                 writer_autostop_reason: &Mutex<Option<String>>| {
+                writer_active.store(status.writing, Ordering::Relaxed);
+                *writer_path.lock().unwrap() = status.path.clone();
+                writer_bytes_written.store(status.bytes_written, Ordering::Relaxed);
+                *writer_ring_file.lock().unwrap() = status.ring_file;
+                *writer_autostop_reason.lock().unwrap() = status.autostop_reason.clone();
+            };
             while let Ok(cmd) = writer_rx.recv() {
                 match cmd {
-                    WriterCommand::Start { path, idb, hostname, agent_version } => {
-                        match pcapng::Writer::create(&path, &idb, &hostname, &agent_version) {
-                            Ok(writer) => {
-                                current = Some(writer);
+                    WriterCommand::Start { path, ring: ring_config, autostop, idb, hostname, agent_version } => {
+                        match ring::start(&mut current, &path, ring_config, autostop, &idb, &hostname, &agent_version, ring::real_free_space_bytes) {
+                            Ok(()) => {
+                                *writer_autostop_reason.lock().unwrap() = None;
+                                *writer_ring_file.lock().unwrap() = None;
                                 *writer_path.lock().unwrap() = Some(path.display().to_string());
                                 writer_bytes_written.store(0, Ordering::Relaxed);
                                 writer_active.store(true, Ordering::Relaxed);
                             }
-                            Err(e) => {
-                                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError {
-                                    message: format!("could not open {}: {e}", path.display()),
-                                }));
+                            Err(message) => {
+                                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError { message }));
                             }
                         }
                     }
                     WriterCommand::Stop => {
                         writer_active.store(false, Ordering::Relaxed);
-                        if let Some(writer) = current.take() {
-                            if let Err(e) = writer.finish() {
-                                eprintln!("capture-agent: error closing capture file: {e}");
-                            }
-                        }
+                        *writer_autostop_reason.lock().unwrap() = None; // operator-requested, not an *auto*-stop
+                        ring::stop(&mut current);
                     }
                     WriterCommand::Packet { timestamp, direction, data } => {
-                        if let Some(writer) = current.as_mut() {
+                        if let Some(ring_state) = current.as_mut() {
                             // I/O errors here surface via the next tick's
                             // capture_file_status simply reporting a stalled
                             // bytesWritten, not panicked on — matching this
                             // writer thread's own "never take the process
                             // down over a disk problem" posture.
-                            if writer.write_packet(timestamp, direction, &data).is_ok() {
-                                writer_bytes_written.store(writer.bytes_written(), Ordering::Relaxed);
+                            if ring_state.write_packet(timestamp, direction, &data).is_ok() {
+                                writer_bytes_written.store(ring_state.bytes_written(), Ordering::Relaxed);
                             }
                         }
                     }
                     WriterCommand::Stats { received, dropped } => {
-                        if let Some(writer) = current.as_mut() {
-                            let _ = writer.write_interface_stats(received as u64, dropped as u64);
+                        if let Some(status) = ring::on_tick(&mut current, received as u64, dropped as u64, ring::real_free_space_bytes) {
+                            apply_status(&status, &writer_active, &writer_path, &writer_bytes_written, &writer_ring_file, &writer_autostop_reason);
                         }
                     }
                 }
@@ -1228,6 +1273,8 @@ async fn main() -> std::io::Result<()> {
         let writer_active = writer_active.clone();
         let writer_bytes_written = writer_bytes_written.clone();
         let writer_path = writer_path.clone();
+        let writer_ring_file = writer_ring_file.clone();
+        let writer_autostop_reason = writer_autostop_reason.clone();
         let writer_backpressure_drops = writer_backpressure_drops.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -1428,6 +1475,9 @@ async fn main() -> std::io::Result<()> {
                     writing: writer_active.load(Ordering::Relaxed),
                     path: writer_path.lock().unwrap().clone(),
                     bytes_written: writer_bytes_written.load(Ordering::Relaxed),
+                    ring_file: *writer_ring_file.lock().unwrap(),
+                    ring_total: None,
+                    autostop_reason: writer_autostop_reason.lock().unwrap().clone(),
                     backpressure_drops: writer_backpressure_drops.load(Ordering::Relaxed),
                 };
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileStatus { status: capture_file_status }));
@@ -1545,10 +1595,12 @@ async fn main() -> std::io::Result<()> {
                                         let _ = capture_config_tx.send(CaptureConfigRequest::SwitchInterface(name));
                                     }
                                     Some(wire::ControlMessage::StartCaptureFile { path, ring, autostop }) => {
-                                        if ring.is_some() || autostop.is_some() {
-                                            let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError {
-                                                message: "ring/autostop are not supported yet — this build only writes a single, non-rotating capture file".to_string(),
-                                            }));
+                                        let config_error = ring
+                                            .as_ref()
+                                            .and_then(|r| validate_ring_config(r).err())
+                                            .or_else(|| autostop.as_ref().and_then(|a| validate_autostop_config(a).err()));
+                                        if let Some(message) = config_error {
+                                            let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError { message }));
                                         } else if writer_active.load(Ordering::Relaxed) {
                                             let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError {
                                                 message: "a capture file is already active — stop it first".to_string(),
@@ -1565,6 +1617,8 @@ async fn main() -> std::io::Result<()> {
                                                     };
                                                     let _ = writer_tx.send(WriterCommand::Start {
                                                         path: resolved,
+                                                        ring,
+                                                        autostop,
                                                         idb,
                                                         hostname: hostname.clone(),
                                                         agent_version: env!("CARGO_PKG_VERSION").to_string(),

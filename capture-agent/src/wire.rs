@@ -317,6 +317,23 @@ pub struct CaptureFileStatusJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     pub bytes_written: u64,
+    /// Present only while `ring` was configured on the `start_capture_file`
+    /// request that's currently active — a plain, non-rotating capture
+    /// never has a ring file number at all (JAM-5/GitHub #72).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ring_file: Option<u32>,
+    /// Reserved for a future fixed-size ring (wraps after N files); every
+    /// ring mode this task implements (size/duration/count) rotates
+    /// indefinitely rather than wrapping, so this is always absent for now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ring_total: Option<u32>,
+    /// Present only on the one tick a run just stopped itself —
+    /// `"duration"`/`"totalSize"` (an autostop condition fired) or
+    /// `"lowDisk"` (the disk-space guard fired). Absent while still
+    /// actively writing, and absent again on an operator-requested
+    /// `stop_capture_file` (that's not an *auto*-stop).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autostop_reason: Option<String>,
     /// Cumulative count of packets the writer's bounded queue couldn't
     /// accept because the writer thread was falling behind (e.g. a slow
     /// disk) — never silently dropped from the operator's view even though
@@ -737,30 +754,63 @@ mod tests {
     }
 
     #[test]
-    fn encodes_capture_file_status_omitting_absent_path() {
+    fn encodes_capture_file_status_omitting_absent_fields() {
         let event = AgentEvent::CaptureFileStatus {
-            status: CaptureFileStatusJson { writing: false, path: None, bytes_written: 0, backpressure_drops: 0 },
+            status: CaptureFileStatusJson {
+                writing: false,
+                path: None,
+                bytes_written: 0,
+                ring_file: None,
+                ring_total: None,
+                autostop_reason: None,
+                backpressure_drops: 0,
+            },
         };
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"capture_file_status\""));
         assert!(line.contains("\"writing\":false"));
         assert!(!line.contains("\"path\""), "absent Option fields must be omitted, not null");
+        assert!(!line.contains("\"ringFile\""));
+        assert!(!line.contains("\"ringTotal\""));
+        assert!(!line.contains("\"autostopReason\""));
     }
 
     #[test]
-    fn encodes_capture_file_status_including_present_path() {
+    fn encodes_capture_file_status_including_present_fields() {
         let event = AgentEvent::CaptureFileStatus {
             status: CaptureFileStatusJson {
                 writing: true,
-                path: Some("/tmp/capture.pcapng".to_string()),
+                path: Some("/tmp/capture-0002.pcapng".to_string()),
                 bytes_written: 4096,
+                ring_file: Some(2),
+                ring_total: None,
+                autostop_reason: None,
                 backpressure_drops: 2,
             },
         };
         let line = encode_event(&event);
-        assert!(line.contains("\"path\":\"/tmp/capture.pcapng\""));
+        assert!(line.contains("\"path\":\"/tmp/capture-0002.pcapng\""));
         assert!(line.contains("\"bytesWritten\":4096"));
+        assert!(line.contains("\"ringFile\":2"));
         assert!(line.contains("\"backpressureDrops\":2"));
+    }
+
+    #[test]
+    fn encodes_capture_file_status_autostop_reason_when_a_run_just_stopped() {
+        let event = AgentEvent::CaptureFileStatus {
+            status: CaptureFileStatusJson {
+                writing: false,
+                path: Some("/tmp/capture.pcapng".to_string()),
+                bytes_written: 8192,
+                ring_file: None,
+                ring_total: None,
+                autostop_reason: Some("lowDisk".to_string()),
+                backpressure_drops: 0,
+            },
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"autostopReason\":\"lowDisk\""));
+        assert!(line.contains("\"writing\":false"));
     }
 
     #[test]
