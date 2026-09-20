@@ -12,6 +12,7 @@ use capture_agent::{
     wire,
 };
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -339,6 +340,269 @@ fn resolve_link_type(datalink: pcap::Linktype, interface_name: &str) -> parse::L
             datalink.0
         )
     })
+}
+
+/// One packet source, abstracting over live capture, a replayed pcapng
+/// file (this agent's own writer output, or any modern tool's), and a
+/// replayed classic-pcap file (legacy Wireshark/tcpdump captures) — see
+/// docs/superpowers/specs/2026-09-19-capture-files-design.md Components §2
+/// for why these three variants, and why the capture loop below never
+/// needs to know which one is active: `parse::parse_packet` and everything
+/// downstream of it only ever sees the `(data, timestamp)` shape
+/// `next_frame` yields.
+enum PacketSource {
+    Live(pcap::Capture<pcap::Active>),
+    ReplayPcapng(pcapng::Reader<std::fs::File>),
+    ReplayClassic(pcap::Capture<pcap::Offline>),
+}
+
+/// One frame read from a `PacketSource`. `Timeout` is live mode's existing
+/// read-timeout case (already relied on today to poll `capture_config_rx`/
+/// `pause` between packets on a quiet interface); `Eof` covers both a
+/// replay file being fully consumed and a live device erroring out for any
+/// other reason — the same "no more frames coming" outcome either way.
+enum SourceFrame {
+    Bytes { data: Vec<u8>, timestamp: std::time::SystemTime },
+    Timeout,
+    Eof,
+}
+
+impl PacketSource {
+    fn next_frame(&mut self) -> SourceFrame {
+        match self {
+            PacketSource::Live(cap) => match cap.next_packet() {
+                Ok(packet) => SourceFrame::Bytes {
+                    data: packet.data.to_vec(),
+                    timestamp: std::time::SystemTime::now(), // live mode's existing behavior — unchanged
+                },
+                Err(pcap::Error::TimeoutExpired) => SourceFrame::Timeout,
+                Err(_) => SourceFrame::Eof, // a live device closing is treated the same as replay EOF — both mean "no more frames"
+            },
+            PacketSource::ReplayPcapng(reader) => match reader.next_packet() {
+                Ok(Some(packet)) => SourceFrame::Bytes { data: packet.data, timestamp: packet.timestamp },
+                Ok(None) => SourceFrame::Eof,
+                Err(_) => SourceFrame::Eof, // a malformed trailing block ends replay early rather than looping forever on the same error
+            },
+            PacketSource::ReplayClassic(cap) => match cap.next_packet() {
+                Ok(packet) => SourceFrame::Bytes {
+                    data: packet.data.to_vec(),
+                    timestamp: std::time::UNIX_EPOCH
+                        + std::time::Duration::new(packet.header.ts.tv_sec as u64, (packet.header.ts.tv_usec as u32) * 1000),
+                },
+                Err(_) => SourceFrame::Eof,
+            },
+        }
+    }
+}
+
+/// Pure parser behind `replay_local_addrs`, split out so it has a direct
+/// unit test that doesn't mutate a real process env var — this file has no
+/// precedent for that (`detect_interface`'s own `CAPTURE_INTERFACE`-reading
+/// logic is likewise tested only through its pure `is_meaningful_override`
+/// helper), and `cargo test`'s parallel runner makes mutating shared
+/// process-global state from multiple tests a real flakiness risk.
+fn parse_replay_local_addrs(raw: Option<&str>) -> Vec<String> {
+    raw.map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// `REPLAY_LOCAL_ADDRS`, comma-separated — spec Components §2's resolution
+/// for "`FlowTable::new`'s `local_addrs` cannot come from this machine's
+/// interfaces when replaying someone else's capture." Empty (never
+/// guessed) if unset; Task 8 covers the resulting "unknown direction"
+/// degradation this produces.
+fn replay_local_addrs() -> Vec<String> {
+    parse_replay_local_addrs(std::env::var("REPLAY_LOCAL_ADDRS").ok().as_deref())
+}
+
+/// `REPLAY_SPEED` — `fast` (default, and the only meaningful value in live
+/// mode, where it's simply never read) replays every frame back-to-back as
+/// quickly as the pipeline can process them; `realtime` sleeps between
+/// frames to reproduce the file's own inter-packet timing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplaySpeed {
+    Fast,
+    Realtime,
+}
+
+/// Pure parser behind `replay_speed` — same env-var-free-test rationale as
+/// `parse_replay_local_addrs` above.
+fn parse_replay_speed(raw: Option<&str>) -> ReplaySpeed {
+    match raw {
+        Some("realtime") => ReplaySpeed::Realtime,
+        _ => ReplaySpeed::Fast,
+    }
+}
+
+fn replay_speed() -> ReplaySpeed {
+    parse_replay_speed(std::env::var("REPLAY_SPEED").ok().as_deref())
+}
+
+/// Everything `resolve_packet_source` resolves once at startup and never
+/// re-resolves — this repo's own explicit design decision (spec Components
+/// §2) to avoid doubling the state space of the capture loop with a
+/// live<->replay runtime-switching mechanism nothing in the acceptance
+/// criteria actually asks for.
+struct ResolvedPacketSource {
+    source: PacketSource,
+    interface_name: String,
+    local_addrs: Vec<String>,
+    link_type: parse::LinkType,
+    /// `"live"` or `"replay"` — Task 9 revives this onto the `agent_status`
+    /// wire event; for now it's used locally to gate the runtime
+    /// capture-reconfiguration control messages (Live-only) and realtime
+    /// replay pacing.
+    mode: &'static str,
+    replay_source: Option<String>,
+    /// The `pcap::Device` behind `source`, kept around so a later
+    /// `set_interface`/`set_capture_filter`/`set_snaplen` control message
+    /// can reopen it — mirrors the existing live-mode `device_for_reopen`
+    /// local this replaces. Always `Some` exactly when `source` is
+    /// `PacketSource::Live`, `None` otherwise: those control messages
+    /// aren't available in replay mode (Components §2: "existing
+    /// runtime-reconfiguration code path completely unaware replay mode
+    /// exists at all").
+    device_for_reopen: Option<pcap::Device>,
+}
+
+/// pcapng's Section Header Block type, as it appears literally on disk —
+/// the same four bytes regardless of the file's internal byte-order marker
+/// (0x0A0D0D0A's byte representation is identical little- or big-endian),
+/// which is exactly why real pcapng readers use it to detect the format
+/// before even knowing which endianness the rest of the file uses.
+const PCAPNG_MAGIC: [u8; 4] = [0x0A, 0x0D, 0x0D, 0x0A];
+
+/// Peeks the first four bytes of `path` to check whether it's shaped like a
+/// pcapng file, without needing a full parse. Used only to decide whether a
+/// file that already failed this agent's own pcapng reader should be
+/// refused outright rather than handed to libpcap's own competing pcapng
+/// parser (see the caller's comment). Any I/O failure here (can't open,
+/// too short) is treated as "not pcapng-shaped" — the caller's subsequent
+/// `pcap::Capture::from_file` attempt will surface the real error.
+fn looks_like_pcapng(path: &str) -> bool {
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map(|()| magic == PCAPNG_MAGIC)
+        .unwrap_or(false)
+}
+
+/// Mirrors `detect_interface()`'s existing fail-loud posture exactly: an
+/// unparseable or self-contradictory startup configuration panics with a
+/// specific message naming what's wrong, never silently falls back.
+fn resolve_packet_source() -> ResolvedPacketSource {
+    let replay_file = std::env::var("REPLAY_FILE").ok().filter(|s| !s.trim().is_empty());
+    let capture_interface_set = std::env::var_os("CAPTURE_INTERFACE")
+        .map(|v| !v.to_string_lossy().trim().is_empty())
+        .unwrap_or(false);
+
+    if let Some(path) = replay_file {
+        if capture_interface_set {
+            panic!("both CAPTURE_INTERFACE and REPLAY_FILE are set — these are mutually exclusive; unset one");
+        }
+
+        let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("REPLAY_FILE={path} could not be opened: {e}"));
+
+        // Try pcapng first (this agent's own writer always produces it, and
+        // it's the richer format — a real interface name/link type from the
+        // file's own Interface Description block); fall back to classic
+        // pcap via libpcap's own file-open support, per spec Components
+        // §2's two-path design. `pcap::Capture::from_file` opens the path
+        // itself rather than reusing `file`, so there's no conflict with
+        // `file` having already been partially read by the failed pcapng
+        // attempt below.
+        return match pcapng::Reader::new(file) {
+            Ok((reader, interface)) => {
+                let interface_name = interface
+                    .interface_name
+                    .unwrap_or_else(|| "unknown (replayed pcapng, no if_name recorded)".to_string());
+                ResolvedPacketSource {
+                    source: PacketSource::ReplayPcapng(reader),
+                    interface_name,
+                    local_addrs: replay_local_addrs(),
+                    link_type: interface.link_type,
+                    mode: "replay",
+                    replay_source: Some(path),
+                    device_for_reopen: None,
+                }
+            }
+            Err(_) => {
+                // Security-review finding: libpcap (>=1.10) auto-detects
+                // and natively parses pcapng too, not just classic pcap —
+                // so without this check, a file that merely *fails* our
+                // own strict, fuzzed pcapng reader (malformed in some way
+                // it doesn't tolerate) would fall through to libpcap's own
+                // C-based pcapng parser, which has real CVE history on
+                // malformed capture files (e.g. CVE-2019-15161) and has no
+                // fuzz coverage in this repo. Refusing any file whose first
+                // four bytes are the pcapng Section Header Block's block
+                // type (a fixed byte sequence regardless of the file's
+                // internal byte-order, since it's the same four bytes
+                // whichever way you encode 0x0A0D0D0A) keeps every
+                // pcapng-shaped file on our own audited/fuzzed path only —
+                // it either parses there or is rejected outright, never
+                // handed to a second, unfuzzed pcapng parser as a fallback.
+                if looks_like_pcapng(&path) {
+                    panic!(
+                        "REPLAY_FILE={path} looks like a pcapng file (starts with the pcapng \
+                         Section Header Block signature) but failed to parse with this agent's \
+                         own reader — refusing to fall back to libpcap's own pcapng parser for a \
+                         file already known to be malformed or unsupported"
+                    );
+                }
+                let cap = pcap::Capture::from_file(&path)
+                    .unwrap_or_else(|e| panic!("REPLAY_FILE={path} is neither valid pcapng nor classic pcap: {e}"));
+                let link_type = resolve_link_type(cap.get_datalink(), &path);
+                ResolvedPacketSource {
+                    source: PacketSource::ReplayClassic(cap),
+                    interface_name: "unknown (replayed classic pcap)".to_string(),
+                    local_addrs: replay_local_addrs(),
+                    link_type,
+                    mode: "replay",
+                    replay_source: Some(path),
+                    device_for_reopen: None,
+                }
+            }
+        };
+    }
+
+    // Existing live-mode startup path, moved here verbatim from main() —
+    // unchanged by this task other than being wrapped in this match arm.
+    let device = detect_interface();
+    let interface_name = device.name.clone();
+    let local_addrs = local_addrs_for(&device);
+    println!("capture-agent: using interface {interface_name}");
+    // Kept around for the life of the process so a later `snaplen <bytes>`
+    // control message (issue #68) can reopen the same device — `device`
+    // itself is consumed by `Capture::from_device` immediately below.
+    let device_for_reopen = device.clone();
+    let cap = pcap::Capture::from_device(device)
+        .and_then(|c| {
+            c.promisc(true)
+                .snaplen(DEFAULT_SNAPLEN)
+                .timeout(1000)
+                // Without this, macOS BPF only flushes its buffer to
+                // userspace once it's full, which on a normal-traffic
+                // interface can mean no packets are delivered for a very
+                // long time. Immediate mode delivers each packet as soon as
+                // it arrives instead.
+                .immediate_mode(true)
+                .open()
+        })
+        .unwrap_or_else(|e| panic!("capture-agent: failed to open capture device {interface_name}: {e}"));
+    let datalink = cap.get_datalink();
+    let link_type = resolve_link_type(datalink, &interface_name);
+    println!("capture-agent: link type {datalink:?} on {interface_name}");
+
+    ResolvedPacketSource {
+        source: PacketSource::Live(cap),
+        interface_name,
+        local_addrs,
+        link_type,
+        mode: "live",
+        replay_source: None,
+        device_for_reopen: Some(device_for_reopen),
+    }
 }
 
 /// Maximum accepted length for a browser-supplied BPF filter expression, in
@@ -816,38 +1080,28 @@ async fn main() -> std::io::Result<()> {
         eprintln!("capture-agent: WARNING failed to disable core dumps: {e}");
     }
 
-    let device = detect_interface();
-    let interface_name = device.name.clone();
-    let local_addrs = local_addrs_for(&device);
-    println!("capture-agent: using interface {interface_name}");
-    // Kept around for the life of the process so a later `snaplen <bytes>`
-    // control message (issue #68) can reopen the same device — `device`
-    // itself is consumed by `Capture::from_device` immediately below.
-    let device_for_reopen = device.clone();
-
-    // Opened synchronously here, before anything else starts (including the
-    // TCP listener below), rather than inside the capture thread: this is a
-    // startup precondition, and both failure modes below (device won't
-    // open, or opens with a link type this agent can't parse — issue #63)
-    // need to fail the whole process loudly and immediately, not leave a
-    // dead capture thread behind a process that otherwise looks healthy.
-    let cap = pcap::Capture::from_device(device)
-        .and_then(|c| {
-            c.promisc(true)
-                .snaplen(DEFAULT_SNAPLEN)
-                .timeout(1000)
-                // Without this, macOS BPF only flushes its buffer to
-                // userspace once it's full, which on a normal-traffic
-                // interface can mean no packets are delivered for a very
-                // long time. Immediate mode delivers each packet as soon as
-                // it arrives instead.
-                .immediate_mode(true)
-                .open()
-        })
-        .unwrap_or_else(|e| panic!("capture-agent: failed to open capture device {interface_name}: {e}"));
-    let datalink = cap.get_datalink();
-    let link_type = resolve_link_type(datalink, &interface_name);
-    println!("capture-agent: link type {datalink:?} on {interface_name}");
+    // Resolved once, here, and never again — see `ResolvedPacketSource`'s
+    // own doc comment for why replay mode is never runtime-switchable.
+    // Opened synchronously, before anything else starts (including the TCP
+    // listener below), rather than inside the capture thread: this is a
+    // startup precondition, and every failure mode inside it (device won't
+    // open, opens with a link type this agent can't parse — issue #63, or a
+    // REPLAY_FILE that's neither valid pcapng nor classic pcap) needs to
+    // fail the whole process loudly and immediately, not leave a dead
+    // capture thread behind a process that otherwise looks healthy.
+    let ResolvedPacketSource {
+        source: packet_source,
+        interface_name,
+        local_addrs,
+        link_type,
+        mode,
+        replay_source,
+        device_for_reopen,
+    } = resolve_packet_source();
+    println!(
+        "capture-agent: mode={mode} interface={interface_name}{}",
+        replay_source.as_deref().map(|s| format!(" replay_source={s}")).unwrap_or_default()
+    );
 
     // Hostname is read once at startup and never changes for the life of
     // this process — the OS hostname isn't re-read at runtime.
@@ -1068,14 +1322,15 @@ async fn main() -> std::io::Result<()> {
         let writer_active = writer_active.clone();
         let writer_backpressure_drops = writer_backpressure_drops.clone();
         std::thread::spawn(move || {
-            let mut cap = cap;
+            let mut packet_source = packet_source;
             // Mutable locals, not Arc<Mutex<_>>: only this thread ever
             // reads or writes them, and this is the hot per-packet path —
             // `local_addrs` in particular is checked on every captured
             // packet (see the direction checks below), so a lock here
             // would mean contending for it thousands of times a second.
             // They only change on a successful `set_interface` (issue
-            // #69), applied in the drain loop below, on this same thread.
+            // #69, Live mode only), applied in the drain loop below, on
+            // this same thread.
             let mut local_addrs = local_addrs;
             let mut link_type = link_type;
             let mut device_for_reopen = device_for_reopen;
@@ -1085,42 +1340,64 @@ async fn main() -> std::io::Result<()> {
             // Connection/layer aggregates below are unaffected: `observe()`
             // runs on every packet regardless of this limiter.
             let mut packet_event_limiter = PacketEventLimiter::new(100, 1000);
-            // `cap` (the pcap handle) only ever lives on this thread, so
-            // polling pcap_stats() has to happen here rather than from the
-            // periodic emitter task — see build_capture_stats_json's doc
-            // comment for why this is split into a separate pure function.
+            // The live pcap handle (when `packet_source` is `Live`) only
+            // ever lives on this thread, so polling pcap_stats() has to
+            // happen here rather than from the periodic emitter task — see
+            // build_capture_stats_json's doc comment for why this is split
+            // into a separate pure function. Meaningless for a replay, so
+            // simply never polled in that mode — `capture_stats` stays
+            // `None` for the life of a replay process, reporting absent
+            // rather than a fabricated value.
             let mut last_stats_poll = Instant::now();
+            // Realtime replay pacing (spec Components §2) — both are no-ops
+            // in Live mode: `replay_speed()` is only ever read when
+            // `mode == "replay"`, below.
+            let replay_speed = replay_speed();
+            let mut previous_frame_timestamp: Option<std::time::SystemTime> = None;
             loop {
                 // Non-blocking: applies at most whatever has queued up since
-                // the last iteration. `cap.next_packet()`'s 1s timeout below
-                // (and every real packet arrival) guarantees this runs
+                // the last iteration. `next_frame()`'s 1s live-mode timeout
+                // below (and every real packet arrival) guarantees this runs
                 // frequently, so a `filter`/`snaplen` command bar action
                 // takes effect within about a second, not indefinitely
                 // delayed behind a quiet capture (issue #68).
                 while let Ok(request) = capture_config_rx.try_recv() {
-                    match request {
-                        CaptureConfigRequest::SwitchInterface(name) => {
-                            apply_interface_switch_request(
-                                &name,
-                                &mut cap,
-                                &mut device_for_reopen,
-                                &mut link_type,
-                                &mut local_addrs,
-                                &current_interface,
-                                &current_link_type,
-                                &capture_config_state,
-                                &flow_table,
-                                &tx,
-                            );
-                        }
-                        other => {
-                            apply_capture_config_request(
-                                other,
-                                &mut cap,
-                                &device_for_reopen,
-                                &capture_config_state,
-                                &tx,
-                            );
+                    match (&mut packet_source, device_for_reopen.as_mut()) {
+                        (PacketSource::Live(cap), Some(device_for_reopen)) => match request {
+                            CaptureConfigRequest::SwitchInterface(name) => {
+                                apply_interface_switch_request(
+                                    &name,
+                                    cap,
+                                    device_for_reopen,
+                                    &mut link_type,
+                                    &mut local_addrs,
+                                    &current_interface,
+                                    &current_link_type,
+                                    &capture_config_state,
+                                    &flow_table,
+                                    &tx,
+                                );
+                            }
+                            other => {
+                                apply_capture_config_request(other, cap, device_for_reopen, &capture_config_state, &tx);
+                            }
+                        },
+                        // Replay mode: these control messages have no live
+                        // device to act on (spec Components §2 — "existing
+                        // runtime-reconfiguration code path completely
+                        // unaware replay mode exists at all"). Reported,
+                        // not silently dropped, matching this codebase's
+                        // existing posture for every other rejected request.
+                        _ => {
+                            let event = match request {
+                                CaptureConfigRequest::SwitchInterface(_) => wire::AgentEvent::InterfaceError {
+                                    message: "interface switching is not available during file replay".to_string(),
+                                },
+                                _ => wire::AgentEvent::CaptureConfigError {
+                                    message: "capture filter/snap length changes are not available during file replay".to_string(),
+                                },
+                            };
+                            let _ = tx.send(wire::encode_event(&event));
                         }
                     }
                 }
@@ -1128,21 +1405,31 @@ async fn main() -> std::io::Result<()> {
                     std::thread::sleep(Duration::from_millis(200));
                     continue;
                 }
-                if last_stats_poll.elapsed() >= Duration::from_secs(1) {
-                    last_stats_poll = Instant::now();
-                    match cap.stats() {
-                        Ok(stat) => {
-                            *capture_stats.lock().unwrap() = Some(stat);
-                            if writer_active.load(Ordering::Relaxed) {
-                                let _ = writer_tx.try_send(WriterCommand::Stats { received: stat.received, dropped: stat.dropped });
+                if let PacketSource::Live(cap) = &mut packet_source {
+                    if last_stats_poll.elapsed() >= Duration::from_secs(1) {
+                        last_stats_poll = Instant::now();
+                        match cap.stats() {
+                            Ok(stat) => {
+                                *capture_stats.lock().unwrap() = Some(stat);
+                                if writer_active.load(Ordering::Relaxed) {
+                                    let _ = writer_tx.try_send(WriterCommand::Stats { received: stat.received, dropped: stat.dropped });
+                                }
                             }
+                            Err(e) => eprintln!("capture-agent: failed to read capture stats: {e}"),
                         }
-                        Err(e) => eprintln!("capture-agent: failed to read capture stats: {e}"),
                     }
                 }
-                match cap.next_packet() {
-                    Ok(packet) => {
-                        let Some(parsed) = parse::parse_packet(packet.data, link_type) else {
+                match packet_source.next_frame() {
+                    SourceFrame::Bytes { data, timestamp } => {
+                        if mode == "replay" {
+                            if let (ReplaySpeed::Realtime, Some(prev_ts)) = (replay_speed, previous_frame_timestamp) {
+                                if let Ok(delta) = timestamp.duration_since(prev_ts) {
+                                    std::thread::sleep(delta.min(Duration::from_secs(5)));
+                                }
+                            }
+                            previous_frame_timestamp = Some(timestamp);
+                        }
+                        let Some(parsed) = parse::parse_packet(&data, link_type) else {
                             unparseable_frames.fetch_add(1, Ordering::Relaxed);
                             continue;
                         };
@@ -1173,17 +1460,15 @@ async fn main() -> std::io::Result<()> {
                         // Capture-to-file (epic #55, JAM-132/GitHub #70):
                         // never on by default, and a cheap atomic check when
                         // it's off (the overwhelming majority of the time) —
-                        // only clones the raw frame and touches the writer's
-                        // channel when a capture is actually active. A full
-                        // queue means the writer thread can't keep up (e.g. a
-                        // slow disk); counted, never silently dropped, and
-                        // never blocks this hot path (`try_send`, not `send`).
+                        // only touches the writer's channel when a capture is
+                        // actually active. A full queue means the writer
+                        // thread can't keep up (e.g. a slow disk); counted,
+                        // never silently dropped, and never blocks this hot
+                        // path (`try_send`, not `send`). `data` is moved
+                        // (not cloned) here — nothing downstream needs the
+                        // raw frame bytes again after this point.
                         if writer_active.load(Ordering::Relaxed) {
-                            let cmd = WriterCommand::Packet {
-                                timestamp: std::time::SystemTime::now(),
-                                direction,
-                                data: packet.data.to_vec(),
-                            };
+                            let cmd = WriterCommand::Packet { timestamp, direction, data };
                             if writer_tx.try_send(cmd).is_err() {
                                 writer_backpressure_drops.fetch_add(1, Ordering::Relaxed);
                             }
@@ -1244,10 +1529,19 @@ async fn main() -> std::io::Result<()> {
                             packet: Box::new(packet_json),
                         }));
                     }
-                    Err(pcap::Error::TimeoutExpired) => continue,
-                    Err(e) => {
-                        eprintln!("capture-agent: capture error (skipping): {e}");
-                        continue;
+                    SourceFrame::Timeout => continue,
+                    SourceFrame::Eof => {
+                        // Replay fully consumed, or a live device errored
+                        // out for good (spec Components §2: both mean "no
+                        // more frames coming"). Ends this thread cleanly —
+                        // the rest of the agent (relay, control channel,
+                        // periodic emitter) keeps running on whatever state
+                        // it already has.
+                        println!(
+                            "capture-agent: {} finished — no more frames",
+                            if mode == "replay" { "replay" } else { "capture" }
+                        );
+                        break;
                     }
                 }
             }
@@ -1669,9 +1963,9 @@ async fn main() -> std::io::Result<()> {
 mod tests {
     use super::{
         build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
-        is_capturable, is_meaningful_override, resolve_link_type, validate_capture_file_path,
-        validate_capture_filter_len, validate_interface_name_len, validate_snaplen, MAX_CAPTURE_FILTER_LEN,
-        MAX_INTERFACE_NAME_LEN,
+        is_capturable, is_meaningful_override, looks_like_pcapng, parse_replay_local_addrs, parse_replay_speed,
+        resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
+        validate_snaplen, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::parse::LinkType;
     use std::path::Path;
@@ -1838,6 +2132,62 @@ mod tests {
         assert!(!is_meaningful_override("   "));
         assert!(is_meaningful_override("en0"));
         assert!(is_meaningful_override("  en0  "));
+    }
+
+    #[test]
+    fn parse_replay_local_addrs_splits_on_commas_and_trims_whitespace() {
+        let addrs = parse_replay_local_addrs(Some("192.168.1.10, 10.0.0.5,"));
+        assert_eq!(addrs, vec!["192.168.1.10".to_string(), "10.0.0.5".to_string()]);
+    }
+
+    #[test]
+    fn parse_replay_local_addrs_is_empty_when_absent() {
+        assert!(parse_replay_local_addrs(None).is_empty());
+    }
+
+    #[test]
+    fn parse_replay_local_addrs_is_empty_for_an_empty_string() {
+        assert!(parse_replay_local_addrs(Some("")).is_empty());
+    }
+
+    #[test]
+    fn looks_like_pcapng_recognizes_a_real_pcapng_files_magic_bytes() {
+        let path = std::env::temp_dir().join(format!("looks-like-pcapng-test-real-{}.pcapng", std::process::id()));
+        // The literal bytes a real Section Header Block starts with,
+        // regardless of the rest of the file — this test only needs the
+        // magic, not a fully valid file.
+        std::fs::write(&path, [0x0A, 0x0D, 0x0D, 0x0A, 0, 0, 0, 0]).unwrap();
+        assert!(looks_like_pcapng(path.to_str().unwrap()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn looks_like_pcapng_rejects_classic_pcap_magic() {
+        let path = std::env::temp_dir().join(format!("looks-like-pcapng-test-classic-{}.pcap", std::process::id()));
+        std::fs::write(&path, [0xD4, 0xC3, 0xB2, 0xA1, 0, 0, 0, 0]).unwrap();
+        assert!(!looks_like_pcapng(path.to_str().unwrap()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn looks_like_pcapng_is_false_for_a_nonexistent_path() {
+        assert!(!looks_like_pcapng("/nonexistent/path/that/does/not/exist.pcapng"));
+    }
+
+    #[test]
+    fn looks_like_pcapng_is_false_for_a_file_shorter_than_the_magic() {
+        let path = std::env::temp_dir().join(format!("looks-like-pcapng-test-short-{}.bin", std::process::id()));
+        std::fs::write(&path, [0x0A, 0x0D]).unwrap();
+        assert!(!looks_like_pcapng(path.to_str().unwrap()));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn parse_replay_speed_recognizes_realtime_and_defaults_to_fast() {
+        assert_eq!(parse_replay_speed(Some("realtime")), ReplaySpeed::Realtime);
+        assert_eq!(parse_replay_speed(Some("fast")), ReplaySpeed::Fast);
+        assert_eq!(parse_replay_speed(Some("bogus")), ReplaySpeed::Fast);
+        assert_eq!(parse_replay_speed(None), ReplaySpeed::Fast);
     }
 
     /// Proves the Lagged branch is reachable and recoverable: a slow
