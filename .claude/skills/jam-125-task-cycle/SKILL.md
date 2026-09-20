@@ -40,6 +40,26 @@ mirrored in the Notion pages below) or this repo's own `CLAUDE.md` and
   sub-project — read the relevant one before extending it, per
   `CONTRIBUTING.md`.
 
+## Task ordering (Tasks 7-14)
+
+The plan document's own per-task "Interfaces" sections make the dependency
+chain explicit — it matches the JAM-141…148 numeric order exactly, so there
+is no reason to resequence:
+
+- Task 8 "Consumes: Task 7's `local_addrs`."
+- Task 9 extends the same `AgentStatusJson` struct Task 8 introduces
+  (adds `mode`/`replay_source`).
+- Task 10 "Consumes: every wire change from Tasks 4 and 9."
+- Task 11 "Consumes: Task 10's `mapAgentStatusEvent`/`mapCaptureFileStatusEvent`."
+- Task 12 only hard-depends on Task 4 (already shipped), so it's technically
+  unblocked earlier, but it shares `app/page.tsx` with Task 11 — do it right
+  after.
+- Task 13 has no hard dependency on 7-12 (pure functions over
+  already-in-memory arrays) but there's no cost to leaving it here either.
+- Task 14 "Consumes: everything from Tasks 1-13" — always last.
+
+Work them **7 → 8 → 9 → 10 → 11 → 12 → 13 → 14**.
+
 ## Per-task cycle
 
 1. Fetch the Linear issue for the task; read its description for what it
@@ -63,6 +83,19 @@ mirrored in the Notion pages below) or this repo's own `CLAUDE.md` and
    ~30-60s (`cargo +nightly fuzz run <target> -- -max_total_time=40`)
    before shipping — this caught a real out-of-memory bug (an unbounded
    allocation from an untrusted length field) that unit tests alone missed.
+5a. Run the `security-review` skill on the diff before pushing if the task
+    touches anything security-sensitive: the replay path, direction/process
+    attribution, TLS decrypt gating, or anything under `deploy/`/
+    `macos-app/`. In this epic that specifically means Tasks 7-9 (replay
+    dispatch and direction attribution) — don't skip this just because
+    `cargo test`/clippy are clean; those don't check for the class of bug
+    this skill looks for.
+5b. If the task touches `app/page.tsx` or `components/` (UI), use the `run`
+    skill to launch the app and exercise the change in a real browser
+    before considering the task done. `CLAUDE.md`'s own testing rule is
+    explicit that type-checking and test suites verify code correctness,
+    not feature correctness — a passing `npm run lint`/Vitest run is not
+    evidence a UI change actually works. In this epic that's Tasks 11-13.
 6. Commit (with whatever attribution footer the current system reminder
    specifies — it's session-scoped, don't hardcode an old session's URL).
    Push with `git push -u origin <branch>`.
