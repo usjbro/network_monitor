@@ -118,7 +118,10 @@ Sent once per tick (~1 second), immediately after that tick's `layer_update`. Re
     "dropped": 0,
     "ifDropped": 0,
     "relayLaggedEvents": 0,
-    "unparseableFrames": 0
+    "unparseableFrames": 0,
+    "totalConnectionsObserved": 812,
+    "capacityEvictions": 0,
+    "idleEvictions": 47
   }
 }
 ```
@@ -129,7 +132,9 @@ Field notes:
 - `received`, `dropped`, `if_dropped` come straight from `pcap::Capture::stats()` (`ps_recv`/`ps_drop`/`ps_ifdrop`) — cumulative since the capture handle opened, not per-tick deltas. `dropped` is the kernel/driver's capture buffer filling up before the agent could read from it; `if_dropped` is the network interface driver dropping frames upstream of that buffer (`0` on platforms that don't report it separately). Both are `0` until the capture thread's first successful poll (roughly one second after the agent starts).
 - `relayLaggedEvents` is unrelated to the three fields above: it's this relay process's own outbound backlog — a cumulative count (since agent start, not per-tick) of discrete `packet`/`decrypted_payload` events silently dropped for an SSE client that fell behind the broadcast channel (see `RecvError::Lagged` in `main.rs`). A capture can have `dropped: 0` and still have a nonzero `relayLaggedEvents` if the browser tab itself is slow to consume events.
 - `unparseableFrames` is a fourth, independent signal: a cumulative count of frames the agent *did* receive from the capture handle but `parse::parse_packet` couldn't decode at all (an unsupported or malformed link-layer/network-layer shape — see issue #63 and `capture-agent/src/parse.rs`'s `LinkType`). Unlike `dropped`/`if_dropped`, these frames did reach this process; unlike `relayLaggedEvents`, this has nothing to do with the relay's outbound side.
-- All five counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
+- `totalConnectionsObserved` — the "N" half of an honest "showing N of M" horizon (JAM-6/GitHub #73): a cumulative count of every distinct flow this session's `FlowTable` has ever observed. A repeat packet on an already-tracked flow never inflates this, so it climbs only as genuinely new connections appear.
+- `capacityEvictions`/`idleEvictions` — two independent reasons a flow can leave the table. `capacityEvictions` counts flows dropped because the table exceeded its capacity ceiling (`MAX_FLOWS`) — a nonzero, growing value here means this session is losing still-active flows under memory pressure, a materially different health signal from ordinary churn. `idleEvictions` counts flows evicted for going idle past their status-appropriate threshold — normal connection turnover, not a capacity concern.
+- All eight counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
 
 Any connection's `packetLoss` (in `connection_update`) is derived purely from observed TCP retransmits — it has no way to know about packets the kernel or the relay itself lost before ever reaching that computation. A nonzero `dropped`/`ifDropped`/`relayLaggedEvents`/`unparseableFrames` here means `packetLoss` figures elsewhere in this same tick may under-report actual loss; the UI treats these two as independent signals (see `app/page.tsx`'s capture-degraded banner and `ConnectionsView`'s loss-column caveat) rather than trying to merge them into one number.
 
@@ -165,7 +170,27 @@ What this event does **not** carry, and why: the placeholder `SystemStats` shape
 
 ### `agent_status`
 
-Defined in the wire protocol (`interface: String, capturing: bool`) but **never actually sent** by the current agent — the relay synthesizes its own `connection_status` event from the TCP connection state instead (see below). This is dead wire protocol surface; a future task should either wire it up (so the UI can display which interface is active) or remove it.
+Sent once per tick (~1 second), alongside `capture_stats`/`system_stats`/`capture_config` — previously defined but never sent (the relay's `connection_status` event, below, is a separate, TCP-connection-derived signal and still exists independently). Revived by epic #55 (JAM-125) to carry the live/replay mode indicator file-replay needs.
+
+```json
+{
+  "type": "agent_status",
+  "interface": "lo",
+  "capturing": true,
+  "mode": "replay",
+  "replaySource": "/Users/me/captures/incident.pcapng",
+  "directionAttributionUnavailable": false
+}
+```
+
+Flat (no nested envelope), unlike `capture_stats`/`system_stats`/`capture_config` above. Maps to `AgentStatus` (`lib/types.ts`) via `mapAgentStatusEvent` (`lib/agent-mapping.ts`).
+
+Field notes:
+- `interface` — the same interface name reported by `system_stats.interfaceName`; repeated here so this event is self-contained.
+- `capturing` — `true` whenever the capture loop is actively processing frames; `false` while `pause`d. Distinct from `mode`: pausing doesn't change live vs. replay.
+- `mode` — `"live"` or `"replay"`, fixed for the life of the agent process (see `REPLAY_FILE` in [troubleshooting.md](troubleshooting.md#replaying-a-capture-file-instead-of-live-traffic)) — never changes mid-session; there is no runtime live↔replay switch.
+- `replaySource` — present only when `mode` is `"replay"`; the file path passed via `REPLAY_FILE`.
+- `directionAttributionUnavailable` — `true` for the whole session when replay had no derivable local-address information (`REPLAY_LOCAL_ADDRS` unset and the file's own Interface Description block carried no address option). Every connection in that session used a positional fallback (the packet's source treated as local by convention) rather than a real determination — see `capture-agent/src/flow.rs`'s `key_for`. Always `false` in live mode.
 
 ### `decrypted_payload`
 
@@ -247,6 +272,43 @@ Sent once, immediately, when a `set_capture_filter`/`set_snaplen` control messag
 ```
 
 The rejected change never takes effect — the previous, still-active `filter`/`snaplen` keeps running, and the *next* `capture_config` tick reports that unchanged previous state, not anything derived from the rejected request. The UI (`app/page.tsx`) treats this as a dismissible banner rather than auto-clearing it on the next `capture_config` tick, since that tick re-sending the same still-unchanged config isn't evidence the rejection was resolved.
+
+### `capture_file_status`
+
+Sent once per tick (~1 second), reporting whether the agent is currently writing captured traffic to a pcapng file on disk — capture-to-file (epic #55/JAM-132/GitHub #70), ring rotation (JAM-5/GitHub #72). Like `capture_config`, this is a persistent snapshot resent every tick, not triggered by the `start_capture_file`/`stop_capture_file` control messages (below) arriving.
+
+```json
+{
+  "type": "capture_file_status",
+  "status": {
+    "writing": true,
+    "path": "/Users/me/captures/incident-0002.pcapng",
+    "bytesWritten": 1048576,
+    "ringFile": 2,
+    "backpressureDrops": 0
+  }
+}
+```
+
+Note the nesting: fields sit under a `status` key, same shape as `capture_stats`'s `stats`/`traceroute_hop`'s `hop` — not flat on the event. `mapCaptureFileStatusEvent` (`lib/agent-mapping.ts`) owns this unwrap.
+
+Field notes:
+- `writing` — `true` while a capture-to-file run is active. `false` both before the first `start_capture_file` of the process's life and after a run stops (operator-requested or autostop) — the fields below keep reporting that run's last known values in the `false` case too (see next bullet), rather than resetting.
+- `path`/`bytesWritten` — the currently (or, if `writing` is `false`, most recently) active file's path and cumulative bytes written. Present starting with the first successful `start_capture_file`; absent (`path`) or `0` (`bytesWritten`) before that. Only reset by the *next* successful `start_capture_file`, so a client sees the run's actual end state rather than the fields just disappearing the moment it stops.
+- `ringFile` — present only while `ring` was configured on the active/most-recent `start_capture_file` request; a plain, non-rotating capture never has a ring file number at all. Counts up from `1` each time the writer rotates to a new file.
+- `ringTotal` — reserved for a future fixed-size ring (wraps after N files); every ring mode this agent implements today (`size`/`duration`/`count`) rotates indefinitely rather than wrapping, so this is always absent.
+- `autostopReason` — present only on the one tick a run just stopped itself: `"duration"`/`"totalSize"` (an autostop condition configured on `start_capture_file` fired) or `"lowDisk"` (the disk-space guard fired — free space on the target volume dropped below its floor, default 500MB). Absent while still actively writing, and absent again on an operator-requested `stop_capture_file` (that's not an *auto*-stop).
+- `backpressureDrops` — cumulative count of packets the writer's bounded internal queue couldn't accept because the writer thread was falling behind (e.g. a slow disk) — never silently dropped from the operator's view even though the frame itself is gone. Distinct from `capture_stats`'s `dropped`/`unparseableFrames` counters above, which are about the kernel and the parser respectively, not this writer.
+
+### `capture_file_error`
+
+Sent once, immediately, when a `start_capture_file` control message is rejected — an invalid or unsafe path, a ring/autostop configuration with an invalid mode or a zero threshold, a capture already active (the operator must `stop` first), or free space already below the disk-space-guard floor. Same flat, one-off shape as `capture_config_error`/`interface_error`.
+
+```json
+{"type": "capture_file_error", "message": "a capture is already active — stop it first"}
+```
+
+The rejected request never takes effect — if a capture was already running, it keeps running unchanged; if none was, none starts. The *next* `capture_file_status` tick reports that unchanged state, same "rejection doesn't imply a state change" posture as `capture_config_error`.
 
 ### `interface_list`
 
@@ -349,6 +411,22 @@ Sent by `app/api/control/route.ts` (same POST endpoint as `pause`/`resume`/`set_
 4. Only once all of the above succeeds does it replace the live capture handle, link type, local-address list, and `capture_config`/`system_stats`-reported identity — a failure at any step leaves every one of those exactly as it was.
 
 `CAPTURE_INTERFACE` still wins at startup and is unaffected by any of this — it's read once, before the TCP listener even binds; `set_interface` only ever changes the *runtime* selection made after that.
+
+### `start_capture_file` / `stop_capture_file`
+
+```json
+{"type": "start_capture_file", "path": "/Users/me/captures/incident.pcapng"}
+{"type": "start_capture_file", "path": "/Users/me/captures/incident.pcapng", "ring": {"mode": "size", "threshold": 104857600}, "autostop": {"mode": "duration", "threshold": 3600}}
+{"type": "stop_capture_file"}
+```
+
+Sent by `app/api/control/route.ts` (same POST endpoint as `pause`/`resume`/`set_capture_filter`), called by the command bar's `capture <path> [ring <mode> <n>] [autostop <mode> <n>]` / `capture stop` commands — capture-to-file (epic #55/JAM-132/GitHub #70, ring rotation JAM-5/GitHub #72).
+
+`ring`/`autostop` are both optional and independent of each other — a `start_capture_file` with neither writes one plain, non-rotating file until stopped. `ring.mode` is one of `"size"` (rotate after `threshold` bytes), `"duration"` (rotate after `threshold` seconds), or `"count"` (rotate after `threshold` packets); `autostop.mode` is one of `"duration"` (stop after `threshold` seconds) or `"totalSize"` (stop after `threshold` bytes written across every file in the run, not just the current one) — there is no `"lowDisk"` autostop mode to request; the disk-space guard below is a separate, always-active mechanism, not something `autostop` configures. An invalid mode string or a zero `threshold` on either `ring` or `autostop` is rejected via `capture_file_error` — same validation posture as `set_capture_filter`'s BPF expression checks.
+
+Queued from the async connection-handling task into the dedicated writer thread (the only place the open `pcapng::Writer`/`ring::RingState` lives) via an in-process channel, the same pattern `set_capture_filter`/`set_snaplen`/`set_interface` use for the capture thread. Rejected via `capture_file_error` rather than silently switching files out from under an in-flight write or writing somewhere unsafe: `start_capture_file` while one is already active; an empty path; a path containing a `.data/` component; or a path that resolves *inside* the agent's own working directory (`validate_capture_file_path` in `capture-agent/src/main.rs` — capture files must be written somewhere outside the agent's own project checkout, not inside it). `stop_capture_file` with no capture active is a no-op, reported success — same idempotent tolerance `pause`/`resume` already have for a redundant call.
+
+Refuses to begin at all if free space on the target volume is already below a fixed 500MB floor (`DEFAULT_LOW_DISK_FLOOR_BYTES` in `capture-agent/src/ring.rs` — not operator-configurable; `start_capture_file`'s wire shape has no field for it); while running, the writer thread checks free space each rotation tick and stops cleanly (same clean-stop path as autostop, reported via `capture_file_status`'s `autostopReason: "lowDisk"`) rather than running the volume to zero.
 
 ## Adding a new field or event type
 

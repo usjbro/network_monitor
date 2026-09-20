@@ -34,6 +34,22 @@ Use the `route -n get default` output from *before* your VPN connected to find y
 
 **You don't have to restart the agent to try a different interface.** `CAPTURE_INTERFACE` still wins at startup and needs a restart to change — it's the right tool for "always start on this interface." But for a quick "let me just try another one" without killing the process, use the header's interface picker (or `iface list` / `iface <name>` in the command bar) — issue #69. Switching takes effect within about a second, no restart needed, though it does reset the active `filter`/`snaplen` to their defaults and clears tracked connections (every existing flow belonged to the interface that just stopped being captured). Same validation as `CAPTURE_INTERFACE`: an addressless interface, or one this agent can't parse the link type of, is rejected with a clear error rather than silently accepted.
 
+## Replaying a capture file instead of live traffic
+
+Set `REPLAY_FILE` to a path before starting the agent to replay a previously-captured file (this agent's own pcapng output, another tool's pcapng, or classic pcap/`tcpdump`) through the exact same pipeline live traffic uses — same wire events, same UI, no special cases. `REPLAY_FILE` is mutually exclusive with `CAPTURE_INTERFACE`: setting both is a startup error naming both conflicting values, the same fail-loud posture `CAPTURE_INTERFACE` alone already has for a bad value.
+
+```bash
+REPLAY_FILE=/Users/me/captures/incident.pcapng cargo run --release
+```
+
+This is a startup-only choice — there is no control message or command-bar verb that switches a running agent between live and replay, or restarts a replay from the beginning; restart the process to replay a different file or go back to live capture. The agent tries its own pcapng reader first (richer metadata: the real interface name/link type the file was originally captured on, not this machine's), falling back to classic pcap via libpcap only for files that don't look pcapng-shaped at all — a file that looks like pcapng but fails to parse is refused outright rather than being handed to a second, less-audited parser. `REPLAY_FILE` set to a path that's neither valid pcapng nor classic pcap fails loudly at startup, naming the file and the parse failure.
+
+**`REPLAY_LOCAL_ADDRS`** (optional, comma-separated) names the addresses that were *local* in that capture — e.g. `REPLAY_LOCAL_ADDRS=10.0.0.5,10.0.0.6`. Without it, `FlowTable` can't reliably tell which side of a replayed packet was "this machine" (this machine's own interface addresses are meaningless for someone else's capture), so every connection falls back to a fixed positional convention (the packet's source treated as local) rather than a real determination — flagged once per session via the `agent_status` wire event's `directionAttributionUnavailable: true` (see `docs/wire-protocol.md`), not silently per-connection.
+
+**`REPLAY_SPEED`** (optional, `fast` or `realtime`, default `fast`) controls playback pacing: `fast` reads and emits every frame back-to-back as quickly as the pipeline can process them (best for "reproduce this bug quickly" or an automated test); `realtime` sleeps between frames to reproduce the file's own inter-packet timing, capped at 5 seconds between any two frames so a capture with a multi-hour gap in it doesn't stall replay for that long (best for "watch it happen again" review). `pause`/`resume` work unchanged in either mode.
+
+Process-attribution (`processName`/`pid` on each connection) is never populated during replay — the processes that owned those flows may never have run on this machine at all, or have long since exited if it's an old capture of this same machine, so every connection reports `"unknown"`/`0` rather than risking mis-attribution to whatever unrelated process happens to hold a matching local port on this machine today.
+
 ## Capturing on `lo0` (loopback), or the agent panics with "uses link type ... which this agent doesn't know how to parse"
 
 Loopback (`lo0`) and raw-IP interfaces don't use Ethernet framing, so the agent reads the capture handle's actual link type at startup (`pcap::Capture::get_datalink()`) rather than assuming Ethernet. It understands three shapes: Ethernet II (`DLT_EN10MB`), BSD loopback (`DLT_NULL`/`DLT_LOOP`), and raw IP (`DLT_RAW`) — see `capture-agent/src/parse.rs`'s `LinkType` and issue #63. Loopback and raw-IP frames have no real MAC addresses; the agent reports `00:00:00:00:00:00` for both rather than fabricating or omitting them.

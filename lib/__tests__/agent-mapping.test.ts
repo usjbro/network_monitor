@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  mapAgentStatusEvent,
   mapCaptureConfigErrorEvent,
   mapCaptureConfigEvent,
+  mapCaptureFileStatusEvent,
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
@@ -278,27 +280,156 @@ describe('mapCaptureStatsEvent', () => {
   it('maps capture stats with nonzero drops and lag', () => {
     const event = {
       type: 'capture_stats',
-      stats: { received: 5000, dropped: 12, ifDropped: 3, relayLaggedEvents: 7, unparseableFrames: 2 },
+      stats: {
+        received: 5000,
+        dropped: 12,
+        ifDropped: 3,
+        relayLaggedEvents: 7,
+        unparseableFrames: 2,
+        totalConnectionsObserved: 42,
+        capacityEvictions: 3,
+        idleEvictions: 7,
+      },
     };
     const stats = mapCaptureStatsEvent(event);
-    expect(stats).toEqual({ received: 5000, dropped: 12, ifDropped: 3, relayLaggedEvents: 7, unparseableFrames: 2 });
+    expect(stats).toEqual({
+      received: 5000,
+      dropped: 12,
+      ifDropped: 3,
+      relayLaggedEvents: 7,
+      unparseableFrames: 2,
+      totalConnectionsObserved: 42,
+      capacityEvictions: 3,
+      idleEvictions: 7,
+    });
   });
 
   it('maps healthy zero-drop stats', () => {
     const event = {
       type: 'capture_stats',
-      stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0 },
+      stats: {
+        received: 5000,
+        dropped: 0,
+        ifDropped: 0,
+        relayLaggedEvents: 0,
+        unparseableFrames: 0,
+        totalConnectionsObserved: 5000,
+        capacityEvictions: 0,
+        idleEvictions: 0,
+      },
     };
     const stats = mapCaptureStatsEvent(event);
     expect(stats.dropped).toBe(0);
     expect(stats.ifDropped).toBe(0);
     expect(stats.relayLaggedEvents).toBe(0);
     expect(stats.unparseableFrames).toBe(0);
+    expect(stats.capacityEvictions).toBe(0);
+    expect(stats.idleEvictions).toBe(0);
   });
 
   it('throws on an event with no "stats" field at all', () => {
     const event = { type: 'capture_stats', received: 5000 };
     expect(() => mapCaptureStatsEvent(event)).toThrow('missing "stats" field');
+  });
+
+  it('carries the three horizon/eviction counters (JAM-6/GitHub #73)', () => {
+    const event = {
+      type: 'capture_stats',
+      stats: {
+        received: 100,
+        dropped: 0,
+        ifDropped: 0,
+        relayLaggedEvents: 0,
+        unparseableFrames: 0,
+        totalConnectionsObserved: 42,
+        capacityEvictions: 3,
+        idleEvictions: 7,
+      },
+    };
+    const mapped = mapCaptureStatsEvent(event);
+    expect(mapped.totalConnectionsObserved).toBe(42);
+    expect(mapped.capacityEvictions).toBe(3);
+    expect(mapped.idleEvictions).toBe(7);
+  });
+
+  it('throws when a horizon/eviction counter is missing, same as any other required field', () => {
+    const event = {
+      type: 'capture_stats',
+      stats: { received: 100, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0, totalConnectionsObserved: 42 },
+    };
+    expect(() => mapCaptureStatsEvent(event)).toThrow('missing required field "capacityEvictions"');
+  });
+});
+
+describe('mapAgentStatusEvent', () => {
+  // Flat (no nested envelope), revived by epic #55 — see docs/wire-protocol.md.
+  it('maps a live-mode status with directionAttributionUnavailable false', () => {
+    const event = { type: 'agent_status', interface: 'en0', capturing: true, mode: 'live', directionAttributionUnavailable: false };
+    expect(mapAgentStatusEvent(event)).toEqual({
+      interface: 'en0',
+      capturing: true,
+      mode: 'live',
+      replaySource: undefined,
+      directionAttributionUnavailable: false,
+    });
+  });
+
+  it('maps a replay-mode status including replaySource', () => {
+    const event = {
+      type: 'agent_status',
+      interface: 'unknown (replayed pcapng, no if_name recorded)',
+      capturing: true,
+      mode: 'replay',
+      replaySource: '/tmp/x.pcapng',
+      directionAttributionUnavailable: true,
+    };
+    const mapped = mapAgentStatusEvent(event);
+    expect(mapped.mode).toBe('replay');
+    expect(mapped.replaySource).toBe('/tmp/x.pcapng');
+    expect(mapped.directionAttributionUnavailable).toBe(true);
+  });
+
+  it('throws on a malformed event rather than silently producing garbage', () => {
+    expect(() => mapAgentStatusEvent({ type: 'agent_status', interface: 'en0' })).toThrow();
+  });
+});
+
+describe('mapCaptureFileStatusEvent', () => {
+  // Nested envelope under a "status" key, same shape as capture_stats/
+  // system_stats — see epic #55 and docs/wire-protocol.md.
+  it('maps an active-writing status including a ring file number', () => {
+    const event = {
+      type: 'capture_file_status',
+      status: { writing: true, path: '/tmp/capture-0001.pcapng', bytesWritten: 4096, ringFile: 1, backpressureDrops: 0 },
+    };
+    const mapped = mapCaptureFileStatusEvent(event);
+    expect(mapped.writing).toBe(true);
+    expect(mapped.path).toBe('/tmp/capture-0001.pcapng');
+    expect(mapped.bytesWritten).toBe(4096);
+    expect(mapped.ringFile).toBe(1);
+    expect(mapped.ringTotal).toBeUndefined();
+    expect(mapped.autostopReason).toBeUndefined();
+  });
+
+  it('maps a stopped, never-started status with no path/ring fields', () => {
+    const event = { type: 'capture_file_status', status: { writing: false, bytesWritten: 0, backpressureDrops: 0 } };
+    const mapped = mapCaptureFileStatusEvent(event);
+    expect(mapped.writing).toBe(false);
+    expect(mapped.path).toBeUndefined();
+    expect(mapped.bytesWritten).toBe(0);
+  });
+
+  it('carries an autostopReason on the one tick a run just stopped itself', () => {
+    const event = {
+      type: 'capture_file_status',
+      status: { writing: false, path: '/tmp/capture-0003.pcapng', bytesWritten: 900000, ringFile: 3, autostopReason: 'totalSize', backpressureDrops: 0 },
+    };
+    const mapped = mapCaptureFileStatusEvent(event);
+    expect(mapped.autostopReason).toBe('totalSize');
+  });
+
+  it('throws on a missing status field, matching every other envelope mapper', () => {
+    expect(() => mapCaptureFileStatusEvent({ type: 'capture_file_status' })).toThrow('missing "status" field');
   });
 });
 
