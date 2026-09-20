@@ -126,13 +126,61 @@ export interface TracerouteHop {
 // the agent did receive but couldn't decode at all (e.g. an unsupported
 // link-layer shape — see issue #63). All three are independent of, and a
 // precondition for trusting, any connection's retransmit-derived
-// `packetLoss` figure — see issue #61.
+// `packetLoss` figure — see issue #61. `totalConnectionsObserved`/
+// `capacityEvictions`/`idleEvictions` are the "showing N of M" horizon
+// counters (JAM-6/GitHub #73): `totalConnectionsObserved` is the "N" half
+// (every distinct flow this session has ever seen, never inflated by a
+// repeat packet on an already-tracked flow); `capacityEvictions` (flows
+// dropped for exceeding the table's capacity ceiling, not for going idle)
+// and `idleEvictions` (ordinary connection turnover) are two independent
+// health signals a nonzero-and-growing `capacityEvictions` distinguishes
+// from normal churn.
 export interface CaptureStats {
   received: number;
   dropped: number;
   ifDropped: number;
   relayLaggedEvents: number;
   unparseableFrames: number;
+  totalConnectionsObserved: number;
+  capacityEvictions: number;
+  idleEvictions: number;
+}
+
+// Whether this agent process is capturing live traffic or replaying a
+// previously-captured file — fixed for the life of the process (spec:
+// live/replay is a startup-only choice, never runtime-switchable).
+export type AgentMode = 'live' | 'replay';
+
+// From the agent's `agent_status` wire event (docs/wire-protocol.md), sent
+// once per tick alongside capture_stats/system_stats — revived by epic #55
+// (JAM-125) to carry the live/replay mode indicator file-replay needs;
+// previously defined but never sent. Consumers hold this as
+// `AgentStatus | null`, matching `SystemStats`/`CaptureConfig`'s own
+// "null until the first tick" discipline.
+export interface AgentStatus {
+  interface: string;
+  capturing: boolean;
+  mode: AgentMode;
+  replaySource?: string;
+  directionAttributionUnavailable: boolean;
+}
+
+// From the agent's `capture_file_status` wire event (docs/wire-protocol.md)
+// — capture-to-file (epic #55/JAM-132/GitHub #70, ring rotation JAM-5/
+// GitHub #72). Sent once per tick; `path`/`bytesWritten` keep reporting the
+// last-active file's values even after `writing` goes back to `false`, so
+// a client sees the run's actual end state rather than the fields just
+// disappearing. `ringFile`/`ringTotal`/`autostopReason` are only present
+// while a ring-mode capture is active/finished respectively — see the
+// wire doc's field notes for exactly when each is absent vs. present.
+export interface CaptureFileStatus {
+  writing: boolean;
+  path?: string;
+  bytesWritten: number;
+  ringFile?: number;
+  ringTotal?: number;
+  autostopReason?: string;
+  backpressureDrops: number;
 }
 
 export type TerminalTheme = 'sophisticated' | 'macos_pro' | 'macos_homebrew' | 'iterm_snazzy' | 'matrix' | 'dracula' | 'amber' | 'cyberpunk' | 'catppuccin' | 'nord';

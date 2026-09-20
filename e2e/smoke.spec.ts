@@ -75,7 +75,16 @@ test('real browser sees live agent data flow through the whole relay pipeline', 
   await expect(page.getByText(/capture degraded/i)).toHaveCount(0);
   agent.send({
     type: 'capture_stats',
-    stats: { received: 100, dropped: 7, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0 },
+    stats: {
+      received: 100,
+      dropped: 7,
+      ifDropped: 0,
+      relayLaggedEvents: 0,
+      unparseableFrames: 0,
+      totalConnectionsObserved: 1,
+      capacityEvictions: 0,
+      idleEvictions: 0,
+    },
   });
   await expect(page.getByText(/capture degraded/i)).toBeVisible({ timeout: 10_000 });
 

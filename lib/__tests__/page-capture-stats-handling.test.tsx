@@ -70,7 +70,16 @@ describe('TerminalApp capture_stats stream handling', () => {
       source.onmessage!({
         data: JSON.stringify({
           type: 'capture_stats',
-          stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0 },
+          stats: {
+            received: 5000,
+            dropped: 0,
+            ifDropped: 0,
+            relayLaggedEvents: 0,
+            unparseableFrames: 0,
+            totalConnectionsObserved: 12,
+            capacityEvictions: 0,
+            idleEvictions: 2,
+          },
         }),
       } as MessageEvent);
     });
@@ -88,7 +97,16 @@ describe('TerminalApp capture_stats stream handling', () => {
       source.onmessage!({
         data: JSON.stringify({
           type: 'capture_stats',
-          stats: { received: 5000, dropped: 12, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0 },
+          stats: {
+            received: 5000,
+            dropped: 12,
+            ifDropped: 0,
+            relayLaggedEvents: 0,
+            unparseableFrames: 0,
+            totalConnectionsObserved: 12,
+            capacityEvictions: 0,
+            idleEvictions: 2,
+          },
         }),
       } as MessageEvent);
     });
@@ -110,7 +128,16 @@ describe('TerminalApp capture_stats stream handling', () => {
       source.onmessage!({
         data: JSON.stringify({
           type: 'capture_stats',
-          stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 9, unparseableFrames: 0 },
+          stats: {
+            received: 5000,
+            dropped: 0,
+            ifDropped: 0,
+            relayLaggedEvents: 9,
+            unparseableFrames: 0,
+            totalConnectionsObserved: 12,
+            capacityEvictions: 0,
+            idleEvictions: 2,
+          },
         }),
       } as MessageEvent);
     });
@@ -125,7 +152,16 @@ describe('TerminalApp capture_stats stream handling', () => {
       source.onmessage!({
         data: JSON.stringify({
           type: 'capture_stats',
-          stats: { received: 5000, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 6 },
+          stats: {
+            received: 5000,
+            dropped: 0,
+            ifDropped: 0,
+            relayLaggedEvents: 0,
+            unparseableFrames: 6,
+            totalConnectionsObserved: 12,
+            capacityEvictions: 0,
+            idleEvictions: 2,
+          },
         }),
       } as MessageEvent);
     });

@@ -1,4 +1,4 @@
-import { CaptureConfig, CaptureStats, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -78,6 +78,45 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     ifDropped: requireField(w, 'ifDropped'),
     relayLaggedEvents: requireField(w, 'relayLaggedEvents'),
     unparseableFrames: requireField(w, 'unparseableFrames'),
+    totalConnectionsObserved: requireField(w, 'totalConnectionsObserved'),
+    capacityEvictions: requireField(w, 'capacityEvictions'),
+    idleEvictions: requireField(w, 'idleEvictions'),
+  };
+}
+
+// agent_status is flat (no nested envelope) — see issue #55/JAM-133 and
+// docs/wire-protocol.md. `replaySource` is genuinely optional (absent in
+// live mode); every other field is required for every mode.
+export function mapAgentStatusEvent(json: unknown): AgentStatus {
+  const w = json as Record<string, unknown>;
+  return {
+    interface: requireField(w, 'interface'),
+    capturing: requireField(w, 'capturing'),
+    mode: requireField(w, 'mode'),
+    replaySource: w.replaySource as string | undefined,
+    directionAttributionUnavailable: requireField(w, 'directionAttributionUnavailable'),
+  };
+}
+
+// Same nested-envelope shape as mapCaptureStatsEvent/mapSystemStatsEvent
+// above, under a `status` key — see epic #55 (JAM-132/GitHub #70) and
+// docs/wire-protocol.md. `path`/`ringFile`/`ringTotal`/`autostopReason`
+// are all genuinely optional — see the wire doc's field notes for when
+// each is present vs. absent.
+export function mapCaptureFileStatusEvent(json: unknown): CaptureFileStatus {
+  const envelope = json as { status?: Record<string, unknown> };
+  const w = envelope.status;
+  if (!w) {
+    throw new Error('malformed capture_file_status event: missing "status" field');
+  }
+  return {
+    writing: requireField(w, 'writing'),
+    path: w.path as string | undefined,
+    bytesWritten: requireField(w, 'bytesWritten'),
+    ringFile: w.ringFile as number | undefined,
+    ringTotal: w.ringTotal as number | undefined,
+    autostopReason: w.autostopReason as string | undefined,
+    backpressureDrops: requireField(w, 'backpressureDrops'),
   };
 }
 
