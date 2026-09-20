@@ -5,7 +5,7 @@
 //! docs/superpowers/specs/2026-09-19-capture-files-design.md Components §1
 //! for why this is hand-rolled rather than a new crate dependency.
 use std::fs::{File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt; // mode() — Unix-only, matching this repo's existing macOS/Linux-only posture
 use std::path::Path;
 use std::time::SystemTime;
@@ -272,6 +272,226 @@ impl Writer {
     }
 }
 
+/// pcapng LINKTYPE_* values this agent can read back — the exact reverse of
+/// `pcapng_linktype` above, and deliberately no more permissive: a file
+/// this agent didn't write itself, or one from a corrupted write, might
+/// carry a linktype it has no `parse::LinkType` for, and silently guessing
+/// one would misparse every packet in it.
+fn linktype_from_pcapng(value: u16) -> Option<crate::parse::LinkType> {
+    match value {
+        1 => Some(crate::parse::LinkType::Ethernet),
+        0 => Some(crate::parse::LinkType::NullLoopback),
+        101 => Some(crate::parse::LinkType::Raw),
+        _ => None,
+    }
+}
+
+/// Reads exactly `buf.len()` bytes, distinguishing a clean end-of-stream
+/// (zero bytes read before anything else) from a truncated read (some
+/// bytes read, then the stream ends mid-header) — `read_block` needs this
+/// distinction to know whether it's at a legitimate end of file or reading
+/// a corrupted one.
+fn read_exact_or_eof(r: &mut impl Read, buf: &mut [u8]) -> io::Result<bool> {
+    let mut total = 0;
+    while total < buf.len() {
+        match r.read(&mut buf[total..])? {
+            0 if total == 0 => return Ok(false),
+            0 => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated pcapng block header")),
+            n => total += n,
+        }
+    }
+    Ok(true)
+}
+
+/// Blocks larger than this are rejected outright rather than allocated. A
+/// truncated or hostile stream can claim any length up to `u32::MAX` in
+/// its 4-byte length field, and this reader must never let that untrusted
+/// value drive an unbounded allocation before the length is even known to
+/// be real (found by the `pcapng_reader` fuzz target as an out-of-memory
+/// crash). 16 MiB is far larger than any block this agent's own `Writer`
+/// ever produces — every packet it captures is bounded by an at-most-65535
+/// byte snaplen — so this only ever rejects corrupt or hostile input,
+/// never a legitimate one.
+const MAX_BLOCK_LEN: u32 = 16 * 1024 * 1024;
+
+/// Reads one block's type and body, validating that its trailing length
+/// matches its leading length (the same invariant `write_block` guarantees
+/// on write) and that the declared length is within
+/// `[12, MAX_BLOCK_LEN]` and a multiple of 4. Returns `Ok(None)` only at a
+/// clean end of stream, between blocks.
+fn read_block(r: &mut impl Read) -> io::Result<Option<(u32, Vec<u8>)>> {
+    let mut header = [0u8; 8];
+    if !read_exact_or_eof(r, &mut header)? {
+        return Ok(None);
+    }
+    let block_type = u32::from_le_bytes(header[0..4].try_into().unwrap());
+    let total_len = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    if !(12..=MAX_BLOCK_LEN).contains(&total_len) || total_len % 4 != 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("invalid pcapng block length {total_len}")));
+    }
+
+    let body_len = (total_len - 12) as usize;
+    let mut body = vec![0u8; body_len];
+    r.read_exact(&mut body)?;
+
+    let mut trailer = [0u8; 4];
+    r.read_exact(&mut trailer)?;
+    let trailing_len = u32::from_le_bytes(trailer);
+    if trailing_len != total_len {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "pcapng block length prefix/suffix mismatch"));
+    }
+
+    Ok(Some((block_type, body)))
+}
+
+/// Walks a block body's option TLVs, calling `on_option` for each one up to
+/// (not including) the end-of-options marker. `body` must already be
+/// positioned right after a block's fixed-width fields.
+fn for_each_option(mut body: &[u8], mut on_option: impl FnMut(u16, &[u8])) -> io::Result<()> {
+    while body.len() >= 4 {
+        let code = u16::from_le_bytes(body[0..2].try_into().unwrap());
+        let len = u16::from_le_bytes(body[2..4].try_into().unwrap()) as usize;
+        if code == OPT_END_OF_OPT {
+            return Ok(());
+        }
+        let padded = pad4(len);
+        if body.len() < 4 + padded {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated pcapng option"));
+        }
+        on_option(code, &body[4..4 + len]);
+        body = &body[4 + padded..];
+    }
+    Ok(())
+}
+
+/// An Interface Description Block, decoded back from a file — the reader's
+/// counterpart to `InterfaceDescriptionBlock` above. `interface_name` is
+/// `None` only if a file lacks an `if_name` option, which this agent's own
+/// `Writer` never produces; a reader for a foreign pcapng file would need
+/// to tolerate that, so it's modeled as optional rather than assumed.
+#[derive(Debug, Clone)]
+pub struct ParsedInterface {
+    pub interface_name: Option<String>,
+    pub link_type: crate::parse::LinkType,
+    pub snaplen: u32,
+}
+
+fn parse_interface_description(body: &[u8]) -> io::Result<ParsedInterface> {
+    if body.len() < 8 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated interface description block"));
+    }
+    let linktype_raw = u16::from_le_bytes(body[0..2].try_into().unwrap());
+    let snaplen = u32::from_le_bytes(body[4..8].try_into().unwrap());
+    let link_type = linktype_from_pcapng(linktype_raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsupported pcapng linktype {linktype_raw}")))?;
+
+    let mut interface_name = None;
+    for_each_option(&body[8..], |code, value| {
+        if code == IF_NAME {
+            interface_name = Some(String::from_utf8_lossy(value).into_owned());
+        }
+    })?;
+
+    Ok(ParsedInterface { interface_name, link_type, snaplen })
+}
+
+/// A captured frame, decoded back from an Enhanced Packet Block —
+/// `direction` reads back the same `epb_flags` option `Writer` always
+/// writes; a foreign pcapng file lacking that option decodes as
+/// `Direction::Unknown`, matching the flags value (`00`) the spec assigns
+/// to "not available".
+#[derive(Debug, Clone)]
+pub struct ParsedPacket {
+    pub timestamp: SystemTime,
+    pub direction: Direction,
+    pub data: Vec<u8>,
+}
+
+fn parse_enhanced_packet(body: &[u8]) -> io::Result<ParsedPacket> {
+    if body.len() < 20 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated enhanced packet block"));
+    }
+    let ts_high = u32::from_le_bytes(body[4..8].try_into().unwrap());
+    let ts_low = u32::from_le_bytes(body[8..12].try_into().unwrap());
+    let cap_len = u32::from_le_bytes(body[12..16].try_into().unwrap()) as usize;
+    let padded_len = pad4(cap_len);
+    if body.len() < 20 + padded_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "enhanced packet block shorter than its declared capture length",
+        ));
+    }
+    let data = body[20..20 + cap_len].to_vec();
+
+    let ts_ns = ((ts_high as u64) << 32) | ts_low as u64;
+    let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(ts_ns);
+
+    let mut direction = Direction::Unknown;
+    for_each_option(&body[20 + padded_len..], |code, value| {
+        if code == EPB_FLAGS && value.len() == 4 {
+            let flags = u32::from_le_bytes(value.try_into().unwrap());
+            direction = match flags & 0b11 {
+                0b01 => Direction::Inbound,
+                0b10 => Direction::Outbound,
+                _ => Direction::Unknown,
+            };
+        }
+    })?;
+
+    Ok(ParsedPacket { timestamp, direction, data })
+}
+
+/// Reads back a pcapng file/stream written by `Writer` above. Deliberately
+/// narrow to match the writer: understands exactly the four block types
+/// `Writer` produces, skips Interface Statistics blocks transparently (the
+/// caller — file replay, a later task — has no use for periodic
+/// receive/drop counters describing the *original* capture host), and
+/// errors on any other block type rather than silently skipping it, since
+/// an unrecognized block in a file this agent wrote itself would mean data
+/// corruption, not a legitimate extension.
+pub struct Reader<R: Read> {
+    inner: R,
+}
+
+impl<R: Read> Reader<R> {
+    /// Consumes the Section Header and Interface Description blocks and
+    /// returns the parsed interface metadata alongside a `Reader`
+    /// positioned to read packets.
+    pub fn new(mut inner: R) -> io::Result<(Self, ParsedInterface)> {
+        let (block_type, _body) =
+            read_block(&mut inner)?.ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "empty pcapng stream"))?;
+        if block_type != BT_SECTION_HEADER {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a pcapng Section Header Block first"));
+        }
+
+        let (block_type, body) = read_block(&mut inner)?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "pcapng stream ended before an Interface Description Block")
+        })?;
+        if block_type != BT_INTERFACE_DESCRIPTION {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a pcapng Interface Description Block second"));
+        }
+        let interface = parse_interface_description(&body)?;
+
+        Ok((Self { inner }, interface))
+    }
+
+    /// Returns the next captured packet, transparently skipping any
+    /// Interface Statistics blocks in between, or `Ok(None)` at a clean end
+    /// of stream.
+    pub fn next_packet(&mut self) -> io::Result<Option<ParsedPacket>> {
+        loop {
+            match read_block(&mut self.inner)? {
+                None => return Ok(None),
+                Some((BT_ENHANCED_PACKET, body)) => return Ok(Some(parse_enhanced_packet(&body)?)),
+                Some((BT_INTERFACE_STATISTICS, _)) => continue,
+                Some((other, _)) => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected pcapng block type {other:#x}")));
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +664,145 @@ mod writer_tests {
         assert_eq!(buf.len(), total_len as usize);
         let suffix = u32::from_le_bytes(buf[buf.len() - 4..].try_into().unwrap());
         assert_eq!(suffix, total_len);
+    }
+}
+
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn test_idb() -> InterfaceDescriptionBlock {
+        InterfaceDescriptionBlock {
+            interface_name: "en0".into(),
+            link_type: crate::parse::LinkType::Ethernet,
+            snaplen: 65535,
+            timestamp_resolution_exponent: 9,
+        }
+    }
+
+    #[test]
+    fn linktype_from_pcapng_inverts_pcapng_linktype_for_every_supported_link_type() {
+        for link_type in [
+            crate::parse::LinkType::Ethernet,
+            crate::parse::LinkType::NullLoopback,
+            crate::parse::LinkType::Raw,
+        ] {
+            let encoded = pcapng_linktype(link_type);
+            assert_eq!(linktype_from_pcapng(encoded), Some(link_type));
+        }
+    }
+
+    #[test]
+    fn linktype_from_pcapng_rejects_an_unrecognized_value() {
+        assert_eq!(linktype_from_pcapng(0xFFFF), None);
+    }
+
+    #[test]
+    fn read_block_returns_none_at_a_clean_end_of_stream() {
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        assert!(read_block(&mut cursor).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_block_errors_on_a_header_truncated_mid_read() {
+        let mut buf = Vec::new();
+        write_interface_statistics_block(&mut buf, SystemTime::now(), 1, 2).unwrap();
+        buf.truncate(buf.len() - 2); // chop off part of the trailing length
+        let mut cursor = Cursor::new(buf);
+        assert!(read_block(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn read_block_rejects_an_implausibly_large_declared_length_without_allocating_it() {
+        // Regression for a real out-of-memory crash the pcapng_reader fuzz
+        // target found: a bogus length field must be rejected before it
+        // ever drives an allocation, not after failing to read that many
+        // bytes.
+        let header: [u8; 8] = [10, 0, 0, 0, 0, 6, 0, 196]; // declares a ~3.2 GiB block
+        let mut cursor = Cursor::new(header.to_vec());
+        assert!(read_block(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn read_block_rejects_a_mismatched_length_prefix_and_suffix() {
+        let mut buf = Vec::new();
+        write_interface_statistics_block(&mut buf, SystemTime::now(), 1, 2).unwrap();
+        let last = buf.len() - 1;
+        buf[last] ^= 0xFF; // corrupt one byte of the trailing length
+        let mut cursor = Cursor::new(buf);
+        assert!(read_block(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn for_each_option_visits_every_option_up_to_end_of_opt() {
+        let mut body = Vec::new();
+        write_option(&mut body, 11, b"hello").unwrap();
+        write_option(&mut body, 22, b"hi").unwrap();
+        write_end_of_opt(&mut body).unwrap();
+
+        let mut seen = Vec::new();
+        for_each_option(&body, |code, value| seen.push((code, value.to_vec()))).unwrap();
+        assert_eq!(seen, vec![(11, b"hello".to_vec()), (22, b"hi".to_vec())]);
+    }
+
+    #[test]
+    fn reader_recovers_the_written_interface_metadata() {
+        let mut buf = Vec::new();
+        SectionHeaderBlock {
+            hostname: "test-host".into(),
+            agent_version: "0.1.0".into(),
+        }
+        .write_to(&mut buf)
+        .unwrap();
+        test_idb().write_to(&mut buf).unwrap();
+
+        let (_reader, interface) = Reader::new(Cursor::new(buf)).unwrap();
+        assert_eq!(interface.interface_name.as_deref(), Some("en0"));
+        assert_eq!(interface.link_type, crate::parse::LinkType::Ethernet);
+        assert_eq!(interface.snaplen, 65535);
+    }
+
+    #[test]
+    fn reader_rejects_a_stream_not_starting_with_a_section_header_block() {
+        let mut buf = Vec::new();
+        test_idb().write_to(&mut buf).unwrap(); // IDB first, no SHB — invalid
+        assert!(Reader::new(Cursor::new(buf)).is_err());
+    }
+
+    #[test]
+    fn reader_round_trips_packets_written_by_writer_in_order_with_direction_and_data_intact() {
+        let path = std::env::temp_dir().join(format!("pcapng-reader-test-round-trip-{}.pcapng", std::process::id()));
+        let mut writer = Writer::create(&path, &test_idb(), "test-host", "0.1.0").unwrap();
+        let packets: Vec<(Direction, Vec<u8>)> = vec![
+            (Direction::Inbound, vec![1, 2, 3]),
+            (Direction::Outbound, vec![4, 5, 6, 7, 8]),
+            (Direction::Unknown, vec![9]),
+        ];
+        for (direction, data) in &packets {
+            writer.write_packet(SystemTime::now(), *direction, data).unwrap();
+        }
+        writer.write_interface_stats(100, 3).unwrap(); // interleaved ISB must be skipped transparently
+        writer.finish().unwrap();
+
+        let file = File::open(&path).unwrap();
+        let (mut reader, interface) = Reader::new(file).unwrap();
+        assert_eq!(interface.link_type, crate::parse::LinkType::Ethernet);
+
+        for (direction, data) in &packets {
+            let parsed = reader.next_packet().unwrap().expect("expected a packet");
+            assert_eq!(parsed.direction, *direction);
+            assert_eq!(&parsed.data, data);
+        }
+        assert!(reader.next_packet().unwrap().is_none(), "no packets should remain after the last one written");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn reader_errors_on_a_packet_whose_declared_capture_length_exceeds_the_block() {
+        let mut body = vec![0u8; 20];
+        body[12..16].copy_from_slice(&1_000_000u32.to_le_bytes()); // claims a huge capture length
+        assert!(parse_enhanced_packet(&body).is_err());
     }
 }
