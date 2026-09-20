@@ -1116,13 +1116,6 @@ async fn main() -> std::io::Result<()> {
     // values computed here just seed `current_interface` below.
     let hostname = host_stats::hostname();
     let ip_address = local_addrs.first().cloned().unwrap_or_default();
-    // Computed here, before `local_addrs` is moved into `FlowTable::new`
-    // below — true only when replay had no derivable local-address
-    // information at all, the one case where `FlowTable::key_for` falls
-    // back to its canonical-endpoint-ordering convention instead of a real
-    // local/remote determination. Fixed for the life of the process, same
-    // as `mode`/`replay_source`.
-    let direction_attribution_unavailable = local_addrs.is_empty();
 
     // Shared clock: both the capture thread and the periodic emitter need
     // `now_ms` to mean "milliseconds since agent start" on the SAME clock —
@@ -1620,11 +1613,24 @@ async fn main() -> std::io::Result<()> {
                 // Evict first so a flow that goes stale this tick emits only
                 // a ConnectionClosed event, not also a now-stale
                 // connection_update in the same pass.
-                let (evicted, snapshots, total_flows_observed, capacity_evictions, idle_evictions) = {
+                let (evicted, snapshots, total_flows_observed, capacity_evictions, idle_evictions, direction_attribution_unavailable) = {
                     let mut ft = flow_table.lock().unwrap();
                     let evicted = ft.evict_stale(now_ms);
                     let snapshots = ft.snapshot(now_ms);
-                    (evicted, snapshots, ft.total_flows_observed(), ft.capacity_evictions(), ft.idle_evictions())
+                    (
+                        evicted,
+                        snapshots,
+                        ft.total_flows_observed(),
+                        ft.capacity_evictions(),
+                        ft.idle_evictions(),
+                        // Live, not a startup snapshot — a runtime
+                        // `set_interface` switch (issue #69) can change
+                        // whether local_addrs is empty, so this must be
+                        // re-read from FlowTable every tick, same as
+                        // `interface` below re-reads `current_interface`
+                        // instead of the frozen startup value.
+                        ft.direction_attribution_unavailable(),
+                    )
                 };
                 let processes = process_map.lock().unwrap();
 

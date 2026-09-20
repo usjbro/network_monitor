@@ -194,6 +194,17 @@ impl FlowTable {
         self.local_addrs.iter().any(|a| a == addr)
     }
 
+    /// True exactly when `key_for`'s canonical-endpoint-ordering fallback is
+    /// in effect for every packet this table observes right now — i.e.
+    /// `local_addrs` is currently empty. Live, not a startup snapshot: a
+    /// runtime `set_interface` switch (issue #69) calls `reset`, which can
+    /// change this from either state to the other, so callers (the
+    /// `agent_status` emitter) must re-read this each tick rather than
+    /// caching the value computed at process start.
+    pub fn direction_attribution_unavailable(&self) -> bool {
+        self.local_addrs.is_empty()
+    }
+
     /// `key_for` always orders (local, remote) so both packet directions of
     /// one connection map to the same FlowKey.
     fn key_for(&self, packet: &ParsedPacket) -> Option<(FlowKey, bool /* is_outbound */)> {
@@ -765,6 +776,23 @@ mod tests {
         let closed_ports: std::collections::HashSet<u16> = closed.iter().map(|k| k.remote_port).collect();
         assert_eq!(closed_ports, [443, 8443].into_iter().collect());
         assert!(table.snapshot(0).is_empty(), "reset must leave no flows behind");
+    }
+
+    #[test]
+    fn direction_attribution_unavailable_reflects_a_runtime_reset() {
+        // Regression test: a caller (the agent_status emitter) must be able
+        // to read this live rather than caching it from startup — a runtime
+        // `set_interface` switch (issue #69) to a properly-addressed
+        // interface must clear this immediately, and a switch to an
+        // addressless one must set it, not leave either state frozen.
+        let mut table = FlowTable::new(vec![]); // starts with no known local address
+        assert!(table.direction_attribution_unavailable());
+
+        table.reset(vec!["10.0.0.5".to_string()]);
+        assert!(!table.direction_attribution_unavailable(), "switching to an addressed interface must clear this immediately");
+
+        table.reset(vec![]);
+        assert!(table.direction_attribution_unavailable(), "switching to an addressless interface must set this immediately");
     }
 
     #[test]
