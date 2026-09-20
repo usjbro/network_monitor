@@ -178,13 +178,65 @@ impl FlowTable {
                 },
                 false,
             ))
+        } else if self.local_addrs.is_empty() {
+            // No known local address at all (replay with no REPLAY_LOCAL_ADDRS
+            // and no IDB address option — see resolve_packet_source in
+            // main.rs) — rather than silently dropping this packet from the
+            // flow table entirely, fall back to a canonical ordering of the
+            // two endpoints (compare (ip, port) pairs) and treat the
+            // lexicographically-smaller one as "local" for FlowKey
+            // construction. This is explicitly NOT a claim that endpoint
+            // actually was the local side — every consumer of this flow's
+            // direction is told so via
+            // agent_status.directionAttributionUnavailable, sent once per
+            // replay session, not silently per-flow. Canonicalizing by
+            // endpoint identity (rather than by this packet's own src/dst
+            // position) is what makes both directions of one connection map
+            // to the same FlowKey, as this function's doc comment requires —
+            // a positional convention would instead split a request and its
+            // reply into two separate one-directional flows.
+            let src_is_canonical_local =
+                (&packet.src_ip, src_port) <= (&packet.dst_ip, dst_port);
+            if src_is_canonical_local {
+                Some((
+                    FlowKey {
+                        protocol: packet.protocol,
+                        local_addr: packet.src_ip.clone(),
+                        local_port: src_port,
+                        remote_addr: packet.dst_ip.clone(),
+                        remote_port: dst_port,
+                    },
+                    true,
+                ))
+            } else {
+                Some((
+                    FlowKey {
+                        protocol: packet.protocol,
+                        local_addr: packet.dst_ip.clone(),
+                        local_port: dst_port,
+                        remote_addr: packet.src_ip.clone(),
+                        remote_port: src_port,
+                    },
+                    false,
+                ))
+            }
         } else {
+            // local_addrs is non-empty but matched neither side — e.g. a
+            // capture containing third-party-to-third-party traffic captured
+            // in promiscuous mode. Unchanged existing behavior: this packet
+            // isn't part of any flow this table tracks.
             None
         }
     }
 
-    pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) {
-        let Some((key, is_outbound)) = self.key_for(packet) else { return };
+    /// Returns the direction this packet was attributed (`Some(true)` =
+    /// outbound/local-to-remote, `Some(false)` = inbound, `None` = the
+    /// packet matched no tracked flow) — the single source of truth for
+    /// per-packet direction, so callers (e.g. the capture loop's aggregate
+    /// throughput counters) don't need their own separate src/dst-vs-
+    /// local_addrs check that can drift out of sync with this one.
+    pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<bool> {
+        let (key, is_outbound) = self.key_for(packet)?;
         let remote_port = key.remote_port;
         let state = self.flows.entry(key).or_default();
         state.last_seen_ms = now_ms;
@@ -271,6 +323,8 @@ impl FlowTable {
                 }
             }
         }
+
+        Some(is_outbound)
     }
 
     /// Looks up the given flow's observed ClientHello `client_random`, if
@@ -446,6 +500,29 @@ mod tests {
         let snap = table.snapshot(25);
         assert_eq!(snap[0].status, "ESTABLISHED");
         assert!((snap[0].latency_ms - 20.0).abs() < 0.01, "expected ~20ms RTT, got {}", snap[0].latency_ms);
+    }
+
+    #[test]
+    fn merges_both_directions_into_one_flow_when_local_addrs_is_empty() {
+        // Regression test: key_for's empty-local_addrs fallback must
+        // canonicalize by endpoint identity, not packet-positional src/dst —
+        // otherwise a request and its reply (swapped src/dst) hash to two
+        // different FlowKeys instead of merging into one flow.
+        let mut table = FlowTable::new(vec![]);
+        let request = tcp_packet(true, TcpFlags::default(), 100);
+        let response = tcp_packet(false, TcpFlags::default(), 250);
+        table.observe(&request, &L7Info::None, 0);
+        table.observe(&response, &L7Info::None, 1);
+
+        let snap = table.snapshot(1000);
+        assert_eq!(snap.len(), 1, "expected request+response to merge into one flow, got {}", snap.len());
+        assert_eq!(snap[0].tx_bytes_total + snap[0].rx_bytes_total, 350);
+        assert!(
+            snap[0].tx_bytes_total > 0 && snap[0].rx_bytes_total > 0,
+            "expected both directions to have nonzero bytes, got tx={} rx={}",
+            snap[0].tx_bytes_total,
+            snap[0].rx_bytes_total
+        );
     }
 
     #[test]
@@ -836,5 +913,54 @@ mod tests {
 
         let snap = table.snapshot(1000);
         assert_eq!(snap[0].status, "ESTABLISHED");
+    }
+
+    fn packet_between(src_ip: &str, dst_ip: &str) -> ParsedPacket {
+        ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: src_ip.to_string(),
+            dst_ip: dst_ip.to_string(),
+            protocol: TransportProtocol::Tcp,
+            src_port: Some(51000),
+            dst_port: Some(443),
+            tcp_flags: Some(TcpFlags::default()),
+            seq: Some(1000),
+            ttl: 64,
+            total_len: 60,
+            payload: vec![],
+            ip_version: 4,
+            ip_checksum: Some(0),
+            vlan_tag: None,
+        }
+    }
+
+    #[test]
+    fn with_no_local_addrs_a_packet_still_produces_a_flow_using_canonical_endpoint_ordering() {
+        let mut table = FlowTable::new(vec![]); // empty — the replay-with-no-hint case
+        let packet = packet_between("203.0.113.5", "198.51.100.9");
+        table.observe(&packet, &L7Info::None, 0);
+
+        let flows = table.snapshot(0);
+        assert_eq!(flows.len(), 1, "an empty local_addrs list must not silently drop every packet");
+        // Canonical ordering compares (ip, port) pairs and picks the
+        // lexicographically-smaller endpoint as "local" — regardless of
+        // which side happens to be this packet's src — so that a reply
+        // packet (with src/dst swapped) still maps to the same FlowKey. See
+        // merges_both_directions_into_one_flow_when_local_addrs_is_empty.
+        assert_eq!(flows[0].key.local_addr, "198.51.100.9", "canonical ordering picks the lexicographically-smaller endpoint as local");
+    }
+
+    #[test]
+    fn with_local_addrs_set_but_not_matching_either_side_the_packet_is_still_dropped() {
+        let mut table = FlowTable::new(vec!["10.0.0.1".to_string()]); // non-empty, but doesn't match this packet
+        let packet = packet_between("203.0.113.5", "198.51.100.9");
+        table.observe(&packet, &L7Info::None, 0);
+
+        assert_eq!(
+            table.snapshot(0).len(),
+            0,
+            "a non-empty, non-matching local_addrs list keeps its existing drop behavior — only the EMPTY case gets the new fallback"
+        );
     }
 }

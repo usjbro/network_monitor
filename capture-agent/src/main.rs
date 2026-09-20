@@ -1122,7 +1122,19 @@ async fn main() -> std::io::Result<()> {
     // copy of the local-address list.
     let local_addrs_for_capture = local_addrs.clone();
     let flow_table = Arc::new(Mutex::new(FlowTable::new(local_addrs)));
-    let process_map = Arc::new(Mutex::new(process_lookup::refresh()));
+    // Replay mode: `process_lookup::refresh()` walks *this* machine's live
+    // socket table, which is meaningless for a replayed capture — the
+    // processes that owned those flows may never have run on this machine
+    // at all, or have long since exited. Never populating `process_map`
+    // means every connection reports `processName: "unknown"`/`pid: 0` via
+    // the existing no-match fallback, rather than mis-attributing to
+    // whatever unrelated process happens to hold a matching local port
+    // today (spec Components §2).
+    let process_map = Arc::new(Mutex::new(if mode == "live" {
+        process_lookup::refresh()
+    } else {
+        HashMap::new()
+    }));
     // Tier B (opt-in decrypted TLS content) state — all in-memory only,
     // never persisted across a restart (spec: "opt-in never persists").
     let keylog_watcher = Arc::new(Mutex::new(KeyLogWatcher::new()));
@@ -1284,8 +1296,11 @@ async fn main() -> std::io::Result<()> {
         });
     }
 
-    // Background: refresh the process-attribution map every 3s.
-    {
+    // Background: refresh the process-attribution map every 3s. Live mode
+    // only — in replay mode `process_map` stays permanently empty (see
+    // where it's constructed above), so refreshing it would just be wasted
+    // work re-populating a map nothing ever reads.
+    if mode == "live" {
         let process_map = process_map.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(3));
@@ -1435,26 +1450,29 @@ async fn main() -> std::io::Result<()> {
                         };
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
-                        flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+                        let is_outbound = flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
 
-                        // Aggregate throughput counters (issue #64) — same
-                        // src/dst-vs-local_addrs direction check
-                        // local_port_of/build_flow_key use elsewhere in this
-                        // file. A packet matching neither (e.g. broadcast/
-                        // multicast traffic captured in promiscuous mode)
-                        // counts toward neither total, same as it's excluded
-                        // from FlowTable's own local/remote attribution.
+                        // Aggregate throughput counters (issue #64) — driven
+                        // by the same direction FlowTable::observe just
+                        // attributed this packet, rather than a separate
+                        // src/dst-vs-local_addrs check of our own that could
+                        // drift out of sync with it. A packet matching no
+                        // tracked flow (e.g. broadcast/multicast traffic
+                        // captured in promiscuous mode) counts toward
+                        // neither total, same as before.
                         let len = parsed.total_len as u64;
-                        let direction = if local_addrs.iter().any(|a| a == &parsed.src_ip) {
-                            total_tx_bytes.fetch_add(len, Ordering::Relaxed);
-                            total_tx_packets.fetch_add(1, Ordering::Relaxed);
-                            pcapng::Direction::Outbound
-                        } else if local_addrs.iter().any(|a| a == &parsed.dst_ip) {
-                            total_rx_bytes.fetch_add(len, Ordering::Relaxed);
-                            total_rx_packets.fetch_add(1, Ordering::Relaxed);
-                            pcapng::Direction::Inbound
-                        } else {
-                            pcapng::Direction::Unknown
+                        let direction = match is_outbound {
+                            Some(true) => {
+                                total_tx_bytes.fetch_add(len, Ordering::Relaxed);
+                                total_tx_packets.fetch_add(1, Ordering::Relaxed);
+                                pcapng::Direction::Outbound
+                            }
+                            Some(false) => {
+                                total_rx_bytes.fetch_add(len, Ordering::Relaxed);
+                                total_rx_packets.fetch_add(1, Ordering::Relaxed);
+                                pcapng::Direction::Inbound
+                            }
+                            None => pcapng::Direction::Unknown,
                         };
 
                         // Capture-to-file (epic #55, JAM-132/GitHub #70):
