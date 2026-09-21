@@ -10,7 +10,7 @@ import {
   Tv,
   Apple,
 } from 'lucide-react';
-import { CaptureConfig, NetworkInterface, SystemStats, TerminalTheme, ThemeConfig } from '@/lib/types';
+import { CaptureConfig, CaptureFileStatus, NetworkInterface, SystemStats, TerminalTheme, ThemeConfig } from '@/lib/types';
 import { THEMES, formatSpeed } from '@/lib/osi-engine';
 
 interface HeaderBarProps {
@@ -24,6 +24,10 @@ interface HeaderBarProps {
   // must never be unsure whether they're seeing everything, so this is
   // always rendered once known, not tucked behind a menu.
   captureConfig: CaptureConfig | null;
+  // `null` until the agent's first `capture_file_status` tick arrives
+  // (epic #55/JAM-132/GitHub #70) — same "no placeholder" discipline as
+  // `captureConfig` above.
+  captureFileStatus: CaptureFileStatus | null;
   // Empty until an `interface_list` event arrives (issue #69) — populated
   // on demand via `onListInterfaces`, not fetched automatically. The
   // currently-active interface (from `stats.interfaceName`) is always
@@ -44,6 +48,7 @@ interface HeaderBarProps {
 export const HeaderBar: React.FC<HeaderBarProps> = ({
   stats,
   captureConfig,
+  captureFileStatus,
   availableInterfaces,
   onListInterfaces,
   onSelectInterface,
@@ -126,6 +131,20 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             >
               snaplen: {captureConfig ? `${captureConfig.snaplen}B` : '—'}
             </span>
+            {/* Active capture-to-file indicator (epic #55/JAM-132/GitHub
+                #70) — only rendered while actually writing; disappears the
+                moment `writing` goes false rather than lingering, unlike
+                the filter/snaplen badges above which are always shown. */}
+            {captureFileStatus?.writing && (
+              <span
+                className="px-1.5 py-0.5 rounded text-[10px] font-semibold border bg-amber-950/60 border-amber-700 text-amber-300 animate-pulse"
+                title={`${captureFileStatus.bytesWritten} bytes written${
+                  captureFileStatus.ringFile ? `, file ${captureFileStatus.ringFile}` : ''
+                }`}
+              >
+                ● recording {captureFileStatus.path?.split('/').pop() ?? ''}
+              </span>
+            )}
           </div>
         </div>
 

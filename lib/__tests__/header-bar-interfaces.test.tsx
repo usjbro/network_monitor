@@ -20,6 +20,7 @@ const noop = () => {};
 
 const baseProps = {
   captureConfig: null,
+  captureFileStatus: null,
   theme: THEMES.matrix,
   onSelectTheme: noop,
   isPaused: false,

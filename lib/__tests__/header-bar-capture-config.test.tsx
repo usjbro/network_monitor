@@ -9,7 +9,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { HeaderBar } from '@/components/HeaderBar';
 import { THEMES } from '@/lib/osi-engine';
-import { CaptureConfig } from '@/lib/types';
+import { CaptureConfig, CaptureFileStatus } from '@/lib/types';
 
 afterEach(() => {
   cleanup();
@@ -19,6 +19,7 @@ const noop = () => {};
 
 const baseProps = {
   stats: null,
+  captureFileStatus: null,
   theme: THEMES.matrix,
   onSelectTheme: noop,
   isPaused: false,
@@ -56,5 +57,30 @@ describe('HeaderBar capture_config rendering', () => {
     const config: CaptureConfig = { filter: null, snaplen: 96 };
     render(<HeaderBar {...baseProps} captureConfig={config} />);
     expect(screen.getByText(/snaplen:/i)).toHaveTextContent('snaplen: 96B');
+  });
+});
+
+describe('HeaderBar capture_file_status rendering (epic #55/JAM-132/GitHub #70)', () => {
+  it('shows no recording indicator before any capture_file_status tick arrives', () => {
+    render(<HeaderBar {...baseProps} captureConfig={null} />);
+    expect(screen.queryByText(/recording/i)).toBeNull();
+  });
+
+  it('shows no recording indicator while writing is false, even with a known last-active path', () => {
+    const status: CaptureFileStatus = { writing: false, path: '/tmp/capture-0001.pcapng', bytesWritten: 4096, backpressureDrops: 0 };
+    render(<HeaderBar {...baseProps} captureConfig={null} captureFileStatus={status} />);
+    expect(screen.queryByText(/recording/i)).toBeNull();
+  });
+
+  it('shows the recording indicator with the active file\'s basename while writing', () => {
+    const status: CaptureFileStatus = {
+      writing: true,
+      path: '/Users/me/captures/incident-0002.pcapng',
+      bytesWritten: 1048576,
+      ringFile: 2,
+      backpressureDrops: 0,
+    };
+    render(<HeaderBar {...baseProps} captureConfig={null} captureFileStatus={status} />);
+    expect(screen.getByText(/recording/i)).toHaveTextContent('recording incident-0002.pcapng');
   });
 });

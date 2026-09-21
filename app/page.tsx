@@ -9,7 +9,9 @@ import {
   Radio,
 } from 'lucide-react';
 import {
+  AgentStatus,
   CaptureConfig,
+  CaptureFileStatus,
   CaptureStats,
   DecryptedPayloadSegment,
   OSILayerInfo,
@@ -24,8 +26,10 @@ import {
 } from '@/lib/types';
 import { THEMES } from '@/lib/osi-engine';
 import {
+  mapAgentStatusEvent,
   mapCaptureConfigErrorEvent,
   mapCaptureConfigEvent,
+  mapCaptureFileStatusEvent,
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
@@ -57,6 +61,16 @@ export default function TerminalApp() {
   const [crtEnabled, setCrtEnabled] = useState(false);
   const [isInstallOpen, setIsInstallOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
+  // Live/replay mode (epic #55/JAM-133) — null until the agent's first
+  // agent_status tick arrives, same "no placeholder" discipline as
+  // stats/captureConfig below. Orthogonal to agentConnected: that answers
+  // "is the TCP socket to the agent up at all," this answers "what mode is
+  // the agent in" — see the three-state banner derivation below.
+  const [agentMode, setAgentMode] = useState<AgentStatus | null>(null);
+  // Capture-to-file status (epic #55/JAM-132/GitHub #70, ring rotation
+  // JAM-5/GitHub #72) — null until the agent's first capture_file_status
+  // tick arrives.
+  const [captureFileStatus, setCaptureFileStatus] = useState<CaptureFileStatus | null>(null);
   const [liveLayers, setLiveLayers] = useState<Record<OSILayerNumber, Partial<OSILayerInfo>>>({} as never);
   const layers = useMemo(() => mergeLayerStats(liveLayers), [liveLayers]);
   // Capture health (issue #61) — null until the agent's first capture_stats
@@ -184,6 +198,12 @@ export default function TerminalApp() {
         }
         if (data.type === 'system_stats') {
           setStats(mapSystemStatsEvent(data));
+        }
+        if (data.type === 'agent_status') {
+          setAgentMode(mapAgentStatusEvent(data));
+        }
+        if (data.type === 'capture_file_status') {
+          setCaptureFileStatus(mapCaptureFileStatusEvent(data));
         }
         if (data.type === 'capture_config') {
           // Sent once per tick regardless of whether anything changed (so a
@@ -488,11 +508,31 @@ export default function TerminalApp() {
   const decryptingConnectionIds = new Set(decryptedSegments.map((s) => s.connectionId));
   const isDecrypting = decryptingConnectionIds.size > 0;
 
+  // Three-state mode banner (epic #55/JAM-133's UI honesty requirement: "the
+  // UI must say 'replaying <file>' rather than implying live capture").
+  // Order matters: disconnected (no TCP socket at all) always wins over
+  // whatever mode was last known, since a disconnected agent's last-known
+  // mode is stale information. 'live' renders no banner, matching the
+  // pre-existing "no banner when connected" behavior exactly.
+  const bannerState: 'disconnected' | 'live' | 'replaying' = !agentConnected
+    ? 'disconnected'
+    : agentMode?.mode === 'replay'
+      ? 'replaying'
+      : 'live';
+
   return (
     <div className={`min-h-screen ${themeConfig.bg} ${themeConfig.text} font-mono flex flex-col justify-between overflow-x-hidden relative select-none transition-colors duration-300`}>
-      {!agentConnected && (
+      {bannerState === 'disconnected' && (
         <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2">
           capture agent not connected — run <code>./capture-agent</code> in <code>capture-agent/</code> (see capture-agent/README.md)
+        </div>
+      )}
+
+      {bannerState === 'replaying' && (
+        <div className="w-full bg-sky-900/40 border-b border-sky-700 text-sky-200 text-sm px-4 py-2">
+          replaying <code>{agentMode?.replaySource ?? 'unknown file'}</code> — not a live capture
+          {agentMode?.directionAttributionUnavailable &&
+            ' — direction (rx/tx) could not be determined for this file and is shown positionally, not authoritatively'}
         </div>
       )}
 
@@ -577,6 +617,7 @@ export default function TerminalApp() {
         <HeaderBar
           stats={stats}
           captureConfig={captureConfig}
+          captureFileStatus={captureFileStatus}
           availableInterfaces={availableInterfaces}
           onListInterfaces={sendListInterfaces}
           onSelectInterface={sendSetInterface}

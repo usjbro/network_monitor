@@ -28,6 +28,7 @@ const baseProps = {
   onToggleCrt: noop,
   onOpenInstall: noop,
   captureConfig: null as CaptureConfig | null,
+  captureFileStatus: null,
   availableInterfaces: [],
   onListInterfaces: noop,
   onSelectInterface: noop,
