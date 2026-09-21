@@ -1,6 +1,17 @@
 use crate::redact::redact_headers;
 use fluke_hpack::Decoder as HpackDecoder;
 
+/// Defensive cap on a single frame's declared length. Nothing in this
+/// reassembler ever negotiates HTTP/2 SETTINGS, so its effective max frame
+/// size never legitimately exceeds the un-negotiated default (16 KiB, RFC
+/// 7540 §4.2) — a declared length far beyond any plausible real frame is
+/// either a corrupted stream or a hostile peer trying to make `buffer` grow
+/// unbounded while `feed()` waits for the rest of a frame that size to
+/// arrive. Generous headroom over 16 KiB avoids false-positiving on a real
+/// large-but-legitimate frame while still bounding worst-case memory growth
+/// per connection. Mirrors `pcapng.rs`'s `MAX_BLOCK_LEN` guard.
+const MAX_FRAME_LEN: usize = 1024 * 1024; // 1 MiB
+
 pub enum FrameOutcome {
     Frame { stream_id: u32, headers: Vec<(String, String)>, body: Vec<u8> },
     DesyncFallback { reason: &'static str },
@@ -72,6 +83,16 @@ impl Http2Reassembler {
             let frame_type = self.buffer[3];
             let stream_id =
                 u32::from_be_bytes([self.buffer[5], self.buffer[6], self.buffer[7], self.buffer[8]]) & 0x7fff_ffff;
+            if len > MAX_FRAME_LEN {
+                // Reject before buffering toward it — waiting for `9 + len`
+                // bytes here is exactly the unbounded-growth path this cap
+                // exists to prevent.
+                self.desynced = true;
+                outcomes.push(FrameOutcome::DesyncFallback {
+                    reason: "declared frame length exceeds the defensive cap",
+                });
+                break;
+            }
             if self.buffer.len() < 9 + len {
                 outcomes.push(FrameOutcome::NeedMoreData);
                 break;
@@ -242,6 +263,27 @@ mod tests {
         assert!(outcomes
             .iter()
             .any(|o| matches!(o, FrameOutcome::Frame { stream_id: 9, body, .. } if body == b"hello world")));
+    }
+
+    #[test]
+    fn a_declared_frame_length_beyond_the_defensive_cap_desyncs_instead_of_buffering_toward_it() {
+        let mut r = Http2Reassembler::new();
+        let mut header = Vec::new();
+        header.extend_from_slice(&(MAX_FRAME_LEN as u32 + 1).to_be_bytes()[1..]); // 24-bit length, 1 byte over the cap
+        header.push(0x00); // type: DATA
+        header.push(0x00); // flags
+        header.extend_from_slice(&1u32.to_be_bytes()); // stream id
+
+        let outcomes = r.feed(0, &header);
+
+        assert!(
+            outcomes.iter().any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })),
+            "expected a DesyncFallback, not NeedMoreData — the cap must reject before buffering toward the declared length"
+        );
+        assert!(
+            r.buffer.len() < MAX_FRAME_LEN,
+            "buffer must not have grown toward the oversized declared length"
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 See [docs/architecture.md](docs/architecture.md) for how the pieces fit together before making changes. Broadly:
 
-- `capture-agent/` — Rust, the privileged capture agent. Own `Cargo.toml`, own test suite (`cargo test`), two fuzz targets (`cargo fuzz run parse_packet`, `cargo fuzz run http2_reassembly`) — CI now runs both (30s each) on every push to `main` and on any PR touching `capture-agent/src/parse.rs`, `capture-agent/src/http2.rs`, or `capture-agent/fuzz/**` (issue #66).
+- `capture-agent/` — Rust, the privileged capture agent. Own `Cargo.toml`, own test suite (`cargo test`), three fuzz targets (`cargo fuzz run parse_packet`, `cargo fuzz run http2_reassembly`, `cargo fuzz run pcapng_reader`) — CI now runs all three (30s each) on every push to `main` and on any PR touching `capture-agent/src/parse.rs`, `capture-agent/src/http2.rs`, `capture-agent/src/pcapng.rs`, or `capture-agent/fuzz/**` (issue #66).
 - `app/`, `components/`, `lib/` — Next.js/React/TypeScript, the relay and UI. Own test suite (`npx vitest run` / `npm test`).
 - `docs/` — user-facing documentation (this file's sibling).
 - `docs/superpowers/specs/` and `docs/superpowers/plans/` — design specs and implementation plans for each sub-project, written before implementation. If you're planning substantial new work, look at the existing ones for the expected shape and level of detail.
@@ -17,6 +17,7 @@ cd capture-agent
 cargo test
 cargo fuzz run parse_packet -- -max_total_time=30      # if touching parse.rs
 cargo fuzz run http2_reassembly -- -max_total_time=30  # if touching http2.rs
+cargo fuzz run pcapng_reader -- -max_total_time=30     # if touching pcapng.rs
 cargo audit                                            # checks Cargo.lock against RustSec advisory-db
 
 # TypeScript
@@ -28,7 +29,7 @@ npm run build
 npx playwright test   # real-browser smoke test — see e2e/smoke.spec.ts
 ```
 
-All checks above should pass before opening a PR. CI enforces the two `cargo fuzz` commands, `cargo audit`, and `npm audit` above itself now (issues #66, #111, #112) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, or `capture-agent/fuzz/**` will fail CI if either fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock`/`package-lock.json` carries a dependency with a known advisory (RustSec for Rust, `high` severity or above for npm), same as running these locally would show.
+All checks above should pass before opening a PR. CI enforces the three `cargo fuzz` commands, `cargo audit`, and `npm audit` above itself now (issues #66, #111, #112) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, `pcapng.rs`, or `capture-agent/fuzz/**` will fail CI if any fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock`/`package-lock.json` carries a dependency with a known advisory (RustSec for Rust, `high` severity or above for npm), same as running these locally would show.
 
 ### Live-loopback packet-capture integration test (issue #114)
 
