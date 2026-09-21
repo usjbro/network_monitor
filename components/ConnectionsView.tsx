@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import {
+  Download,
   Filter,
   Lock,
   Network,
@@ -10,6 +11,7 @@ import {
 } from 'lucide-react';
 import { NetworkConnection, ThemeConfig, TracerouteHop } from '@/lib/types';
 import { formatSpeed, formatBytes } from '@/lib/osi-engine';
+import { connectionsToCsv, downloadBlob } from '@/lib/export';
 
 interface ConnectionsViewProps {
   connections: NetworkConnection[];
@@ -109,6 +111,26 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             </button>
           ))}
         </div>
+
+        {/* Export (JAM-7/GitHub #74). Exports `filtered` — exactly the rows
+            the table below is showing — not the unfiltered `connections`
+            prop, per the spec's "the current filtered table" requirement.
+            Purely client-side: no request, nothing written server-side. */}
+        <button
+          onClick={() =>
+            downloadBlob(
+              connectionsToCsv(filtered, totalObserved ?? filtered.length),
+              `connections-${Date.now()}.csv`,
+              'text/csv'
+            )
+          }
+          disabled={filtered.length === 0}
+          title="Download the rows currently shown as CSV"
+          className="flex items-center space-x-1 px-2 py-1 rounded text-[10px] font-bold border bg-slate-800 border-slate-700 text-slate-300 hover:text-emerald-300 disabled:opacity-40 disabled:hover:text-slate-300 transition"
+        >
+          <Download className="h-3 w-3" />
+          <span>EXPORT CSV</span>
+        </button>
       </div>
 
       {/* Honest horizon (JAM-6/GitHub #73) — see the props' own comment

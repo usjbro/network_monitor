@@ -3,12 +3,17 @@
 import React, { useState } from 'react';
 import {
   Code,
+  Download,
   Pause,
   Play,
   Search,
   Trash2,
 } from 'lucide-react';
 import { DecryptedPayloadSegment, PacketFrame, ThemeConfig, OSILayerNumber } from '@/lib/types';
+// Only packetsToJson is imported here. decryptedSegments is deliberately
+// never passed to it — see lib/export.ts's header and
+// lib/__tests__/decrypted-export-exclusion.test.ts.
+import { downloadBlob, packetsToJson } from '@/lib/export';
 
 interface PacketStreamViewProps {
   packets: PacketFrame[];
@@ -40,6 +45,11 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   const [isFrozen, setIsFrozen] = useState(false);
   const [layerFilter, setLayerFilter] = useState<number>(0); // 0 = all
   const [selectedPacket, setSelectedPacket] = useState<PacketFrame | null>(packets[0] || null);
+  // Transient feedback for the hex-dump copy button: a clipboard write can
+  // legitimately fail (no permission, or no navigator.clipboard at all on a
+  // non-secure origin), and silently doing nothing would read as a broken
+  // button.
+  const [hexCopyState, setHexCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   const displayedPackets = packets.filter((pkt) => {
     const matchesSearch =
@@ -106,6 +116,18 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
           >
             {isFrozen ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
             <span>{isFrozen ? 'RESUME STREAM' : 'FREEZE'}</span>
+          </button>
+
+          {/* Export (JAM-7/GitHub #74) — the displayed packets only, and
+              never decryptedSegments, which packetsToJson cannot accept. */}
+          <button
+            onClick={() => downloadBlob(packetsToJson(displayedPackets), `packets-${Date.now()}.json`, 'application/json')}
+            disabled={displayedPackets.length === 0}
+            title="Download the frames currently shown as JSON"
+            className="flex items-center space-x-1 px-2 py-1 rounded text-[10px] font-bold border bg-slate-800 border-slate-700 text-slate-300 hover:text-emerald-300 disabled:opacity-40 disabled:hover:text-slate-300 transition"
+          >
+            <Download className="h-3 w-3" />
+            <span>EXPORT JSON</span>
           </button>
 
           <button
@@ -271,9 +293,30 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
 
               {/* Raw Hex Dump Box */}
               <div className="space-y-1">
-                <div className="text-[10px] font-bold text-slate-400 flex items-center space-x-1">
-                  <Code className="h-3 w-3 inline" />
-                  <span>RAW HEX PAYLOAD DUMP</span>
+                <div className="text-[10px] font-bold text-slate-400 flex items-center justify-between">
+                  <span className="flex items-center space-x-1">
+                    <Code className="h-3 w-3 inline" />
+                    <span>RAW HEX PAYLOAD DUMP</span>
+                  </span>
+                  {/* Copy the single selected frame's hex dump (JAM-7/GitHub
+                      #74's third export form). navigator.clipboard is absent
+                      on a non-secure origin other than localhost, so the
+                      button reports failure rather than appearing to work. */}
+                  <button
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(selectedPacket.hexDump);
+                        setHexCopyState('copied');
+                      } catch {
+                        setHexCopyState('failed');
+                      }
+                      setTimeout(() => setHexCopyState('idle'), 2000);
+                    }}
+                    title="Copy this frame's hex dump to the clipboard"
+                    className="px-2 py-0.5 rounded text-[10px] font-bold border bg-slate-800 border-slate-700 text-slate-300 hover:text-emerald-300 transition"
+                  >
+                    {hexCopyState === 'copied' ? 'COPIED' : hexCopyState === 'failed' ? 'COPY FAILED' : 'COPY HEX'}
+                  </button>
                 </div>
                 <pre className="p-2 bg-black text-emerald-400 text-[10px] rounded border border-slate-800 leading-tight overflow-x-auto select-all">
                   {selectedPacket.hexDump}
