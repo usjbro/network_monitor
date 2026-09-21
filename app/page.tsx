@@ -118,6 +118,33 @@ export default function TerminalApp() {
   // this buffer without bound for the life of the browser tab.
   const [decryptedSegments, setDecryptedSegments] = useState<DecryptedPayloadSegment[]>([]);
 
+  // How many recent items this browser tab keeps, per view (JAM-6/GitHub
+  // #73's `buffer packets|connections|decrypted <n>` command-bar verbs).
+  // Purely client-side: changing one re-caps what the SSE handler below
+  // retains going forward, and never sends anything to the agent — the
+  // agent's own flow-table ceiling is `MAX_FLOWS`, a separate, server-side
+  // knob. Defaults are the literals these buffers were hard-capped at
+  // before this became adjustable.
+  const [packetBufferLimit, setPacketBufferLimit] = useState(100);
+  const [connectionBufferLimit, setConnectionBufferLimit] = useState(200);
+  const [decryptedBufferLimit, setDecryptedBufferLimit] = useState(100);
+
+  // The SSE effect below has an empty dependency array (deliberately — it
+  // must open exactly one EventSource for the life of the component), so
+  // its `onmessage` closure captures whatever these values were on the
+  // first render and would never see a later `buffer ...` command. Reading
+  // them through refs instead is what actually makes the command take
+  // effect; the state copies above exist for rendering (the horizon text)
+  // and are the single writer of these refs, kept in sync below.
+  const packetBufferLimitRef = useRef(packetBufferLimit);
+  const connectionBufferLimitRef = useRef(connectionBufferLimit);
+  const decryptedBufferLimitRef = useRef(decryptedBufferLimit);
+  useEffect(() => {
+    packetBufferLimitRef.current = packetBufferLimit;
+    connectionBufferLimitRef.current = connectionBufferLimit;
+    decryptedBufferLimitRef.current = decryptedBufferLimit;
+  }, [packetBufferLimit, connectionBufferLimit, decryptedBufferLimit]);
+
   // Ownership enrichment state (spec Components §7's five-state Ownership
   // display, and §1's opt-in disclosure). `enrichmentMode` mirrors the
   // server-side EnrichmentClient's mode (kept in sync via the
@@ -166,7 +193,7 @@ export default function TerminalApp() {
           const connection = mapConnectionEvent(data.connection);
           setConnections((prev) => {
             const idx = prev.findIndex((c) => c.id === connection.id);
-            if (idx === -1) return [connection, ...prev].slice(0, 200);
+            if (idx === -1) return [connection, ...prev].slice(0, connectionBufferLimitRef.current);
             const next = [...prev];
             next[idx] = connection;
             return next;
@@ -178,11 +205,11 @@ export default function TerminalApp() {
         }
         if (data.type === 'packet') {
           const packet = mapPacketEvent(data.packet);
-          setPackets((prev) => [packet, ...prev.slice(0, 100)]);
+          setPackets((prev) => [packet, ...prev.slice(0, packetBufferLimitRef.current - 1)]);
         }
         if (data.type === 'decrypted_payload') {
           const segment = mapDecryptedPayloadEvent(data);
-          setDecryptedSegments((prev) => [segment, ...prev.slice(0, 100)]);
+          setDecryptedSegments((prev) => [segment, ...prev.slice(0, decryptedBufferLimitRef.current - 1)]);
         }
         if (data.type === 'layer_update') {
           setLiveLayers((prev) => {
@@ -397,6 +424,49 @@ export default function TerminalApp() {
     });
   };
 
+  // Capture-to-file (epic #55/JAM-132/GitHub #70, ring rotation JAM-5/
+  // GitHub #72) — the same /api/control POST route as pause/filter/snaplen
+  // above; no dedicated route. The agent is the authoritative validator and
+  // reports a rejection via `capture_file_error`, so nothing here tries to
+  // second-guess whether a path is writable.
+  const sendStartCaptureFile = (
+    path: string,
+    ring?: { mode: string; threshold: number },
+    autostop?: { mode: string; threshold: number },
+  ) => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'start_capture_file', path, ring, autostop }),
+    });
+  };
+  const sendStopCaptureFile = () => {
+    fetch('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'stop_capture_file' }),
+    });
+  };
+
+  // Parses the `ring`/`autostop` option pairs out of a `capture <path> ...`
+  // command's token list. Returns `undefined` when the keyword is absent
+  // (the common case — a plain, non-rotating capture) and `null` when it's
+  // present but malformed, which the caller treats as "don't send anything"
+  // rather than silently starting a capture with the option dropped.
+  const parseCaptureOption = (
+    tokens: string[],
+    keyword: string,
+    allowedModes: string[],
+  ): { mode: string; threshold: number } | undefined | null => {
+    const idx = tokens.indexOf(keyword);
+    if (idx === -1) return undefined;
+    const mode = tokens[idx + 1];
+    const threshold = Number(tokens[idx + 2]);
+    if (!mode || !allowedModes.includes(mode)) return null;
+    if (!Number.isInteger(threshold) || threshold <= 0) return null;
+    return { mode, threshold };
+  };
+
   // Interface selection (issue #69). Listing is on-demand only (the header
   // picker requests it when opened; `iface list` does the same from the
   // command bar) — never fetched automatically, matching this app's
@@ -490,6 +560,62 @@ export default function TerminalApp() {
       // free-text filter expression, there's no case-sensitive content to
       // preserve.
       sendSetInterface(arg1);
+    } else if (mainCmd === 'capture' && arg1 === 'stop') {
+      sendStopCaptureFile();
+    } else if (mainCmd === 'capture' && arg1) {
+      // `capture /Users/Me/Captures/Run1.pcapng ring size 104857600 autostop duration 3600`
+      //
+      // A filesystem path is case-sensitive on any volume that isn't
+      // case-insensitive, so the path is sliced off the ORIGINAL cmdStr,
+      // not the lowercased `parts` used for routing — the same precedent
+      // `filter <expr>` sets above, and the single thing most likely to
+      // regress here (see lib/__tests__/page-command-bar-capture.test.tsx).
+      const rest = cmdStr.slice(cmdStr.indexOf(' ') + 1).trim();
+      const tokens = rest.split(/\s+/);
+      const path = tokens[0];
+      // The option KEYWORDS and mode names are matched case-insensitively
+      // (they're command syntax, not data) while the path above keeps its
+      // case. Lowercasing only the tokens used for option lookup is what
+      // keeps those two requirements from fighting.
+      const optionTokens = tokens.map((t) => t.toLowerCase());
+      const ring = parseCaptureOption(optionTokens, 'ring', ['size', 'duration', 'count']);
+      const autostop = parseCaptureOption(optionTokens, 'autostop', ['duration', 'totalsize']);
+      // A malformed option is refused locally rather than sent with the
+      // option silently dropped — starting an un-rotated, un-autostopped
+      // capture when the operator asked for both is the worse failure.
+      if (path && ring !== null && autostop !== null) {
+        sendStartCaptureFile(
+          path,
+          ring,
+          // The wire contract spells this mode "totalSize" (camelCase);
+          // the command bar accepts it in any case, so it's normalized
+          // back here rather than at the parse site.
+          autostop && autostop.mode === 'totalsize' ? { ...autostop, mode: 'totalSize' } : autostop,
+        );
+      }
+    } else if (mainCmd === 'buffer' && arg1 && parts[2]) {
+      // Purely client-side: re-caps what this tab keeps, no agent
+      // round-trip. A non-positive or unparseable count is ignored rather
+      // than clamped, matching `snaplen <n>`'s own validation posture.
+      const n = parseInt(parts[2], 10);
+      if (Number.isInteger(n) && n > 0) {
+        // Each branch also truncates what's already held. Without this, a
+        // LOWERED limit would only take effect on the next event of that
+        // kind — so `buffer packets 10` on an idle capture would leave 100
+        // packets on screen indefinitely, which reads as the command
+        // having been ignored. Raising a limit needs no equivalent (the
+        // dropped items are gone), it just lets the buffer grow again.
+        if (arg1 === 'packets') {
+          setPacketBufferLimit(n);
+          setPackets((prev) => prev.slice(0, n));
+        } else if (arg1 === 'connections') {
+          setConnectionBufferLimit(n);
+          setConnections((prev) => prev.slice(0, n));
+        } else if (arg1 === 'decrypted') {
+          setDecryptedBufferLimit(n);
+          setDecryptedSegments((prev) => prev.slice(0, n));
+        }
+      }
     }
   };
 
@@ -740,6 +866,9 @@ export default function TerminalApp() {
               traceInFlight={traceInFlight}
               onTraceRoute={handleTraceRoute}
               captureDegraded={captureDegraded}
+              totalObserved={captureStats?.totalConnectionsObserved}
+              capacityEvictions={captureStats?.capacityEvictions}
+              bufferLimit={connectionBufferLimit}
             />
           )}
 
@@ -749,6 +878,8 @@ export default function TerminalApp() {
               theme={themeConfig}
               onClearPackets={() => setPackets([])}
               decryptedSegments={decryptedSegments}
+              totalObserved={captureStats?.received}
+              bufferLimit={packetBufferLimit}
             />
           )}
 

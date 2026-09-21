@@ -17,6 +17,15 @@ interface PacketStreamViewProps {
   // Tier B (opt-in decrypted TLS content) — optional so this component
   // stays backward compatible with call sites that never pass it.
   decryptedSegments?: DecryptedPayloadSegment[];
+  // The "showing N of M observed" horizon (JAM-6/GitHub #73): every packet
+  // the agent has reported this session, from capture_stats' `received`.
+  // Optional — omitted (or before the first capture_stats tick) the view
+  // says nothing about a horizon rather than claiming one it can't
+  // substantiate.
+  totalObserved?: number;
+  // The current client-side retention cap (`buffer packets <n>`), shown so
+  // the horizon text explains WHY only N are listed.
+  bufferLimit?: number;
 }
 
 export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
@@ -24,6 +33,8 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   theme,
   onClearPackets,
   decryptedSegments = [],
+  totalObserved,
+  bufferLimit,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isFrozen, setIsFrozen] = useState(false);
@@ -115,6 +126,27 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
             <span>PACKET CAPTURE FEED ({displayedPackets.length} FRAMES)</span>
             <span>{isFrozen ? '[STREAM PAUSED]' : '[LIVE CAPTURING]'}</span>
           </div>
+
+          {/* Honest horizon (JAM-6/GitHub #73). This buffer holds the most
+              recent `bufferLimit` frames; `totalObserved` is every frame
+              the agent reported this session. Saying so explicitly is the
+              point of the issue — a 100-row list silently standing in for
+              400,000 observed frames is the dishonesty being fixed.
+
+              The `>= packets.length` guard matters: `totalObserved` comes
+              from capture_stats' `received`, which is libpcap's own
+              `pcap::Stat` and is therefore 0 for a REPLAYED file (there's
+              no live capture handle to ask). Printing "showing last 25 of
+              0 observed" there would be its own dishonesty, so when the
+              counter can't support the claim the total is simply omitted
+              rather than shown as a number known to be wrong. */}
+          {(totalObserved !== undefined || bufferLimit !== undefined) && (
+            <div className="bg-slate-950/60 px-3 py-1 border-b border-slate-800 text-[10px] text-slate-500">
+              showing last {packets.length}
+              {totalObserved !== undefined && totalObserved >= packets.length && ` of ${totalObserved} observed`}
+              {bufferLimit !== undefined && ` — this tab keeps ${bufferLimit} (\`buffer packets <n>\` to change)`}
+            </div>
+          )}
 
           <div className="flex-1 overflow-y-auto divide-y divide-slate-800/80">
             {displayedPackets.map((pkt) => {

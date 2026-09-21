@@ -1,6 +1,6 @@
 use base64::Engine;
 use capture_agent::{
-    flow::{FlowKey, FlowTable},
+    flow::{self, FlowKey, FlowTable},
     host_stats,
     http2::{FrameOutcome, Http2Reassembler},
     keylog::KeyLogWatcher,
@@ -243,6 +243,40 @@ fn is_meaningful_override(raw: &str) -> bool {
 /// detected"). A value that fails to decode as UTF-8 is treated the same
 /// way, not silently ignored — `std::env::var`'s `Result` alone would
 /// quietly treat that case as "unset."
+/// The flow table's capacity ceiling, overridable via `MAX_FLOWS` (JAM-6/
+/// GitHub #73). The default (`flow::DEFAULT_MAX_FLOWS`) bounds memory under
+/// a SYN flood / port scan / spoofed-UDP burst; an operator watching a
+/// genuinely busy link needs to raise it, and one on a memory-constrained
+/// box needs to lower it, without a rebuild.
+///
+/// Reads the env var and delegates to `parse_max_flows` — the split exists
+/// so the parsing rules are testable without mutating process-global
+/// environment state from a test, which Rust's default parallel test
+/// harness makes racy (two tests touching the same var interleave, and a
+/// `#[should_panic]` test leaves its value set for whatever runs next).
+/// No other test in this repo mutates the environment either.
+fn resolve_max_flows() -> usize {
+    parse_max_flows(std::env::var("MAX_FLOWS").ok())
+}
+
+/// Pure half of `resolve_max_flows`. Fails loud on a value that's set but
+/// unusable, matching `detect_interface`'s `CAPTURE_INTERFACE` posture
+/// exactly: silently falling back to the default would defeat the point of
+/// setting the override. An unset — or empty/whitespace-only, which
+/// `resolve_packet_source` already treats as unset for `REPLAY_FILE` —
+/// value takes the default. Zero is rejected rather than accepted as a
+/// parse success: a zero-capacity flow table evicts every flow the instant
+/// it's inserted, which looks like a total capture failure, not a setting.
+fn parse_max_flows(raw: Option<String>) -> usize {
+    let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
+        return flow::DEFAULT_MAX_FLOWS;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n,
+        _ => panic!("MAX_FLOWS={raw} is not a valid positive integer"),
+    }
+}
+
 fn detect_interface() -> pcap::Device {
     if let Some(raw) = std::env::var_os("CAPTURE_INTERFACE") {
         let name = raw
@@ -1127,7 +1161,13 @@ async fn main() -> std::io::Result<()> {
     // (Tier B decrypt-eligibility lookups) and FlowTable both need their own
     // copy of the local-address list.
     let local_addrs_for_capture = local_addrs.clone();
-    let flow_table = Arc::new(Mutex::new(FlowTable::new(local_addrs)));
+    // `MAX_FLOWS` (JAM-6/GitHub #73) overrides the table's capacity ceiling;
+    // resolved here rather than inside `FlowTable::new` so the env-var
+    // policy stays with the other startup-override reads in this file.
+    let flow_table = Arc::new(Mutex::new(FlowTable::new_with_capacity(
+        local_addrs,
+        resolve_max_flows(),
+    )));
     // Replay mode: `process_lookup::refresh()` walks *this* machine's live
     // socket table, which is meaningless for a replayed capture — the
     // processes that owned those flows may never have run on this machine
@@ -2025,7 +2065,8 @@ async fn main() -> std::io::Result<()> {
 mod tests {
     use super::{
         build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
-        is_capturable, is_meaningful_override, looks_like_pcapng, parse_replay_local_addrs, parse_replay_speed,
+        is_capturable, is_meaningful_override, looks_like_pcapng, parse_max_flows, parse_replay_local_addrs,
+        parse_replay_speed,
         resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
     };
@@ -2416,5 +2457,55 @@ mod tests {
         // fine").
         let cwd = Path::new("/home/user/network_monitor/capture-agent");
         assert!(validate_capture_file_path("../captures/run1.pcapng", cwd).is_err());
+    }
+
+    // --- MAX_FLOWS (JAM-6/GitHub #73) ---
+    //
+    // Exercised through `parse_max_flows` rather than by setting the real
+    // env var: `resolve_max_flows` is a one-line wrapper around this, and
+    // mutating a process-global env var from a parallel test harness races
+    // every other test in this binary (see `resolve_max_flows`' own doc
+    // comment).
+
+    #[test]
+    fn parse_max_flows_falls_back_to_default_when_unset() {
+        assert_eq!(parse_max_flows(None), capture_agent::flow::DEFAULT_MAX_FLOWS);
+    }
+
+    #[test]
+    fn parse_max_flows_treats_empty_or_whitespace_as_unset() {
+        // Same "empty means unset" tolerance `resolve_packet_source`
+        // already applies to REPLAY_FILE — an exported-but-empty var is a
+        // shell accident, not an operator asking for a zero-flow table.
+        assert_eq!(parse_max_flows(Some(String::new())), capture_agent::flow::DEFAULT_MAX_FLOWS);
+        assert_eq!(parse_max_flows(Some("   ".to_string())), capture_agent::flow::DEFAULT_MAX_FLOWS);
+    }
+
+    #[test]
+    fn parse_max_flows_accepts_a_positive_integer() {
+        assert_eq!(parse_max_flows(Some("250".to_string())), 250);
+        // Surrounding whitespace is trimmed, not treated as garbage.
+        assert_eq!(parse_max_flows(Some(" 64 ".to_string())), 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "not a valid positive integer")]
+    fn parse_max_flows_panics_loudly_on_garbage() {
+        let _ = parse_max_flows(Some("not-a-number".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "not a valid positive integer")]
+    fn parse_max_flows_rejects_zero() {
+        // Parses fine as a usize, but a zero-capacity table evicts every
+        // flow on insert — indistinguishable from a broken capture, so it
+        // fails at startup instead of at runtime.
+        let _ = parse_max_flows(Some("0".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "not a valid positive integer")]
+    fn parse_max_flows_rejects_a_negative_value() {
+        let _ = parse_max_flows(Some("-1".to_string()));
     }
 }
