@@ -84,11 +84,28 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
   };
 }
 
-// agent_status is flat (no nested envelope) — see issue #55/JAM-133 and
-// docs/wire-protocol.md. `replaySource` is genuinely optional (absent in
-// live mode); every other field is required for every mode.
+// Same nested-envelope shape as mapCaptureStatsEvent/mapSystemStatsEvent/
+// mapCaptureFileStatusEvent — under a `status` key, matching what
+// `capture-agent/src/wire.rs`'s `AgentStatus { status: AgentStatusJson }`
+// actually serializes.
+//
+// This previously read the fields off the top level, because
+// docs/wire-protocol.md described the event as flat (JAM-150). Nothing
+// caught it: both TS test layers fed the mapper the same flat shape the
+// mapper expected, and wire.rs's own test only asserts `line.contains(..)`
+// on individual field substrings, which passes either way. Against a real
+// agent every tick threw `missing required field "interface"` into the SSE
+// handler's catch, so agentMode stayed null and JAM-145's "replaying
+// <file>" banner never rendered.
+//
+// `replaySource` is genuinely optional (absent in live mode); every other
+// field is required for every mode.
 export function mapAgentStatusEvent(json: unknown): AgentStatus {
-  const w = json as Record<string, unknown>;
+  const envelope = json as { status?: Record<string, unknown> };
+  const w = envelope.status;
+  if (!w) {
+    throw new Error('malformed agent_status event: missing "status" field');
+  }
   return {
     interface: requireField(w, 'interface'),
     capturing: requireField(w, 'capturing'),

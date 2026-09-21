@@ -362,9 +362,17 @@ describe('mapCaptureStatsEvent', () => {
 });
 
 describe('mapAgentStatusEvent', () => {
-  // Flat (no nested envelope), revived by epic #55 — see docs/wire-protocol.md.
+  // Nested envelope under a "status" key, same shape as capture_stats/
+  // system_stats/capture_file_status — see docs/wire-protocol.md.
+  //
+  // These previously used the flat shape, matching the mapper rather than
+  // the agent, which is why JAM-150 shipped undetected. Every fixture here
+  // is now the shape capture-agent/src/wire.rs actually serializes.
   it('maps a live-mode status with directionAttributionUnavailable false', () => {
-    const event = { type: 'agent_status', interface: 'en0', capturing: true, mode: 'live', directionAttributionUnavailable: false };
+    const event = {
+      type: 'agent_status',
+      status: { interface: 'en0', capturing: true, mode: 'live', directionAttributionUnavailable: false },
+    };
     expect(mapAgentStatusEvent(event)).toEqual({
       interface: 'en0',
       capturing: true,
@@ -377,11 +385,13 @@ describe('mapAgentStatusEvent', () => {
   it('maps a replay-mode status including replaySource', () => {
     const event = {
       type: 'agent_status',
-      interface: 'unknown (replayed pcapng, no if_name recorded)',
-      capturing: true,
-      mode: 'replay',
-      replaySource: '/tmp/x.pcapng',
-      directionAttributionUnavailable: true,
+      status: {
+        interface: 'unknown (replayed pcapng, no if_name recorded)',
+        capturing: true,
+        mode: 'replay',
+        replaySource: '/tmp/x.pcapng',
+        directionAttributionUnavailable: true,
+      },
     };
     const mapped = mapAgentStatusEvent(event);
     expect(mapped.mode).toBe('replay');
@@ -390,7 +400,22 @@ describe('mapAgentStatusEvent', () => {
   });
 
   it('throws on a malformed event rather than silently producing garbage', () => {
-    expect(() => mapAgentStatusEvent({ type: 'agent_status', interface: 'en0' })).toThrow();
+    expect(() => mapAgentStatusEvent({ type: 'agent_status', status: { interface: 'en0' } })).toThrow();
+  });
+
+  // The exact regression JAM-150 was: a flat event (what the doc used to
+  // describe) must be rejected loudly, not silently mapped, so a future
+  // drift back to flat fails here instead of in a browser.
+  it('throws on a flat event with no status envelope', () => {
+    expect(() =>
+      mapAgentStatusEvent({
+        type: 'agent_status',
+        interface: 'en0',
+        capturing: true,
+        mode: 'live',
+        directionAttributionUnavailable: false,
+      })
+    ).toThrow(/missing "status" field/);
   });
 });
 
