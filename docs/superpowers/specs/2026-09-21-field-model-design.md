@@ -30,6 +30,12 @@ Today those responsibilities are maintained separately in four places with no co
 
 pub enum FieldType { Group, Bool, Uint, Str, Addr, Bytes }
 
+/// Which of the two hex-dump panes (below) a field's offset/len is relative
+/// to. Header fields (eth/ip/tcp/udp/vlan) are offset into `header_bytes`;
+/// app-layer fields (http/dns/tls) are offset into `payload` — the two
+/// panes are never merged into one shared byte space.
+pub enum ByteRegion { Header, Payload }
+
 pub enum FieldValue {
     None,             // Group entries carry no value
     Bool(bool),
@@ -45,14 +51,21 @@ pub struct Field {
     pub group: Option<String>,  // immediate parent's `path`; None for a top-level group
     pub field_type: FieldType,
     pub value: FieldValue,
-    pub offset: u32,            // byte offset into the raw frame
+    pub region: ByteRegion,
+    pub offset: u32,            // byte offset into whichever pane `region` names
     pub len: u32,               // byte length
 }
 
-pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info, raw_frame: &[u8]) -> Vec<Field>
+pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info) -> Vec<Field>
 ```
 
-`build_fields` replaces `build_header_breakdown` as the function called once per `Packet` wire event in `main.rs`'s capture loop. It takes the same inputs `build_header_breakdown` already takes (nothing new is parsed), plus the raw frame bytes (already available at the call site as the source `hex_dump` is built from) so offsets can be resolved.
+`build_fields` replaces `build_header_breakdown` as the function called once per `Packet` wire event in `main.rs`'s capture loop, taking the same inputs `build_header_breakdown` already takes — nothing new is parsed, and it needs no raw-frame parameter: `ParsedPacket` (below) now carries its own header bytes.
+
+### Two hex-dump panes, not one
+
+`hex_dump` (`parsed.payload`, capped at 64 bytes) already exists and is unchanged. `ParsedPacket` gains a new field, `header_bytes: Vec<u8>`, computed once in `parse_packet` as "everything before `payload`" in whichever slice was actually used to build the packet (for `NullLoopback` framing this is relative to `ip_data`, so the 4-byte AF prefix — never a real protocol header — is naturally excluded, matching `parse.rs`'s existing comment that it's "never inspected"). `PacketJson` gains `header_hex_dump: String`, hex-formatted from `parsed.header_bytes` the same way `hex_dump` already formats `parsed.payload`; unlike the payload dump it carries no artificial cap, since every currently-rendered field lives in a header's fixed, bounded portion (worst case today: Ethernet+VLAN+IPv4+TCP ≈ 78 bytes).
+
+Header-group fields (`eth`, `ip`/`ip6`, `tcp`/`udp`/`icmp`, `vlan`) get `region: Header`, offsets relative to `header_hex_dump`. App-layer fields (`http`, `dns`, `tls`) get `region: Payload`, offsets relative to the existing `hex_dump` — unchanged base, unchanged cap. The UI (below) renders and highlights these as two independent panes; a field's `region` says which one it belongs to.
 
 ### Naming convention
 
@@ -65,16 +78,16 @@ Top-level groups are named by the *protocol actually present*, not by OSI layer 
 ### Byte offsets
 
 Two sources, both exact, neither requiring new parsing:
-1. **Header-level ranges** come from pointer arithmetic against etherparse's existing zero-copy `SlicedPacket` slices (`parse_packet` already holds these) — e.g. the IPv4 header's slice start/end relative to `raw_frame`'s start.
-2. **Individual field ranges within a header's fixed portion** are constants: every currently-rendered field (TTL, flags, ports, sequence numbers, MAC addresses, SNI is the one exception — see below) sits at a fixed RFC-defined offset within a header's non-variable portion. None sit inside TCP options or other variable-length regions, so no field currently needs dynamic offset computation beyond the header-level slice math.
+1. **Header-level ranges** are constants relative to `header_bytes`'s own start (offset 0): Ethernet is always 14 bytes (+4 if VLAN-tagged), IPv4/IPv6 and TCP/UDP/ICMP follow immediately after at their own fixed lengths — all computable from fields `ParsedPacket` already exposes (`ip_version`, `vlan_tag.is_some()`, `protocol`, and the `LinkType` the caller parsed with), no re-parsing or pointer arithmetic against etherparse's slices needed.
+2. **Individual field ranges within a header's fixed portion** are likewise constants: every currently-rendered field (TTL, flags, ports, sequence numbers, MAC addresses, SNI is the one exception — see below) sits at a fixed RFC-defined offset within a header's non-variable portion. None sit inside TCP options or other variable-length regions, so no field currently needs dynamic offset computation.
 
-`tls.handshake.sni` is the one field whose offset is itself computed during parsing today (`l7::sniff_tls_client_hello` already walks TLS extensions to find it) — its offset/len come directly from that existing walk, just carried forward into the `Field` instead of discarded.
+`tls.handshake.sni` is the one field whose offset is itself computed during parsing today (`l7::sniff_tls_client_hello` already walks TLS extensions to find it) — its offset/len (relative to `payload`) come directly from that existing walk, just carried forward into the `Field` instead of discarded. JA3/`ja3_label` are derived from several non-contiguous ClientHello sub-fields (cipher suites, extensions, elliptic curves, ec_point_formats — not one byte run); both get `region: Payload` with offset/len spanning the whole ClientHello message, the same "derived field points at what it was derived from" convention Wireshark itself uses for computed fields.
 
 Sibling bit-fields sharing one byte (`tcp.flags.syn`/`.ack`/`.fin`/`.rst`, all bits of the single TCP flags byte) legitimately share the same offset/len. Clicking any one highlights that byte — the finest granularity a hex dump can show, and how Wireshark itself handles bitfields.
 
 ## Wire representation
 
-`PacketJson` gains `fields: Vec<Field>` (camelCase on the wire per this repo's convention: `path`, `label`, `group`, `type`, `value`, `offset`, `len`); `header_breakdown` and its four `Layer*Json` structs are deleted from `wire.rs`.
+`PacketJson` gains `fields: Vec<Field>` and `header_hex_dump: String` (camelCase on the wire per this repo's convention: `path`, `label`, `group`, `type`, `value`, `region`, `offset`, `len`, `headerHexDump`); `header_breakdown` and its four `Layer*Json` structs are deleted from `wire.rs`. The existing `hex_dump` field is unchanged.
 
 ```json
 {
@@ -82,25 +95,29 @@ Sibling bit-fields sharing one byte (`tcp.flags.syn`/`.ack`/`.fin`/`.rst`, all b
   "packet": {
     "id": "pkt-1",
     "...": "...",
+    "headerHexDump": "00 01 02 03 04 05 06 07 08 09 0a 0b 08 00 45 00 ...",
+    "hexDump": "16 03 01 00 a5 01 00 00 a1 03 03 ...",
     "fields": [
-      {"path":"eth","label":"Ethernet II","type":"group","offset":0,"len":14},
-      {"path":"eth.src","label":"Source MAC","type":"addr","group":"eth","value":"00:01:02:03:04:05","offset":6,"len":6},
-      {"path":"ip","label":"Internet Protocol Version 4","type":"group","offset":14,"len":20},
-      {"path":"ip.ttl","label":"Time to Live","type":"uint","group":"ip","value":64,"offset":22,"len":1},
-      {"path":"tcp","label":"Transmission Control Protocol","type":"group","offset":34,"len":20},
-      {"path":"tcp.flags","label":"Flags","type":"group","group":"tcp","offset":47,"len":1},
-      {"path":"tcp.flags.syn","label":"SYN","type":"bool","group":"tcp.flags","value":true,"offset":47,"len":1},
-      {"path":"tcp.src_port","label":"Source Port","type":"uint","group":"tcp","value":51000,"offset":34,"len":2}
+      {"path":"eth","label":"Ethernet II","type":"group","region":"header","offset":0,"len":14},
+      {"path":"eth.src","label":"Source MAC","type":"addr","group":"eth","region":"header","value":"00:01:02:03:04:05","offset":6,"len":6},
+      {"path":"ip","label":"Internet Protocol Version 4","type":"group","region":"header","offset":14,"len":20},
+      {"path":"ip.ttl","label":"Time to Live","type":"uint","group":"ip","region":"header","value":64,"offset":22,"len":1},
+      {"path":"tcp","label":"Transmission Control Protocol","type":"group","region":"header","offset":34,"len":20},
+      {"path":"tcp.flags","label":"Flags","type":"group","group":"tcp","region":"header","offset":47,"len":1},
+      {"path":"tcp.flags.syn","label":"SYN","type":"bool","group":"tcp.flags","region":"header","value":true,"offset":47,"len":1},
+      {"path":"tcp.src_port","label":"Source Port","type":"uint","group":"tcp","region":"header","value":51000,"offset":34,"len":2},
+      {"path":"tls","label":"Transport Layer Security","type":"group","region":"payload","offset":0,"len":165},
+      {"path":"tls.handshake.sni","label":"Server Name","type":"str","group":"tls","region":"payload","value":"example.com","offset":49,"len":11}
     ]
   }
 }
 ```
 
-A `Field` serializes its `value` key only when `field_type != Group` (a group has no value, same "omit rather than null" discipline this wire protocol already uses elsewhere — e.g. `capture_file_status`'s optional fields); `group` is omitted for top-level entries rather than sent as `null`.
+A `Field` serializes its `value` key only when `field_type != Group` (a group has no value, same "omit rather than null" discipline this wire protocol already uses elsewhere — e.g. `capture_file_status`'s optional fields); `group` is omitted for top-level entries rather than sent as `null`. `region`/`offset`/`len` are always present, on groups and leaves alike, so a group itself can be highlighted (e.g. hovering the `tcp` group highlights the whole 20-byte TCP header).
 
 ## TypeScript side
 
-`lib/types.ts`: `PacketFrame.headerBreakdown` (the nested `layer1`..`layer7` block) is deleted and replaced by `fields: WireField[]`:
+`lib/types.ts`: `PacketFrame.headerBreakdown` (the nested `layer1`..`layer7` block) is deleted and replaced by `fields: WireField[]`; `PacketFrame` also gains `headerHexDump: string` alongside its existing `hexDump`:
 
 ```typescript
 export interface WireField {
@@ -109,17 +126,18 @@ export interface WireField {
   group?: string;
   type: 'group' | 'bool' | 'uint' | 'string' | 'addr' | 'bytes';
   value?: boolean | number | string;
+  region: 'header' | 'payload';
   offset: number;
   len: number;
 }
 ```
 
-`lib/agent-mapping.ts`'s `mapPacketEvent` maps `data.fields` straight through — it's already flat, no reshaping needed (unlike the old per-layer object it replaces).
+`lib/agent-mapping.ts`'s `mapPacketEvent` maps `data.fields`/`data.headerHexDump` straight through — the field list is already flat, no reshaping needed (unlike the old per-layer object it replaces).
 
 `components/PacketStreamView.tsx`'s hard-coded layer7/6/5/4/3/2/1 JSX blocks (current lines ~180-224 and following) are replaced by:
 - A small tree-builder: one pass over the flat `fields` array, grouping children under their `group` path, producing a renderable tree. (Lives in `lib/` as a pure function so it's unit-testable without rendering.)
-- A collapsible tree view for the selected packet's fields.
-- Bidirectional highlighting: clicking a field highlights its `[offset, offset+len)` byte range in the existing `hexDump` view; hovering a byte range in the hex dump highlights the field(s) whose range contains it (a shared byte can highlight multiple fields, e.g. hovering the TCP flags byte highlights `tcp.flags` and all four boolean children).
+- A collapsible tree view for the selected packet's fields, split into two sections — header fields and app-layer fields — matching the two panes below.
+- **Two independent hex panes**: the existing payload hex dump (`hexDump`) and a new header-bytes pane (`headerHexDump`), rendered side by side or stacked. Bidirectional highlighting is scoped per pane by each field's `region`: clicking a header-region field highlights bytes in the header pane only; clicking a payload-region field highlights the payload pane only. Hovering a byte range in either pane highlights the field(s) in that same pane whose range contains it (a shared byte can highlight multiple fields, e.g. hovering the TCP flags byte highlights `tcp.flags` and all four boolean children).
 
 ## Migration
 
@@ -131,8 +149,8 @@ Measured by serializing one representative real packet — a TCP segment carryin
 
 ## Testing
 
-- **Rust**: unit tests on `build_fields`, one per currently-decoded protocol combination (Ethernet/VLAN/loopback/raw framing × TCP/UDP/ICMP × each `L7Info` variant), mirroring today's `build_header_breakdown` test coverage in `wire.rs`. Assert exact `path`/`type`/`value`/`offset`/`len` for a representative field per header, plus the "omit value for group entries" and "omit group key for top-level entries" serialization rules. No new fuzz target: `build_fields` consumes already-parsed, already-fuzzed `ParsedPacket`/`L7Info` — it does not re-parse raw untrusted bytes itself.
-- **TypeScript**: unit tests on `mapPacketEvent`'s new field mapping, the tree-builder function (flat list → tree, including the shared-byte multi-parent highlight case), and `PacketStreamView`'s render/click-to-highlight behavior (component test, mirroring this repo's existing `packet-stream-*.test.tsx` pattern).
+- **Rust**: unit tests on `parse_packet`/`build_parsed_packet` asserting `header_bytes` excludes the payload and, for `NullLoopback`, excludes the 4-byte AF prefix. Unit tests on `build_fields`, one per currently-decoded protocol combination (Ethernet/VLAN/loopback/raw framing × TCP/UDP/ICMP × each `L7Info` variant), mirroring today's `build_header_breakdown` test coverage in `wire.rs`. Assert exact `path`/`type`/`value`/`region`/`offset`/`len` for a representative field per header, plus the "omit value for group entries," "omit group key for top-level entries," and "region present on both groups and leaves" serialization rules. No new fuzz target: `build_fields` consumes already-parsed, already-fuzzed `ParsedPacket`/`L7Info` — it does not re-parse raw untrusted bytes itself.
+- **TypeScript**: unit tests on `mapPacketEvent`'s new field/`headerHexDump` mapping, the tree-builder function (flat list → tree, including the shared-byte multi-parent highlight case), and `PacketStreamView`'s render/click-to-highlight behavior for both panes independently (component test, mirroring this repo's existing `packet-stream-*.test.tsx` pattern).
 
 ## Deferred to later tasks
 
@@ -145,4 +163,4 @@ Measured by serializing one representative real packet — a TCP segment carryin
 - No placeholders (no TBD/TODO left in this document).
 - Internal consistency: the wire example, the Rust struct, and the TypeScript interface all agree on field names and casing (snake_case in Rust struct fields, camelCase on the wire per this repo's existing convention, matching `WireField`).
 - Scope check: this is one task's worth of work (registry + wire + full UI cutover), explicitly excluding the filter language and any new dissector coverage — both called out above so they aren't silently pulled in during implementation.
-- Ambiguity check: the group/leaf distinction (Approach C: every group is its own explicit entry with `type: "group"` and no `value`) removes the "is this path a group or a leaf" ambiguity a pure path-splitting scheme would have.
+- Ambiguity check: the group/leaf distinction (Approach C: every group is its own explicit entry with `type: "group"` and no `value`) removes the "is this path a group or a leaf" ambiguity a pure path-splitting scheme would have. The header/payload pane split (added after the first approval pass, once it became clear `hex_dump` never included header bytes at all) removes the "which byte space does this offset mean" ambiguity the same way — every field's `region` says explicitly which of the two panes it's relative to.
