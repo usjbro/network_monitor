@@ -39,6 +39,27 @@ what failed. Note `pcap::Device::list()` is the authority here, not
 `ifconfig -l` — they're usually the same set, but `access_bpf` scoping can
 make them differ.
 
+## Flow-table capacity (`MAX_FLOWS`)
+
+The flow table tracks at most 10,000 concurrent flows by default, which
+bounds memory under a SYN flood, port scan, or spoofed-UDP burst — each
+distinct (local, remote) pair would otherwise hold a `FlowState` for up to
+30 minutes regardless of intent. Override it for a genuinely busy link, or
+lower it on a memory-constrained box, with `MAX_FLOWS`:
+
+    MAX_FLOWS=50000 cargo run --release
+
+An empty/blank value is treated as unset, same as `CAPTURE_INTERFACE`. A
+value that's set but unusable — not a number, negative, or `0` (a
+zero-capacity table evicts every flow the instant it's inserted, which
+looks like a total capture failure rather than a setting) — fails loudly at
+startup rather than silently falling back to the default.
+
+When the ceiling is actually reached, the UI says so: the Connections view
+surfaces the agent's capacity-eviction count separately from ordinary idle
+turnover, since the former means the flow table may be missing recent
+activity.
+
 See [../docs/wire-protocol.md](../docs/wire-protocol.md) for the full JSON
 event contract this binary produces.
 

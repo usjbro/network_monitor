@@ -29,6 +29,16 @@ interface ConnectionsViewProps {
   // kernel/driver drops or relay lag — the per-connection loss % below is
   // retransmit-derived and only trustworthy when this is false.
   captureDegraded?: boolean;
+  // The "showing N of M observed" horizon (JAM-6/GitHub #73), from
+  // capture_stats: `totalObserved` is every distinct flow the agent has
+  // seen this session, `capacityEvictions` the subset dropped because the
+  // agent's own flow table hit its `MAX_FLOWS` ceiling. The two are
+  // surfaced separately on purpose — ordinary idle turnover is expected,
+  // capacity eviction means the table may be missing recent activity.
+  totalObserved?: number;
+  capacityEvictions?: number;
+  // The current client-side retention cap (`buffer connections <n>`).
+  bufferLimit?: number;
 }
 
 export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
@@ -42,6 +52,9 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   traceInFlight,
   onTraceRoute,
   captureDegraded,
+  totalObserved,
+  capacityEvictions,
+  bufferLimit,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [protocolFilter, setProtocolFilter] = useState<string>('ALL');
@@ -97,6 +110,29 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           ))}
         </div>
       </div>
+
+      {/* Honest horizon (JAM-6/GitHub #73) — see the props' own comment
+          for why capacity eviction is called out separately from the
+          plain "showing N of M" line. */}
+      {(totalObserved !== undefined || bufferLimit !== undefined) && (
+        <div className="text-[11px] text-slate-500">
+          showing {connections.length}
+          {/* Same "don't claim a total the counter can't support" guard as
+              PacketStreamView — see its comment. `totalConnectionsObserved`
+              is agent-maintained (not libpcap's) so it is trustworthy in
+              replay too, but the guard costs nothing and keeps the two
+              views' honesty rule identical. */}
+          {totalObserved !== undefined && totalObserved >= connections.length && ` of ${totalObserved} observed`}
+          {bufferLimit !== undefined && ` — this tab keeps ${bufferLimit} (\`buffer connections <n>\` to change)`}
+        </div>
+      )}
+      {capacityEvictions !== undefined && capacityEvictions > 0 && (
+        <div className="text-[11px] text-amber-500">
+          {capacityEvictions} connection(s) evicted for capacity — the agent&apos;s flow table hit its ceiling, so it may
+          be missing recent activity (a port scan or a burst can do this). Raise it with the agent&apos;s{' '}
+          <code>MAX_FLOWS</code> environment variable.
+        </div>
+      )}
 
       {/* Connection Table */}
       <div className={`rounded border ${theme.border} ${theme.cardBg} overflow-x-auto`}>

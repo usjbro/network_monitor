@@ -95,6 +95,16 @@ This should not happen under normal operation — the parser is specifically har
 
 If speeds look wildly unrealistic (many multiples of what your actual connection could sustain), you may be running a build from before the "shared clock" fix — `capture-agent/src/main.rs`'s periodic emitter previously computed elapsed time incorrectly, inflating speed metrics by roughly 1000x. Make sure you're on a current build (`git pull && cd capture-agent && cargo build --release`).
 
+## Connections or packets are missing from the list
+
+Two different ceilings can be responsible, and the UI distinguishes them.
+
+**The browser tab's own buffer.** Each view keeps only its most recent N items (defaults: 100 packets, 200 connections, 100 decrypted segments) and says so in a "showing N of M observed" line beneath the controls. Raise it with `buffer packets <n>` / `buffer connections <n>` / `buffer decrypted <n>` in the command bar. This is purely client-side — it changes what this tab retains, nothing about what the agent captures, and it resets on reload.
+
+**The agent's flow table.** If the Connections view shows an amber "N connection(s) evicted for capacity" line, the agent hit its own ceiling (10,000 concurrent flows by default) and dropped flows to stay within it, so the table may be missing recent activity. A burst of this during a port scan or a traffic spike is the mechanism working as intended; a steadily growing count on ordinary traffic means the ceiling is too low for your link. Raise it by starting the agent with `MAX_FLOWS` set (see `capture-agent/README.md`). Note that this counter is specifically *capacity* eviction — ordinary idle-connection turnover is tracked separately and is not a problem.
+
+Neither of these is the same as **capture-side loss** (kernel/driver drops or a lagging relay), which shows up as the separate red "capture degraded" banner at the top of the window — that means data never reached the UI at all.
+
 ## Ownership enrichment shows nothing, or is very slow
 
 - **Is it actually on?** It's off by default and never persisted — type `enrich on` in the command bar first (see [usage.md](usage.md)). Check that it didn't silently turn back off across a relay restart.

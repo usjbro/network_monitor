@@ -93,7 +93,7 @@ pub struct FlowSnapshot {
 /// flood / port scan / spoofed-UDP burst, which would otherwise allocate one
 /// `FlowState` (four `String`s + a `HashMap`) per distinct (local, remote)
 /// pair and hold each for up to 30 minutes regardless of attacker intent.
-const DEFAULT_MAX_FLOWS: usize = 10_000;
+pub const DEFAULT_MAX_FLOWS: usize = 10_000;
 
 pub struct FlowTable {
     local_addrs: Vec<String>,

@@ -81,6 +81,9 @@ export const CommandLineBar: React.FC<CommandLineBarProps> = ({
             <div><strong className="text-emerald-400">geoip enable</strong>: Opt in to geoIP lookups for traceroute hops</div>
             <div><strong className="text-emerald-400">geoip disable</strong>: Turn geoIP lookups back off</div>
             <div><strong className="text-emerald-400">geoip clear</strong>: Erase the on-disk geoIP cache</div>
+            <div><strong className="text-emerald-400">capture &lt;path&gt; [ring size|duration|count &lt;n&gt;] [autostop duration|totalSize &lt;n&gt;]</strong>: Start writing a live capture to a pcapng file</div>
+            <div><strong className="text-emerald-400">capture stop</strong>: Stop the active capture-to-file</div>
+            <div><strong className="text-emerald-400">buffer packets|connections|decrypted &lt;n&gt;</strong>: Adjust how many recent items this browser tab keeps</div>
           </div>
         </div>
       )}
