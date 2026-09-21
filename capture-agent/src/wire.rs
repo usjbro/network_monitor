@@ -653,6 +653,28 @@ mod tests {
     }
 
     #[test]
+    fn decode_control_rejects_malformed_shapes_without_panicking() {
+        // main.rs's read loop has a bare `None => {}` arm for whatever this
+        // returns and never breaks the connection on it — this test is what
+        // actually proves that's safe: a malformed-but-non-empty control
+        // line must decode to `None`, never panic.
+        let cases = [
+            r#"{"type":"nonexistent"}"#,
+            // register_decrypt_eligible missing its required keylogPath.
+            r#"{"type":"register_decrypt_eligible","pid":4242}"#,
+            // pid is a string, not the required u32.
+            r#"{"type":"register_decrypt_eligible","pid":"not-a-number","keylogPath":"/tmp/x.keylog"}"#,
+            // bytes is a string, not the required u32.
+            r#"{"type":"set_snaplen","bytes":"not-a-number"}"#,
+            r#"{}"#,
+            r#"[]"#,
+        ];
+        for case in cases {
+            assert!(decode_control(case).is_none(), "expected None for malformed input: {case}");
+        }
+    }
+
+    #[test]
     fn decodes_set_capture_filter_and_set_snaplen() {
         let msg = decode_control("{\"type\":\"set_capture_filter\",\"filter\":\"tcp port 443\"}");
         match msg {

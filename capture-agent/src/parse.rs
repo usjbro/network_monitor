@@ -204,7 +204,9 @@ fn build_parsed_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use etherparse::{PacketBuilder, VlanId};
+    use etherparse::{
+        IpFragOffset, IpNumber, Ipv4Header, PacketBuilder, TcpHeader, TcpOptionElement, VlanId,
+    };
 
     #[test]
     fn parses_a_tcp_syn_packet() {
@@ -319,5 +321,82 @@ mod tests {
         assert_eq!(parsed.dst_port, Some(12345));
         assert_eq!(parsed.src_mac, "00:00:00:00:00:00");
         assert_eq!(parsed.dst_mac, "00:00:00:00:00:00");
+    }
+
+    #[test]
+    fn parses_a_non_first_ipv4_fragment_without_panicking_or_misattributing_l4_fields() {
+        // `PacketBuilder`'s fluent API has no fragment support, so this
+        // builds the IP header directly. A non-first fragment's payload is
+        // raw fragment bytes, not a real UDP header — etherparse correctly
+        // refuses to parse a transport layer for any fragmented IP payload
+        // (`sliced.transport` is `None` whenever `more_fragments`/a nonzero
+        // `fragment_offset` is set), so this must land in the `Other`/no-port
+        // arm rather than being misread as UDP with garbage ports.
+        let payload = b"raw-fragment-bytes-not-a-udp-header";
+        let mut ip = Ipv4Header::new(payload.len() as u16, 64, IpNumber::UDP, [192, 168, 1, 10], [93, 184, 216, 34])
+            .unwrap();
+        ip.more_fragments = true;
+        ip.fragment_offset = IpFragOffset::try_new(185).unwrap();
+        ip.header_checksum = ip.calc_header_checksum();
+
+        let mut data = Vec::new();
+        ip.write(&mut data).unwrap();
+        data.extend_from_slice(payload);
+
+        let parsed = parse_packet(&data, LinkType::Raw)
+            .expect("a fragmented IPv4 packet must still parse, not return None");
+
+        assert_eq!(parsed.src_ip, "192.168.1.10");
+        assert_eq!(parsed.dst_ip, "93.184.216.34");
+        assert_eq!(parsed.ttl, 64);
+        assert_eq!(parsed.ip_version, 4);
+        assert_eq!(parsed.protocol, TransportProtocol::Other);
+        assert_eq!(parsed.src_port, None);
+        assert_eq!(parsed.dst_port, None);
+    }
+
+    #[test]
+    fn parses_a_tcp_header_with_options_present() {
+        // MSS (4 bytes) + WindowScale (3 bytes) + a Noop pad byte (1 byte)
+        // pushes the header 8 bytes past the fixed 20-byte minimum —
+        // `payload` must start after all of it, not partway through the
+        // options.
+        let mut tcp = TcpHeader::new(51000, 443, 1000, 65535);
+        tcp.syn = true;
+        tcp.set_options(&[
+            TcpOptionElement::MaximumSegmentSize(1460),
+            TcpOptionElement::WindowScale(7),
+            TcpOptionElement::Noop,
+        ])
+        .unwrap();
+
+        let payload = b"hello";
+        let mut ip = Ipv4Header::new(
+            (tcp.header_len() + payload.len()) as u16,
+            64,
+            IpNumber::TCP,
+            [192, 168, 1, 10],
+            [93, 184, 216, 34],
+        )
+        .unwrap();
+        ip.header_checksum = ip.calc_header_checksum();
+        tcp.checksum = tcp.calc_checksum_ipv4(&ip, payload).unwrap();
+
+        let mut data = Vec::new();
+        ip.write(&mut data).unwrap();
+        tcp.write(&mut data).unwrap();
+        data.extend_from_slice(payload);
+
+        let parsed = parse_packet(&data, LinkType::Raw)
+            .expect("should parse a TCP packet carrying header options");
+
+        assert_eq!(parsed.src_ip, "192.168.1.10");
+        assert_eq!(parsed.dst_ip, "93.184.216.34");
+        assert_eq!(parsed.protocol, TransportProtocol::Tcp);
+        assert_eq!(parsed.src_port, Some(51000));
+        assert_eq!(parsed.dst_port, Some(443));
+        let flags = parsed.tcp_flags.unwrap();
+        assert!(flags.syn);
+        assert_eq!(parsed.payload, payload);
     }
 }
