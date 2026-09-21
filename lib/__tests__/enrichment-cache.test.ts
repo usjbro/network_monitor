@@ -64,10 +64,26 @@ describe('EnrichmentCache', () => {
   it('negative caching: a never-succeeded lookup is cached with its own short TTL', async () => {
     const cache = new EnrichmentCache(filePath);
     cache.load();
+    // `now` is captured BEFORE setNegative, and freshness is asserted
+    // against it explicitly rather than against the wall clock — same
+    // injectable-clock form as the TTL-expiry test above.
+    //
+    // Without it this races its own TTL: setNegative stores
+    // `Date.now() + 5` and then awaits a disk write, so any scheduling or
+    // filesystem delay over 5ms leaves the entry already expired by the
+    // time isFresh() reads the wall clock, and the assertion flips. That
+    // is a real intermittent failure, not a hypothetical — it took CI on
+    // main red (run 127, commit 884d2e0) while passing on other runs of
+    // the identical code.
+    //
+    // Note the neighbouring stale-on-failure test deliberately keeps its
+    // own 5ms TTL and a 20ms sleep: waiting PAST a short TTL is
+    // deterministic, asserting you are still INSIDE one is not.
+    const now = Date.now();
     await cache.setNegative('198.51.100.0/24', 5);
     const entry = cache.getForIp('198.51.100.7')!;
     expect(entry.record).toBeNull();
-    expect(cache.isFresh(entry)).toBe(true);
+    expect(cache.isFresh(entry, now)).toBe(true);
   });
 
   it('atomic write: a write interrupted before rename leaves the previous file intact', async () => {
