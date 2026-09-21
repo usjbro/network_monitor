@@ -63,6 +63,53 @@ activity.
 See [../docs/wire-protocol.md](../docs/wire-protocol.md) for the full JSON
 event contract this binary produces.
 
+## Replaying a capture file instead of live traffic
+
+Set `REPLAY_FILE` to a path before starting the agent to read a previously
+captured file through the same pipeline live traffic uses — same wire
+events, same UI, no special cases. Accepts this agent's own pcapng output,
+another tool's pcapng, or classic pcap/`tcpdump`:
+
+    REPLAY_FILE=~/captures/incident.pcapng cargo run --release
+
+`REPLAY_FILE` is mutually exclusive with `CAPTURE_INTERFACE`; setting both
+is a startup error naming both values rather than a silent precedence rule.
+
+Two companions, both optional:
+
+- `REPLAY_LOCAL_ADDRS` — a comma-separated list of addresses to treat as
+  local, so rx/tx direction can be attributed. Without it (and without an
+  address option in the file's own Interface Description Block) the agent
+  falls back to positional attribution and says so: `agent_status` carries
+  `directionAttributionUnavailable: true` for the whole session, and the UI
+  captions the replay banner accordingly.
+- `REPLAY_SPEED` — `realtime` paces frames by their recorded timestamps;
+  anything else (the default) replays as fast as the pipeline accepts.
+
+Replay is a startup-only choice. There is no runtime switch between live
+and replay, deliberately — see `docs/superpowers/specs/`.
+
+Note that process attribution is meaningless for a replayed file: the
+processes that owned those flows may never have run on this machine. The
+agent doesn't guess, so every connection reports `processName: "unknown"`
+with `pid: 0`.
+
+## Environment variables
+
+| Variable | Effect | When read |
+| --- | --- | --- |
+| `CAPTURE_INTERFACE` | Force a specific capture interface instead of auto-detecting | Startup |
+| `REPLAY_FILE` | Replay this capture file instead of capturing live (mutually exclusive with `CAPTURE_INTERFACE`) | Startup |
+| `REPLAY_LOCAL_ADDRS` | Comma-separated local addresses, so replay can attribute rx/tx direction | Startup |
+| `REPLAY_SPEED` | `realtime` to pace by recorded timestamps; otherwise as fast as possible | Startup |
+| `MAX_FLOWS` | Flow-table capacity ceiling (default 10,000) | Startup |
+
+All five are read once, at startup, and fail loudly on a value that is set
+but unusable rather than silently falling back. An empty or whitespace-only
+value is treated as unset. See [../docs/architecture.md](../docs/architecture.md)'s
+Resource limits table for every cap in the system, not just the
+configurable ones.
+
 ## Beyond the base flow table
 
 This binary also does three further things, each documented in more depth

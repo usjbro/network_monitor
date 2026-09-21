@@ -62,7 +62,7 @@ Sibling routes handle the three sub-projects: `app/api/enrichment/control/route.
 |---|---|
 | `connection_status` | drives the "agent not connected" banner |
 | `connection_update` | upserts into the `connections` list (now also carries `ja3Fingerprint`/`ja3Label`, see below) |
-| `packet` | prepends into a capped `packets` buffer (keeps the newest ~100: `[packet, ...prev.slice(0, 100)]`) |
+| `packet` | prepends into a capped `packets` buffer (newest 100 by default, adjustable per tab with `buffer packets <n>` — see Resource limits below) |
 | `layer_update` | merges into `liveLayers`; `layers` is *derived* from it via `useMemo` |
 | `decrypted_payload` | mapped via `lib/decrypted-mapping.ts`, gated by `lib/decrypted-payload-gate.ts` to loopback/mTLS-authenticated transport, rendered in `PacketStreamView` |
 | `traceroute_hop` / `geo_hop_update` | folded into `lib/traceroute-state.ts`, rendered as a per-hop table in `ConnectionsView` |
@@ -85,14 +85,44 @@ There is no simulation code anywhere in this path — but that's not quite the s
 - **One clock, one source of truth**: the agent computes all derived metrics (speed, RTT, loss, per-layer aggregates) once, server-side; the relay and UI just forward and render.
 - **No polling**: SSE + a persistent agent connection means the UI updates as events happen, not on a fixed interval.
 
+## Resource limits
+
+Every cap in the system, and what actually happens when you hit it. Nothing
+here silently discards data without saying so somewhere — that's the point of
+the "what happens" column (JAM-6/GitHub #73).
+
+| Limit | Default | Configurable via | What happens at the limit |
+| --- | --- | --- | --- |
+| Packet buffer (browser tab) | 100 | `buffer packets <n>` | Oldest entries drop. The view states "showing last N of M observed" so the list never silently stands in for more traffic than it shows |
+| Connection list (browser tab) | 200 | `buffer connections <n>` | Same, as "showing N of M observed" |
+| Decrypted-segment buffer (browser tab) | 100 | `buffer decrypted <n>` | Same |
+| Flow table capacity (agent) | 10,000 | `MAX_FLOWS` env var, startup-only | The least-recently-seen flow is evicted. Counted as `capture_stats.capacityEvictions`, separately from idle eviction, and surfaced in the Connections view as a distinct warning — capacity eviction means the table may be missing recent activity, unlike ordinary turnover |
+| Flow idle eviction (agent) | 30s `SYN_SENT` / 60s UDP / 120s closing (`TIME_WAIT`/`CLOSE_WAIT`) / 1800s ceiling for any status | not configurable | Flow removed. Counted as `capture_stats.idleEvictions` — normal churn, not a health signal |
+| Packet events to the wire (agent) | 100 per 1s window | not configurable | Excess packet events are dropped rather than queued (`rate_limit.rs`). Connection/stats events are unaffected — only the per-packet firehose is shaped |
+| Decrypted-content ring buffer (agent) | capped, `mlock`'d, zeroed on evict | not configurable | Oldest segment evicted and its memory zeroed. Never written to disk (`ring_buffer.rs`) |
+| Capture-to-file ring | none (a single, non-rotating file if `ring` is omitted) | `capture <path> ring size\|duration\|count <n>` | Rotates to a **new** numbered file. It does **not** wrap or overwrite: every mode rotates indefinitely, so a ring alone does not bound disk use — pair it with `autostop`, and note the disk floor below is the only always-on backstop |
+| Capture-to-file autostop | none (runs until stopped) | `capture <path> autostop duration\|totalSize <n>` | Capture stops cleanly; `capture_file_status.autostopReason` names which condition fired |
+| Capture-to-file low-disk floor | 500MB free on the target volume | not configurable (`DEFAULT_LOW_DISK_FLOOR_BYTES`, `ring.rs`) | Refuses to start below the floor; if free space falls below it mid-run, stops cleanly with `autostopReason: "lowDisk"` rather than filling the volume |
+| Capture filter expression | 1024 bytes | not configurable (`MAX_CAPTURE_FILTER_LEN`) | Rejected before reaching libpcap's compiler; the previous filter keeps running |
+
+The browser-side buffers are per tab and reset on reload — they change what
+*this* tab retains, never what the agent captures. The agent-side limits are
+the ones that affect what is observed at all.
+
 ## Known, deliberate gaps
 
 These aren't oversights — they're scoped out of the current increment and tracked as GitHub issues in [usjbro/network_monitor](https://github.com/usjbro/network_monitor):
 
-- **`SystemStats`** (hostname, CPU/mem, aggregate interface throughput) has no wire event yet. Only `rxTotalMbps`/`txTotalMbps` and the RX/TX history arrays were zeroed out (and the dashboard's "LIVE" badge removed for that section) as a deliberate honesty fix — the rest of `SystemStats` (`hostname`, `cpuUsagePct`, `memUsagePct`, `uptimeSeconds`, MAC/IP, `totalPacketsCaptured`, etc., seeded in `app/page.tsx`) is still the original scaffold's hardcoded fake values, not yet touched. Don't trust anything in the header bar's stats beyond throughput as real.
-- **`headerBreakdown`** (per-layer packet detail: MACs, TLS SNI, HTTP method/path, DNS query name) is parsed by the agent but never reaches the wire — issue #29.
-- **The packet-event stream is uncapped** — no sampling/rate limit yet, issue #27.
-- **Flows never expire** — the flow table grows unbounded for the life of the process, issue #28.
+- **No per-viewer identity or permissions.** Every client past the mTLS front door has identical, full access, and relay-wide toggles (ownership enrichment, geoIP) apply to all of them at once. See [security.md](security.md).
+- **Live↔replay is a startup-only choice.** `REPLAY_FILE` is read once; there is no runtime switch between live capture and replaying a file, deliberately, to avoid doubling the capture loop's state space.
+- **Replay has no seek or single-step.** A capture file plays start to finish (optionally paced with `REPLAY_SPEED`); arbitrary-offset seeking and frame stepping are out of scope.
+- **Capture files carry no decryption secrets, name-resolution blocks, or per-packet comments.** The writer emits Section Header, Interface Description, Enhanced Packet and Interface Statistics blocks only.
+- **Host CPU/memory/uptime and interface speed/duplex are absent from `SystemStats`, on purpose.** None are measurable from this agent today, so they are omitted rather than faked — don't add them back without a real wire producer.
+
+Four gaps listed here previously (no `SystemStats` wire event, `headerBreakdown`
+never reaching the wire, an uncapped packet-event stream, and flows never
+expiring) have all since been closed — see the resource-limits table above for
+what actually governs them now.
 - **The app has no application-layer auth of its own** — epic #22 landed mTLS at the Caddy layer (`deploy/`) plus a native viewer (`macos-app/`), so LAN access is gated on a client certificate, but the relay still can't distinguish one authenticated client from another and every one of them has full access. That layer also carries known residual risks (an unencrypted local CA key, long-lived certs with no revocation, and an App Sandbox limitation in the native app's cert provisioning) — see [security.md](security.md).
 
 See [troubleshooting.md](troubleshooting.md) for what these look like in practice, and [security.md](security.md) for the full security posture.
