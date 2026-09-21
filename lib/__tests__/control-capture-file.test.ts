@@ -11,9 +11,19 @@ import type { NextRequest } from 'next/server';
 import { POST } from '@/app/api/control/route';
 import type { AgentClient } from '@/lib/agent-client';
 
-/** A minimal stand-in for NextRequest — the route only calls `.json()`. */
+/**
+ * A minimal stand-in for NextRequest. The route reads `.json()` plus, since
+ * JAM-151's cross-site guard, `.headers` and `.url`. `Sec-Fetch-Site:
+ * same-origin` stands in for the app's own page making the call — these
+ * cases are about the route's own validation, not the cross-site policy,
+ * which lib/__tests__/same-origin.test.ts covers directly.
+ */
 function req(body: unknown): NextRequest {
-  return { json: async () => body } as NextRequest;
+  return {
+    url: 'http://127.0.0.1:3000/api/control',
+    headers: new Headers({ 'sec-fetch-site': 'same-origin' }),
+    json: async () => body,
+  } as unknown as NextRequest;
 }
 
 describe('POST /api/control — capture-to-file messages', () => {
