@@ -65,7 +65,10 @@ describe('TerminalApp agent mode banner', () => {
     const source = FakeEventSource.instances[0];
 
     send(source, { type: 'connection_status', connected: true });
-    send(source, { type: 'agent_status', interface: 'lo', capturing: true, mode: 'live', directionAttributionUnavailable: false });
+    send(source, {
+      type: 'agent_status',
+      status: { interface: 'lo', capturing: true, mode: 'live', directionAttributionUnavailable: false },
+    });
     send(source, { type: 'connection_status', connected: false });
 
     expect(bannerTextContaining('capture agent not connected')).not.toBeNull();
@@ -79,11 +82,13 @@ describe('TerminalApp agent mode banner', () => {
     send(source, { type: 'connection_status', connected: true });
     send(source, {
       type: 'agent_status',
-      interface: 'unknown (replayed pcapng, no if_name recorded)',
-      capturing: true,
-      mode: 'replay',
-      replaySource: '/tmp/incident.pcapng',
-      directionAttributionUnavailable: false,
+      status: {
+        interface: 'unknown (replayed pcapng, no if_name recorded)',
+        capturing: true,
+        mode: 'replay',
+        replaySource: '/tmp/incident.pcapng',
+        directionAttributionUnavailable: false,
+      },
     });
 
     const banner = bannerTextContaining('replaying');
@@ -99,11 +104,13 @@ describe('TerminalApp agent mode banner', () => {
     send(source, { type: 'connection_status', connected: true });
     send(source, {
       type: 'agent_status',
-      interface: 'unknown (replayed pcapng, no if_name recorded)',
-      capturing: true,
-      mode: 'replay',
-      replaySource: '/tmp/incident.pcapng',
-      directionAttributionUnavailable: true,
+      status: {
+        interface: 'unknown (replayed pcapng, no if_name recorded)',
+        capturing: true,
+        mode: 'replay',
+        replaySource: '/tmp/incident.pcapng',
+        directionAttributionUnavailable: true,
+      },
     });
 
     const banner = bannerTextContaining('replaying');
@@ -117,11 +124,13 @@ describe('TerminalApp agent mode banner', () => {
     send(source, { type: 'connection_status', connected: true });
     send(source, {
       type: 'agent_status',
-      interface: 'unknown (replayed pcapng, no if_name recorded)',
-      capturing: true,
-      mode: 'replay',
-      replaySource: '/tmp/incident.pcapng',
-      directionAttributionUnavailable: false,
+      status: {
+        interface: 'unknown (replayed pcapng, no if_name recorded)',
+        capturing: true,
+        mode: 'replay',
+        replaySource: '/tmp/incident.pcapng',
+        directionAttributionUnavailable: false,
+      },
     });
 
     const banner = bannerTextContaining('replaying');
@@ -133,7 +142,10 @@ describe('TerminalApp agent mode banner', () => {
     const source = FakeEventSource.instances[0];
 
     send(source, { type: 'connection_status', connected: true });
-    send(source, { type: 'agent_status', interface: 'en0', capturing: true, mode: 'live', directionAttributionUnavailable: false });
+    send(source, {
+      type: 'agent_status',
+      status: { interface: 'en0', capturing: true, mode: 'live', directionAttributionUnavailable: false },
+    });
 
     expect(bannerTextContaining('capture agent not connected')).toBeNull();
     expect(bannerTextContaining('replaying')).toBeNull();

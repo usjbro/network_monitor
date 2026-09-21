@@ -175,15 +175,19 @@ Sent once per tick (~1 second), alongside `capture_stats`/`system_stats`/`captur
 ```json
 {
   "type": "agent_status",
-  "interface": "lo",
-  "capturing": true,
-  "mode": "replay",
-  "replaySource": "/Users/me/captures/incident.pcapng",
-  "directionAttributionUnavailable": false
+  "status": {
+    "interface": "lo",
+    "capturing": true,
+    "mode": "replay",
+    "replaySource": "/Users/me/captures/incident.pcapng",
+    "directionAttributionUnavailable": false
+  }
 }
 ```
 
-Flat (no nested envelope), unlike `capture_stats`/`system_stats`/`capture_config` above. Maps to `AgentStatus` (`lib/types.ts`) via `mapAgentStatusEvent` (`lib/agent-mapping.ts`).
+Note the nesting: fields sit under a `status` key, same shape as `capture_stats`'s `stats`/`capture_file_status`'s own `status` — not flat on the event. `mapAgentStatusEvent` (`lib/agent-mapping.ts`) owns this unwrap, mapping to `AgentStatus` (`lib/types.ts`).
+
+This section previously documented the event as flat, and `mapAgentStatusEvent` was written to match the doc rather than the agent (JAM-150). It never worked against a real agent: every tick threw `missing required field "interface"` into the SSE handler's catch, so the live/replaying/disconnected banner never left its default state. Corrected to what `capture-agent/src/wire.rs`'s `AgentStatus { status: AgentStatusJson }` has always emitted.
 
 Field notes:
 - `interface` — the same interface name reported by `system_stats.interfaceName`; repeated here so this event is self-contained.
