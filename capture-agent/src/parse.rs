@@ -55,6 +55,13 @@ pub struct ParsedPacket {
     pub ttl: u8,
     pub total_len: u16,
     pub payload: Vec<u8>,
+    /// Every byte before `payload` starts, in whichever slice was actually
+    /// parsed — the Ethernet/IP/transport headers, with no artificial cap
+    /// (bounded naturally: every currently-decoded field lives in a fixed
+    /// header portion, worst case Ethernet+VLAN+IPv4+TCP ≈ 78 bytes). Used
+    /// to build the wire's `headerHexDump`, a separate pane from the
+    /// existing payload-only `hexDump`.
+    pub header_bytes: Vec<u8>,
     /// 4 or 6, from the IP header actually parsed.
     pub ip_version: u8,
     /// IPv4 header checksum. Always `None` for IPv6, which has no header
@@ -109,16 +116,16 @@ pub fn parse_packet(data: &[u8], link_type: LinkType) -> Option<ParsedPacket> {
                 LinkExtSlice::Vlan(vlan) => Some(vlan.vlan_identifier().value().to_string()),
                 _ => None,
             });
-            build_parsed_packet(&sliced, src_mac, dst_mac, vlan_tag, data.len())
+            build_parsed_packet(&sliced, src_mac, dst_mac, vlan_tag, data)
         }
         LinkType::NullLoopback => {
             let ip_data = data.get(NULL_LOOPBACK_HEADER_LEN..)?;
             let sliced = SlicedPacket::from_ip(ip_data).ok()?;
-            build_parsed_packet(&sliced, NO_MAC.to_string(), NO_MAC.to_string(), None, data.len())
+            build_parsed_packet(&sliced, NO_MAC.to_string(), NO_MAC.to_string(), None, ip_data)
         }
         LinkType::Raw => {
             let sliced = SlicedPacket::from_ip(data).ok()?;
-            build_parsed_packet(&sliced, NO_MAC.to_string(), NO_MAC.to_string(), None, data.len())
+            build_parsed_packet(&sliced, NO_MAC.to_string(), NO_MAC.to_string(), None, data)
         }
     }
 }
@@ -131,7 +138,7 @@ fn build_parsed_packet(
     src_mac: String,
     dst_mac: String,
     vlan_tag: Option<String>,
-    total_len: usize,
+    frame_data: &[u8],
 ) -> Option<ParsedPacket> {
     let (src_ip, dst_ip, ttl, ip_version, ip_checksum) = match &sliced.net {
         Some(NetSlice::Ipv4(ipv4)) => (
@@ -182,6 +189,8 @@ fn build_parsed_packet(
         None => (TransportProtocol::Other, None, None, None, None, Vec::new()),
     };
 
+    let header_bytes = frame_data[..frame_data.len() - payload.len()].to_vec();
+
     Some(ParsedPacket {
         src_mac,
         dst_mac,
@@ -193,8 +202,9 @@ fn build_parsed_packet(
         tcp_flags,
         seq,
         ttl,
-        total_len: total_len as u16,
+        total_len: frame_data.len() as u16,
         payload,
+        header_bytes,
         ip_version,
         ip_checksum,
         vlan_tag,
@@ -398,5 +408,42 @@ mod tests {
         let flags = parsed.tcp_flags.unwrap();
         assert!(flags.syn);
         assert_eq!(parsed.payload, payload);
+    }
+
+    #[test]
+    fn header_bytes_excludes_the_payload() {
+        let builder = PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
+            .ipv4([192, 168, 1, 10], [93, 184, 216, 34], 64)
+            .tcp(51000, 443, 1000, 65535)
+            .syn();
+        let payload: &[u8] = b"hello";
+        let mut data = Vec::new();
+        builder.write(&mut data, payload).unwrap();
+
+        let parsed = parse_packet(&data, LinkType::Ethernet).unwrap();
+
+        assert_eq!(parsed.header_bytes.len(), data.len() - payload.len());
+        assert_eq!(parsed.header_bytes, &data[..data.len() - payload.len()]);
+        assert_eq!(parsed.payload, payload);
+    }
+
+    #[test]
+    fn header_bytes_excludes_the_null_loopback_af_prefix() {
+        let builder = PacketBuilder::ipv4([127, 0, 0, 1], [127, 0, 0, 1], 64)
+            .tcp(51000, 8080, 1000, 65535)
+            .syn();
+        let payload: &[u8] = b"hi";
+        let mut ip_packet = Vec::new();
+        builder.write(&mut ip_packet, payload).unwrap();
+        let mut data = vec![2, 0, 0, 0]; // 4-byte AF_INET prefix, never a real header
+        data.extend_from_slice(&ip_packet);
+
+        let parsed = parse_packet(&data, LinkType::NullLoopback).unwrap();
+
+        // header_bytes must be relative to ip_packet, not the wire bytes
+        // that also carried the 4-byte AF prefix — that prefix is not a
+        // protocol header and must never show up in a byte-highlighting pane.
+        assert_eq!(parsed.header_bytes.len(), ip_packet.len() - payload.len());
+        assert_eq!(parsed.header_bytes, &ip_packet[..ip_packet.len() - payload.len()]);
     }
 }
