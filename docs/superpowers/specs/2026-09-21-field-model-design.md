@@ -124,7 +124,7 @@ export interface WireField {
   path: string;
   label: string;
   group?: string;
-  type: 'group' | 'bool' | 'uint' | 'string' | 'addr' | 'bytes';
+  type: 'group' | 'bool' | 'uint' | 'str' | 'addr' | 'bytes';
   value?: boolean | number | string;
   region: 'header' | 'payload';
   offset: number;
