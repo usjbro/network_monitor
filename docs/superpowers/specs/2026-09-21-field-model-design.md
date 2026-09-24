@@ -37,11 +37,9 @@ pub enum FieldType { Group, Bool, Uint, Str, Addr, Bytes }
 pub enum ByteRegion { Header, Payload }
 
 pub enum FieldValue {
-    None,             // Group entries carry no value
     Bool(bool),
     Uint(u64),
     Str(String),
-    Addr(String),     // MAC or IP — formatted, not raw bytes
     Bytes(Vec<u8>),
 }
 
@@ -50,20 +48,20 @@ pub struct Field {
     pub label: String,          // human-readable tree label: "SYN"
     pub group: Option<String>,  // immediate parent's `path`; None for a top-level group
     pub field_type: FieldType,
-    pub value: FieldValue,
+    pub value: Option<FieldValue>, // omitted entirely for Group; addresses use Str values
     pub region: ByteRegion,
     pub offset: u32,            // byte offset into whichever pane `region` names
     pub len: u32,               // byte length
 }
 
-pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info) -> Vec<Field>
+pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info, link_type: LinkType) -> Vec<Field>
 ```
 
-`build_fields` replaces `build_header_breakdown` as the function called once per `Packet` wire event in `main.rs`'s capture loop, taking the same inputs `build_header_breakdown` already takes — nothing new is parsed, and it needs no raw-frame parameter: `ParsedPacket` (below) now carries its own header bytes.
+`build_fields` replaces `build_header_breakdown` as the function called once per `Packet` wire event in `main.rs`'s capture loop. The caller passes its known `LinkType` so loopback and raw-IP packets do not gain a fabricated Ethernet group; nothing new is parsed.
 
 ### Two hex-dump panes, not one
 
-`hex_dump` (`parsed.payload`, capped at 64 bytes) already exists and is unchanged. `ParsedPacket` gains a new field, `header_bytes: Vec<u8>`, computed once in `parse_packet` as "everything before `payload`" in whichever slice was actually used to build the packet (for `NullLoopback` framing this is relative to `ip_data`, so the 4-byte AF prefix — never a real protocol header — is naturally excluded, matching `parse.rs`'s existing comment that it's "never inspected"). `PacketJson` gains `header_hex_dump: String`, hex-formatted from `parsed.header_bytes` the same way `hex_dump` already formats `parsed.payload`; unlike the payload dump it carries no artificial cap, since every currently-rendered field lives in a header's fixed, bounded portion (worst case today: Ethernet+VLAN+IPv4+TCP ≈ 78 bytes).
+`hex_dump` (`parsed.payload`, capped at 64 bytes) already exists and is unchanged. `ParsedPacket` gains `header_bytes: Vec<u8>`, computed once in `parse_packet` as "everything before `payload`" in whichever slice was actually used to build the packet (for `NullLoopback` framing the 4-byte AF prefix is excluded). `PacketJson` gains `header_hex_dump: String`, hex-formatted from `parsed.header_bytes` with no artificial cap. IPv4 options, IPv6 extensions, and TCP options can make these headers longer than their fixed portions. Payload field offsets still refer to the full payload, even when the corresponding bytes fall beyond the 64-byte display cap.
 
 Header-group fields (`eth`, `ip`/`ip6`, `tcp`/`udp`/`icmp`, `vlan`) get `region: Header`, offsets relative to `header_hex_dump`. App-layer fields (`http`, `dns`, `tls`) get `region: Payload`, offsets relative to the existing `hex_dump` — unchanged base, unchanged cap. The UI (below) renders and highlights these as two independent panes; a field's `region` says which one it belongs to.
 
@@ -73,13 +71,13 @@ Dotted, lowercase, Wireshark-style abbreviations (`tcp.flags.syn`, `ip.ttl`, `tl
 
 ### Grouping
 
-Top-level groups are named by the *protocol actually present*, not by OSI layer number: `eth`, `ip` or `ip6`, `tcp`/`udp`/`icmp`, and an app-layer group named for whatever `L7Info` detected (`http`, `dns`, `tls`). This is strictly more honest than today's `layer4`/`layer7` wrapping a `"transport": "TCP"` string — a UDP packet gets a `udp` group, never a `tcp` group with a `transport` field lying about which protocol it is. A VLAN tag, when present, nests under Ethernet: `eth.vlan` (group) → `eth.vlan.id` (child), matching where it physically sits in the frame.
+Top-level groups are named by the *protocol actually decoded*, not by OSI layer number: `eth`, `ip` or `ip6`, `tcp`/`udp`, and an app-layer group named for whatever `L7Info` detected (`http`, `dns`, `tls`). ICMP currently has no decoded transport fields, so it has no transport group. A VLAN tag, when present, nests under Ethernet: `eth.vlan` (group) → `eth.vlan.id` (child), matching where it physically sits in the frame.
 
 ### Byte offsets
 
 Two sources, both exact, neither requiring new parsing:
-1. **Header-level ranges** are constants relative to `header_bytes`'s own start (offset 0): Ethernet is always 14 bytes (+4 if VLAN-tagged), IPv4/IPv6 and TCP/UDP/ICMP follow immediately after at their own fixed lengths — all computable from fields `ParsedPacket` already exposes (`ip_version`, `vlan_tag.is_some()`, `protocol`, and the `LinkType` the caller parsed with), no re-parsing or pointer arithmetic against etherparse's slices needed.
-2. **Individual field ranges within a header's fixed portion** are likewise constants: every currently-rendered field (TTL, flags, ports, sequence numbers, MAC addresses, SNI is the one exception — see below) sits at a fixed RFC-defined offset within a header's non-variable portion. None sit inside TCP options or other variable-length regions, so no field currently needs dynamic offset computation.
+1. **Header-level ranges** start at the known link offset (Ethernet is 14 bytes, plus 4 if VLAN tagged). `parse_packet` carries the actual IP and transport header lengths from the `etherparse` slices into `ParsedPacket`, so IPv4 options and IPv6 extensions correctly move the TCP/UDP start offset and group spans.
+2. **Individual field ranges within a header's fixed portion** use RFC offsets relative to that header's actual start. TTL, flags, ports, sequence numbers, and MAC addresses remain at fixed positions inside their respective base headers. The variable portions change where a later header starts, not the offset of these leaves within a header.
 
 `tls.handshake.sni` is the one field whose offset is itself computed during parsing today (`l7::sniff_tls_client_hello` already walks TLS extensions to find it) — its offset/len (relative to `payload`) come directly from that existing walk, just carried forward into the `Field` instead of discarded. JA3/`ja3_label` are derived from several non-contiguous ClientHello sub-fields (cipher suites, extensions, elliptic curves, ec_point_formats — not one byte run); both get `region: Payload` with offset/len spanning the whole ClientHello message, the same "derived field points at what it was derived from" convention Wireshark itself uses for computed fields.
 

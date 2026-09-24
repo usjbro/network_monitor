@@ -4,11 +4,13 @@
 
 **Goal:** Replace the fixed `header_breakdown` packet summary with a registry of typed, named, individually addressable fields, and cut the whole stack (wire protocol, docs, TypeScript types, UI) over to it in one coordinated change — no dual-emit period.
 
-**Architecture:** A new Rust module (`capture-agent/src/fields.rs`) builds a flat `Vec<Field>` per packet from already-parsed data (`ParsedPacket` + `L7Info`), computing each field's byte offset via fixed RFC-defined header-layout arithmetic (no re-parsing). Two independent hex-dump panes replace the assumption that one `hexDump` covers everything: the existing payload dump (unchanged) plus a new header-bytes dump. `PacketStreamView.tsx` renders a collapsible field tree with bidirectional click-to-highlight against whichever pane a field's `region` names.
+**Architecture:** A new Rust module (`capture-agent/src/fields.rs`) builds a flat `Vec<Field>` per packet from already-parsed data (`ParsedPacket` + `L7Info`). Leaf offsets within base headers use RFC constants; the actual IP and transport header lengths come from `etherparse` slices so IPv4 options and IPv6 extensions place later headers correctly without re-parsing. Two independent hex-dump panes cover payload and header bytes. `PacketStreamView.tsx` renders a collapsible field tree with bidirectional click-to-highlight against the pane named by `region`.
 
 **Tech Stack:** Rust (capture-agent), TypeScript/React (Next.js relay + UI), serde for wire serialization, Vitest + Testing Library for TS tests, `cargo test` for Rust tests.
 
 **Spec:** `docs/superpowers/specs/2026-09-21-field-model-design.md`
+
+**Implementation correction (2026-09-24):** The original Task 3 and Task 4 sketches below assume IPv4 is always 20 bytes and IPv6 always 40 bytes. Real IPv4 options and IPv6 extension headers invalidate transport offsets derived from those constants. Commit `415d734` adds `ParsedPacket.ip_header_len` and `transport_header_len` from the already-parsed slices, plus regressions using both variable-header cases. The sketches remain as the original task record; follow the corrected spec and shipped code for later changes. Payload field ranges remain relative to the full payload even though `hexDump` displays only its first 64 bytes.
 
 ## Global Constraints
 
