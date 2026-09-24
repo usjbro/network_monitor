@@ -1,5 +1,12 @@
 use serde::Serialize;
 
+use crate::parse::{ParsedPacket, TransportProtocol};
+
+const ETH_HEADER_LEN: u32 = 14;
+const VLAN_TAG_LEN: u32 = 4;
+const IPV4_HEADER_LEN: u32 = 20;
+const IPV6_HEADER_LEN: u32 = 40;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
@@ -86,9 +93,228 @@ impl Field {
     }
 }
 
+fn protocol_num(protocol: TransportProtocol) -> u8 {
+    match protocol {
+        TransportProtocol::Tcp => 6,
+        TransportProtocol::Udp => 17,
+        TransportProtocol::Icmp => 1,
+        TransportProtocol::Other => 0,
+    }
+}
+
+/// Returns fields and the byte offset where the IP header begins.
+fn eth_fields(parsed: &ParsedPacket) -> (Vec<Field>, u32) {
+    let vlan_tagged = parsed.vlan_tag.is_some();
+    let eth_len = ETH_HEADER_LEN + if vlan_tagged { VLAN_TAG_LEN } else { 0 };
+    let mut fields = vec![Field::group(
+        "eth",
+        "Ethernet II",
+        None,
+        ByteRegion::Header,
+        0,
+        eth_len,
+    )];
+    fields.push(Field::leaf(
+        "eth.dst",
+        "Destination MAC",
+        "eth",
+        FieldType::Addr,
+        FieldValue::Str(parsed.dst_mac.clone()),
+        ByteRegion::Header,
+        0,
+        6,
+    ));
+    fields.push(Field::leaf(
+        "eth.src",
+        "Source MAC",
+        "eth",
+        FieldType::Addr,
+        FieldValue::Str(parsed.src_mac.clone()),
+        ByteRegion::Header,
+        6,
+        6,
+    ));
+    if let Some(vlan_tag) = &parsed.vlan_tag {
+        fields.push(Field::group(
+            "eth.vlan",
+            "802.1Q VLAN Tag",
+            Some("eth"),
+            ByteRegion::Header,
+            12,
+            VLAN_TAG_LEN,
+        ));
+        fields.push(Field::leaf(
+            "eth.vlan.id",
+            "VLAN ID",
+            "eth.vlan",
+            FieldType::Uint,
+            FieldValue::Uint(vlan_tag.parse().unwrap_or(0)),
+            ByteRegion::Header,
+            14,
+            2,
+        ));
+    }
+    let ethertype_offset = if vlan_tagged { 16 } else { 12 };
+    let ethertype_label = match parsed.ip_version {
+        4 => "IPv4",
+        6 => "IPv6",
+        _ => "Unknown",
+    };
+    fields.push(Field::leaf(
+        "eth.type",
+        "EtherType",
+        "eth",
+        FieldType::Str,
+        FieldValue::Str(ethertype_label.to_string()),
+        ByteRegion::Header,
+        ethertype_offset,
+        2,
+    ));
+    (fields, eth_len)
+}
+
+/// Returns fields and the byte offset where the transport header begins.
+fn ip_fields(parsed: &ParsedPacket, ip_start: u32) -> (Vec<Field>, u32) {
+    if parsed.ip_version == 6 {
+        let mut fields = vec![Field::group(
+            "ip6",
+            "Internet Protocol Version 6",
+            None,
+            ByteRegion::Header,
+            ip_start,
+            IPV6_HEADER_LEN,
+        )];
+        fields.push(Field::leaf(
+            "ip6.src",
+            "Source Address",
+            "ip6",
+            FieldType::Addr,
+            FieldValue::Str(parsed.src_ip.clone()),
+            ByteRegion::Header,
+            ip_start + 8,
+            16,
+        ));
+        fields.push(Field::leaf(
+            "ip6.dst",
+            "Destination Address",
+            "ip6",
+            FieldType::Addr,
+            FieldValue::Str(parsed.dst_ip.clone()),
+            ByteRegion::Header,
+            ip_start + 24,
+            16,
+        ));
+        fields.push(Field::leaf(
+            "ip6.hop_limit",
+            "Hop Limit",
+            "ip6",
+            FieldType::Uint,
+            FieldValue::Uint(parsed.ttl.into()),
+            ByteRegion::Header,
+            ip_start + 7,
+            1,
+        ));
+        fields.push(Field::leaf(
+            "ip6.next_header",
+            "Next Header",
+            "ip6",
+            FieldType::Uint,
+            FieldValue::Uint(protocol_num(parsed.protocol).into()),
+            ByteRegion::Header,
+            ip_start + 6,
+            1,
+        ));
+        (fields, ip_start + IPV6_HEADER_LEN)
+    } else {
+        let mut fields = vec![Field::group(
+            "ip",
+            "Internet Protocol Version 4",
+            None,
+            ByteRegion::Header,
+            ip_start,
+            IPV4_HEADER_LEN,
+        )];
+        fields.push(Field::leaf(
+            "ip.src",
+            "Source Address",
+            "ip",
+            FieldType::Addr,
+            FieldValue::Str(parsed.src_ip.clone()),
+            ByteRegion::Header,
+            ip_start + 12,
+            4,
+        ));
+        fields.push(Field::leaf(
+            "ip.dst",
+            "Destination Address",
+            "ip",
+            FieldType::Addr,
+            FieldValue::Str(parsed.dst_ip.clone()),
+            ByteRegion::Header,
+            ip_start + 16,
+            4,
+        ));
+        fields.push(Field::leaf(
+            "ip.ttl",
+            "Time to Live",
+            "ip",
+            FieldType::Uint,
+            FieldValue::Uint(parsed.ttl.into()),
+            ByteRegion::Header,
+            ip_start + 8,
+            1,
+        ));
+        fields.push(Field::leaf(
+            "ip.protocol_num",
+            "Protocol",
+            "ip",
+            FieldType::Uint,
+            FieldValue::Uint(protocol_num(parsed.protocol).into()),
+            ByteRegion::Header,
+            ip_start + 9,
+            1,
+        ));
+        if let Some(checksum) = parsed.ip_checksum {
+            fields.push(Field::leaf(
+                "ip.checksum",
+                "Header Checksum",
+                "ip",
+                FieldType::Str,
+                FieldValue::Str(format!("0x{checksum:04x}")),
+                ByteRegion::Header,
+                ip_start + 10,
+                2,
+            ));
+        }
+        (fields, ip_start + IPV4_HEADER_LEN)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse::{ParsedPacket, TransportProtocol};
+
+    fn base_packet() -> ParsedPacket {
+        ParsedPacket {
+            src_mac: "00:01:02:03:04:05".to_string(),
+            dst_mac: "06:07:08:09:0a:0b".to_string(),
+            src_ip: "192.168.1.10".to_string(),
+            dst_ip: "93.184.216.34".to_string(),
+            protocol: TransportProtocol::Other,
+            src_port: None,
+            dst_port: None,
+            tcp_flags: None,
+            seq: None,
+            ttl: 64,
+            total_len: 100,
+            payload: vec![],
+            header_bytes: vec![],
+            ip_version: 4,
+            ip_checksum: Some(0xbeef),
+            vlan_tag: None,
+        }
+    }
 
     #[test]
     fn a_group_omits_the_value_key_entirely() {
@@ -131,5 +357,58 @@ mod tests {
         assert!(json.contains("\"path\":\"ip.ttl\""));
         assert!(json.contains("\"offset\":22"));
         assert!(json.contains("\"len\":1"));
+    }
+
+    #[test]
+    fn eth_fields_places_the_ip_header_right_after_a_14_byte_untagged_ethernet_header() {
+        let (fields, ip_start) = eth_fields(&base_packet());
+        assert_eq!(ip_start, 14);
+        let eth = fields.iter().find(|f| f.path == "eth").unwrap();
+        assert_eq!(eth.offset, 0);
+        assert_eq!(eth.len, 14);
+        let src = fields.iter().find(|f| f.path == "eth.src").unwrap();
+        assert_eq!(src.offset, 6);
+        assert_eq!(src.len, 6);
+        assert!(matches!(&src.value, Some(FieldValue::Str(v)) if v == "00:01:02:03:04:05"));
+    }
+
+    #[test]
+    fn eth_fields_accounts_for_the_4_byte_vlan_tag_when_present() {
+        let mut packet = base_packet();
+        packet.vlan_tag = Some("100".to_string());
+        let (fields, ip_start) = eth_fields(&packet);
+        assert_eq!(ip_start, 18, "a VLAN-tagged frame's IP header starts 4 bytes later");
+        let vlan_id = fields.iter().find(|f| f.path == "eth.vlan.id").unwrap();
+        assert!(matches!(&vlan_id.value, Some(FieldValue::Uint(100))));
+        assert_eq!(vlan_id.offset, 14);
+        assert_eq!(vlan_id.len, 2);
+    }
+
+    #[test]
+    fn ip_fields_places_ipv4_addresses_at_their_rfc_791_offsets() {
+        let (fields, transport_start) = ip_fields(&base_packet(), 14);
+        assert_eq!(transport_start, 34, "14 (eth) + 20 (ipv4) = 34");
+        let src = fields.iter().find(|f| f.path == "ip.src").unwrap();
+        assert_eq!(src.offset, 14 + 12);
+        assert_eq!(src.len, 4);
+        assert!(matches!(&src.value, Some(FieldValue::Str(v)) if v == "192.168.1.10"));
+        let ttl = fields.iter().find(|f| f.path == "ip.ttl").unwrap();
+        assert_eq!(ttl.offset, 14 + 8);
+        assert!(matches!(&ttl.value, Some(FieldValue::Uint(64))));
+        let checksum = fields.iter().find(|f| f.path == "ip.checksum").unwrap();
+        assert!(matches!(&checksum.value, Some(FieldValue::Str(v)) if v == "0xbeef"));
+    }
+
+    #[test]
+    fn ip_fields_uses_the_ip6_group_and_16_byte_addresses_for_ipv6() {
+        let mut packet = base_packet();
+        packet.ip_version = 6;
+        packet.ip_checksum = None;
+        let (fields, transport_start) = ip_fields(&packet, 14);
+        assert_eq!(transport_start, 14 + 40);
+        assert!(fields.iter().any(|f| f.path == "ip6"));
+        assert!(fields.iter().all(|f| f.path != "ip.checksum"), "IPv6 must never fabricate a checksum field");
+        let src = fields.iter().find(|f| f.path == "ip6.src").unwrap();
+        assert_eq!(src.len, 16);
     }
 }
