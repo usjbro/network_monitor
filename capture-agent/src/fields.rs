@@ -6,6 +6,8 @@ const ETH_HEADER_LEN: u32 = 14;
 const VLAN_TAG_LEN: u32 = 4;
 const IPV4_HEADER_LEN: u32 = 20;
 const IPV6_HEADER_LEN: u32 = 40;
+const TCP_HEADER_LEN: u32 = 20;
+const UDP_HEADER_LEN: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -290,6 +292,33 @@ fn ip_fields(parsed: &ParsedPacket, ip_start: u32) -> (Vec<Field>, u32) {
     }
 }
 
+fn transport_fields(parsed: &ParsedPacket, start: u32) -> Vec<Field> {
+    match parsed.protocol {
+        TransportProtocol::Tcp => {
+            let flags = parsed.tcp_flags.unwrap_or_default();
+            vec![
+                Field::group("tcp", "Transmission Control Protocol", None, ByteRegion::Header, start, TCP_HEADER_LEN),
+                Field::leaf("tcp.src_port", "Source Port", "tcp", FieldType::Uint, FieldValue::Uint(parsed.src_port.unwrap_or(0).into()), ByteRegion::Header, start, 2),
+                Field::leaf("tcp.dst_port", "Destination Port", "tcp", FieldType::Uint, FieldValue::Uint(parsed.dst_port.unwrap_or(0).into()), ByteRegion::Header, start + 2, 2),
+                Field::leaf("tcp.seq", "Sequence Number", "tcp", FieldType::Uint, FieldValue::Uint(parsed.seq.unwrap_or(0).into()), ByteRegion::Header, start + 4, 4),
+                Field::leaf("tcp.ack_number", "Acknowledgment Number", "tcp", FieldType::Uint, FieldValue::Uint(flags.ack_number.into()), ByteRegion::Header, start + 8, 4),
+                Field::group("tcp.flags", "Flags", Some("tcp"), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.flags.syn", "SYN", "tcp.flags", FieldType::Bool, FieldValue::Bool(flags.syn), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.flags.ack", "ACK", "tcp.flags", FieldType::Bool, FieldValue::Bool(flags.ack), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.flags.fin", "FIN", "tcp.flags", FieldType::Bool, FieldValue::Bool(flags.fin), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.flags.rst", "RST", "tcp.flags", FieldType::Bool, FieldValue::Bool(flags.rst), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.window_size", "Window Size", "tcp", FieldType::Uint, FieldValue::Uint(flags.window_size.into()), ByteRegion::Header, start + 14, 2),
+            ]
+        }
+        TransportProtocol::Udp => vec![
+            Field::group("udp", "User Datagram Protocol", None, ByteRegion::Header, start, UDP_HEADER_LEN),
+            Field::leaf("udp.src_port", "Source Port", "udp", FieldType::Uint, FieldValue::Uint(parsed.src_port.unwrap_or(0).into()), ByteRegion::Header, start, 2),
+            Field::leaf("udp.dst_port", "Destination Port", "udp", FieldType::Uint, FieldValue::Uint(parsed.dst_port.unwrap_or(0).into()), ByteRegion::Header, start + 2, 2),
+        ],
+        TransportProtocol::Icmp | TransportProtocol::Other => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +439,53 @@ mod tests {
         assert!(fields.iter().all(|f| f.path != "ip.checksum"), "IPv6 must never fabricate a checksum field");
         let src = fields.iter().find(|f| f.path == "ip6.src").unwrap();
         assert_eq!(src.len, 16);
+    }
+
+    #[test]
+    fn transport_fields_places_tcp_ports_and_flags_at_their_fixed_offsets() {
+        let mut packet = base_packet();
+        packet.protocol = TransportProtocol::Tcp;
+        packet.src_port = Some(51000);
+        packet.dst_port = Some(443);
+        packet.seq = Some(1000);
+        packet.tcp_flags = Some(crate::parse::TcpFlags { syn: true, ack: false, fin: false, rst: false, window_size: 65535, ack_number: 0 });
+        let fields = transport_fields(&packet, 34);
+        let tcp = fields.iter().find(|f| f.path == "tcp").unwrap();
+        assert_eq!((tcp.offset, tcp.len), (34, 20));
+        let src_port = fields.iter().find(|f| f.path == "tcp.src_port").unwrap();
+        assert_eq!(src_port.offset, 34);
+        assert!(matches!(&src_port.value, Some(FieldValue::Uint(51000))));
+        let syn = fields.iter().find(|f| f.path == "tcp.flags.syn").unwrap();
+        assert_eq!(syn.offset, 47);
+        assert_eq!(syn.group.as_deref(), Some("tcp.flags"));
+        assert!(matches!(&syn.value, Some(FieldValue::Bool(true))));
+        let ack = fields.iter().find(|f| f.path == "tcp.flags.ack").unwrap();
+        assert_eq!(ack.offset, 47);
+        assert!(matches!(&ack.value, Some(FieldValue::Bool(false))));
+        let window = fields.iter().find(|f| f.path == "tcp.window_size").unwrap();
+        assert_eq!(window.offset, 48);
+        assert!(matches!(&window.value, Some(FieldValue::Uint(65535))));
+    }
+
+    #[test]
+    fn transport_fields_covers_udp_with_just_ports_no_fabricated_flags_or_seq() {
+        let mut packet = base_packet();
+        packet.protocol = TransportProtocol::Udp;
+        packet.src_port = Some(60123);
+        packet.dst_port = Some(53);
+        let fields = transport_fields(&packet, 34);
+        assert!(fields.iter().any(|f| f.path == "udp.src_port"));
+        assert!(fields.iter().any(|f| f.path == "udp.dst_port"));
+        assert!(fields.iter().all(|f| !f.path.starts_with("tcp")));
+        assert!(fields.iter().all(|f| !f.path.contains("flags") && !f.path.contains("seq")));
+    }
+
+    #[test]
+    fn transport_fields_is_empty_for_icmp_and_other_nothing_decoded_to_show() {
+        let mut packet = base_packet();
+        packet.protocol = TransportProtocol::Icmp;
+        assert!(transport_fields(&packet, 34).is_empty());
+        packet.protocol = TransportProtocol::Other;
+        assert!(transport_fields(&packet, 34).is_empty());
     }
 }
