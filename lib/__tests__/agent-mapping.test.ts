@@ -128,7 +128,18 @@ describe('mapConnectionClosedEvent', () => {
 });
 
 describe('mapPacketEvent', () => {
-  it('maps agent wire JSON to a PacketFrame', () => {
+  const wireField = {
+    path: 'tcp.flags.syn',
+    label: 'SYN',
+    group: 'tcp.flags',
+    type: 'bool',
+    value: true,
+    region: 'header',
+    offset: 47,
+    len: 1,
+  };
+
+  it('maps agent wire JSON to a PacketFrame, passing fields/headerHexDump through unchanged', () => {
     const wire = {
       id: 'pkt-1',
       timestamp: '2026-08-26T00:00:00.000Z',
@@ -140,44 +151,19 @@ describe('mapPacketEvent', () => {
       length: 60,
       summary: 'TCP SYN',
       hexDump: '00 01 02',
-      headerBreakdown: {
-        layer4: {
-          transport: 'TCP',
-          srcPort: 51000,
-          dstPort: 443,
-          flags: 'SYN',
-          windowSize: 65535,
-          seqAck: 'seq=1000 ack=0',
-        },
-        layer3: {
-          ipVersion: 'IPv4',
-          srcIp: '192.168.1.10',
-          dstIp: '93.184.216.34',
-          ttl: 64,
-          protocolNum: 6,
-          checksum: '0xbeef',
-        },
-        layer2: {
-          srcMac: '00:01:02:03:04:05',
-          dstMac: '06:07:08:09:0a:0b',
-          ethType: 'IPv4',
-        },
-      },
+      headerHexDump: 'aa bb cc',
+      fields: [wireField],
     };
 
     const packet = mapPacketEvent(wire);
 
     expect(packet.id).toBe('pkt-1');
-    expect(packet.layer).toBe(4);
     expect(packet.hexDump).toBe('00 01 02');
-    expect(packet.headerBreakdown.layer4?.windowSize).toBe(65535);
-    expect(packet.headerBreakdown.layer7).toBeUndefined();
-    // Untagged frame in this fixture — vlanTag must be absent, not a
-    // fabricated value (see issue #62).
-    expect(packet.headerBreakdown.layer2?.vlanTag).toBeUndefined();
+    expect(packet.headerHexDump).toBe('aa bb cc');
+    expect(packet.fields).toEqual([wireField]);
   });
 
-  it('carries the 802.1Q VLAN tag through when the frame was tagged', () => {
+  it('throws when fields is missing entirely, rather than defaulting to []', () => {
     const wire = {
       id: 'pkt-2',
       timestamp: '2026-08-26T00:00:00.000Z',
@@ -189,64 +175,11 @@ describe('mapPacketEvent', () => {
       length: 60,
       summary: 'TCP SYN',
       hexDump: '00 01 02',
-      headerBreakdown: {
-        layer2: {
-          srcMac: '00:01:02:03:04:05',
-          dstMac: '06:07:08:09:0a:0b',
-          ethType: 'IPv4',
-          vlanTag: '100',
-        },
-      },
+      headerHexDump: 'aa bb cc',
+      // fields intentionally omitted
     };
 
-    const packet = mapPacketEvent(wire);
-
-    expect(packet.headerBreakdown.layer2?.vlanTag).toBe('100');
-  });
-
-  it('carries statusOrCode through for an HTTP response (issue #65)', () => {
-    const wire = {
-      id: 'pkt-3',
-      timestamp: '2026-08-26T00:00:00.000Z',
-      relativeTimeMs: 42,
-      layer: 4,
-      protocol: 'TCP',
-      src: '93.184.216.34:443',
-      dst: '192.168.1.10:51000',
-      length: 60,
-      summary: 'TCP',
-      hexDump: '00 01 02',
-      headerBreakdown: {
-        layer7: {
-          app: 'HTTP',
-          methodOrType: 'RESPONSE',
-          pathOrQuery: '',
-          statusOrCode: '404',
-          payloadBytes: 10,
-        },
-      },
-    };
-
-    const packet = mapPacketEvent(wire);
-
-    expect(packet.headerBreakdown.layer7?.statusOrCode).toBe('404');
-  });
-
-  it('throws when headerBreakdown is missing rather than defaulting to {}', () => {
-    const wire = {
-      id: 'pkt-1',
-      timestamp: '2026-08-26T00:00:00.000Z',
-      relativeTimeMs: 42,
-      layer: 4,
-      protocol: 'TCP',
-      src: '192.168.1.10:51000',
-      dst: '93.184.216.34:443',
-      length: 60,
-      summary: 'TCP SYN',
-      hexDump: '00 01 02',
-    };
-
-    expect(() => mapPacketEvent(wire)).toThrow();
+    expect(() => mapPacketEvent(wire)).toThrow('agent event missing required field "fields"');
   });
 });
 
