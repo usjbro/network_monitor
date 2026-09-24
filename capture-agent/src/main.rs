@@ -1,5 +1,6 @@
 use base64::Engine;
 use capture_agent::{
+    fields,
     flow::{self, FlowKey, FlowTable},
     host_stats,
     http2::{FrameOutcome, Http2Reassembler},
@@ -1566,7 +1567,7 @@ async fn main() -> std::io::Result<()> {
                             .map(|d| d.as_millis())
                             .unwrap_or(0);
                         let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
-                        let header_breakdown = wire::build_header_breakdown(&parsed, &l7_info);
+                        let packet_fields = fields::build_fields(&parsed, &l7_info, link_type);
                         let packet_json = wire::PacketJson {
                             id: format!("pkt-{epoch_ms}-{seq}"),
                             timestamp: epoch_ms.to_string(),
@@ -1587,7 +1588,15 @@ async fn main() -> std::io::Result<()> {
                                 .map(|b| format!("{b:02x}"))
                                 .collect::<Vec<_>>()
                                 .join(" "),
-                            header_breakdown,
+                            // Header options and extensions can be variable length,
+                            // so keep all parsed header bytes available for highlighting.
+                            header_hex_dump: parsed
+                                .header_bytes
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                            fields: packet_fields,
                         };
                         let _ = tx.send(wire::encode_event(&wire::AgentEvent::Packet {
                             packet: Box::new(packet_json),
