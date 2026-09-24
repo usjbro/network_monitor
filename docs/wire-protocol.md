@@ -74,16 +74,41 @@ Sent once per captured packet, immediately (not batched).
     "length": 60,
     "summary": "Tcp 192.168.1.10 -> 93.184.216.34",
     "hexDump": "00 01 02 ...",
-    "headerBreakdown": {
-      "layer4": { "transport": "TCP", "srcPort": 51000, "dstPort": 443, "flags": "SYN", "windowSize": 65535, "seqAck": "seq=1000 ack=0" },
-      "layer3": { "ipVersion": "IPv4", "srcIp": "192.168.1.10", "dstIp": "93.184.216.34", "ttl": 64, "protocolNum": 6, "checksum": "0xbeef" },
-      "layer2": { "srcMac": "00:01:02:03:04:05", "dstMac": "06:07:08:09:0a:0b", "ethType": "IPv4" }
-    }
+    "headerHexDump": "06 07 08 09 0a 0b 00 01 02 03 04 05 08 00 45 00 ...",
+    "fields": [
+      {"path":"eth","label":"Ethernet II","type":"group","region":"header","offset":0,"len":14},
+      {"path":"eth.dst","label":"Destination MAC","type":"addr","group":"eth","region":"header","value":"06:07:08:09:0a:0b","offset":0,"len":6},
+      {"path":"eth.src","label":"Source MAC","type":"addr","group":"eth","region":"header","value":"00:01:02:03:04:05","offset":6,"len":6},
+      {"path":"eth.type","label":"EtherType","type":"str","group":"eth","region":"header","value":"IPv4","offset":12,"len":2},
+      {"path":"ip","label":"Internet Protocol Version 4","type":"group","region":"header","offset":14,"len":20},
+      {"path":"ip.src","label":"Source Address","type":"addr","group":"ip","region":"header","value":"192.168.1.10","offset":26,"len":4},
+      {"path":"ip.dst","label":"Destination Address","type":"addr","group":"ip","region":"header","value":"93.184.216.34","offset":30,"len":4},
+      {"path":"ip.ttl","label":"Time to Live","type":"uint","group":"ip","region":"header","value":64,"offset":22,"len":1},
+      {"path":"ip.protocol_num","label":"Protocol","type":"uint","group":"ip","region":"header","value":6,"offset":23,"len":1},
+      {"path":"ip.checksum","label":"Header Checksum","type":"str","group":"ip","region":"header","value":"0xbeef","offset":24,"len":2},
+      {"path":"tcp","label":"Transmission Control Protocol","type":"group","region":"header","offset":34,"len":20},
+      {"path":"tcp.src_port","label":"Source Port","type":"uint","group":"tcp","region":"header","value":51000,"offset":34,"len":2},
+      {"path":"tcp.dst_port","label":"Destination Port","type":"uint","group":"tcp","region":"header","value":443,"offset":36,"len":2},
+      {"path":"tcp.seq","label":"Sequence Number","type":"uint","group":"tcp","region":"header","value":1000,"offset":38,"len":4},
+      {"path":"tcp.ack_number","label":"Acknowledgment Number","type":"uint","group":"tcp","region":"header","value":0,"offset":42,"len":4},
+      {"path":"tcp.flags","label":"Flags","type":"group","group":"tcp","region":"header","offset":47,"len":1},
+      {"path":"tcp.flags.syn","label":"SYN","type":"bool","group":"tcp.flags","region":"header","value":true,"offset":47,"len":1},
+      {"path":"tcp.flags.ack","label":"ACK","type":"bool","group":"tcp.flags","region":"header","value":false,"offset":47,"len":1},
+      {"path":"tcp.flags.fin","label":"FIN","type":"bool","group":"tcp.flags","region":"header","value":false,"offset":47,"len":1},
+      {"path":"tcp.flags.rst","label":"RST","type":"bool","group":"tcp.flags","region":"header","value":false,"offset":47,"len":1},
+      {"path":"tcp.window_size","label":"Window Size","type":"uint","group":"tcp","region":"header","value":65535,"offset":48,"len":2}
+    ]
   }
 }
 ```
 
-Maps to `PacketFrame` via `mapPacketEvent`, which throws if `headerBreakdown` is missing entirely rather than defaulting it to `{}` — see [issue #29](https://github.com/usjbro/network_monitor/issues/29) (closed): `PacketJson` (`capture-agent/src/wire.rs`) does carry a `header_breakdown` field, built by `wire::build_header_breakdown` from `ParsedPacket` + `L7Info` at the point each `Packet` event is constructed in `main.rs`'s capture loop. `layer2`/`layer3`/`layer4` are always present (every captured packet has an Ethernet/IP/transport header by construction); `layer7` is present only when the payload matched a recognized application protocol; `layer1`/`layer5`/`layer6` are never present — no PHY, session, or TLS-version/cipher data is extracted anywhere in this agent, and fabricating it would contradict the rest of this document's "report zero/absent rather than invent a number" convention. `layer2.vlanTag` (optional) is present only for an 802.1Q-tagged frame — see `parse.rs`'s `vlan_tag` field and [issue #62](https://github.com/usjbro/network_monitor/issues/62); a double-tagged (QinQ) frame reports only its outermost tag. `layer7.statusOrCode` (optional) is present only for a recognized HTTP response status line (`HTTP/<version> <3-digit code> <reason>`) — `l7::sniff_http_response`, see [issue #65](https://github.com/usjbro/network_monitor/issues/65). When present, `methodOrType` reads `"RESPONSE"` and `pathOrQuery` is empty (a response has neither a method nor a path). This is a decode only: nothing correlates a response to the request it answers, or computes service time — that is out of scope here and belongs to the request/response-matching work under epic #57. DNS responses are not decoded at all yet (`L7Info::Dns` still models the query only), so `statusOrCode` is never populated for DNS. `timestamp` is epoch milliseconds as a string, not ISO-8601.
+Maps to `PacketFrame` via `mapPacketEvent`, which requires `fields` to be present (including when empty). `PacketJson` (`capture-agent/src/wire.rs`) carries `fields: Vec<Field>` from `fields::build_fields` and `headerHexDump` from `ParsedPacket.header_bytes`. `timestamp` is epoch milliseconds as a string, not ISO-8601.
+
+`hexDump` contains at most the first 64 payload bytes. `headerHexDump` contains all parsed Ethernet/IP/transport header bytes and has no artificial cap. Field `offset` and `len` are relative to the pane named by `region`: `"header"` for `headerHexDump`, `"payload"` for `hexDump`. A payload field can extend beyond the 64 visible bytes; its full range is retained for data consumers while the UI highlights only visible bytes.
+
+`path` is the stable dotted abbreviation used by filters; `label` is display text. `group` names the immediate parent path and is omitted for top-level fields. `type` is `group`, `bool`, `uint`, `str`, `addr`, or `bytes`. Group entries omit `value` entirely. Sibling TCP flag fields share one byte, so their ranges legitimately overlap. Header field offsets account for variable-length IP headers and extension headers when present; leaf offsets within TCP/UDP's fixed portion remain RFC-defined. Text and derived application fields span the payload range, while `tls.handshake.sni` identifies the precise server-name bytes.
+
+Top-level groups describe only protocols actually decoded: `eth` appears for Ethernet framing, `ip` or `ip6` for the network layer, `tcp` or `udp` for decoded transport, and `http`, `dns`, or `tls` when application decoding succeeds. Loopback and raw-IP framing have no `eth` group. An 802.1Q tag appears as `eth.vlan` with child `eth.vlan.id`. ICMP and unrecognized transports have no transport group because no fields are decoded for them today.
 
 **No rate limiting yet** — every captured packet gets its own event ([issue #27](https://github.com/usjbro/network_monitor/issues/27)). On a busy interface this can mean thousands of these per second.
 
@@ -441,3 +466,5 @@ Refuses to begin at all if free space on the target volume is already below a fi
 5. Update this document.
 
 Field name mismatches between steps 1 and 4 are the single most common way this pipeline breaks silently — there's no compiler to catch it.
+
+For a new packet field, register it in `capture-agent/src/fields.rs` (`eth_fields`, `ip_fields`, `transport_fields`, or `app_fields`) instead of adding a new wire struct. `WireField` in `lib/types.ts` and `mapPacketEvent` in `lib/agent-mapping.ts` already accept any registered path with an existing field type. Check that its byte range points into the correct hex pane and document the new stable path here.
