@@ -69,6 +69,23 @@ export interface NetworkConnection {
   };
 }
 
+// One entry from the agent's per-packet field registry
+// (capture-agent/src/fields.rs, docs/wire-protocol.md's `packet` event
+// section). A `group` entry (type: 'group') carries no `value` — only a
+// byte range spanning its children. `region` says which of the two
+// hex-dump panes `offset`/`len` is relative to.
+export interface WireField {
+  path: string;
+  label: string;
+  group?: string;
+  // 'str' matches Rust's lowercase serialization of FieldType::Str.
+  type: 'group' | 'bool' | 'uint' | 'str' | 'addr' | 'bytes';
+  value?: boolean | number | string;
+  region: 'header' | 'payload';
+  offset: number;
+  len: number;
+}
+
 export interface PacketFrame {
   id: string;
   timestamp: string;
@@ -80,15 +97,13 @@ export interface PacketFrame {
   length: number;
   summary: string;
   hexDump: string;
-  headerBreakdown: {
-    layer7?: { app: string; methodOrType: string; pathOrQuery: string; statusOrCode?: string; payloadBytes: number };
-    layer6?: { tlsVersion: string; cipherSuite: string; compression: string; payloadEncrypted: boolean };
-    layer5?: { sessionType: string; sessionId: string; token: string };
-    layer4?: { transport: string; srcPort: number; dstPort: number; flags: string; windowSize: number; seqAck: string };
-    layer3?: { ipVersion: string; srcIp: string; dstIp: string; ttl: number; protocolNum: number; checksum: string };
-    layer2?: { srcMac: string; dstMac: string; ethType: string; vlanTag?: string };
-    layer1?: { phyType: string; bitrateMbps: number; snrDb: number; linkStatus: string };
-  };
+  // Header-region bytes (Ethernet/IP/transport) — a separate pane from
+  // hexDump above, which covers only the L4 payload. No cap: every
+  // currently-decoded field lives in a fixed header portion.
+  headerHexDump: string;
+  // Flat per-packet field list; components/FieldTree.ts groups entries
+  // into a tree by each field's `group`.
+  fields: WireField[];
 }
 
 // Tier B (opt-in, per-process decrypted TLS content via `osi-inspect` /
