@@ -75,7 +75,7 @@ export function connectionsToCsv(connections: NetworkConnection[], totalObserved
 
 /**
  * The packet list as JSON, indented for reading. Round-trips through
- * JSON.parse with `headerBreakdown` intact — the per-layer detail is the
+ * JSON.parse with `fields` intact — the field registry is the
  * point of exporting packets rather than a flat summary table.
  */
 export function packetsToJson(packets: PacketFrame[]): string {

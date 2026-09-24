@@ -44,10 +44,11 @@ function packet(overrides: Partial<PacketFrame> = {}): PacketFrame {
     length: 64,
     summary: 'GET /',
     hexDump: '00 01 02 03',
-    headerBreakdown: {
-      layer4: { transport: 'TCP', srcPort: 51234, dstPort: 443, flags: 'PSH,ACK', windowSize: 65535, seqAck: '1/1' },
-      layer3: { ipVersion: 'IPv4', srcIp: '10.0.0.1', dstIp: '93.184.216.34', ttl: 64, protocolNum: 6, checksum: '0x0' },
-    },
+    headerHexDump: '00 01',
+    fields: [
+      { path: 'tcp', label: 'TCP', type: 'group', region: 'header', offset: 0, len: 20 },
+      { path: 'tcp.src_port', label: 'Source Port', type: 'uint', group: 'tcp', value: 51234, region: 'header', offset: 0, len: 2 },
+    ],
     ...overrides,
   };
 }
@@ -97,11 +98,11 @@ describe('connectionsToCsv', () => {
 });
 
 describe('packetsToJson', () => {
-  it('round-trips through JSON.parse with headerBreakdown intact', () => {
+  it('round-trips through JSON.parse with the field list intact', () => {
     const packets = [packet()];
     const parsed = JSON.parse(packetsToJson(packets));
     expect(parsed).toEqual(packets);
-    expect(parsed[0].headerBreakdown.layer4.srcPort).toBe(51234);
+    expect(parsed[0].fields.find((f: { path: string }) => f.path === 'tcp.src_port').value).toBe(51234);
   });
 
   it('is indented for reading rather than minified', () => {
