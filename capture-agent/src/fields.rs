@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::l7::L7Info;
 use crate::parse::{ParsedPacket, TransportProtocol};
 
 const ETH_HEADER_LEN: u32 = 14;
@@ -319,10 +320,65 @@ fn transport_fields(parsed: &ParsedPacket, start: u32) -> Vec<Field> {
     }
 }
 
+/// Application ranges are relative to the full payload. The wire's payload
+/// hex dump shows only its first 64 bytes, so a valid SNI range can lie beyond
+/// the visible dump; its offset is retained rather than moved or truncated.
+/// Text fields and derived JA3 values span their source payload. Only SNI's
+/// bytes are located precisely by the TLS extension parser.
+fn app_fields(l7: &L7Info, payload_len: u32) -> Vec<Field> {
+    match l7 {
+        L7Info::Http { method, path } => vec![
+            Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
+            Field::leaf("http.request.method", "Request Method", "http", FieldType::Str, FieldValue::Str(method.clone()), ByteRegion::Payload, 0, payload_len),
+            Field::leaf("http.request.uri", "Request URI", "http", FieldType::Str, FieldValue::Str(path.clone()), ByteRegion::Payload, 0, payload_len),
+        ],
+        L7Info::HttpResponse { status } => vec![
+            Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
+            Field::leaf("http.response.code", "Status Code", "http", FieldType::Uint, FieldValue::Uint(status.parse().unwrap_or(0)), ByteRegion::Payload, 0, payload_len),
+        ],
+        L7Info::Dns { query_name } => vec![
+            Field::group("dns", "Domain Name System", None, ByteRegion::Payload, 0, payload_len),
+            Field::leaf("dns.qry.name", "Query Name", "dns", FieldType::Str, FieldValue::Str(query_name.clone()), ByteRegion::Payload, 0, payload_len),
+        ],
+        L7Info::TlsClientHello { sni, ja3, ja3_label, sni_offset, sni_len, .. } => {
+            let mut fields = vec![
+                Field::group("tls", "Transport Layer Security", None, ByteRegion::Payload, 0, payload_len),
+                Field::leaf("tls.handshake.sni", "Server Name", "tls", FieldType::Str, FieldValue::Str(sni.clone()), ByteRegion::Payload, *sni_offset as u32, *sni_len as u32),
+            ];
+            if let Some(ja3_hash) = ja3 {
+                fields.push(Field::leaf("tls.ja3", "JA3 Fingerprint", "tls", FieldType::Str, FieldValue::Str(ja3_hash.clone()), ByteRegion::Payload, 0, payload_len));
+            }
+            if let Some(label) = ja3_label {
+                fields.push(Field::leaf("tls.ja3_label", "JA3 Label", "tls", FieldType::Str, FieldValue::Str(label.to_string()), ByteRegion::Payload, 0, payload_len));
+            }
+            fields
+        }
+        L7Info::None => Vec::new(),
+    }
+}
+
+/// Assemble the field list for one packet in its actual link framing.
+pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info, link_type: crate::parse::LinkType) -> Vec<Field> {
+    let mut fields = Vec::new();
+    let ip_start = if link_type == crate::parse::LinkType::Ethernet {
+        let (eth, next) = eth_fields(parsed);
+        fields.extend(eth);
+        next
+    } else {
+        0
+    };
+    let (ip, transport_start) = ip_fields(parsed, ip_start);
+    fields.extend(ip);
+    fields.extend(transport_fields(parsed, transport_start));
+    fields.extend(app_fields(l7, parsed.payload.len() as u32));
+    fields
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::{ParsedPacket, TransportProtocol};
+    use crate::l7::L7Info;
+    use crate::parse::{LinkType, ParsedPacket, TransportProtocol};
 
     fn base_packet() -> ParsedPacket {
         ParsedPacket {
@@ -487,5 +543,69 @@ mod tests {
         assert!(transport_fields(&packet, 34).is_empty());
         packet.protocol = TransportProtocol::Other;
         assert!(transport_fields(&packet, 34).is_empty());
+    }
+
+    #[test]
+    fn app_fields_cover_the_existing_application_decodes() {
+        let cases = [
+            (L7Info::Http { method: "GET".into(), path: "/index.html".into() }, "http.request.uri", FieldValue::Str("/index.html".into())),
+            (L7Info::HttpResponse { status: "404".into() }, "http.response.code", FieldValue::Uint(404)),
+            (L7Info::Dns { query_name: "example.com".into() }, "dns.qry.name", FieldValue::Str("example.com".into())),
+        ];
+        for (l7, path, value) in cases {
+            let fields = app_fields(&l7, 50);
+            let field = fields.iter().find(|f| f.path == path).expect(path);
+            assert_eq!(field.value, Some(value));
+            assert_eq!(field.region, ByteRegion::Payload);
+            assert_eq!((field.offset, field.len), (0, 50));
+        }
+        assert!(app_fields(&L7Info::None, 50).is_empty());
+    }
+
+    #[test]
+    fn tls_sni_uses_its_real_range_even_when_the_dump_is_capped() {
+        let l7 = L7Info::TlsClientHello {
+            sni: "example.com".into(), ja3: Some("deadbeef".into()),
+            ja3_label: Some("matches Chrome 12x"), client_random: None,
+            sni_offset: 80, sni_len: 11,
+        };
+        let fields = app_fields(&l7, 165);
+        let sni = fields.iter().find(|f| f.path == "tls.handshake.sni").unwrap();
+        assert_eq!((sni.offset, sni.len), (80, 11));
+        assert_eq!(sni.value, Some(FieldValue::Str("example.com".into())));
+        assert!(fields.iter().any(|f| f.path == "tls.ja3"));
+        assert!(fields.iter().any(|f| f.path == "tls.ja3_label"));
+    }
+
+    #[test]
+    fn tls_omits_unavailable_ja3_fields() {
+        let l7 = L7Info::TlsClientHello {
+            sni: "example.com".into(), ja3: None, ja3_label: None,
+            client_random: None, sni_offset: 63, sni_len: 11,
+        };
+        let fields = app_fields(&l7, 100);
+        assert!(fields.iter().all(|f| f.path != "tls.ja3" && f.path != "tls.ja3_label"));
+    }
+
+    #[test]
+    fn build_fields_assembles_headers_and_application_for_ethernet() {
+        let mut p = base_packet();
+        p.protocol = TransportProtocol::Tcp;
+        p.src_port = Some(51000);
+        p.dst_port = Some(80);
+        let l7 = L7Info::Http { method: "GET".into(), path: "/".into() };
+        let fields = build_fields(&p, &l7, LinkType::Ethernet);
+        for group in ["eth", "ip", "tcp", "http"] {
+            assert!(fields.iter().any(|f| f.path == group), "missing {group}");
+        }
+    }
+
+    #[test]
+    fn build_fields_omits_ethernet_for_loopback_and_raw() {
+        for link_type in [LinkType::NullLoopback, LinkType::Raw] {
+            let fields = build_fields(&base_packet(), &L7Info::None, link_type);
+            assert!(fields.iter().all(|f| !f.path.starts_with("eth")));
+            assert_eq!(fields.iter().find(|f| f.path == "ip").unwrap().offset, 0);
+        }
     }
 }

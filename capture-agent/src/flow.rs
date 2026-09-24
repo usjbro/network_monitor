@@ -943,6 +943,8 @@ mod tests {
             ja3: Some("abc123".to_string() + &"0".repeat(26)), // 32-char hex-like JA3 hash
             ja3_label: Some("matches Chrome 12x"),
             client_random: Some(vec![0xab; 32]),
+            sni_offset: 0,
+            sni_len: 0,
         };
         table.observe(&packet, &l7, 0);
         table.observe(&packet, &L7Info::None, 100); // a later, non-ClientHello packet on the same flow
@@ -975,6 +977,8 @@ mod tests {
             ja3: Some("x".to_string()),
             ja3_label: None,
             client_random: Some(vec![0x42; 32]),
+            sni_offset: 0,
+            sni_len: 0,
         };
         table.observe(&packet, &l7, 1);
         assert_eq!(table.client_random_for(&key), Some(vec![0x42; 32]));
