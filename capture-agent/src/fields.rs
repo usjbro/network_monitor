@@ -5,9 +5,6 @@ use crate::parse::{ParsedPacket, TransportProtocol};
 
 const ETH_HEADER_LEN: u32 = 14;
 const VLAN_TAG_LEN: u32 = 4;
-const IPV4_HEADER_LEN: u32 = 20;
-const IPV6_HEADER_LEN: u32 = 40;
-const TCP_HEADER_LEN: u32 = 20;
 const UDP_HEADER_LEN: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -185,7 +182,7 @@ fn ip_fields(parsed: &ParsedPacket, ip_start: u32) -> (Vec<Field>, u32) {
             None,
             ByteRegion::Header,
             ip_start,
-            IPV6_HEADER_LEN,
+            parsed.ip_header_len,
         )];
         fields.push(Field::leaf(
             "ip6.src",
@@ -222,12 +219,12 @@ fn ip_fields(parsed: &ParsedPacket, ip_start: u32) -> (Vec<Field>, u32) {
             "Next Header",
             "ip6",
             FieldType::Uint,
-            FieldValue::Uint(protocol_num(parsed.protocol).into()),
+            FieldValue::Uint(parsed.header_bytes.get((ip_start + 6) as usize).copied().unwrap_or_else(|| protocol_num(parsed.protocol)).into()),
             ByteRegion::Header,
             ip_start + 6,
             1,
         ));
-        (fields, ip_start + IPV6_HEADER_LEN)
+        (fields, ip_start + parsed.ip_header_len)
     } else {
         let mut fields = vec![Field::group(
             "ip",
@@ -235,7 +232,7 @@ fn ip_fields(parsed: &ParsedPacket, ip_start: u32) -> (Vec<Field>, u32) {
             None,
             ByteRegion::Header,
             ip_start,
-            IPV4_HEADER_LEN,
+            parsed.ip_header_len,
         )];
         fields.push(Field::leaf(
             "ip.src",
@@ -272,7 +269,7 @@ fn ip_fields(parsed: &ParsedPacket, ip_start: u32) -> (Vec<Field>, u32) {
             "Protocol",
             "ip",
             FieldType::Uint,
-            FieldValue::Uint(protocol_num(parsed.protocol).into()),
+            FieldValue::Uint(parsed.header_bytes.get((ip_start + 9) as usize).copied().unwrap_or_else(|| protocol_num(parsed.protocol)).into()),
             ByteRegion::Header,
             ip_start + 9,
             1,
@@ -289,7 +286,7 @@ fn ip_fields(parsed: &ParsedPacket, ip_start: u32) -> (Vec<Field>, u32) {
                 2,
             ));
         }
-        (fields, ip_start + IPV4_HEADER_LEN)
+        (fields, ip_start + parsed.ip_header_len)
     }
 }
 
@@ -298,7 +295,7 @@ fn transport_fields(parsed: &ParsedPacket, start: u32) -> Vec<Field> {
         TransportProtocol::Tcp => {
             let flags = parsed.tcp_flags.unwrap_or_default();
             vec![
-                Field::group("tcp", "Transmission Control Protocol", None, ByteRegion::Header, start, TCP_HEADER_LEN),
+                Field::group("tcp", "Transmission Control Protocol", None, ByteRegion::Header, start, parsed.transport_header_len),
                 Field::leaf("tcp.src_port", "Source Port", "tcp", FieldType::Uint, FieldValue::Uint(parsed.src_port.unwrap_or(0).into()), ByteRegion::Header, start, 2),
                 Field::leaf("tcp.dst_port", "Destination Port", "tcp", FieldType::Uint, FieldValue::Uint(parsed.dst_port.unwrap_or(0).into()), ByteRegion::Header, start + 2, 2),
                 Field::leaf("tcp.seq", "Sequence Number", "tcp", FieldType::Uint, FieldValue::Uint(parsed.seq.unwrap_or(0).into()), ByteRegion::Header, start + 4, 4),
@@ -377,8 +374,58 @@ pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info, link_type: crate::parse:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use etherparse::{Ipv4Header, PacketBuilder};
     use crate::l7::L7Info;
-    use crate::parse::{LinkType, ParsedPacket, TransportProtocol};
+    use crate::parse::{parse_packet, LinkType, ParsedPacket, TransportProtocol};
+
+    fn field<'a>(fields: &'a [Field], path: &str) -> &'a Field {
+        fields.iter().find(|field| field.path == path).expect(path)
+    }
+
+    #[test]
+    fn ipv4_options_move_udp_ranges_after_the_full_ip_header() {
+        let builder = PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
+            .ipv4([192, 0, 2, 1], [198, 51, 100, 2], 64)
+            .udp(0x1234, 0x5678);
+        let mut bytes = Vec::new();
+        builder.write(&mut bytes, b"data").unwrap();
+        bytes.splice(34..34, [1, 1, 1, 1]); // four IPv4 option bytes
+        bytes[14] = 0x46; // IPv4, IHL = 24 bytes
+        bytes[16..18].copy_from_slice(&36u16.to_be_bytes());
+        bytes[24..26].copy_from_slice(&[0, 0]);
+        let (ip, _) = Ipv4Header::from_slice(&bytes[14..]).unwrap();
+        bytes[24..26].copy_from_slice(&ip.calc_header_checksum().to_be_bytes());
+
+        let parsed = parse_packet(&bytes, LinkType::Ethernet).unwrap();
+        let fields = build_fields(&parsed, &L7Info::None, LinkType::Ethernet);
+        assert_eq!((field(&fields, "ip").offset, field(&fields, "ip").len), (14, 24));
+        assert_eq!((field(&fields, "udp").offset, field(&fields, "udp").len), (38, 8));
+        assert_eq!((field(&fields, "udp.src_port").offset, field(&fields, "udp.src_port").len), (38, 2));
+        assert_eq!(&parsed.header_bytes[38..40], &[0x12, 0x34]);
+        assert_eq!((field(&fields, "udp.dst_port").offset, field(&fields, "udp.dst_port").len), (40, 2));
+        assert_eq!(&parsed.header_bytes[40..42], &[0x56, 0x78]);
+    }
+
+    #[test]
+    fn ipv6_hop_by_hop_extension_moves_tcp_ranges_after_the_extension() {
+        let builder = PacketBuilder::ipv6([0; 16], [1; 16], 64)
+            .tcp(0x1234, 0x5678, 1000, 4096)
+            .syn();
+        let mut bytes = Vec::new();
+        builder.write(&mut bytes, b"data").unwrap();
+        bytes.splice(40..40, [6, 0, 0, 0, 0, 0, 0, 0]); // hop-by-hop, next TCP
+        bytes[6] = 0; // IPv6 next header = hop-by-hop
+        bytes[4..6].copy_from_slice(&32u16.to_be_bytes());
+
+        let parsed = parse_packet(&bytes, LinkType::Raw).unwrap();
+        let fields = build_fields(&parsed, &L7Info::None, LinkType::Raw);
+        assert_eq!((field(&fields, "ip6").offset, field(&fields, "ip6").len), (0, 48));
+        assert_eq!((field(&fields, "tcp").offset, field(&fields, "tcp").len), (48, 20));
+        assert_eq!((field(&fields, "tcp.src_port").offset, field(&fields, "tcp.src_port").len), (48, 2));
+        assert_eq!(&parsed.header_bytes[48..50], &[0x12, 0x34]);
+        assert_eq!((field(&fields, "tcp.flags.syn").offset, field(&fields, "tcp.flags.syn").len), (61, 1));
+        assert_eq!(field(&fields, "ip6.next_header").value, Some(FieldValue::Uint(0)));
+    }
 
     fn base_packet() -> ParsedPacket {
         ParsedPacket {
@@ -395,6 +442,8 @@ mod tests {
             total_len: 100,
             payload: vec![],
             header_bytes: vec![],
+            ip_header_len: 20,
+            transport_header_len: 20,
             ip_version: 4,
             ip_checksum: Some(0xbeef),
             vlan_tag: None,
@@ -489,6 +538,7 @@ mod tests {
         let mut packet = base_packet();
         packet.ip_version = 6;
         packet.ip_checksum = None;
+        packet.ip_header_len = 40;
         let (fields, transport_start) = ip_fields(&packet, 14);
         assert_eq!(transport_start, 14 + 40);
         assert!(fields.iter().any(|f| f.path == "ip6"));

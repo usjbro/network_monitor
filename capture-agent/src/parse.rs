@@ -62,6 +62,11 @@ pub struct ParsedPacket {
     /// to build the wire's `headerHexDump`, a separate pane from the
     /// existing payload-only `hexDump`.
     pub header_bytes: Vec<u8>,
+    /// Length of the parsed IP header and its extension headers, including
+    /// IPv4 options or IPv6 extensions, from the network-layer slice.
+    pub ip_header_len: u32,
+    /// Length of the parsed TCP/UDP header, including TCP options.
+    pub transport_header_len: u32,
     /// 4 or 6, from the IP header actually parsed.
     pub ip_version: u8,
     /// IPv4 header checksum. Always `None` for IPv6, which has no header
@@ -140,13 +145,15 @@ fn build_parsed_packet(
     vlan_tag: Option<String>,
     frame_data: &[u8],
 ) -> Option<ParsedPacket> {
-    let (src_ip, dst_ip, ttl, ip_version, ip_checksum) = match &sliced.net {
+    let (src_ip, dst_ip, ttl, ip_version, ip_checksum, ip_header_len) = match &sliced.net {
         Some(NetSlice::Ipv4(ipv4)) => (
             ipv4.header().source_addr().to_string(),
             ipv4.header().destination_addr().to_string(),
             ipv4.header().ttl(),
             4u8,
             Some(ipv4.header().header_checksum()),
+            (ipv4.header().slice().len()
+                + ipv4.extensions().auth.map_or(0, |auth| auth.slice().len())) as u32,
         ),
         Some(NetSlice::Ipv6(ipv6)) => (
             ipv6.header().source_addr().to_string(),
@@ -154,12 +161,13 @@ fn build_parsed_packet(
             ipv6.header().hop_limit(),
             6u8,
             None,
+            (ipv6.header().slice().len() + ipv6.extensions().slice().len()) as u32,
         ),
         None => return None,
         _ => return None,
     };
 
-    let (protocol, src_port, dst_port, tcp_flags, seq, payload) = match &sliced.transport {
+    let (protocol, src_port, dst_port, tcp_flags, seq, payload, transport_header_len) = match &sliced.transport {
         Some(TransportSlice::Tcp(tcp)) => (
             TransportProtocol::Tcp,
             Some(tcp.source_port()),
@@ -174,6 +182,7 @@ fn build_parsed_packet(
             }),
             Some(tcp.sequence_number()),
             tcp.payload().to_vec(),
+            tcp.header_slice().len() as u32,
         ),
         Some(TransportSlice::Udp(udp)) => (
             TransportProtocol::Udp,
@@ -182,11 +191,12 @@ fn build_parsed_packet(
             None,
             None,
             udp.payload().to_vec(),
+            udp.header_slice().len() as u32,
         ),
         Some(TransportSlice::Icmpv4(_)) | Some(TransportSlice::Icmpv6(_)) => {
-            (TransportProtocol::Icmp, None, None, None, None, Vec::new())
+            (TransportProtocol::Icmp, None, None, None, None, Vec::new(), 0)
         }
-        None => (TransportProtocol::Other, None, None, None, None, Vec::new()),
+        None => (TransportProtocol::Other, None, None, None, None, Vec::new(), 0),
     };
 
     let header_bytes = frame_data[..frame_data.len() - payload.len()].to_vec();
@@ -205,6 +215,8 @@ fn build_parsed_packet(
         total_len: frame_data.len() as u16,
         payload,
         header_bytes,
+        ip_header_len,
+        transport_header_len,
         ip_version,
         ip_checksum,
         vlan_tag,
@@ -242,6 +254,8 @@ mod tests {
         assert_eq!(flags.ack_number, 0);
         assert_eq!(parsed.ttl, 64);
         assert_eq!(parsed.ip_version, 4);
+        assert_eq!(parsed.ip_header_len, 20);
+        assert_eq!(parsed.transport_header_len, 20);
         assert!(parsed.ip_checksum.is_some());
         // Untagged frame — must read as absent, not a fabricated 0/default,
         // and not confused with "unparsed" (see issue #62).
@@ -408,6 +422,8 @@ mod tests {
         let flags = parsed.tcp_flags.unwrap();
         assert!(flags.syn);
         assert_eq!(parsed.payload, payload);
+        assert_eq!(parsed.ip_header_len, 20);
+        assert_eq!(parsed.transport_header_len, 28);
     }
 
     #[test]
