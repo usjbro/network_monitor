@@ -20,9 +20,8 @@ function formatValue(field: WireField): string | null {
   return String(field.value);
 }
 
-function Row({ node, depth, theme, selectedPath, highlightedPaths, onSelectField, onHoverField }: {
+function Row({ node, theme, selectedPath, highlightedPaths, onSelectField, onHoverField }: {
   node: FieldTreeNode;
-  depth: number;
   theme: ThemeConfig;
   selectedPath: string | null;
   highlightedPaths: ReadonlySet<string>;
@@ -44,7 +43,6 @@ function Row({ node, depth, theme, selectedPath, highlightedPaths, onSelectField
         onClick={() => onSelectField(isSelected ? null : path)}
         onMouseEnter={() => onHoverField(path)}
         onMouseLeave={() => onHoverField(null)}
-        style={{ paddingLeft: `${depth * 14}px` }}
         className={`flex items-center space-x-1.5 py-0.5 px-1 rounded cursor-pointer text-[11px] ${highlighted ? theme.highlight : 'hover:bg-slate-800/60'}`}
       >
         {hasChildren ? (
@@ -62,9 +60,15 @@ function Row({ node, depth, theme, selectedPath, highlightedPaths, onSelectField
         {value !== null && <span className="text-emerald-400 font-mono">{value}</span>}
       </div>
       {hasChildren && !collapsed && (
-        <div>
+        // A static Tailwind class, not a computed `style={{ paddingLeft }}` --
+        // this app's CSP is `style-src 'self'` with no 'unsafe-inline' or
+        // nonce carve-out for style attributes, so an inline style here would
+        // be silently dropped by the browser, flattening the tree's nesting.
+        // Indentation instead compounds through this wrapper's own DOM
+        // nesting, one level per recursive call.
+        <div className="pl-3.5">
           {node.children.map((child) => (
-            <Row key={child.field.path} node={child} depth={depth + 1} theme={theme}
+            <Row key={child.field.path} node={child} theme={theme}
               selectedPath={selectedPath} highlightedPaths={highlightedPaths}
               onSelectField={onSelectField} onHoverField={onHoverField} />
           ))}
@@ -80,7 +84,7 @@ export const FieldTree: React.FC<FieldTreeProps> = ({ fields, theme, selectedPat
   return (
     <div className="space-y-0.5">
       {roots.map((node) => (
-        <Row key={node.field.path} node={node} depth={0} theme={theme}
+        <Row key={node.field.path} node={node} theme={theme}
           selectedPath={selectedPath} highlightedPaths={highlightedPaths}
           onSelectField={onSelectField} onHoverField={onHoverField} />
       ))}
