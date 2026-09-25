@@ -20,15 +20,20 @@ Merge the downloaded `agent-coordination-kit` into `AGENTS.md`/`CLAUDE.md` and a
   - Fixed: `new-task.sh` now uses `BRANCH_PREFIX="${COORDINATION_BRANCH_PREFIX:-jamesmbrownjr}"` with a comment explaining why it isn't derived from git config, and an env-var override if the handle ever changes.
   - Re-ran and verified correct behavior for: `new-task.sh` with no `linear-id` (branch `jamesmbrownjr/verify-coordination-kit`), `new-task.sh` with `linear-id JAM-9` (branch `jamesmbrownjr/jam-9-verify-linear-path`, "update Linear" reminder printed by both `new-task.sh` and `complete-task.sh`), `complete-task.sh` status-field update (`open` → `review` → `done`), the duplicate-task-file guard, and the invalid-owner guard. `SLACK_WEBHOOK_URL` unset throughout — no Slack call attempted, no error, as designed.
   - Cleaned up all test artifacts afterward: 2 branches deleted, 2 worktrees removed, 2 task files deleted. `coordination/tasks/` is back to just `TEMPLATE.md` and `example-lateral-movement-rule.md`.
+- User asked not to lose this work and to get the real Slack webhook wired in:
+  - Committed and pushed both halves (`coordination/` at the main repo root; `AGENTS.md`/`CLAUDE.md`/`.ai/` on this worktree's branch). Direct push to `main` was rejected — it's GitHub-protected (2 required status checks) — so opened usjbro/network_monitor#220 (`coordination/`) and #221 (`AGENTS.md`/`CLAUDE.md`/`.ai/`, since #218 on this same branch was already merged/closed). Both have CI running, nothing failed as of last check.
+  - Added `coordination/.env` (gitignored) loading to all three scripts so `SLACK_WEBHOOK_URL` persists across sessions instead of needing `export` every shell; mechanically verified with a fake unreachable URL before committing (`curl: (7) Failed to connect` proved the value flows through, not silently unset), then pushed as a follow-up commit to PR #220.
+  - User provided the real Incoming Webhook URL; wrote it to `coordination/.env` (confirmed gitignored via `git check-ignore`, `chmod 600`). Ran `slack-notify.sh` for real and confirmed via `slack_read_channel` that the message actually landed in `#network-monitor`, correctly formatted — not just a clean exit code.
+  - Also used the separately-installed Slack plugin (MCP tools, independent of the webhook) to send a live test message to the same channel, confirming that integration too. Explained to the user that these are two distinct mechanisms — the plugin is Claude-side/conversational, the webhook is what standalone scripts (incl. Codex) actually use.
 
 ## Current State
-`AGENTS.md`/`CLAUDE.md` uncommitted diff now includes both this session's and the prior session's changes (never committed). `coordination/` is new and untracked.
+Nothing is local-only. `coordination/` is committed on `jamesmbrownjr/agent-coordination-kit` (PR #220). `AGENTS.md`/`CLAUDE.md`/`.ai/*.md` are committed on this worktree's branch (PR #221). `coordination/.env` holds a real, working Slack webhook (gitignored, not part of either PR).
 
 ## Verification Performed
-`bash -n` syntax-checked all three scripts (pass). Did not execute `new-task.sh`/`complete-task.sh` end-to-end (would create a real branch/worktree/Slack post) or run any application test suite — this was a docs/tooling change only, no application files touched.
+`bash -n` clean on all three scripts. Full end-to-end exercise of `new-task.sh`/`complete-task.sh` (see above) plus a real Slack webhook send confirmed via `slack_read_channel`, not just curl's exit code. CI is running on both PRs; no application test suite affected (no application files touched).
 
 ## Remaining Work
-User review of the merged `AGENTS.md`/`CLAUDE.md` content and the `coordination/` scripts; resolve whether `new-task.sh` should nest sub-task worktrees under the parent worktree's `.worktrees/` (see `CURRENT_TASK.md` Constraints) before it's ever run for real; no commit requested yet.
+User review/merge of PR #220 and #221. Still open: whether `new-task.sh` should nest sub-task worktrees under a parent worktree's `.worktrees/` when invoked from one (currently: no, it always resolves to the main repo root — see `DECISIONS.md` ADR-001).
 
 ## Known Issues / Blockers
 Same GitHub/Linear tracker and host-metrics documentation conflicts already noted in `PROJECT_STATE.md` — unrelated to this task, not touched.
