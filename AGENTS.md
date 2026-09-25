@@ -77,12 +77,35 @@ When sources disagree, explicitly report the disagreement.
 **Ask first**
 - Changing `deploy/Caddyfile`, `next.config.ts`'s webpack/file-watching block, or the `--webpack` flags in `package.json`.
 - Adding a new dependency, widening a network bind, or touching the wire protocol (`capture-agent/src/wire.rs`, `lib/agent-mapping.ts`, `lib/types.ts` must change together — see `docs/wire-protocol.md`).
-- Anything else `CLAUDE.md`'s Critical Invariants section calls out — that list is the detailed source of truth; this is a summary, not a replacement for reading it.
+- Anything else called out in Critical Invariants below or in relevant subsystem documentation.
 
 **Never**
 - Commit or push without explicit authorization; merge your own branch.
 - Force-push over unmerged work, or `git checkout`/`git switch` inside a worktree.
 - Invent host metrics, interface properties, or wire fields the agent doesn't actually emit.
+
+## Critical Invariants
+
+- Preserve `next.config.ts`'s deliberate Webpack/file-watching behavior and the `--webpack` flags in `package.json`; do not casually remove or “fix” them.
+- Next.js and the capture agent bind to `127.0.0.1`. Never expose them by widening their bind. LAN access goes through the existing Caddy/mTLS front door; its LAN-facing change is deliberate/manual and must follow `deploy/README.md`.
+- Before changing `deploy/Caddyfile`, read `docs/security.md` and `deploy/README.md`; rerun `deploy/test-mtls-rejection.sh` after the change.
+- Startup `CAPTURE_INTERFACE` selection and runtime `set_interface` switching are distinct paths. Preserve their separate semantics.
+- TLS decryption is explicit, per-process opt-in via `bin/osi-inspect.js`; this is passive visibility, not a blanket MITM. Keep key material and decrypted payloads ephemeral/in-memory, redacted, zeroed on eviction, and gated to loopback or mTLS as implemented.
+- Ownership enrichment and GeoIP enrichment are opt-in; traceroute probes are on demand and bounded.
+- Do not invent host metrics or interface properties. The agent emits system/interface identity and traffic counters; it does not emit CPU, memory, uptime, interface speed, or duplex. Add displayed data only with a real producer.
+- Do not mistake static OSI metadata for live values. Do not reintroduce simulated traffic or metrics.
+- A filename, type, issue, UI placeholder, spec, or comment alone does not prove functionality. Check source, tests, and current wire behavior.
+- For `macos-app`, build/test with `CODE_SIGNING_ALLOWED=NO`; use a clean build after changing `NavigationLockDelegate` because optional delegate signature mismatches can evade incremental builds. The client key is Secure-Enclave-backed; the app does not read the CA private key. `deploy/sign-native-app-csr.sh` signs its CSR out of band.
+
+## Read Before Modifying
+
+- Capture-agent wire messages or `lib/agent-mapping.ts`: read `docs/wire-protocol.md`; update the Rust and TypeScript contract together.
+- Ownership enrichment: read `docs/enrichment-protocol.md` and `docs/superpowers/specs/2026-08-28-ownership-enrichment-design.md`.
+- Traceroute/GeoIP: read `docs/geoip-protocol.md` and `docs/superpowers/specs/2026-09-01-path-visualization-design.md`.
+- Deployment or mTLS: read `docs/security.md` and `deploy/README.md`.
+- macOS navigation/client-certificate security: read `macos-app/README.md` and `docs/security.md`.
+- Significant architecture: read the relevant `docs/superpowers/specs/` entry, then follow the spec → plan process in `CONTRIBUTING.md`.
+- TLS visibility or capture files: find and read the relevant design spec and plan under `docs/superpowers/` before extending them.
 
 ## Critical Thinking
 
