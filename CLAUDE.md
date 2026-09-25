@@ -11,7 +11,7 @@ Build and maintain Network Monitor according to repository code, approved requir
 3. Inspect relevant code and tests; read subsystem docs only as needed.
 4. Do not load all of `docs/` or the repository by default.
 
-`AGENTS.md` is the cross-agent source of truth for operational conventions shared by every coding agent in this repo — project structure, boundaries, git/commit conventions, multi-agent coordination, and testing expectations. This file stays the detailed architecture and Claude-Code-specific guidance; read both.
+`AGENTS.md` is the cross-agent source of truth for the newer operational conventions shared by every coding agent in this repo — project structure, boundaries, git/commit conventions, multi-agent coordination, and testing expectations. This file stays the detailed architecture and Claude-Code-specific guidance. Some older sections (Mission, Sources of Truth, Required Workflow, Model Routing, Context Discipline, Session Completion) still exist independently in both files rather than being deduplicated — read both, and if you edit one of those overlapping sections, check whether the other needs the same change.
 
 ## Commands
 
@@ -65,7 +65,9 @@ Tests, not compilation, a rendered screen, a file's existence, or tracker status
 
 The Next.js 16 / React 19 UI displays real traffic. The Rust `capture-agent` captures and parses it in a separate process. Its loopback NDJSON socket feeds the relay (`lib/agent-client.ts`); `app/api/stream/route.ts` sends SSE to the browser and `app/api/control/route.ts` forwards controls. `app/page.tsx` owns main client state; `lib/agent-mapping.ts` maps wire events; `lib/types.ts` defines domain types; `components/` are primarily presentational. `lib/osi-engine.ts` contains static OSI descriptions, not live measurements.
 
-Read `docs/architecture.md` for the component map. Do not infer behavior from this summary alone.
+Read `docs/architecture.md` for the component map. Do not infer behavior from this summary alone — and note `.ai/PROJECT_STATE.md`'s "Known Source Disagreements" flags that `docs/architecture.md` itself contains stale/self-contradictory system-stats claims; current code and tests take precedence over that doc for those fields.
+
+User-facing docs also live under `docs/`: [getting-started.md](docs/getting-started.md), [usage.md](docs/usage.md), [troubleshooting.md](docs/troubleshooting.md), plus the protocol/security docs referenced below.
 
 ## Critical Invariants
 

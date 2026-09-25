@@ -29,7 +29,7 @@ Do not assume documentation proves implementation exists. Verify against code an
 - `macos-app/` — the native SwiftUI/WKWebView viewer.
 - `docs/` — user-facing docs; `docs/superpowers/specs/` and `docs/superpowers/plans/` hold design specs and implementation plans for nontrivial work (see `CONTRIBUTING.md`).
 - `.ai/` — `CURRENT_TASK.md`, `HANDOFF.md`, `DECISIONS.md`, `PROJECT_STATE.md`, `TEST_STATUS.md` (see Sources of Truth below).
-- `.claude/agents/`, `.codex/agents/` — per-tool subagent definitions (architect/developer/reviewer/tester) for this repo.
+- `.claude/agents/`, `.codex/agents/` — per-tool subagent definitions (architect/developer/reviewer/tester), present in some local checkouts as of this writing but not yet committed to the repo — don't assume they exist in a fresh clone.
 - `.agents/skills/` — shared skills, e.g. `epic-task-cycle` (the Linear branch → PR → merge cycle).
 - `coordination/` — cross-agent task contracts and Slack coordination for parallel sub-work; see Multi-Agent Coordination below.
 

@@ -20,8 +20,9 @@ Merge `~/Downloads/agent-coordination-kit.zip` (multi-agent task contracts, a Cl
 - [x] Confirmed and fixed a real breakage this uncovered: bare relative `coordination/...` references in `AGENTS.md`'s prose fail from any worktree cwd (`ls coordination` → not found there) since the directory is uncommitted and only exists at the main root. Reworded that section to say so and to prefer the self-resolving scripts.
 - [x] Scripts verified end-to-end, invoked from inside this worktree (the real usage scenario): `new-task.sh` (no linear-id, with linear-id), `complete-task.sh` (both paths), the duplicate-task guard, and the invalid-owner guard. Found and fixed a real bug along the way (see below); all test artifacts (2 branches, 2 worktrees, 2 task files) removed afterward.
 - [x] `SLACK_WEBHOOK_URL` made durable via `coordination/.env` (gitignored) instead of requiring `export` every shell; mechanically verified with a fake URL, then wired to the user's real Incoming Webhook and confirmed the message actually landed in `#network-monitor` via `slack_read_channel` — not just a clean `curl` exit code.
-- [x] Work committed and pushed — `main` is branch-protected (direct push rejected by GitHub), so this went through two PRs instead: usjbro/network_monitor#220 (`coordination/`) and #221 (`AGENTS.md`/`CLAUDE.md`/`.ai/`). Both have CI running.
-- [ ] User review/merge of #220 and #221.
+- [x] Work committed and pushed — `main` is branch-protected (direct push rejected by GitHub), so this went through PRs instead of a direct push: usjbro/network_monitor#220 (`coordination/`) and #222 (`AGENTS.md`/`CLAUDE.md`/`.ai/`; supersedes #221, closed — that branch's merge-base with `main` predated JAM-9's squash-merge, so its diff showed the entire already-merged field-model change as if new).
+- [x] Independent code review run on both #220 and #222 (`/code-review`, "careful review" per explicit user direction) — real findings on both, all fixed and re-verified: 4 script bugs in #220 (status mutated before validating owner/branch existed; task file written before the more-failure-prone `git worktree add`, blocking retry on failure; unvalidated status value reaching `sed` unescaped; undocumented `python3` dependency with a silently-swallowed curl failure), plus 5 accuracy issues in #222 (stale `#221` references, `.ai/` vs. undocumented-untracked `.claude/agents/`/`.codex/agents/` claim, an uncaveated pointer to a doc `PROJECT_STATE.md` itself flags as stale, `AGENTS.md`/`CLAUDE.md` duplication undercutting the new "source of truth" claim, a deleted docs pointer with no replacement).
+- [ ] User review/merge of #220 and #222.
 
 ## Relevant Areas
 
@@ -41,4 +42,4 @@ Merge `~/Downloads/agent-coordination-kit.zip` (multi-agent task contracts, a Cl
 
 ## Status
 
-Ready for review — merge complete, scripts exercised end-to-end (including a real Slack webhook), pushed as PR #220 and #221. Awaiting user review/merge.
+Ready for review — merge complete, scripts exercised end-to-end (including a real Slack webhook), independently reviewed with all findings fixed and re-verified, pushed as PR #220 and #222. Awaiting user review/merge.

@@ -70,3 +70,28 @@ If this user's Linear-assigned branch handle ever changes, `COORDINATION_BRANCH_
 
 Evidence / References:
 End-to-end exercise of `new-task.sh` in this session, 2026-09-24: first real run produced the wrong branch name; root-caused via `git config user.email`/`user.name` and `gh api user --jq .login`, all returning `usjbro`-derived values; corrected and re-verified against `jamesmbrownjr/jam-9-...` (this worktree's branch) and `jamesmbrownjr/jam-10-...` (a second real worktree found at `/private/tmp/network-monitor-jam10` during cleanup).
+
+## ADR-003 — Independent-review findings on PR #220/#222: fixed vs. deferred
+
+Date:
+2026-09-24
+
+Status:
+Accepted
+
+Context:
+User asked to "coordinate the work... after careful review and discussion." Ran `/code-review` independently against both open PRs rather than relying on this session's own self-review. #221's review returned findings against files (`capture-agent/src/fields.rs`, `components/PacketStreamView.tsx`) this task never touched — its branch's merge-base with `main` predated JAM-9's squash-merge (#218), so its diff was a phantom re-presentation of already-merged work, not this task's actual change. #220's and the corrected #222's reviews returned real, verified findings.
+
+Decision:
+- #221 closed, replaced by #222: fresh branch off current `main`, cherry-picking only the 3 real commits. Diff-verified as exactly the intended 7 files before opening.
+- #220's 4 script-correctness findings (status mutated before field validation; task file written before the more-failure-prone worktree-add; unvalidated status reaching `sed`; undeclared `python3` dependency with swallowed curl failures) were fixed and re-verified end-to-end for real (diff-against-before-copy on each failure path), not just read through.
+- #222's accuracy findings were fixed narrowly: stale PR references, the `.claude/agents/`/`.codex/agents/` committed-vs-actual mismatch, an uncaveated stale-doc pointer, and the deleted "Further documentation" section were all in scope to fix now. The larger `AGENTS.md`/`CLAUDE.md` section-duplication finding was **not** restructured now — flagged as a real issue but out of scope for this task (pre-existing pattern from before this session, and a full dedup is a bigger, separate change) rather than silently expanding scope.
+
+Reasoning:
+Fixing a review finding is only correct when the finding is about the actual diff; #221's findings weren't, and accepting a bogus review's list of "already-fixed" items would have wasted effort and produced misleading task history. For the real findings, fixing narrowly-scoped, high-confidence ones now (script bugs, doc accuracy) while deferring a genuinely larger restructuring (whole-file dedup) matches this repo's own "stay on the assigned task" convention.
+
+Consequences:
+A full `AGENTS.md`/`CLAUDE.md` deduplication remains open as a follow-up, not tracked as its own Linear/coordination task yet.
+
+Evidence / References:
+`gh pr diff 221 --name-only` (showed unrelated already-merged files); `/code-review` output on #220 and #222; `git diff --stat origin/main <branch>` confirming #222's corrected diff scope; review-fix verification steps recorded in `TEST_STATUS.md`.
