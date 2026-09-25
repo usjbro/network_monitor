@@ -15,3 +15,4 @@ pub mod redact;
 pub mod http2;
 pub mod pcapng;
 pub mod ring;
+pub mod fields;

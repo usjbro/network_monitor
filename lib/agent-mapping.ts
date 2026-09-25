@@ -218,7 +218,8 @@ export function mapPacketEvent(json: unknown): PacketFrame {
     length: requireField(w, 'length'),
     summary: requireField(w, 'summary'),
     hexDump: requireField(w, 'hexDump'),
-    headerBreakdown: requireField<PacketFrame['headerBreakdown']>(w, 'headerBreakdown'),
+    headerHexDump: requireField(w, 'headerHexDump'),
+    fields: requireField<PacketFrame['fields']>(w, 'fields'),
   };
 }
 

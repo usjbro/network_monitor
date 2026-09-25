@@ -54,7 +54,8 @@ function packetEvent(id: number): MessageEvent {
         length: 64,
         summary: `frame ${id}`,
         hexDump: '00 01 02 03',
-        headerBreakdown: {},
+        headerHexDump: 'aa bb',
+        fields: [],
       },
     }),
   } as MessageEvent;

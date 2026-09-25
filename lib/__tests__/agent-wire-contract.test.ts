@@ -108,10 +108,15 @@ describe('agent wire contract: real captured agent output maps without throwing'
   });
 
   it('packet maps', () => {
-    const evt = sample('packet') as unknown as { packet: unknown };
+    const evt = sample('packet') as unknown as { packet: Record<string, unknown> };
     const mapped = mapPacketEvent(evt.packet);
     expect(typeof mapped.id).toBe('string');
     expect(typeof mapped.summary).toBe('string');
+    expect(mapped.headerHexDump).toMatch(/^aa bb cc dd ee ff/);
+    expect(mapped.fields).toContainEqual(expect.objectContaining({
+      path: 'http.response.code', type: 'uint', region: 'payload', value: 200,
+    }));
+    expect(evt.packet).not.toHaveProperty('headerBreakdown');
   });
 
   it('layer_update merges', () => {

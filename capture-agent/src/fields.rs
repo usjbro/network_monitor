@@ -1,0 +1,661 @@
+use serde::Serialize;
+
+use crate::l7::L7Info;
+use crate::parse::{ParsedPacket, TransportProtocol};
+
+const ETH_HEADER_LEN: u32 = 14;
+const VLAN_TAG_LEN: u32 = 4;
+const UDP_HEADER_LEN: u32 = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldType {
+    Group,
+    Bool,
+    Uint,
+    Str,
+    Addr,
+    Bytes,
+}
+
+/// Which of the two hex-dump panes a field's `offset`/`len` is relative to.
+/// Header fields (eth/ip/tcp/udp/vlan) are offset into `headerHexDump`;
+/// app-layer fields (http/dns/tls) are offset into the existing `hexDump`
+/// — the two panes are never merged into one shared byte space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ByteRegion {
+    Header,
+    Payload,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum FieldValue {
+    Bool(bool),
+    Uint(u64),
+    Str(String),
+    #[allow(dead_code)] // no currently-decoded field uses this yet; kept for future dissector work per the spec's type enum
+    Bytes(Vec<u8>),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Field {
+    pub path: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(rename = "type")]
+    pub field_type: FieldType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<FieldValue>,
+    pub region: ByteRegion,
+    pub offset: u32,
+    pub len: u32,
+}
+
+impl Field {
+    pub fn group(path: &str, label: &str, group: Option<&str>, region: ByteRegion, offset: u32, len: u32) -> Field {
+        Field {
+            path: path.to_string(),
+            label: label.to_string(),
+            group: group.map(|g| g.to_string()),
+            field_type: FieldType::Group,
+            value: None,
+            region,
+            offset,
+            len,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn leaf(
+        path: &str,
+        label: &str,
+        group: &str,
+        field_type: FieldType,
+        value: FieldValue,
+        region: ByteRegion,
+        offset: u32,
+        len: u32,
+    ) -> Field {
+        Field {
+            path: path.to_string(),
+            label: label.to_string(),
+            group: Some(group.to_string()),
+            field_type,
+            value: Some(value),
+            region,
+            offset,
+            len,
+        }
+    }
+}
+
+fn protocol_num(protocol: TransportProtocol) -> u8 {
+    match protocol {
+        TransportProtocol::Tcp => 6,
+        TransportProtocol::Udp => 17,
+        TransportProtocol::Icmp => 1,
+        TransportProtocol::Other => 0,
+    }
+}
+
+/// Returns fields and the byte offset where the IP header begins.
+fn eth_fields(parsed: &ParsedPacket) -> (Vec<Field>, u32) {
+    let vlan_tagged = parsed.vlan_tag.is_some();
+    let eth_len = ETH_HEADER_LEN + if vlan_tagged { VLAN_TAG_LEN } else { 0 };
+    let mut fields = vec![Field::group(
+        "eth",
+        "Ethernet II",
+        None,
+        ByteRegion::Header,
+        0,
+        eth_len,
+    )];
+    fields.push(Field::leaf(
+        "eth.dst",
+        "Destination MAC",
+        "eth",
+        FieldType::Addr,
+        FieldValue::Str(parsed.dst_mac.clone()),
+        ByteRegion::Header,
+        0,
+        6,
+    ));
+    fields.push(Field::leaf(
+        "eth.src",
+        "Source MAC",
+        "eth",
+        FieldType::Addr,
+        FieldValue::Str(parsed.src_mac.clone()),
+        ByteRegion::Header,
+        6,
+        6,
+    ));
+    if let Some(vlan_tag) = &parsed.vlan_tag {
+        fields.push(Field::group(
+            "eth.vlan",
+            "802.1Q VLAN Tag",
+            Some("eth"),
+            ByteRegion::Header,
+            12,
+            VLAN_TAG_LEN,
+        ));
+        fields.push(Field::leaf(
+            "eth.vlan.id",
+            "VLAN ID",
+            "eth.vlan",
+            FieldType::Uint,
+            FieldValue::Uint(vlan_tag.parse().unwrap_or(0)),
+            ByteRegion::Header,
+            14,
+            2,
+        ));
+    }
+    let ethertype_offset = if vlan_tagged { 16 } else { 12 };
+    let ethertype_label = match parsed.ip_version {
+        4 => "IPv4",
+        6 => "IPv6",
+        _ => "Unknown",
+    };
+    fields.push(Field::leaf(
+        "eth.type",
+        "EtherType",
+        "eth",
+        FieldType::Str,
+        FieldValue::Str(ethertype_label.to_string()),
+        ByteRegion::Header,
+        ethertype_offset,
+        2,
+    ));
+    (fields, eth_len)
+}
+
+/// Returns fields and the byte offset where the transport header begins.
+fn ip_fields(parsed: &ParsedPacket, ip_start: u32) -> (Vec<Field>, u32) {
+    if parsed.ip_version == 6 {
+        let mut fields = vec![Field::group(
+            "ip6",
+            "Internet Protocol Version 6",
+            None,
+            ByteRegion::Header,
+            ip_start,
+            parsed.ip_header_len,
+        )];
+        fields.push(Field::leaf(
+            "ip6.src",
+            "Source Address",
+            "ip6",
+            FieldType::Addr,
+            FieldValue::Str(parsed.src_ip.clone()),
+            ByteRegion::Header,
+            ip_start + 8,
+            16,
+        ));
+        fields.push(Field::leaf(
+            "ip6.dst",
+            "Destination Address",
+            "ip6",
+            FieldType::Addr,
+            FieldValue::Str(parsed.dst_ip.clone()),
+            ByteRegion::Header,
+            ip_start + 24,
+            16,
+        ));
+        fields.push(Field::leaf(
+            "ip6.hop_limit",
+            "Hop Limit",
+            "ip6",
+            FieldType::Uint,
+            FieldValue::Uint(parsed.ttl.into()),
+            ByteRegion::Header,
+            ip_start + 7,
+            1,
+        ));
+        fields.push(Field::leaf(
+            "ip6.next_header",
+            "Next Header",
+            "ip6",
+            FieldType::Uint,
+            FieldValue::Uint(parsed.header_bytes.get((ip_start + 6) as usize).copied().unwrap_or_else(|| protocol_num(parsed.protocol)).into()),
+            ByteRegion::Header,
+            ip_start + 6,
+            1,
+        ));
+        (fields, ip_start + parsed.ip_header_len)
+    } else {
+        let mut fields = vec![Field::group(
+            "ip",
+            "Internet Protocol Version 4",
+            None,
+            ByteRegion::Header,
+            ip_start,
+            parsed.ip_header_len,
+        )];
+        fields.push(Field::leaf(
+            "ip.src",
+            "Source Address",
+            "ip",
+            FieldType::Addr,
+            FieldValue::Str(parsed.src_ip.clone()),
+            ByteRegion::Header,
+            ip_start + 12,
+            4,
+        ));
+        fields.push(Field::leaf(
+            "ip.dst",
+            "Destination Address",
+            "ip",
+            FieldType::Addr,
+            FieldValue::Str(parsed.dst_ip.clone()),
+            ByteRegion::Header,
+            ip_start + 16,
+            4,
+        ));
+        fields.push(Field::leaf(
+            "ip.ttl",
+            "Time to Live",
+            "ip",
+            FieldType::Uint,
+            FieldValue::Uint(parsed.ttl.into()),
+            ByteRegion::Header,
+            ip_start + 8,
+            1,
+        ));
+        fields.push(Field::leaf(
+            "ip.protocol_num",
+            "Protocol",
+            "ip",
+            FieldType::Uint,
+            FieldValue::Uint(parsed.header_bytes.get((ip_start + 9) as usize).copied().unwrap_or_else(|| protocol_num(parsed.protocol)).into()),
+            ByteRegion::Header,
+            ip_start + 9,
+            1,
+        ));
+        if let Some(checksum) = parsed.ip_checksum {
+            fields.push(Field::leaf(
+                "ip.checksum",
+                "Header Checksum",
+                "ip",
+                FieldType::Str,
+                FieldValue::Str(format!("0x{checksum:04x}")),
+                ByteRegion::Header,
+                ip_start + 10,
+                2,
+            ));
+        }
+        (fields, ip_start + parsed.ip_header_len)
+    }
+}
+
+fn transport_fields(parsed: &ParsedPacket, start: u32) -> Vec<Field> {
+    match parsed.protocol {
+        TransportProtocol::Tcp => {
+            let flags = parsed.tcp_flags.unwrap_or_default();
+            vec![
+                Field::group("tcp", "Transmission Control Protocol", None, ByteRegion::Header, start, parsed.transport_header_len),
+                Field::leaf("tcp.src_port", "Source Port", "tcp", FieldType::Uint, FieldValue::Uint(parsed.src_port.unwrap_or(0).into()), ByteRegion::Header, start, 2),
+                Field::leaf("tcp.dst_port", "Destination Port", "tcp", FieldType::Uint, FieldValue::Uint(parsed.dst_port.unwrap_or(0).into()), ByteRegion::Header, start + 2, 2),
+                Field::leaf("tcp.seq", "Sequence Number", "tcp", FieldType::Uint, FieldValue::Uint(parsed.seq.unwrap_or(0).into()), ByteRegion::Header, start + 4, 4),
+                Field::leaf("tcp.ack_number", "Acknowledgment Number", "tcp", FieldType::Uint, FieldValue::Uint(flags.ack_number.into()), ByteRegion::Header, start + 8, 4),
+                Field::group("tcp.flags", "Flags", Some("tcp"), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.flags.syn", "SYN", "tcp.flags", FieldType::Bool, FieldValue::Bool(flags.syn), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.flags.ack", "ACK", "tcp.flags", FieldType::Bool, FieldValue::Bool(flags.ack), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.flags.fin", "FIN", "tcp.flags", FieldType::Bool, FieldValue::Bool(flags.fin), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.flags.rst", "RST", "tcp.flags", FieldType::Bool, FieldValue::Bool(flags.rst), ByteRegion::Header, start + 13, 1),
+                Field::leaf("tcp.window_size", "Window Size", "tcp", FieldType::Uint, FieldValue::Uint(flags.window_size.into()), ByteRegion::Header, start + 14, 2),
+            ]
+        }
+        TransportProtocol::Udp => vec![
+            Field::group("udp", "User Datagram Protocol", None, ByteRegion::Header, start, UDP_HEADER_LEN),
+            Field::leaf("udp.src_port", "Source Port", "udp", FieldType::Uint, FieldValue::Uint(parsed.src_port.unwrap_or(0).into()), ByteRegion::Header, start, 2),
+            Field::leaf("udp.dst_port", "Destination Port", "udp", FieldType::Uint, FieldValue::Uint(parsed.dst_port.unwrap_or(0).into()), ByteRegion::Header, start + 2, 2),
+        ],
+        TransportProtocol::Icmp | TransportProtocol::Other => Vec::new(),
+    }
+}
+
+/// Application ranges are relative to the full payload. The wire's payload
+/// hex dump shows only its first 64 bytes, so a valid SNI range can lie beyond
+/// the visible dump; its offset is retained rather than moved or truncated.
+/// Text fields and derived JA3 values span their source payload. Only SNI's
+/// bytes are located precisely by the TLS extension parser.
+fn app_fields(l7: &L7Info, payload_len: u32) -> Vec<Field> {
+    match l7 {
+        L7Info::Http { method, path } => vec![
+            Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
+            Field::leaf("http.request.method", "Request Method", "http", FieldType::Str, FieldValue::Str(method.clone()), ByteRegion::Payload, 0, payload_len),
+            Field::leaf("http.request.uri", "Request URI", "http", FieldType::Str, FieldValue::Str(path.clone()), ByteRegion::Payload, 0, payload_len),
+        ],
+        L7Info::HttpResponse { status } => vec![
+            Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
+            Field::leaf("http.response.code", "Status Code", "http", FieldType::Uint, FieldValue::Uint(status.parse().unwrap_or(0)), ByteRegion::Payload, 0, payload_len),
+        ],
+        L7Info::Dns { query_name } => vec![
+            Field::group("dns", "Domain Name System", None, ByteRegion::Payload, 0, payload_len),
+            Field::leaf("dns.qry.name", "Query Name", "dns", FieldType::Str, FieldValue::Str(query_name.clone()), ByteRegion::Payload, 0, payload_len),
+        ],
+        L7Info::TlsClientHello { sni, ja3, ja3_label, sni_offset, sni_len, .. } => {
+            let mut fields = vec![
+                Field::group("tls", "Transport Layer Security", None, ByteRegion::Payload, 0, payload_len),
+                Field::leaf("tls.handshake.sni", "Server Name", "tls", FieldType::Str, FieldValue::Str(sni.clone()), ByteRegion::Payload, *sni_offset as u32, *sni_len as u32),
+            ];
+            if let Some(ja3_hash) = ja3 {
+                fields.push(Field::leaf("tls.ja3", "JA3 Fingerprint", "tls", FieldType::Str, FieldValue::Str(ja3_hash.clone()), ByteRegion::Payload, 0, payload_len));
+            }
+            if let Some(label) = ja3_label {
+                fields.push(Field::leaf("tls.ja3_label", "JA3 Label", "tls", FieldType::Str, FieldValue::Str(label.to_string()), ByteRegion::Payload, 0, payload_len));
+            }
+            fields
+        }
+        L7Info::None => Vec::new(),
+    }
+}
+
+/// Assemble the field list for one packet in its actual link framing.
+pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info, link_type: crate::parse::LinkType) -> Vec<Field> {
+    let mut fields = Vec::new();
+    let ip_start = if link_type == crate::parse::LinkType::Ethernet {
+        let (eth, next) = eth_fields(parsed);
+        fields.extend(eth);
+        next
+    } else {
+        0
+    };
+    let (ip, transport_start) = ip_fields(parsed, ip_start);
+    fields.extend(ip);
+    fields.extend(transport_fields(parsed, transport_start));
+    fields.extend(app_fields(l7, parsed.payload.len() as u32));
+    fields
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use etherparse::{Ipv4Header, PacketBuilder};
+    use crate::l7::L7Info;
+    use crate::parse::{parse_packet, LinkType, ParsedPacket, TransportProtocol};
+
+    fn field<'a>(fields: &'a [Field], path: &str) -> &'a Field {
+        fields.iter().find(|field| field.path == path).expect(path)
+    }
+
+    #[test]
+    fn ipv4_options_move_udp_ranges_after_the_full_ip_header() {
+        let builder = PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
+            .ipv4([192, 0, 2, 1], [198, 51, 100, 2], 64)
+            .udp(0x1234, 0x5678);
+        let mut bytes = Vec::new();
+        builder.write(&mut bytes, b"data").unwrap();
+        bytes.splice(34..34, [1, 1, 1, 1]); // four IPv4 option bytes
+        bytes[14] = 0x46; // IPv4, IHL = 24 bytes
+        bytes[16..18].copy_from_slice(&36u16.to_be_bytes());
+        bytes[24..26].copy_from_slice(&[0, 0]);
+        let (ip, _) = Ipv4Header::from_slice(&bytes[14..]).unwrap();
+        bytes[24..26].copy_from_slice(&ip.calc_header_checksum().to_be_bytes());
+
+        let parsed = parse_packet(&bytes, LinkType::Ethernet).unwrap();
+        let fields = build_fields(&parsed, &L7Info::None, LinkType::Ethernet);
+        assert_eq!((field(&fields, "ip").offset, field(&fields, "ip").len), (14, 24));
+        assert_eq!((field(&fields, "udp").offset, field(&fields, "udp").len), (38, 8));
+        assert_eq!((field(&fields, "udp.src_port").offset, field(&fields, "udp.src_port").len), (38, 2));
+        assert_eq!(&parsed.header_bytes[38..40], &[0x12, 0x34]);
+        assert_eq!((field(&fields, "udp.dst_port").offset, field(&fields, "udp.dst_port").len), (40, 2));
+        assert_eq!(&parsed.header_bytes[40..42], &[0x56, 0x78]);
+    }
+
+    #[test]
+    fn ipv6_hop_by_hop_extension_moves_tcp_ranges_after_the_extension() {
+        let builder = PacketBuilder::ipv6([0; 16], [1; 16], 64)
+            .tcp(0x1234, 0x5678, 1000, 4096)
+            .syn();
+        let mut bytes = Vec::new();
+        builder.write(&mut bytes, b"data").unwrap();
+        bytes.splice(40..40, [6, 0, 0, 0, 0, 0, 0, 0]); // hop-by-hop, next TCP
+        bytes[6] = 0; // IPv6 next header = hop-by-hop
+        bytes[4..6].copy_from_slice(&32u16.to_be_bytes());
+
+        let parsed = parse_packet(&bytes, LinkType::Raw).unwrap();
+        let fields = build_fields(&parsed, &L7Info::None, LinkType::Raw);
+        assert_eq!((field(&fields, "ip6").offset, field(&fields, "ip6").len), (0, 48));
+        assert_eq!((field(&fields, "tcp").offset, field(&fields, "tcp").len), (48, 20));
+        assert_eq!((field(&fields, "tcp.src_port").offset, field(&fields, "tcp.src_port").len), (48, 2));
+        assert_eq!(&parsed.header_bytes[48..50], &[0x12, 0x34]);
+        assert_eq!((field(&fields, "tcp.flags.syn").offset, field(&fields, "tcp.flags.syn").len), (61, 1));
+        assert_eq!(field(&fields, "ip6.next_header").value, Some(FieldValue::Uint(0)));
+    }
+
+    fn base_packet() -> ParsedPacket {
+        ParsedPacket {
+            src_mac: "00:01:02:03:04:05".to_string(),
+            dst_mac: "06:07:08:09:0a:0b".to_string(),
+            src_ip: "192.168.1.10".to_string(),
+            dst_ip: "93.184.216.34".to_string(),
+            protocol: TransportProtocol::Other,
+            src_port: None,
+            dst_port: None,
+            tcp_flags: None,
+            seq: None,
+            ttl: 64,
+            total_len: 100,
+            payload: vec![],
+            header_bytes: vec![],
+            ip_header_len: 20,
+            transport_header_len: 20,
+            ip_version: 4,
+            ip_checksum: Some(0xbeef),
+            vlan_tag: None,
+        }
+    }
+
+    #[test]
+    fn a_group_omits_the_value_key_entirely() {
+        let f = Field::group("tcp", "Transmission Control Protocol", None, ByteRegion::Header, 34, 20);
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(!json.contains("\"value\""), "group entries must carry no value key at all, not null: {json}");
+        assert!(!json.contains("\"group\":"), "a top-level group must omit the group key, not send null: {json}");
+        assert!(json.contains("\"type\":\"group\""));
+        assert!(json.contains("\"region\":\"header\""));
+    }
+
+    #[test]
+    fn a_leaf_serializes_its_typed_value_untagged() {
+        let f = Field::leaf(
+            "tcp.flags.syn",
+            "SYN",
+            "tcp.flags",
+            FieldType::Bool,
+            FieldValue::Bool(true),
+            ByteRegion::Header,
+            47,
+            1,
+        );
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains("\"value\":true"), "bool value must serialize as a bare JSON bool, not {{\"Bool\":true}}: {json}");
+        assert!(json.contains("\"group\":\"tcp.flags\""));
+    }
+
+    #[test]
+    fn a_uint_leaf_serializes_as_a_bare_number() {
+        let f = Field::leaf("tcp.src_port", "Source Port", "tcp", FieldType::Uint, FieldValue::Uint(51000), ByteRegion::Header, 34, 2);
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains("\"value\":51000"), "{json}");
+    }
+
+    #[test]
+    fn field_uses_camel_case_keys() {
+        let f = Field::leaf("ip.ttl", "Time to Live", "ip", FieldType::Uint, FieldValue::Uint(64), ByteRegion::Header, 22, 1);
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains("\"path\":\"ip.ttl\""));
+        assert!(json.contains("\"offset\":22"));
+        assert!(json.contains("\"len\":1"));
+    }
+
+    #[test]
+    fn eth_fields_places_the_ip_header_right_after_a_14_byte_untagged_ethernet_header() {
+        let (fields, ip_start) = eth_fields(&base_packet());
+        assert_eq!(ip_start, 14);
+        let eth = fields.iter().find(|f| f.path == "eth").unwrap();
+        assert_eq!(eth.offset, 0);
+        assert_eq!(eth.len, 14);
+        let src = fields.iter().find(|f| f.path == "eth.src").unwrap();
+        assert_eq!(src.offset, 6);
+        assert_eq!(src.len, 6);
+        assert!(matches!(&src.value, Some(FieldValue::Str(v)) if v == "00:01:02:03:04:05"));
+    }
+
+    #[test]
+    fn eth_fields_accounts_for_the_4_byte_vlan_tag_when_present() {
+        let mut packet = base_packet();
+        packet.vlan_tag = Some("100".to_string());
+        let (fields, ip_start) = eth_fields(&packet);
+        assert_eq!(ip_start, 18, "a VLAN-tagged frame's IP header starts 4 bytes later");
+        let vlan_id = fields.iter().find(|f| f.path == "eth.vlan.id").unwrap();
+        assert!(matches!(&vlan_id.value, Some(FieldValue::Uint(100))));
+        assert_eq!(vlan_id.offset, 14);
+        assert_eq!(vlan_id.len, 2);
+    }
+
+    #[test]
+    fn ip_fields_places_ipv4_addresses_at_their_rfc_791_offsets() {
+        let (fields, transport_start) = ip_fields(&base_packet(), 14);
+        assert_eq!(transport_start, 34, "14 (eth) + 20 (ipv4) = 34");
+        let src = fields.iter().find(|f| f.path == "ip.src").unwrap();
+        assert_eq!(src.offset, 14 + 12);
+        assert_eq!(src.len, 4);
+        assert!(matches!(&src.value, Some(FieldValue::Str(v)) if v == "192.168.1.10"));
+        let ttl = fields.iter().find(|f| f.path == "ip.ttl").unwrap();
+        assert_eq!(ttl.offset, 14 + 8);
+        assert!(matches!(&ttl.value, Some(FieldValue::Uint(64))));
+        let checksum = fields.iter().find(|f| f.path == "ip.checksum").unwrap();
+        assert!(matches!(&checksum.value, Some(FieldValue::Str(v)) if v == "0xbeef"));
+    }
+
+    #[test]
+    fn ip_fields_uses_the_ip6_group_and_16_byte_addresses_for_ipv6() {
+        let mut packet = base_packet();
+        packet.ip_version = 6;
+        packet.ip_checksum = None;
+        packet.ip_header_len = 40;
+        let (fields, transport_start) = ip_fields(&packet, 14);
+        assert_eq!(transport_start, 14 + 40);
+        assert!(fields.iter().any(|f| f.path == "ip6"));
+        assert!(fields.iter().all(|f| f.path != "ip.checksum"), "IPv6 must never fabricate a checksum field");
+        let src = fields.iter().find(|f| f.path == "ip6.src").unwrap();
+        assert_eq!(src.len, 16);
+    }
+
+    #[test]
+    fn transport_fields_places_tcp_ports_and_flags_at_their_fixed_offsets() {
+        let mut packet = base_packet();
+        packet.protocol = TransportProtocol::Tcp;
+        packet.src_port = Some(51000);
+        packet.dst_port = Some(443);
+        packet.seq = Some(1000);
+        packet.tcp_flags = Some(crate::parse::TcpFlags { syn: true, ack: false, fin: false, rst: false, window_size: 65535, ack_number: 0 });
+        let fields = transport_fields(&packet, 34);
+        let tcp = fields.iter().find(|f| f.path == "tcp").unwrap();
+        assert_eq!((tcp.offset, tcp.len), (34, 20));
+        let src_port = fields.iter().find(|f| f.path == "tcp.src_port").unwrap();
+        assert_eq!(src_port.offset, 34);
+        assert!(matches!(&src_port.value, Some(FieldValue::Uint(51000))));
+        let syn = fields.iter().find(|f| f.path == "tcp.flags.syn").unwrap();
+        assert_eq!(syn.offset, 47);
+        assert_eq!(syn.group.as_deref(), Some("tcp.flags"));
+        assert!(matches!(&syn.value, Some(FieldValue::Bool(true))));
+        let ack = fields.iter().find(|f| f.path == "tcp.flags.ack").unwrap();
+        assert_eq!(ack.offset, 47);
+        assert!(matches!(&ack.value, Some(FieldValue::Bool(false))));
+        let window = fields.iter().find(|f| f.path == "tcp.window_size").unwrap();
+        assert_eq!(window.offset, 48);
+        assert!(matches!(&window.value, Some(FieldValue::Uint(65535))));
+    }
+
+    #[test]
+    fn transport_fields_covers_udp_with_just_ports_no_fabricated_flags_or_seq() {
+        let mut packet = base_packet();
+        packet.protocol = TransportProtocol::Udp;
+        packet.src_port = Some(60123);
+        packet.dst_port = Some(53);
+        let fields = transport_fields(&packet, 34);
+        assert!(fields.iter().any(|f| f.path == "udp.src_port"));
+        assert!(fields.iter().any(|f| f.path == "udp.dst_port"));
+        assert!(fields.iter().all(|f| !f.path.starts_with("tcp")));
+        assert!(fields.iter().all(|f| !f.path.contains("flags") && !f.path.contains("seq")));
+    }
+
+    #[test]
+    fn transport_fields_is_empty_for_icmp_and_other_nothing_decoded_to_show() {
+        let mut packet = base_packet();
+        packet.protocol = TransportProtocol::Icmp;
+        assert!(transport_fields(&packet, 34).is_empty());
+        packet.protocol = TransportProtocol::Other;
+        assert!(transport_fields(&packet, 34).is_empty());
+    }
+
+    #[test]
+    fn app_fields_cover_the_existing_application_decodes() {
+        let cases = [
+            (L7Info::Http { method: "GET".into(), path: "/index.html".into() }, "http.request.uri", FieldValue::Str("/index.html".into())),
+            (L7Info::HttpResponse { status: "404".into() }, "http.response.code", FieldValue::Uint(404)),
+            (L7Info::Dns { query_name: "example.com".into() }, "dns.qry.name", FieldValue::Str("example.com".into())),
+        ];
+        for (l7, path, value) in cases {
+            let fields = app_fields(&l7, 50);
+            let field = fields.iter().find(|f| f.path == path).expect(path);
+            assert_eq!(field.value, Some(value));
+            assert_eq!(field.region, ByteRegion::Payload);
+            assert_eq!((field.offset, field.len), (0, 50));
+        }
+        assert!(app_fields(&L7Info::None, 50).is_empty());
+    }
+
+    #[test]
+    fn tls_sni_uses_its_real_range_even_when_the_dump_is_capped() {
+        let l7 = L7Info::TlsClientHello {
+            sni: "example.com".into(), ja3: Some("deadbeef".into()),
+            ja3_label: Some("matches Chrome 12x"), client_random: None,
+            sni_offset: 80, sni_len: 11,
+        };
+        let fields = app_fields(&l7, 165);
+        let sni = fields.iter().find(|f| f.path == "tls.handshake.sni").unwrap();
+        assert_eq!((sni.offset, sni.len), (80, 11));
+        assert_eq!(sni.value, Some(FieldValue::Str("example.com".into())));
+        assert!(fields.iter().any(|f| f.path == "tls.ja3"));
+        assert!(fields.iter().any(|f| f.path == "tls.ja3_label"));
+    }
+
+    #[test]
+    fn tls_omits_unavailable_ja3_fields() {
+        let l7 = L7Info::TlsClientHello {
+            sni: "example.com".into(), ja3: None, ja3_label: None,
+            client_random: None, sni_offset: 63, sni_len: 11,
+        };
+        let fields = app_fields(&l7, 100);
+        assert!(fields.iter().all(|f| f.path != "tls.ja3" && f.path != "tls.ja3_label"));
+    }
+
+    #[test]
+    fn build_fields_assembles_headers_and_application_for_ethernet() {
+        let mut p = base_packet();
+        p.protocol = TransportProtocol::Tcp;
+        p.src_port = Some(51000);
+        p.dst_port = Some(80);
+        let l7 = L7Info::Http { method: "GET".into(), path: "/".into() };
+        let fields = build_fields(&p, &l7, LinkType::Ethernet);
+        for group in ["eth", "ip", "tcp", "http"] {
+            assert!(fields.iter().any(|f| f.path == group), "missing {group}");
+        }
+    }
+
+    #[test]
+    fn build_fields_omits_ethernet_for_loopback_and_raw() {
+        for link_type in [LinkType::NullLoopback, LinkType::Raw] {
+            let fields = build_fields(&base_packet(), &L7Info::None, link_type);
+            assert!(fields.iter().all(|f| !f.path.starts_with("eth")));
+            assert_eq!(fields.iter().find(|f| f.path == "ip").unwrap().offset, 0);
+        }
+    }
+}

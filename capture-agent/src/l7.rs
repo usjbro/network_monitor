@@ -7,8 +7,8 @@ pub enum L7Info {
     /// Kept as its own variant rather than an optional field on `Http`
     /// above — a request has a method and a path but no status, a response
     /// has a status but no method or path; the two never overlap on one
-    /// packet. Populates `Layer7Json.status_or_code`, which was previously
-    /// declared on the wire but never produced by anything — see issue #65.
+    /// packet. Populates `http.response.code` on the wire (fields.rs),
+    /// replacing the old, unpopulated `Layer7Json.status_or_code` — see issue #65.
     /// Request/response *correlation* (matching this to the request it
     /// answers, service-time timing) is explicitly out of scope here; that
     /// is epic #57's #82.
@@ -23,6 +23,9 @@ pub enum L7Info {
         // (Tier B / Task 13) — never sent over the wire, purely an
         // in-process decrypt-eligibility lookup key.
         client_random: Option<Vec<u8>>,
+        /// Byte range of the SNI name within the complete TLS payload.
+        sni_offset: usize,
+        sni_len: usize,
     },
     None,
 }
@@ -136,6 +139,8 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
     let mut extensions = Vec::new();
     let mut elliptic_curves = Vec::new();
     let mut ec_point_formats = Vec::new();
+    let mut sni_offset = 0usize;
+    let mut sni_len = 0usize;
 
     while idx + 4 <= payload.len() {
         let ext_type = u16::from_be_bytes([payload[idx], payload[idx + 1]]);
@@ -145,14 +150,16 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
         let ext_body = payload.get(ext_start..ext_start + ext_len);
 
         match (ext_type, ext_body) {
-            (0x0000, Some(_)) => {
+            (0x0000, Some(body)) => {
                 // server_name extension: skip list length(2) + type(1) to reach name length(2)
-                let name_len_idx = ext_start + 3;
-                if let (Some(&hi), Some(&lo)) = (payload.get(name_len_idx), payload.get(name_len_idx + 1)) {
+                if let (Some(&hi), Some(&lo)) = (body.get(3), body.get(4)) {
                     let name_len = u16::from_be_bytes([hi, lo]) as usize;
-                    let name_start = name_len_idx + 2;
-                    if let Some(name_bytes) = payload.get(name_start..name_start + name_len) {
-                        sni = std::str::from_utf8(name_bytes).ok().map(|s| s.to_string());
+                    if let Some(name_bytes) = body.get(5..5 + name_len) {
+                        if let Ok(name) = std::str::from_utf8(name_bytes) {
+                            sni = Some(name.to_string());
+                            sni_offset = ext_start + 5;
+                            sni_len = name_len;
+                        }
                     }
                 }
             }
@@ -181,7 +188,7 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
     // offset 11..43 of the record (record header(5) + handshake header(4) +
     // client_version(2) = 11).
     let client_random = payload.get(11..43).map(|b| b.to_vec());
-    Some(L7Info::TlsClientHello { sni, ja3, ja3_label, client_random })
+    Some(L7Info::TlsClientHello { sni, ja3, ja3_label, client_random, sni_offset, sni_len })
 }
 
 pub fn sniff_l7(payload: &[u8], dst_port: Option<u16>) -> L7Info {
@@ -341,6 +348,26 @@ mod tests {
             }
             other => panic!("expected TlsClientHello, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sni_range_points_to_the_name_bytes_in_the_client_hello() {
+        let payload = build_client_hello("example.com");
+        match sniff_l7(&payload, Some(443)) {
+            L7Info::TlsClientHello { sni, sni_offset, sni_len, .. } => {
+                assert_eq!(sni, "example.com");
+                assert_eq!((sni_offset, sni_len), (63, 11));
+                assert_eq!(&payload[sni_offset..sni_offset + sni_len], b"example.com");
+            }
+            other => panic!("expected TlsClientHello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sni_outside_its_declared_extension_is_not_accepted() {
+        let mut payload = build_client_hello("example.com");
+        payload[56..58].copy_from_slice(&5u16.to_be_bytes());
+        assert!(matches!(sniff_l7(&payload, Some(443)), L7Info::None));
     }
 
     #[test]

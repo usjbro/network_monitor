@@ -9,7 +9,8 @@ import {
   Search,
   Trash2,
 } from 'lucide-react';
-import { DecryptedPayloadSegment, PacketFrame, ThemeConfig, OSILayerNumber } from '@/lib/types';
+import type { DecryptedPayloadSegment, PacketFrame, ThemeConfig, WireField } from '@/lib/types';
+import { FieldTree } from '@/components/FieldTree';
 // Only packetsToJson is imported here. decryptedSegments is deliberately
 // never passed to it — see lib/export.ts's header and
 // lib/__tests__/decrypted-export-exclusion.test.ts.
@@ -33,6 +34,34 @@ interface PacketStreamViewProps {
   bufferLimit?: number;
 }
 
+function HexPane({ hexDump, fields, activePath, hoveredByte, onHoverByte, testId }: {
+  hexDump: string;
+  fields: WireField[];
+  activePath: string | null;
+  hoveredByte: number | null;
+  onHoverByte: (index: number | null) => void;
+  testId: string;
+}) {
+  const selected = fields.find((field) => field.path === activePath);
+  // The payload dump is capped by the agent at 64 bytes; rendering only
+  // available bytes naturally clips a field whose range continues beyond it.
+  const bytes = hexDump.trim() ? hexDump.trim().split(/\s+/) : [];
+  return (
+    <pre data-testid={testId} className="p-2 bg-black text-emerald-400 text-[10px] rounded border border-slate-800 leading-tight overflow-x-auto select-all">
+      {bytes.map((byte, index) => {
+        const inSelectedRange = selected && index >= selected.offset && index < selected.offset + selected.len;
+        const highlighted = inSelectedRange || hoveredByte === index;
+        return (
+          <span key={index} data-byte-index={index}
+            onMouseEnter={() => onHoverByte(index)} onMouseLeave={() => onHoverByte(null)}
+            className={highlighted ? 'bg-emerald-500/40 text-emerald-200 rounded-sm' : undefined}
+          >{byte}{index < bytes.length - 1 ? ' ' : ''}</span>
+        );
+      })}
+    </pre>
+  );
+}
+
 export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   packets,
   theme,
@@ -50,6 +79,17 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   // non-secure origin), and silently doing nothing would read as a broken
   // button.
   const [hexCopyState, setHexCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [selectedHeaderFieldPath, setSelectedHeaderFieldPath] = useState<string | null>(null);
+  const [selectedPayloadFieldPath, setSelectedPayloadFieldPath] = useState<string | null>(null);
+  const [hoveredHeaderFieldPath, setHoveredHeaderFieldPath] = useState<string | null>(null);
+  const [hoveredPayloadFieldPath, setHoveredPayloadFieldPath] = useState<string | null>(null);
+  const [hoveredHeaderByte, setHoveredHeaderByte] = useState<number | null>(null);
+  const [hoveredPayloadByte, setHoveredPayloadByte] = useState<number | null>(null);
+
+  const headerFields = selectedPacket?.fields.filter((field) => field.region === 'header') ?? [];
+  const payloadFields = selectedPacket?.fields.filter((field) => field.region === 'payload') ?? [];
+  const highlightedHeaderPaths = new Set(headerFields.filter((field) => hoveredHeaderByte !== null && hoveredHeaderByte >= field.offset && hoveredHeaderByte < field.offset + field.len).map((field) => field.path));
+  const highlightedPayloadPaths = new Set(payloadFields.filter((field) => hoveredPayloadByte !== null && hoveredPayloadByte >= field.offset && hoveredPayloadByte < field.offset + field.len).map((field) => field.path));
 
   const displayedPackets = packets.filter((pkt) => {
     const matchesSearch =
@@ -177,7 +217,17 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
               return (
                 <div
                   key={pkt.id}
-                  onClick={() => setSelectedPacket(pkt)}
+                  onClick={() => {
+                    if (selectedPacket?.id !== pkt.id) {
+                      setSelectedHeaderFieldPath(null);
+                      setSelectedPayloadFieldPath(null);
+                      setHoveredHeaderFieldPath(null);
+                      setHoveredPayloadFieldPath(null);
+                      setHoveredHeaderByte(null);
+                      setHoveredPayloadByte(null);
+                    }
+                    setSelectedPacket(pkt);
+                  }}
                   className={`p-2 hover:bg-slate-900/90 transition cursor-pointer flex items-start space-x-2 text-[11px] ${
                     isSelected ? 'bg-slate-900 border-l-2 border-emerald-400 font-semibold' : ''
                   }`}
@@ -228,68 +278,28 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                 </div>
               </div>
 
-              {/* Layer Header Decomposition */}
-              <div className="space-y-2 text-[11px]">
-                {/* Layer 7 */}
-                {selectedPacket.headerBreakdown.layer7 && (
-                  <div className="p-2 rounded bg-slate-950 border border-emerald-800/60 space-y-1">
-                    <div className="font-bold text-emerald-400 text-[10px]">▶ Layer 7 (Application): {selectedPacket.headerBreakdown.layer7.app}</div>
-                    <div className="text-[10px] text-slate-300">
-                      Method: {selectedPacket.headerBreakdown.layer7.methodOrType} | Path: {selectedPacket.headerBreakdown.layer7.pathOrQuery}
-                    </div>
-                    {selectedPacket.headerBreakdown.layer7.statusOrCode && (
-                      <div className="text-[10px] text-slate-300">
-                        Status: {selectedPacket.headerBreakdown.layer7.statusOrCode}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Layer 6 */}
-                {selectedPacket.headerBreakdown.layer6 && (
-                  <div className="p-2 rounded bg-slate-950 border border-cyan-800/60 space-y-1">
-                    <div className="font-bold text-cyan-400 text-[10px]">▶ Layer 6 (Presentation): {selectedPacket.headerBreakdown.layer6.tlsVersion}</div>
-                    <div className="text-[10px] text-slate-300">
-                      Cipher: {selectedPacket.headerBreakdown.layer6.cipherSuite}
-                    </div>
-                  </div>
-                )}
-
-                {/* Layer 4 */}
-                {selectedPacket.headerBreakdown.layer4 && (
-                  <div className="p-2 rounded bg-slate-950 border border-amber-800/60 space-y-1">
-                    <div className="font-bold text-amber-400 text-[10px]">▶ Layer 4 (Transport): {selectedPacket.headerBreakdown.layer4.transport}</div>
-                    <div className="text-[10px] text-slate-300">
-                      Ports: {selectedPacket.headerBreakdown.layer4.srcPort} → {selectedPacket.headerBreakdown.layer4.dstPort} | Flags: {selectedPacket.headerBreakdown.layer4.flags}
-                    </div>
-                  </div>
-                )}
-
-                {/* Layer 3 */}
-                {selectedPacket.headerBreakdown.layer3 && (
-                  <div className="p-2 rounded bg-slate-950 border border-rose-800/60 space-y-1">
-                    <div className="font-bold text-rose-400 text-[10px]">▶ Layer 3 (Network): {selectedPacket.headerBreakdown.layer3.ipVersion}</div>
-                    <div className="text-[10px] text-slate-300">
-                      Src IP: {selectedPacket.headerBreakdown.layer3.srcIp} | Dst IP: {selectedPacket.headerBreakdown.layer3.dstIp} | TTL: {selectedPacket.headerBreakdown.layer3.ttl}
-                    </div>
-                  </div>
-                )}
-
-                {/* Layer 2 */}
-                {selectedPacket.headerBreakdown.layer2 && (
-                  <div className="p-2 rounded bg-slate-950 border border-purple-800/60 space-y-1">
-                    <div className="font-bold text-purple-400 text-[10px]">▶ Layer 2 (Data Link): Ethernet II</div>
-                    <div className="text-[10px] text-slate-300">
-                      MAC: {selectedPacket.headerBreakdown.layer2.srcMac} → {selectedPacket.headerBreakdown.layer2.dstMac}
-                    </div>
-                    {selectedPacket.headerBreakdown.layer2.vlanTag && (
-                      <div className="text-[10px] text-slate-300">
-                        802.1Q VLAN: {selectedPacket.headerBreakdown.layer2.vlanTag}
-                      </div>
-                    )}
-                  </div>
-                )}
+              <div className="space-y-1 text-[11px]">
+                <div className="text-[10px] font-bold text-slate-400">HEADER FIELDS</div>
+                <FieldTree fields={headerFields} theme={theme} selectedPath={selectedHeaderFieldPath}
+                  highlightedPaths={highlightedHeaderPaths} onSelectField={setSelectedHeaderFieldPath}
+                  onHoverField={setHoveredHeaderFieldPath} />
               </div>
+
+              <div className="space-y-1">
+                <div className="text-[10px] font-bold text-slate-400">HEADER BYTES</div>
+                <HexPane testId="header-hex-dump" hexDump={selectedPacket.headerHexDump} fields={headerFields}
+                  activePath={hoveredHeaderFieldPath ?? selectedHeaderFieldPath}
+                  hoveredByte={hoveredHeaderByte} onHoverByte={setHoveredHeaderByte} />
+              </div>
+
+              {payloadFields.length > 0 && (
+                <div className="space-y-1 text-[11px]">
+                  <div className="text-[10px] font-bold text-slate-400">APPLICATION FIELDS</div>
+                  <FieldTree fields={payloadFields} theme={theme} selectedPath={selectedPayloadFieldPath}
+                    highlightedPaths={highlightedPayloadPaths} onSelectField={setSelectedPayloadFieldPath}
+                    onHoverField={setHoveredPayloadFieldPath} />
+                </div>
+              )}
 
               {/* Raw Hex Dump Box */}
               <div className="space-y-1">
@@ -318,9 +328,9 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                     {hexCopyState === 'copied' ? 'COPIED' : hexCopyState === 'failed' ? 'COPY FAILED' : 'COPY HEX'}
                   </button>
                 </div>
-                <pre className="p-2 bg-black text-emerald-400 text-[10px] rounded border border-slate-800 leading-tight overflow-x-auto select-all">
-                  {selectedPacket.hexDump}
-                </pre>
+                <HexPane testId="payload-hex-dump" hexDump={selectedPacket.hexDump} fields={payloadFields}
+                  activePath={hoveredPayloadFieldPath ?? selectedPayloadFieldPath}
+                  hoveredByte={hoveredPayloadByte} onHoverByte={setHoveredPayloadByte} />
               </div>
             </>
           ) : (
