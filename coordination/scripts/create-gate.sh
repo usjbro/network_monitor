@@ -43,18 +43,9 @@ _create_locked() {
     return 1
   fi
 
-  if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then
-    if [[ "$MODE" == "autonomous" ]]; then
-      echo "SLACK_WEBHOOK_URL not set — an autonomous gate has no other approval path, refusing to create it." >&2
-      return 1
-    fi
-    echo "Warning: SLACK_WEBHOOK_URL not set — this gate can only be approved in this chat session, not remotely via Slack." >&2
-  elif ! "$SCRIPT_DIR/slack-notify.sh" "awaiting-approval" "$GATE_TAG" "gate" "$PLAN_SUMMARY"; then
-    if [[ "$MODE" == "autonomous" ]]; then
-      echo "Slack post failed — an autonomous gate has no other approval path, refusing to create it." >&2
-      return 1
-    fi
-    echo "Warning: Slack post failed — this gate can only be approved in this chat session, not remotely via Slack." >&2
+  if [[ -z "${SLACK_WEBHOOK_URL:-}" && "$MODE" == "autonomous" ]]; then
+    echo "SLACK_WEBHOOK_URL not set — an autonomous gate has no other approval path, refusing to create it." >&2
+    return 1
   fi
 
   cat > "$GATE_FILE" <<EOF
@@ -73,6 +64,17 @@ delegation_agent_type:
 
 ${PLAN_SUMMARY}
 EOF
+
+  if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then
+    echo "Warning: SLACK_WEBHOOK_URL not set — this gate can only be approved in this chat session, not remotely via Slack." >&2
+  elif ! "$SCRIPT_DIR/slack-notify.sh" "awaiting-approval" "$GATE_TAG" "gate" "$PLAN_SUMMARY"; then
+    if [[ "$MODE" == "autonomous" ]]; then
+      rm -f "$GATE_FILE"
+      echo "Slack post failed — an autonomous gate has no other approval path, refusing to create it." >&2
+      return 1
+    fi
+    echo "Warning: Slack post failed — this gate can only be approved in this chat session, not remotely via Slack." >&2
+  fi
 }
 
 with_gate_lock "$GATE_FILE" _create_locked

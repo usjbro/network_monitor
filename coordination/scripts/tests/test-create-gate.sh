@@ -54,6 +54,12 @@ else
 fi
 if [[ -f "$GATE_FILE" ]]; then
   echo "PASS: gate file exists after interactive no-webhook creation"
+  if git -C "$REPO_ROOT" check-ignore -q -- "$GATE_FILE"; then
+    echo "PASS: generated gate state is ignored by Git"
+  else
+    echo "FAIL: generated gate state is not ignored by Git"
+    FAILURES=$((FAILURES + 1))
+  fi
   STATUS="$(grep '^status:' "$GATE_FILE" | cut -d' ' -f2)"
   [[ "$STATUS" == "awaiting-approval" ]] && echo "PASS: status is awaiting-approval" || { echo "FAIL: status is '$STATUS', expected awaiting-approval"; FAILURES=$((FAILURES + 1)); }
   CLAIMED="$(grep '^delegation_claimed:' "$GATE_FILE" | cut -d' ' -f2)"
@@ -116,6 +122,35 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 rm -f "$RESULT_A" "$RESULT_B" "$RACE_GATE_FILE"
+
+# The gate must exist before the Slack webhook is called, so an immediate
+# approval can be matched to a persisted gate and its posted_at timestamp.
+POST_SLUG="test-create-gate-post-order-$$"
+POST_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$POST_SLUG")"
+FAKE_BIN="$(mktemp -d)"
+POST_OBSERVED="$(mktemp)"
+cat > "$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+if [[ -f "$TEST_GATE_FILE" ]] \
+  && grep -q '^status: awaiting-approval$' "$TEST_GATE_FILE" \
+  && grep -q '^posted_at: [0-9]' "$TEST_GATE_FILE"; then
+  echo observed > "$TEST_POST_OBSERVED"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$FAKE_BIN/curl"
+if TEST_GATE_FILE="$POST_GATE_FILE" TEST_POST_OBSERVED="$POST_OBSERVED" \
+    SLACK_WEBHOOK_URL="https://example.invalid/webhook" PATH="$FAKE_BIN:$PATH" \
+    "$CREATE_GATE" "$TEST_LINEAR_ID" "$POST_SLUG" "post order plan" autonomous >/dev/null 2>&1 \
+    && [[ "$(cat "$POST_OBSERVED")" == "observed" ]]; then
+  echo "PASS: gate is persisted before the Slack request"
+else
+  echo "FAIL: gate was not persisted before the Slack request"
+  FAILURES=$((FAILURES + 1))
+fi
+rm -f "$POST_GATE_FILE" "$POST_OBSERVED" "$FAKE_BIN/curl"
+rmdir "$FAKE_BIN"
 
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."
