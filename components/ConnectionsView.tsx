@@ -14,6 +14,14 @@ import { formatSpeed, formatBytes } from '@/lib/osi-engine';
 import { connectionsToCsv, downloadBlob } from '@/lib/export';
 import type { CompiledDisplayFilter } from '@/lib/display-filter';
 
+function downloadConnectionsCsv(connections: NetworkConnection[], totalObserved: number): void {
+  downloadBlob(
+    connectionsToCsv(connections, totalObserved),
+    `connections-${Date.now()}.csv`,
+    'text/csv',
+  );
+}
+
 interface ConnectionsViewProps {
   connections: NetworkConnection[];
   theme: ThemeConfig;
@@ -123,13 +131,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
             prop, per the spec's "the current filtered table" requirement.
             Purely client-side: no request, nothing written server-side. */}
         <button
-          onClick={() =>
-            downloadBlob(
-              connectionsToCsv(filtered, totalObserved ?? filtered.length),
-              `connections-${Date.now()}.csv`,
-              'text/csv'
-            )
-          }
+          onClick={() => downloadConnectionsCsv(filtered, totalObserved ?? filtered.length)}
           disabled={filtered.length === 0}
           title="Download the rows currently shown as CSV"
           className="flex items-center space-x-1 px-2 py-1 rounded text-[10px] font-bold border bg-slate-800 border-slate-700 text-slate-300 hover:text-emerald-300 disabled:opacity-40 disabled:hover:text-slate-300 transition"

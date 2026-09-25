@@ -22,6 +22,17 @@ const match = connection('conn-match', 'MatchProcess');
 const displayFilter: CompiledDisplayFilter = (record) => record.kind === 'connection' && record.connection.id === 'conn-match';
 
 describe('ConnectionsView shared display filter', () => {
+  it('creates the CSV filename timestamp when export is clicked', () => {
+    const download = vi.spyOn(exportModule, 'downloadBlob').mockImplementation(() => {});
+    const now = vi.spyOn(Date, 'now').mockReturnValue(123456789);
+    render(<ConnectionsView connections={[match]} theme={THEMES.matrix} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /export csv/i }));
+
+    expect(download).toHaveBeenCalledWith(expect.any(String), 'connections-123456789.csv', 'text/csv');
+    now.mockRestore();
+  });
+
   it('scopes rows and CSV export while reporting matches against the full retained buffer', () => {
     const download = vi.spyOn(exportModule, 'downloadBlob').mockImplementation(() => {});
     const connections = [hidden, match];
