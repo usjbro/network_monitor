@@ -74,6 +74,19 @@ grep -q "^delegation_target: in-session$" "$GATE_FILE" \
   && echo "PASS: delegation_target recorded" \
   || { echo "FAIL: delegation_target not recorded"; FAILURES=$((FAILURES + 1)); }
 
+# mark-gate-delegated.sh must reject an agent-type containing sed-special
+# characters ("&" or "/") rather than splicing them into the frontmatter.
+BEFORE_CONTENT="$(cat "$GATE_FILE")"
+"$BIN/mark-gate-delegated.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" in-session "bad&value" >/dev/null 2>&1
+BAD_AGENT_TYPE_CODE=$?
+AFTER_CONTENT="$(cat "$GATE_FILE")"
+if [[ "$BAD_AGENT_TYPE_CODE" -ne 0 && "$BEFORE_CONTENT" == "$AFTER_CONTENT" ]]; then
+  echo "PASS: mark-gate-delegated.sh rejects an unsafe agent-type without corrupting the gate file"
+else
+  echo "FAIL: mark-gate-delegated.sh rejects an unsafe agent-type — exit code '$BAD_AGENT_TYPE_CODE', file changed: $([[ "$BEFORE_CONTENT" == "$AFTER_CONTENT" ]] && echo no || echo yes)"
+  FAILURES=$((FAILURES + 1))
+fi
+
 # block-gate.sh on a fresh gate.
 cat > "$GATE_FILE" <<EOF
 ---

@@ -30,6 +30,10 @@ if [[ ! -f "$GATE_FILE" ]]; then
   exit 1
 fi
 
+if [[ -n "$AGENT_TYPE" ]]; then
+  validate_slug "$AGENT_TYPE" "agent-type"
+fi
+
 _mark_locked() {
   sed -i.bak \
     -e "s/^delegated: .*/delegated: true/" \
