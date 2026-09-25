@@ -35,12 +35,9 @@ if [[ -n "$AGENT_TYPE" ]]; then
 fi
 
 _mark_locked() {
-  sed -i.bak \
-    -e "s/^delegated: .*/delegated: true/" \
-    -e "s/^delegation_target:.*/delegation_target: ${TARGET}/" \
-    -e "s/^delegation_agent_type:.*/delegation_agent_type: ${AGENT_TYPE}/" \
-    "$GATE_FILE"
-  rm -f "${GATE_FILE}.bak"
+  gate_set_field "$GATE_FILE" delegated true
+  gate_set_field "$GATE_FILE" delegation_target "$TARGET"
+  gate_set_field "$GATE_FILE" delegation_agent_type "$AGENT_TYPE"
 }
 
 with_gate_lock "$GATE_FILE" _mark_locked

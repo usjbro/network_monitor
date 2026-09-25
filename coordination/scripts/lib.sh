@@ -52,6 +52,42 @@ gate_path() {
   echo "$REPO_ROOT/coordination/gates/${linear_id_lower}-${slug}.md"
 }
 
+# Reads a single field's value from a gate file's YAML frontmatter block
+# only — the region between the first two "---" lines — never from the
+# free-text Plan/Blocked body below it. A naive `grep '^field:' | cut`
+# over the whole file gets confused if the body happens to contain a line
+# starting with a reserved key (e.g. a plan summary or block reason
+# describing this very gate mechanism, which can legitimately include a
+# line like "status: awaiting-approval" as illustrative text).
+gate_field() {
+  local gate_file="$1" field="$2"
+  awk -v field="$field" '
+    /^---$/ { delim++; next }
+    delim == 1 && index($0, field ":") == 1 {
+      sub("^" field ":[ ]*", "")
+      print
+      exit
+    }
+  ' "$gate_file"
+}
+
+# Rewrites a single frontmatter field's value in place, scoped to the same
+# block gate_field reads from, so a look-alike line in the body can never
+# be mistaken for (or corrupted as) a structured field. VALUE must not
+# contain a newline.
+gate_set_field() {
+  local gate_file="$1" field="$2" value="$3"
+  local tmp
+  tmp="$(mktemp "${gate_file}.XXXXXX")"
+  awk -v field="$field" -v value="$value" '
+    BEGIN { delim = 0 }
+    /^---$/ { delim++; print; next }
+    delim == 1 && index($0, field ":") == 1 { print field ": " value; next }
+    { print }
+  ' "$gate_file" > "$tmp"
+  mv "$tmp" "$gate_file"
+}
+
 # Runs "$@" while holding an exclusive, atomic lock on gate_file, so the two
 # gate observers (a chat session's next turn, and the scheduled watcher)
 # can't both act on the same gate transition. Uses mkdir as the lock

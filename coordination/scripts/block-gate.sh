@@ -4,6 +4,12 @@
 # already has Slack access and replies in-thread directly; this only
 # mutates state.
 #
+# Exits 0 having blocked the gate only if it was still "awaiting-approval";
+# exits 2 and prints the current status (without changing anything) if it
+# was already approved or blocked first — mirrors approve-gate.sh's guard
+# against a stale/duplicate reply stomping a transition that already
+# happened.
+#
 # Usage:
 #   ./block-gate.sh <linear-id> <slug> "<reason>"
 
@@ -25,8 +31,13 @@ if [[ ! -f "$GATE_FILE" ]]; then
 fi
 
 _block_locked() {
-  sed -i.bak "s/^status: .*/status: blocked/" "$GATE_FILE"
-  rm -f "${GATE_FILE}.bak"
+  local current
+  current="$(gate_field "$GATE_FILE" status)"
+  if [[ "$current" != "awaiting-approval" ]]; then
+    echo "$current"
+    return 2
+  fi
+  gate_set_field "$GATE_FILE" status blocked
   {
     echo
     echo "## Blocked"

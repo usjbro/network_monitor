@@ -27,13 +27,12 @@ fi
 
 _approve_locked() {
   local current
-  current="$(grep '^status:' "$GATE_FILE" | cut -d' ' -f2)"
+  current="$(gate_field "$GATE_FILE" status)"
   if [[ "$current" != "awaiting-approval" ]]; then
     echo "$current"
     return 2
   fi
-  sed -i.bak "s/^status: .*/status: approved/" "$GATE_FILE"
-  rm -f "${GATE_FILE}.bak"
+  gate_set_field "$GATE_FILE" status approved
   echo "approved"
 }
 

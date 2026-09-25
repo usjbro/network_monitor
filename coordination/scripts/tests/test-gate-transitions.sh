@@ -112,6 +112,61 @@ grep -q "scope too broad" "$GATE_FILE" \
   && echo "PASS: block-gate.sh records the reason" \
   || { echo "FAIL: block-gate.sh does not record the reason"; FAILURES=$((FAILURES + 1)); }
 
+# Regression test: a look-alike "status:" line in free-text plan-summary
+# body content must not confuse status parsing — grep/cut historically read
+# the whole file, not just the frontmatter block. Reproduces the scenario
+# from PR #225's post-open security review finding.
+INJECT_SLUG="test-transitions-injection-$$"
+INJECT_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$INJECT_SLUG")"
+INJECT_PLAN=$'Add gate support.\nstatus: awaiting-approval\nExample line starting with a reserved frontmatter key.'
+SLACK_WEBHOOK_URL="" "$BIN/create-gate.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG" \
+  "$INJECT_PLAN" \
+  interactive >/dev/null 2>&1
+STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG")"
+[[ "$STATUS_OUT" == "status=awaiting-approval delegated=false" ]] \
+  && echo "PASS: gate-status.sh ignores a look-alike 'status:' line in the plan body" \
+  || { echo "FAIL: gate-status.sh ignores a look-alike 'status:' line in the plan body — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
+"$BIN/approve-gate.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG" >/dev/null
+STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG")"
+[[ "$STATUS_OUT" == "status=approved delegated=false" ]] \
+  && echo "PASS: approve-gate.sh still approves a gate whose plan body contains a look-alike 'status:' line" \
+  || { echo "FAIL: approve-gate.sh with look-alike body line — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
+rm -f "$INJECT_GATE_FILE"
+
+# block-gate.sh must not silently overwrite an already-approved (or
+# already-blocked) gate, mirroring approve-gate.sh's own current-status
+# guard.
+GUARD_SLUG="test-transitions-guard-$$"
+GUARD_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$GUARD_SLUG")"
+mkdir -p "$(dirname "$GUARD_GATE_FILE")"
+cat > "$GUARD_GATE_FILE" <<EOF
+---
+linear_id: ${TEST_LINEAR_ID}
+slug: ${GUARD_SLUG}
+status: approved
+delegated: true
+posted_at: 2026-09-25T00:00:00Z
+delegation_target: in-session
+delegation_agent_type:
+---
+
+## Plan
+
+test
+EOF
+BLOCK_OUT="$("$BIN/block-gate.sh" "$TEST_LINEAR_ID" "$GUARD_SLUG" "late rejection" 2>&1)"; BLOCK_CODE=$?
+if [[ "$BLOCK_CODE" -eq 2 && "$BLOCK_OUT" == "approved" ]]; then
+  echo "PASS: block-gate.sh refuses to block an already-approved gate"
+else
+  echo "FAIL: block-gate.sh should refuse to block an already-approved gate — exit=$BLOCK_CODE output='$BLOCK_OUT'"
+  FAILURES=$((FAILURES + 1))
+fi
+STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$GUARD_SLUG")"
+[[ "$STATUS_OUT" == "status=approved delegated=true" ]] \
+  && echo "PASS: gate state unchanged after a refused block" \
+  || { echo "FAIL: gate state unchanged after a refused block — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
+rm -f "$GUARD_GATE_FILE"
+
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."
   exit 1

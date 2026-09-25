@@ -20,11 +20,11 @@ fi
 
 for gate_file in "$GATES_DIR"/*.md; do
   [[ -e "$gate_file" ]] || continue
-  status="$(grep '^status:' "$gate_file" | cut -d' ' -f2)"
+  status="$(gate_field "$gate_file" status)"
   if [[ "$status" == "awaiting-approval" ]]; then
-    linear_id="$(grep '^linear_id:' "$gate_file" | cut -d' ' -f2)"
-    slug="$(grep '^slug:' "$gate_file" | cut -d' ' -f2)"
-    posted_at="$(grep '^posted_at:' "$gate_file" | cut -d' ' -f2)"
+    linear_id="$(gate_field "$gate_file" linear_id)"
+    slug="$(gate_field "$gate_file" slug)"
+    posted_at="$(gate_field "$gate_file" posted_at)"
     echo "${linear_id} ${slug} ${posted_at}"
   fi
 done

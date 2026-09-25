@@ -23,6 +23,6 @@ if [[ ! -f "$GATE_FILE" ]]; then
   exit 1
 fi
 
-STATUS="$(grep '^status:' "$GATE_FILE" | cut -d' ' -f2)"
-DELEGATED="$(grep '^delegated:' "$GATE_FILE" | cut -d' ' -f2)"
+STATUS="$(gate_field "$GATE_FILE" status)"
+DELEGATED="$(gate_field "$GATE_FILE" delegated)"
 echo "status=${STATUS} delegated=${DELEGATED}"
