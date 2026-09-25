@@ -19,7 +19,9 @@ Merge `~/Downloads/agent-coordination-kit.zip` (multi-agent task contracts, a Cl
 - [x] `REPO_ROOT` resolution fixed to always land on the main repo root (via `git rev-parse --git-common-dir`) even when invoked from inside a linked worktree, per explicit user direction; `coordination/` moved from the worktree to the main repo root to match. Dry-run confirmed the resolved path from inside this worktree.
 - [x] Confirmed and fixed a real breakage this uncovered: bare relative `coordination/...` references in `AGENTS.md`'s prose fail from any worktree cwd (`ls coordination` → not found there) since the directory is uncommitted and only exists at the main root. Reworded that section to say so and to prefer the self-resolving scripts.
 - [x] Scripts verified end-to-end, invoked from inside this worktree (the real usage scenario): `new-task.sh` (no linear-id, with linear-id), `complete-task.sh` (both paths), the duplicate-task guard, and the invalid-owner guard. Found and fixed a real bug along the way (see below); all test artifacts (2 branches, 2 worktrees, 2 task files) removed afterward.
-- [ ] User review of the merged content.
+- [x] `SLACK_WEBHOOK_URL` made durable via `coordination/.env` (gitignored) instead of requiring `export` every shell; mechanically verified with a fake URL, then wired to the user's real Incoming Webhook and confirmed the message actually landed in `#network-monitor` via `slack_read_channel` — not just a clean `curl` exit code.
+- [x] Work committed and pushed — `main` is branch-protected (direct push rejected by GitHub), so this went through two PRs instead: usjbro/network_monitor#220 (`coordination/`) and #221 (`AGENTS.md`/`CLAUDE.md`/`.ai/`). Both have CI running.
+- [ ] User review/merge of #220 and #221.
 
 ## Relevant Areas
 
@@ -36,8 +38,7 @@ Merge `~/Downloads/agent-coordination-kit.zip` (multi-agent task contracts, a Cl
 ## Out of Scope
 
 - Rewriting `router-checklist.md` or `tasks/example-lateral-movement-rule.md` content (kept verbatim per explicit instruction).
-- Wiring an actual `SLACK_WEBHOOK_URL`.
 
 ## Status
 
-Ready for review — merge complete, scripts syntax-checked but not executed end-to-end.
+Ready for review — merge complete, scripts exercised end-to-end (including a real Slack webhook), pushed as PR #220 and #221. Awaiting user review/merge.
