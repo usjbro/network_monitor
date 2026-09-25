@@ -55,12 +55,37 @@ Type a command and press enter. Available commands:
 | `enrich on` / `enrich off` / `enrich clear` | Turn on-demand ownership (WHOIS/RDAP) lookups on/off for the current relay session (never persisted — off again after every relay restart), or wipe the local enrichment cache and query log |
 | `enrich background on` / `enrich background off` | Turn whole-table background ownership lookups on/off, instead of only on-demand per-connection |
 | `geoip enable` / `geoip disable` / `geoip clear` | Turn per-hop geoIP location lookups on/off for Trace Route (separate opt-in from `enrich`, also session-only), or wipe the on-disk geoIP cache |
+| `display <expression>` / `display clear` | Show only buffered packets and connections matching a display-filter expression, or clear it. This runs in the browser and does not change capture. See [Display filters](#display-filters). |
 | `filter <bpf expression>` / `filter clear` | Set (or clear) a BPF capture filter at the agent, e.g. `filter tcp port 443` — narrows what's captured at the source, applied live with no interruption. An invalid expression is rejected with libpcap's own error shown in a dismissible banner; the previous filter keeps running. Active filter always shown in the header. |
 | `snaplen <bytes>` / `snaplen full` | Set (or restore, via `full`) the capture snap length in bytes, e.g. `snaplen 96` — truncates each captured frame past this many bytes, keeping headers while discarding payload. Applying this briefly reopens the capture (logged, expected). Active snap length always shown in the header. |
 | `iface list` / `iface <name>` | List capturable interfaces (also available from the header's interface picker, which lazily loads the same list), or switch capture to one at runtime — no agent restart needed. Switching resets the active filter/snap length to their defaults and clears tracked connections (every existing flow belonged to the interface that just stopped being captured). An interface with no assigned address, or one this agent can't parse the link type of, is rejected rather than silently accepted. |
 | `capture <path> [ring <mode> <n>] [autostop <mode> <n>]` / `capture stop` | Start (or stop) writing captured traffic to a pcapng file on disk at the agent, e.g. `capture ~/captures/incident.pcapng ring size 104857600 autostop duration 3600`. The path keeps its case exactly as typed. `ring` rotates to a new file after `<n>` bytes (`size`), seconds (`duration`), or packets (`count`); `autostop` ends the whole run after `<n>` seconds (`duration`) or bytes written (`totalSize`) — both optional and independent, and a bare `capture <path>` just writes one file until stopped. The agent refuses an unsafe path (anything under `.data/`, or inside its own working directory), a run started while one is already active, or a start with free space already below its 500MB floor. Active capture file always shown in the header. |
 | `buffer packets <n>` / `buffer connections <n>` / `buffer decrypted <n>` | Adjust how many recent items *this browser tab* keeps for each view (defaults: 100 / 200 / 100). Purely client-side — nothing is sent to the agent, and the agent's own flow-table ceiling is the separate `MAX_FLOWS` environment variable below. Lowering a limit discards the excess immediately rather than waiting for the next event. Each view shows a "showing N of M observed" line so a capped list never silently stands in for far more traffic than it lists. |
 | `install` / `macos` / `brew` / `curl` / `sw_vers` | Open the Install modal (see below) |
+
+## Display filters
+
+Enter `display <expression>` to filter the Packet Stream and Connections views using decoded fields. For example:
+
+```text
+display tcp.dst_port == 443
+display tls.handshake.sni contains "example.com"
+display tcp.dst_port in {80, 443, 8080}
+display (tcp.dst_port == 80 or tcp.dst_port == 443) and not tcp.flags.syn == true
+display frame.len >= 100
+display tcp.flags.syn == true
+display tls.handshake.sni
+display connection.remote_addr contains "2001:db8"
+display clear
+```
+
+A bare field path, such as `tls.handshake.sni`, tests whether the field exists. Packet fields use the dotted paths in [the wire protocol reference](wire-protocol.md#packet). `frame.len` is the packet length. Connection rows support `connection.protocol`, `connection.transport`, `connection.local_addr`, `connection.local_port`, `connection.remote_addr`, `connection.remote_port`, and `connection.process`. Packet fields have no value on connection rows, and `connection.*` fields have no value on packets; the same expression is evaluated separately against each view.
+
+Phase 1 supports `==`, `!=`, `>`, `<`, `>=`, `<=`, `in {value, ...}`, `contains "text"`, `not`, `and`, `or`, and parentheses. Values can be base-10 integers, `true` or `false`, or double-quoted strings. Parentheses bind first, followed by `not`, comparisons and existence, `and`, then `or`. Field paths and keywords are case-insensitive. String and address equality, membership, and substring matching are case-insensitive; numeric and boolean values require their own types. Ordered comparisons work on numbers, and `contains` works on strings and addresses.
+
+An absent field does not match a comparison, including `!=`; an unknown field path is treated as absent. A syntax error identifies the offending token and character position, and leaves the last valid display filter active. Each view shows its display-filter match count. Non-matching records remain in the browser's buffers, so `display clear` restores them; each view's quick search and layer or protocol controls can further narrow its visible rows.
+
+`display` only changes what this browser tab shows. Use `filter <bpf expression>` and `filter clear` to control what the capture agent receives at the source. A BPF expression such as `tcp port 443` is not display-filter syntax.
 
 ## Themes
 
