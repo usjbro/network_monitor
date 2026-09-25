@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "'/Users/jamesbrown/Documents/GitHub/network_monitor/.codex/hooks/pr-review-reminder.sh'"
+            "command": "\"$(git rev-parse --show-toplevel)/.codex/hooks/pr-review-reminder.sh\""
           }
         ]
       }
