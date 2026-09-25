@@ -27,20 +27,9 @@ if [[ "$MODE" != "interactive" && "$MODE" != "autonomous" ]]; then
   exit 1
 fi
 
-# Preserve SLACK_WEBHOOK_URL from the environment before lib.sh loads .env;
-# this allows tests to override it with an empty value or a test URL.
-WEBHOOK_OVERRIDE="${SLACK_WEBHOOK_URL:-}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
-
-# Restore the environment's SLACK_WEBHOOK_URL if it was explicitly set
-if [[ -n "$WEBHOOK_OVERRIDE" ]]; then
-  SLACK_WEBHOOK_URL="$WEBHOOK_OVERRIDE"
-else
-  unset SLACK_WEBHOOK_URL
-fi
 
 GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
 LINEAR_ID_LOWER="$(echo "$LINEAR_ID" | tr '[:upper:]' '[:lower:]')"

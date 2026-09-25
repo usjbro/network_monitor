@@ -9,7 +9,20 @@ FAILURES=0
 TEST_LINEAR_ID="ZZZ-999"
 TEST_SLUG="test-create-gate-$$"
 
+# Temporarily hide the main repo's coordination/.env so this worktree's
+# "no .env" scenario is testable (the worktree itself has no .env, and we
+# want lib.sh's sourcing to be a no-op).
+MAIN_REPO_ENV="/Users/jamesbrown/Documents/GitHub/network_monitor/coordination/.env"
+MAIN_REPO_ENV_BACKUP="${MAIN_REPO_ENV}.backup-test-$$"
+if [[ -f "$MAIN_REPO_ENV" ]]; then
+  mv "$MAIN_REPO_ENV" "$MAIN_REPO_ENV_BACKUP"
+fi
+
 cleanup() {
+  # Restore the main repo's .env file
+  if [[ -f "$MAIN_REPO_ENV_BACKUP" ]]; then
+    mv "$MAIN_REPO_ENV_BACKUP" "$MAIN_REPO_ENV"
+  fi
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/../lib.sh"
   rm -f "$(gate_path "$TEST_LINEAR_ID" "$TEST_SLUG" 2>/dev/null)" 2>/dev/null || true
@@ -61,7 +74,25 @@ fi
 grep -qi "warning" /tmp/create-gate-warn-$$ && echo "PASS: a warning was printed" || { echo "FAIL: expected a warning on stderr"; FAILURES=$((FAILURES + 1)); }
 rm -f /tmp/create-gate-warn-$$ "$GATE_FILE"
 
-# Case 4: creating a gate that already exists must fail.
+# Case 4: interactive mode, webhook set but unreachable -> still creates the gate, warns.
+if SLACK_WEBHOOK_URL="http://127.0.0.1:1/unreachable" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" interactive >/dev/null 2>/tmp/create-gate-warn-$$; then
+  echo "PASS: interactive mode with unreachable webhook still creates the gate"
+else
+  echo "FAIL: interactive mode with unreachable webhook should still create the gate"
+  FAILURES=$((FAILURES + 1))
+fi
+if [[ -f "$GATE_FILE" ]]; then
+  echo "PASS: gate file exists after interactive unreachable-webhook creation"
+  STATUS="$(grep '^status:' "$GATE_FILE" | cut -d' ' -f2)"
+  [[ "$STATUS" == "awaiting-approval" ]] && echo "PASS: status is awaiting-approval" || { echo "FAIL: status is '$STATUS', expected awaiting-approval"; FAILURES=$((FAILURES + 1)); }
+else
+  echo "FAIL: gate file missing after interactive unreachable-webhook creation"
+  FAILURES=$((FAILURES + 1))
+fi
+grep -qi "warning" /tmp/create-gate-warn-$$ && echo "PASS: a warning was printed for failed Slack post" || { echo "FAIL: expected a warning on stderr"; FAILURES=$((FAILURES + 1)); }
+rm -f /tmp/create-gate-warn-$$ "$GATE_FILE"
+
+# Case 5: creating a gate that already exists must fail.
 mkdir -p "$(dirname "$GATE_FILE")"
 echo "status: awaiting-approval" > "$GATE_FILE"
 if SLACK_WEBHOOK_URL="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" interactive >/dev/null 2>&1; then

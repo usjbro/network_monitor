@@ -16,20 +16,9 @@ TASK_SLUG="${2:?task-slug}"
 OWNER="${3:?owner}"
 MESSAGE="${4:-}"
 
-# Preserve SLACK_WEBHOOK_URL from the environment before lib.sh loads .env;
-# this allows tests and callers to override it.
-WEBHOOK_OVERRIDE="${SLACK_WEBHOOK_URL:-}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
-
-# Restore the environment's SLACK_WEBHOOK_URL if it was explicitly set
-if [[ -n "$WEBHOOK_OVERRIDE" ]]; then
-  SLACK_WEBHOOK_URL="$WEBHOOK_OVERRIDE"
-else
-  unset SLACK_WEBHOOK_URL
-fi
 
 if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then
   echo "SLACK_WEBHOOK_URL not set — skipping Slack post." >&2
