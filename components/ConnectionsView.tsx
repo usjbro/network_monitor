@@ -12,6 +12,7 @@ import {
 import { NetworkConnection, ThemeConfig, TracerouteHop } from '@/lib/types';
 import { formatSpeed, formatBytes } from '@/lib/osi-engine';
 import { connectionsToCsv, downloadBlob } from '@/lib/export';
+import type { CompiledDisplayFilter } from '@/lib/display-filter';
 
 interface ConnectionsViewProps {
   connections: NetworkConnection[];
@@ -41,6 +42,8 @@ interface ConnectionsViewProps {
   capacityEvictions?: number;
   // The current client-side retention cap (`buffer connections <n>`).
   bufferLimit?: number;
+  displayFilter?: CompiledDisplayFilter;
+  displayFilterExpression?: string;
 }
 
 export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
@@ -57,12 +60,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   totalObserved,
   capacityEvictions,
   bufferLimit,
+  displayFilter,
+  displayFilterExpression,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [protocolFilter, setProtocolFilter] = useState<string>('ALL');
   const [selectedConnId, setSelectedConnId] = useState<string | null>(connections[0]?.id || null);
 
-  const filtered = connections.filter((conn) => {
+  const sharedMatches = displayFilter ? connections.filter((connection) => displayFilter({ kind: 'connection', connection })) : connections;
+  const filtered = sharedMatches.filter((conn) => {
     const matchesSearch =
       conn.protocol.toLowerCase().includes(searchTerm.toLowerCase()) ||
       conn.processName.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -77,7 +83,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     return matchesSearch && conn.appLayerProtocol.toUpperCase().includes(protocolFilter);
   });
 
-  const selectedConn = connections.find((c) => c.id === selectedConnId) || connections[0];
+  const selectedConn = filtered.find((c) => c.id === selectedConnId) ?? filtered[0];
 
   return (
     <div className="space-y-3 font-mono text-xs p-3">
@@ -133,6 +139,12 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         </button>
       </div>
 
+      {displayFilter && (
+        <div className="text-[11px] text-slate-400" role="status">
+          Display filter{displayFilterExpression ? ` (${displayFilterExpression})` : ''}: {sharedMatches.length} of {connections.length} buffered connections match; hidden connections remain buffered.
+        </div>
+      )}
+
       {/* Honest horizon (JAM-6/GitHub #73) — see the props' own comment
           for why capacity eviction is called out separately from the
           plain "showing N of M" line. */}
@@ -173,7 +185,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           </thead>
           <tbody className="divide-y divide-slate-800/60">
             {filtered.map((conn) => {
-              const isSelected = conn.id === selectedConnId;
+              const isSelected = conn.id === selectedConn?.id;
 
               return (
                 <tr

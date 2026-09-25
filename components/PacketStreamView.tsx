@@ -15,6 +15,7 @@ import { FieldTree } from '@/components/FieldTree';
 // never passed to it — see lib/export.ts's header and
 // lib/__tests__/decrypted-export-exclusion.test.ts.
 import { downloadBlob, packetsToJson } from '@/lib/export';
+import type { CompiledDisplayFilter } from '@/lib/display-filter';
 
 interface PacketStreamViewProps {
   packets: PacketFrame[];
@@ -32,6 +33,8 @@ interface PacketStreamViewProps {
   // The current client-side retention cap (`buffer packets <n>`), shown so
   // the horizon text explains WHY only N are listed.
   bufferLimit?: number;
+  displayFilter?: CompiledDisplayFilter;
+  displayFilterExpression?: string;
 }
 
 function HexPane({ hexDump, fields, activePath, hoveredByte, onHoverByte, testId }: {
@@ -69,6 +72,8 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   decryptedSegments = [],
   totalObserved,
   bufferLimit,
+  displayFilter,
+  displayFilterExpression,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isFrozen, setIsFrozen] = useState(false);
@@ -86,12 +91,8 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   const [hoveredHeaderByte, setHoveredHeaderByte] = useState<number | null>(null);
   const [hoveredPayloadByte, setHoveredPayloadByte] = useState<number | null>(null);
 
-  const headerFields = selectedPacket?.fields.filter((field) => field.region === 'header') ?? [];
-  const payloadFields = selectedPacket?.fields.filter((field) => field.region === 'payload') ?? [];
-  const highlightedHeaderPaths = new Set(headerFields.filter((field) => hoveredHeaderByte !== null && hoveredHeaderByte >= field.offset && hoveredHeaderByte < field.offset + field.len).map((field) => field.path));
-  const highlightedPayloadPaths = new Set(payloadFields.filter((field) => hoveredPayloadByte !== null && hoveredPayloadByte >= field.offset && hoveredPayloadByte < field.offset + field.len).map((field) => field.path));
-
-  const displayedPackets = packets.filter((pkt) => {
+  const sharedMatches = displayFilter ? packets.filter((packet) => displayFilter({ kind: 'packet', packet })) : packets;
+  const displayedPackets = sharedMatches.filter((pkt) => {
     const matchesSearch =
       pkt.protocol.toLowerCase().includes(searchTerm.toLowerCase()) ||
       pkt.src.includes(searchTerm) ||
@@ -101,6 +102,11 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
     if (layerFilter === 0) return matchesSearch;
     return matchesSearch && pkt.layer === layerFilter;
   });
+  const visibleSelectedPacket = displayedPackets.find((packet) => packet.id === selectedPacket?.id) ?? displayedPackets[0] ?? null;
+  const headerFields = visibleSelectedPacket?.fields.filter((field) => field.region === 'header') ?? [];
+  const payloadFields = visibleSelectedPacket?.fields.filter((field) => field.region === 'payload') ?? [];
+  const highlightedHeaderPaths = new Set(headerFields.filter((field) => hoveredHeaderByte !== null && hoveredHeaderByte >= field.offset && hoveredHeaderByte < field.offset + field.len).map((field) => field.path));
+  const highlightedPayloadPaths = new Set(payloadFields.filter((field) => hoveredPayloadByte !== null && hoveredPayloadByte >= field.offset && hoveredPayloadByte < field.offset + field.len).map((field) => field.path));
 
   return (
     <div className="space-y-3 font-mono text-xs p-3">
@@ -180,6 +186,12 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
         </div>
       </div>
 
+      {displayFilter && (
+        <div className="text-[11px] text-slate-400" role="status">
+          Display filter{displayFilterExpression ? ` (${displayFilterExpression})` : ''}: {sharedMatches.length} of {packets.length} buffered packets match; hidden packets remain buffered.
+        </div>
+      )}
+
       {/* Main Packet Split View */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         {/* Left Column: Live Packet Log Stream (2 cols) */}
@@ -212,7 +224,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
 
           <div className="flex-1 overflow-y-auto divide-y divide-slate-800/80">
             {displayedPackets.map((pkt) => {
-              const isSelected = selectedPacket?.id === pkt.id;
+              const isSelected = visibleSelectedPacket?.id === pkt.id;
 
               return (
                 <div
@@ -266,15 +278,15 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
 
         {/* Right Column: Selected Packet Frame Inspector */}
         <div className={`rounded border ${theme.border} ${theme.cardBg} p-3 space-y-3 overflow-y-auto h-[480px]`}>
-          {selectedPacket ? (
+          {visibleSelectedPacket ? (
             <>
               <div className="border-b border-slate-800 pb-2">
                 <div className="text-xs font-bold text-slate-100 flex items-center justify-between">
                   <span>PACKET HEADER INSPECTOR</span>
-                  <span className="text-[10px] text-emerald-400 font-mono">ID: {selectedPacket.id}</span>
+                  <span className="text-[10px] text-emerald-400 font-mono">ID: {visibleSelectedPacket.id}</span>
                 </div>
                 <div className="text-[10px] text-slate-400 mt-0.5">
-                  Protocol: {selectedPacket.protocol} | Length: {selectedPacket.length} Bytes
+                  Protocol: {visibleSelectedPacket.protocol} | Length: {visibleSelectedPacket.length} Bytes
                 </div>
               </div>
 
@@ -287,7 +299,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
 
               <div className="space-y-1">
                 <div className="text-[10px] font-bold text-slate-400">HEADER BYTES</div>
-                <HexPane testId="header-hex-dump" hexDump={selectedPacket.headerHexDump} fields={headerFields}
+                <HexPane testId="header-hex-dump" hexDump={visibleSelectedPacket.headerHexDump} fields={headerFields}
                   activePath={hoveredHeaderFieldPath ?? selectedHeaderFieldPath}
                   hoveredByte={hoveredHeaderByte} onHoverByte={setHoveredHeaderByte} />
               </div>
@@ -315,7 +327,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                   <button
                     onClick={async () => {
                       try {
-                        await navigator.clipboard.writeText(selectedPacket.hexDump);
+                        await navigator.clipboard.writeText(visibleSelectedPacket.hexDump);
                         setHexCopyState('copied');
                       } catch {
                         setHexCopyState('failed');
@@ -328,7 +340,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                     {hexCopyState === 'copied' ? 'COPIED' : hexCopyState === 'failed' ? 'COPY FAILED' : 'COPY HEX'}
                   </button>
                 </div>
-                <HexPane testId="payload-hex-dump" hexDump={selectedPacket.hexDump} fields={payloadFields}
+                <HexPane testId="payload-hex-dump" hexDump={visibleSelectedPacket.hexDump} fields={payloadFields}
                   activePath={hoveredPayloadFieldPath ?? selectedPayloadFieldPath}
                   hoveredByte={hoveredPayloadByte} onHoverByte={setHoveredPayloadByte} />
               </div>
