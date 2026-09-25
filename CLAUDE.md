@@ -1,60 +1,109 @@
-# CLAUDE.md
+# Network Monitor — Claude Code Instructions
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Mission
+
+Build and maintain Network Monitor according to repository code, approved requirements, architecture, and tracked work. Treat source and tests as evidence; inspect before editing and keep changes scoped.
+
+## Start Here
+
+1. Read `.ai/CURRENT_TASK.md`.
+2. Read `.ai/HANDOFF.md` only when continuing previous work.
+3. Inspect relevant code and tests; read subsystem docs only as needed.
+4. Do not load all of `docs/` or the repository by default.
+
+`AGENTS.md` is the cross-agent source of truth for operational conventions shared by every coding agent in this repo — project structure, boundaries, git/commit conventions, multi-agent coordination, and testing expectations. This file stays the detailed architecture and Claude-Code-specific guidance; read both.
 
 ## Commands
 
-```bash
-npm install      # install dependencies
-npm run dev       # start dev server (Next.js)
-npm run build     # production build
-npm run start     # run production build
-npm run lint      # eslint .
-npm run clean     # next clean
+```sh
+npm install
+npm run dev       # Next.js; loopback only
+npm run build
+npm run start     # loopback only
+npm run lint
+npm run clean
+npm test          # Vitest
+npx vitest run
 ```
 
-TypeScript/React tests run via Vitest (`npm test`, or `npx vitest run`); specs live in `lib/__tests__/`. The Rust capture agent has its own `cargo test` suite plus a `cargo-fuzz` target — see `capture-agent/` commands below.
+TypeScript/React specs are in `lib/__tests__/`. The Rust agent has its own tests and commands:
 
-```bash
+```sh
 cd capture-agent
-cargo build --release   # build the capture agent
-cargo test               # run its test suite
-cargo run --release      # run it (listens on 127.0.0.1:9990)
+cargo build --release
+cargo test
+cargo run --release
 ```
 
-## Architecture
+See `CONTRIBUTING.md` for broader CI checks, fuzzing, audit, and integration-test requirements. Do not run the full suite just to fill in `.ai/TEST_STATUS.md`.
 
-This is a Next.js 16 (App Router) + React 19 + Tailwind v4 terminal-style UI ("OSI NetStriker") that visualizes **real** network traffic captured on the local machine, broken down across the 7 OSI layers. It was originally scaffolded via Google AI Studio (see `metadata.json`, `README.md`) as a client-side simulation and was later converted to a real live-capture pipeline; some Google AI Studio scaffolding artifacts (e.g. `GEMINI_API_KEY` in `.env.example`, `majorCapabilities` in `metadata.json`, an empty `app/api/gemini/analyze/` directory) are leftover and not wired to anything — there is no Gemini API call anywhere in the code.
+## Sources of Truth
 
-Real traffic flows through three pieces:
+- Repository/GitHub code: implementation, tests, CI, and commits.
+- Linear: tracked task/work status where connected; do not treat `Done` as proof of correct implementation.
+- Notion: specifications/documentation where available; docs do not prove implementation exists.
+- `.ai/PROJECT_STATE.md`: short, verified project orientation.
+- `.ai/CURRENT_TASK.md`: active unit of work.
+- `.ai/HANDOFF.md`: minimal continuation state.
+- `.ai/DECISIONS.md`: durable technical decisions.
+- `.ai/TEST_STATUS.md`: latest verified test condition.
 
-1. **`capture-agent/`** — a standalone Rust binary (not started by `npm run dev`; run it separately) that opens a live packet capture on the default network interface via `pcap`, parses frames (`src/parse.rs`), sniffs application-layer protocols (`src/l7.rs`), attributes flows to local processes (`src/process_lookup.rs`), and aggregates them into a flow table (`src/flow.rs`). It listens on a TCP socket bound to `127.0.0.1:9990` and streams newline-delimited JSON events (`src/wire.rs` defines the wire format: `Packet`, `ConnectionUpdate`, `LayerUpdate`, plus the newer `TracerouteHop`/`DecryptedPayload` events below — `geo_hop_update` is *not* one of these, it's synthesized relay-side in `lib/geoip-mapping.ts`, never sent by the agent) to whatever connects — normally the Next.js relay below. It also accepts `pause`/`resume` control messages on the same connection, plus `set_capture_filter`/`set_snaplen` (issue #68 — a live-applied BPF capture filter and a snap-length change that briefly reopens the capture handle; current state reported back once per tick via `capture_config`, rejections via `capture_config_error`) and `list_interfaces`/`set_interface` (issue #69 — runtime interface switching with no agent restart, resetting the flow table and the active filter/snaplen; `interface_list` on demand, `interface_changed` on success, `interface_error` on rejection). `CAPTURE_INTERFACE` still wins at startup; the runtime path is a *different* selection made after that. See `capture-agent/README.md` for one-time macOS `access_bpf` setup (no `sudo` needed at runtime once configured). Three later sub-projects extended it in place, each with its own design spec under `docs/superpowers/specs/`:
-   - **TLS visibility** (epic #25, closed): `src/ja3.rs` computes a JA3 fingerprint from each observed TLS ClientHello (informational only, never an auth signal — trivially spoofable); `src/keylog.rs`'s `KeyLogWatcher` tails an ephemeral `SSLKEYLOGFILE` for a specific opted-in PID, `src/tls_decrypt.rs` decrypts that connection's TLS 1.3 records, `src/http2.rs` reassembles HTTP/2 streams and decodes HPACK, `src/redact.rs` strips sensitive headers, and `src/ring_buffer.rs` holds the resulting decrypted content in a capped, `mlock`'d, zeroed-on-evict buffer (never written to disk). Nothing decrypts unless a process is explicitly opted in via `bin/osi-inspect.js` (below) — this is not a blanket MITM proxy.
-   - **Network path visualization** (epic #24, closed): `src/traceroute.rs` runs a bounded, on-demand ICMP traceroute probe loop using an unprivileged macOS ping-socket (no raw-socket privilege needed), emitting `traceroute_hop` events per hop.
-2. **`lib/agent-client.ts`** — a Node `net.Socket`-based client (`AgentClient`, a singleton stashed on `global.__agentClient`) that connects to the capture agent, parses its newline-delimited JSON stream, and re-emits `'event'`/`'status'` on a Node `EventEmitter`. It auto-reconnects with a fixed delay on disconnect.
-3. **`app/api/stream/route.ts`** — an SSE (`text/event-stream`) API route that subscribes to the shared `AgentClient` singleton and forwards every event to the connected browser tab. `app/api/control/route.ts` is the corresponding POST endpoint the browser uses to send `pause`/`resume`/`set_capture_filter`/`set_snaplen`/`list_interfaces`/`set_interface` back through the same `AgentClient`. Sibling control/data routes handle the three sub-projects below: `app/api/enrichment/control/route.ts` + `app/api/enrichment/lookup/route.ts` (ownership enrichment), `app/api/traceroute/start/route.ts` + `app/api/geoip/control/route.ts` (path visualization).
+Surface disagreements among sources explicitly. The current epic-cycle skill uses Linear (and optional Notion tracking), while `CONTRIBUTING.md` describes a GitHub issue roadmap; follow the active task's tracker and do not silently rewrite tracker policy.
 
-On the client:
+## Required Development Workflow
 
-- `app/page.tsx` — the entire application lives in one client component (`'use client'`). It opens an `EventSource('/api/stream')` in a `useEffect` and folds incoming events into React state: `connection_update` events upsert into `connections`, `packet` events prepend into a capped `packets` buffer, `layer_update` events merge into `liveLayers` (via `mergeLayerStats` from `lib/agent-mapping.ts`), `decrypted_payload`/`traceroute_hop`/`geo_hop_update` events feed the TLS-visibility and path-visualization features below, `capture_stats` events (kernel/driver drops, relay lag — issue #61) drive a persistent "capture degraded" banner and caveat the per-connection loss column, `system_stats` events (hostname, interface identity/address, aggregate throughput — issue #64) populate `SystemStats`, `capture_config`/`capture_config_error` events (active BPF filter/snap length, and a rejected change — issue #68) populate the header's always-visible filter/snaplen badges and a dismissible error banner, `interface_list`/`interface_changed`/`interface_error` events (issue #69) populate the header's interface picker (populated lazily, not automatically) and a dismissible switch-rejection banner, and a `connection_status` event drives the "agent not connected" banner. There is no simulation loop — all metrics originate from the capture agent. Tab switching, layer selection, and a Unix-style command bar (`handleExecuteCommand`) are handled here rather than via routing — there's only one route. Note: `SystemStats` (`app/page.tsx`) is `null` until the agent's first `system_stats` tick arrives, and deliberately carries no host CPU/memory/uptime or interface speed/duplex fields — none of those are measurable from this agent today, so they're omitted rather than faked; don't add them back without a real wire producer.
-- `lib/agent-mapping.ts` — translates raw agent wire JSON into the app's domain types: `mapConnectionEvent`, `mapPacketEvent`, and `mergeLayerStats` (merges live per-layer stats from the agent onto the static per-layer metadata below, sorted descending 7→1 to match display order).
-- `lib/enrichment.ts`, `lib/enrichment/` (`bootstrap.ts`, `cache.ts`, `query-log.ts`, `rdap-client.ts`, `referral-allowlist.ts`, `request-queue.ts`, `reverse-dns.ts`, `scope-filter.ts`, `whois-client.ts`, `types.ts`), and `lib/enrichment-mapping.ts` — **ownership enrichment** (epic #23, closed): opt-in-only (`enrich on` in the command bar, never persisted across a relay restart) WHOIS/RDAP lookups that attribute a remote IP/domain to an owning org. Cache-first (14-day TTL), rate-limited to one in-flight request, SSRF-hardened against a reviewed RDAP/registrar host allowlist. Results and the outbound query audit log live under `.data/enrichment/` (`0600` perms, 30-day retention); `enrich clear` wipes both. See `docs/enrichment-protocol.md` and `docs/superpowers/specs/2026-08-28-ownership-enrichment-design.md`.
-- `lib/decrypted-mapping.ts` and `lib/decrypted-payload-gate.ts` — map the agent's `decrypted_payload` wire event into the app's types and gate rendering it to loopback/mTLS-authenticated transport only, part of the TLS-visibility sub-project above.
-- `lib/geoip.ts`, `lib/geoip-mapping.ts`, and `lib/traceroute-state.ts` — client-side state and mapping for the path-visualization sub-project above (traceroute hop tables plus per-hop geoIP lookups). See `docs/geoip-protocol.md`.
-- `bin/osi-inspect.js` — a standalone Node CLI (published via `package.json`'s `bin` field) that launches exactly one target process with `SSLKEYLOGFILE` pointed at a fresh, ephemeral, `0600` key-log file, then registers that PID as decrypt-eligible with the capture agent over the existing control channel (unregistering on exit). This is the *only* way TLS decryption (above) ever turns on for a process — no CA, no cert forging, no traffic redirection.
-- `lib/osi-engine.ts` — `THEMES` (terminal color schemes), `STATIC_LAYER_INFO` (per-layer metadata: name, PDU, protocol list, badge colors — NOT live values), and formatting helpers (`formatSpeed`, `formatBytes`). It no longer generates fake traffic.
-- `lib/types.ts` — all domain types (`OSILayerInfo`, `NetworkConnection`, `PacketFrame`, `SystemStats`, `ThemeConfig`, `TerminalTheme`). Add new fields here first when extending what's displayed.
-- `components/` — one component per view/tab (`DashboardView`, `LayerDetailView`, `ConnectionsView`, `PacketStreamView`, `ProtocolMatrixView`), plus chrome (`HeaderBar`, `CommandLineBar`, `InstallModal`). All are presentational — they receive `theme: ThemeConfig` plus view-specific data as props from `app/page.tsx`; there's no separate client-side data fetching or state management library. (The old `ScenarioLabView` was removed along with the simulation it drove.) `ConnectionsView` now also renders a JA3 label per connection, an ownership-enrichment lookup trigger, and a "Trace Route" button with a per-hop table; `PacketStreamView` renders decrypted content (when the gate above allows it) behind a persistent "decrypting" banner.
-- `app/api/install/route.ts` — a single API route that serves a generated bash installer script (`GET`), which itself writes a standalone Node CLI script to the user's machine mimicking the terminal UI. Self-contained; not connected to the rest of the app.
-- Theming: `TerminalTheme` (10 variants defined in `THEMES`) drives Tailwind class strings passed down as a `theme` prop — there's no CSS-in-JS or theme context, just plain prop drilling.
-- `next.config.ts` has a webpack tweak that disables file watching when `DISABLE_HMR=true` (used by the AI Studio agent environment to avoid flicker during automated edits) — don't "fix" the watchOptions block. Since Next.js 16 defaults to Turbopack, `dev`/`build` in `package.json` pass `--webpack` explicitly so that hook still applies; don't drop that flag. (The old `eslint.ignoreDuringBuilds` config key was removed in the Next 16 upgrade — it's no longer a recognized option, and `next build` doesn't run ESLint regardless; `npm run lint` — plain `eslint .` — remains the actual lint gate, unaffected.)
-- `npm run dev`/`npm run start` bind Next.js to `127.0.0.1` only (`-H 127.0.0.1`), matching the capture agent's loopback-only bind — don't remove that flag, it's a deliberate security boundary. LAN access is served by Caddy in front of it (see below), never by widening this bind.
+1. Read `CURRENT_TASK.md`; inspect relevant implementation, tests, and architecture.
+2. Read the relevant spec/protocol docs and confirm acceptance criteria.
+3. Use test-first development where practical; show the changed test fails for the missing behavior.
+4. Implement the smallest correct change; run relevant tests, fix failures, then broader applicable checks.
+5. Review `git diff`; update applicable state files and `HANDOFF.md` with verified facts.
+6. Commit only verified work and only when the user explicitly requests a commit.
 
-Two further self-contained subprojects handle LAN access (neither is started by `npm run dev`):
+Tests, not compilation, a rendered screen, a file's existence, or tracker status, establish behavior. Never claim completion without evidence.
 
-- **`deploy/`** — a Caddy reverse proxy enforcing mutual TLS in front of `127.0.0.1:3000`, plus `setup-ca.sh` (mkcert-based local CA, server cert, per-device client certs) and `test-mtls-rejection.sh` (three live checks: missing cert rejected, valid cert accepted, untrusted self-signed cert rejected — re-run it after any `Caddyfile` change). `deploy/Caddyfile` ships loopback-only via `bind 127.0.0.1` at `localhost:8443`; the site address is what Caddy *matches* on, `bind` is what selects the interface, and switching to LAN-facing `:443` requires changing both (`deploy/README.md` step 5, deliberately manual — never automate it).
-- **`macos-app/`** — a native SwiftUI/`WKWebView` viewer (built via `xcodegen generate` from `project.yml`; the `.xcodeproj` is gitignored). `NavigationLockDelegate` locks it to a single origin matching on scheme + host + port; `ClientCertStore` provisions a Secure-Enclave-backed mTLS client certificate. Two traps: build/test with `CODE_SIGNING_ALLOWED=NO`, and always use `clean build` when touching `NavigationLockDelegate` — `WKNavigationDelegate`'s methods are all optional, so a signature mismatch (e.g. a missing `@MainActor` on a completion handler) is only a "nearly matches optional requirement" warning that Xcode's incremental cache hides, while the method silently never gets called. The app never reads the CA private key directly (App Sandbox blocks that) — `deploy/sign-native-app-csr.sh` signs its CSR out-of-band instead; see `macos-app/README.md` ("Provisioning the client certificate") for the flow.
+## Architecture Summary
 
-## Further documentation
+The Next.js 16 / React 19 UI displays real traffic. The Rust `capture-agent` captures and parses it in a separate process. Its loopback NDJSON socket feeds the relay (`lib/agent-client.ts`); `app/api/stream/route.ts` sends SSE to the browser and `app/api/control/route.ts` forwards controls. `app/page.tsx` owns main client state; `lib/agent-mapping.ts` maps wire events; `lib/types.ts` defines domain types; `components/` are primarily presentational. `lib/osi-engine.ts` contains static OSI descriptions, not live measurements.
 
-User-facing docs live under `docs/`: [architecture.md](docs/architecture.md), [getting-started.md](docs/getting-started.md), [usage.md](docs/usage.md), [wire-protocol.md](docs/wire-protocol.md) (the full agent↔relay JSON contract — read this before touching `capture-agent/src/wire.rs` or `lib/agent-mapping.ts`), [enrichment-protocol.md](docs/enrichment-protocol.md) (ownership-enrichment wire/control contract), [geoip-protocol.md](docs/geoip-protocol.md) (traceroute/geoIP wire/control contract), [troubleshooting.md](docs/troubleshooting.md), [security.md](docs/security.md) (current posture *and* the known residual risks of the mTLS layer — read before changing anything in `deploy/` or `macos-app/`). Setup instructions for the two LAN-access subprojects live with them, in `deploy/README.md` and `macos-app/README.md`. Design specs and implementation plans for each sub-project live under `docs/superpowers/specs/` and `docs/superpowers/plans/` — read the relevant spec before extending a sub-project, and follow that same spec-then-plan process for new architectural work (see `CONTRIBUTING.md`).
+Read `docs/architecture.md` for the component map. Do not infer behavior from this summary alone.
+
+## Critical Invariants
+
+- Preserve `next.config.ts`'s deliberate Webpack/file-watching behavior and `--webpack` flags in `package.json`; do not casually remove or “fix” them.
+- Next.js and the capture agent bind to `127.0.0.1`. Never expose them by widening their bind. LAN access goes through the existing Caddy/mTLS front door; its LAN-facing change is deliberate/manual and must follow `deploy/README.md`.
+- Before changing `deploy/Caddyfile`, read `docs/security.md` and `deploy/README.md`; rerun `deploy/test-mtls-rejection.sh` after the change.
+- Startup `CAPTURE_INTERFACE` selection and runtime `set_interface` switching are distinct paths. Preserve their separate semantics.
+- TLS decryption is explicit, per-process opt-in via `bin/osi-inspect.js`; this is passive visibility, not a blanket MITM. Keep key material and decrypted payloads ephemeral/in-memory, redacted, zeroed on eviction, and gated to loopback or mTLS as implemented.
+- Ownership enrichment and GeoIP enrichment are opt-in; traceroute probes are on demand and bounded.
+- Do not invent host metrics or interface properties. The agent emits system/interface identity and traffic counters; it does not emit CPU, memory, uptime, interface speed, or duplex. Add displayed data only with a real producer.
+- Do not mistake static OSI metadata for live values. Do not reintroduce simulated traffic or metrics.
+- A filename, type, issue, UI placeholder, spec, or comment alone does not prove functionality. Check source, tests, and current wire behavior.
+- `macos-app`: build/test with `CODE_SIGNING_ALLOWED=NO`; use a clean build after changing `NavigationLockDelegate` because optional delegate signature mismatches can evade incremental builds. The client key is Secure-Enclave-backed; the app does not read the CA private key. `deploy/sign-native-app-csr.sh` signs its CSR out of band.
+
+## Read Before Modifying
+
+- Capture-agent wire messages or `lib/agent-mapping.ts`: `docs/wire-protocol.md`; update Rust and TypeScript contract together.
+- Ownership enrichment: `docs/enrichment-protocol.md` and `docs/superpowers/specs/2026-08-28-ownership-enrichment-design.md`.
+- Traceroute/GeoIP: `docs/geoip-protocol.md` and `docs/superpowers/specs/2026-09-01-path-visualization-design.md`.
+- Deployment or mTLS: `docs/security.md` and `deploy/README.md`.
+- macOS navigation/client certificate security: `macos-app/README.md` and `docs/security.md`.
+- Significant architecture: relevant `docs/superpowers/specs/` entry, then follow the spec → plan process in `CONTRIBUTING.md`.
+- TLS visibility or capture files: find and read the relevant design spec and plan under `docs/superpowers/` before extending them.
+
+## Model Routing
+
+- **Opus:** architecture, cross-subsystem design, ambiguous/conflicting requirements, difficult root-cause analysis, security-sensitive design, major data-model or performance work, and competing technical approaches.
+- **Sonnet:** normal implementation, tests, approved designs, bug fixes, refactoring, integrations, docs, and review.
+- **Haiku:** formatting, renaming, simple documentation/mechanical changes, and tiny well-defined fixes.
+
+Escalate Haiku → Sonnet → Opus based on actual complexity. A test failure alone is not a reason to escalate; first check whether its cause is straightforward. Use the least expensive model that can reliably complete the task; return to a cheaper model for mechanical follow-up.
+
+## Context and Orchestration Cost Control
+
+Load only the state and docs the task needs. Do not repeatedly reread unchanged large docs. Conversation history is not project state; persist durable facts in Git, the active tracker, approved specs, tests, and concise `.ai/` files. Start fresh at meaningful task boundaries.
+
+Do not spawn agents just because roles exist. Delegate only when work is genuinely parallel, independent verification has material value, specialization helps, or isolation saves context. Give narrow scopes; do not make every role inspect the whole repository. A simple task usually needs one developer; agent count should follow complexity, not a fixed pipeline.
+
+## Session Completion
+
+For substantial work: test → review → update `TEST_STATUS` and `PROJECT_STATE` when applicable → record durable decisions → update `HANDOFF` → commit verified work only if explicitly requested. Keep handoffs short; do not store transcripts or logs.

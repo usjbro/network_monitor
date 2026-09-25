@@ -1,65 +1,167 @@
-# AGENTS.md
+# Network Monitor — Codex Instructions
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+## Mission
+
+Build and maintain Network Monitor according to verified repository implementation, approved requirements, tests, and project architecture.
+
+## Start Here
+
+For normal development:
+
+1. Read `.ai/CURRENT_TASK.md`.
+2. Read `.ai/HANDOFF.md` only when continuing previous work.
+3. Inspect relevant implementation and tests.
+4. Read relevant subsystem documentation only when necessary.
+
+Do not read the entire repository or all documentation by default.
+
+## Repository Guidance
+
+The repository contains detailed project-specific guidance in `CLAUDE.md`. When a task involves architecture, security boundaries, capture behavior, deployment constraints, TLS visibility, macOS behavior, or another non-obvious subsystem, inspect the applicable guidance there and its referenced documentation before editing.
+
+Do not assume documentation proves implementation exists. Verify against code and tests.
+
+## Project Structure
+
+- `app/`, `components/`, `lib/` — Next.js/React/TypeScript relay and UI (`npm test` / `npx vitest run`).
+- `capture-agent/` — the Rust capture agent (`cargo test`); see its own README for macOS `access_bpf` setup.
+- `deploy/` — Caddy mTLS reverse proxy for LAN access (loopback-only by default).
+- `macos-app/` — the native SwiftUI/WKWebView viewer.
+- `docs/` — user-facing docs; `docs/superpowers/specs/` and `docs/superpowers/plans/` hold design specs and implementation plans for nontrivial work (see `CONTRIBUTING.md`).
+- `.ai/` — `CURRENT_TASK.md`, `HANDOFF.md`, `DECISIONS.md`, `PROJECT_STATE.md`, `TEST_STATUS.md` (see Sources of Truth below).
+- `.claude/agents/`, `.codex/agents/` — per-tool subagent definitions (architect/developer/reviewer/tester) for this repo.
+- `.agents/skills/` — shared skills, e.g. `epic-task-cycle` (the Linear branch → PR → merge cycle).
+- `coordination/` — cross-agent task contracts and Slack coordination for parallel sub-work; see Multi-Agent Coordination below.
+
+## Sources of Truth
+
+- Repository/GitHub: actual implementation, tests, CI, and commits.
+- Linear: tracked work and workflow state.
+- Notion: requirements and specifications where applicable.
+- `.ai/PROJECT_STATE.md`: concise verified project orientation.
+- `.ai/CURRENT_TASK.md`: active unit of work.
+- `.ai/HANDOFF.md`: cross-session continuation state.
+- `.ai/DECISIONS.md`: durable architectural decisions.
+- `.ai/TEST_STATUS.md`: latest verified test state.
+
+When sources disagree, explicitly report the disagreement.
+
+## Required Workflow
+
+1. Read `.ai/CURRENT_TASK.md`.
+2. Inspect relevant source code and tests.
+3. Read applicable specification/protocol documentation.
+4. Confirm acceptance criteria.
+5. Write/update tests first where practical and demonstrate missing behavior.
+6. Implement the smallest correct change.
+7. Run relevant tests, fix failures, then run broader applicable tests.
+8. Review `git diff`.
+9. Update applicable `.ai/` state and `.ai/HANDOFF.md`.
+10. Commit only when explicitly requested or authorized by the task.
+
+## Scope Control
+
+- Stay on the assigned task; avoid unrelated refactoring and speculative functionality.
+- Do not change architecture casually; prefer small, reviewable changes.
+- Inspect before editing.
+- Do not infer functionality from filenames, comments, issue titles, documentation, or UI placeholders.
+- Never declare success without verification.
+
+## Boundaries — Always / Ask first / Never
+
+**Always**
+- Read `.ai/CURRENT_TASK.md` (and the relevant `coordination/tasks/` contract, if this work is part of one) before editing.
+- Treat source and tests as evidence; verify before claiming something works.
+- Keep the capture agent and Next.js bound to `127.0.0.1`; LAN access only through `deploy/`.
+
+**Ask first**
+- Changing `deploy/Caddyfile`, `next.config.ts`'s webpack/file-watching block, or the `--webpack` flags in `package.json`.
+- Adding a new dependency, widening a network bind, or touching the wire protocol (`capture-agent/src/wire.rs`, `lib/agent-mapping.ts`, `lib/types.ts` must change together — see `docs/wire-protocol.md`).
+- Anything else `CLAUDE.md`'s Critical Invariants section calls out — that list is the detailed source of truth; this is a summary, not a replacement for reading it.
+
+**Never**
+- Commit or push without explicit authorization; merge your own branch.
+- Force-push over unmerged work, or `git checkout`/`git switch` inside a worktree.
+- Invent host metrics, interface properties, or wire fields the agent doesn't actually emit.
+
+## Critical Thinking
+
+- If a task's stated goal and its owned-files/do-not-edit scope conflict, stop and ask rather than silently expanding scope.
+- Root-cause bugs — don't patch symptoms without checking upstream data/state first (the `systematic-debugging` skill covers this in depth).
+- A plan or spec's own code sketch can be wrong; verify it against the actual code rather than transcribing it (see `epic-task-cycle`'s §2 step 4 for a concrete rate of this happening).
+
+## Test-Driven Development
+
+TDD is the default. Code compiling, a rendered UI, a Linear issue marked Done, documentation describing a feature, or a relevant file existing does not establish correct behavior. Verify the behavior against requirements and tests.
+
+## Testing
+
+- Every task must leave the relevant test suite(s) green — `npx vitest run` for TypeScript, `cargo test` for the capture agent; see `CONTRIBUTING.md` for the full CI-matching list (fuzzing, audit, live-loopback, Playwright).
+- New behavior needs a new test; don't just eyeball it.
+- Record actual commands and results in `.ai/TEST_STATUS.md` — compilation, a rendered screen, or a tracker status is not test evidence.
+
+## Context Discipline
+
+- Start with `.ai/CURRENT_TASK.md`; load only relevant files and deeper docs.
+- Avoid rereading unchanged large documents; prefer references over copied content.
+- Do not load every `.ai/` file automatically.
+- Avoid unnecessary subagents or multiple agents independently rediscovering the same state.
+- Prefer fresh sessions at meaningful task boundaries.
+
+## Model / Agent Routing
+
+Use the least expensive model capable of reliably completing the task. Route architecture, security design, cross-subsystem work, ambiguous requirements, difficult root-cause analysis, and major performance/data-model decisions to stronger reasoning. Use standard models for normal implementation, testing, debugging, refactoring, review, and documentation; use lighter models for mechanical edits. Escalate only when complexity requires it.
+
+Use agents only when work is genuinely parallel, specialization helps, or independent verification has material value. Keep agent scopes narrow; there is no fixed pipeline.
+
+## Git & Commits
+
+- One task = one git worktree, under `.worktrees/<slug>/` in this repo (see the `using-git-worktrees` skill).
+- Branch naming follows the Linear issue's own `gitBranchName` where one exists (`<github-username>/<linear-id>-<slug>`, e.g. `jamesmbrownjr/jam-9-...`) — don't invent a different scheme; confirm it's safe before using it (`epic-task-cycle` §2 step 2).
+- Never `git checkout`/`git switch` inside a worktree — it's already on the right branch. If you think you need to switch, stop and ask.
+- Commit only when explicitly authorized, with the attribution footer given by current session instructions — never a stale one.
+- `git checkout next-env.d.ts` before committing if `npm run dev` ran this session; it's a build side-effect file unrelated to your change.
+- Push only when authorized (`git push -u origin <branch>`); merge with squash only once CI is green, review has passed, and GitHub reports `mergeable_state: "clean"` — see `epic-task-cycle`'s full gate list.
+
+## Multi-Agent Coordination
+
+Linear (via `epic-task-cycle`) stays the single source of truth for which epic task is active; `.ai/CURRENT_TASK.md` mirrors it locally. `coordination/` doesn't replace that — it's for planning and discussing parallel sub-work between agents (Claude Code, Codex, or both) working on independently-scoped pieces at the same time, with status kept truthful in both places.
+
+`coordination/` lives at the **main repo root only** — it is not committed and is not copied into any `.worktrees/<slug>/` checkout, so a bare relative path to it resolves correctly only when your cwd already is the main repo root. From inside a worktree, either `cd` to the main repo root first, or just invoke the scripts below by their full path / after `cd`-ing — they resolve the main repo root themselves (`git rev-parse --git-common-dir`) regardless of where they're run from, so prefer them over hand-editing files under `coordination/` directly when your cwd is a worktree.
+
+1. Write one `coordination/tasks/<task-slug>.md` contract per parallel sub-task, giving its owned files, do-not-edit boundaries, and validation — the same role `.ai/CURRENT_TASK.md` plays for a single task, scoped to one concurrent piece of work. If the sub-task contributes to a Linear-tracked epic task, record that issue id in the contract.
+2. Create it with `coordination/scripts/new-task.sh <slug> <claude-code|codex> "<goal>" [linear-id]` — it creates the contract, a `.worktrees/<slug>/` worktree (sibling to the others, at the main repo root regardless of the script's own cwd), a branch matching the convention above, and (if `SLACK_WEBHOOK_URL` is exported) posts a 🟡 started message to the shared Slack channel; without it, the task is still created, just without a Slack post.
+3. Discuss blockers, interface questions, and plan changes in that Slack thread rather than guessing at another task's interface. See `coordination/router-checklist.md` (main repo root) for whether a piece suits Claude Code or Codex better.
+4. On finish, run `coordination/scripts/complete-task.sh <slug> review "<summary>"` (updates the contract and posts to Slack), fill in its Handoff section by hand, and update the corresponding Linear issue's status per `epic-task-cycle` §2 steps 8-11 — the contract and Linear must agree, not just one of them.
+5. A human (or reviewer agent) merges one branch at a time and removes its worktree, same as any other task branch.
+
+## Session Completion
+
+For substantial work: test → review → update `TEST_STATUS` and `PROJECT_STATE` when applicable → update `DECISIONS` if needed → update `HANDOFF` → commit only when authorized.
 
 ## Commands
 
-```bash
-npm install      # install dependencies
-npm run dev       # start dev server (Next.js)
-npm run build     # production build
-npm run start     # run production build
-npm run lint      # eslint .
-npm run clean     # next clean
+```sh
+npm install
+npm run dev       # Next.js; loopback only
+npm run build
+npm run start     # production; loopback only
+npm run lint
+npm run clean
+npm test          # Vitest
+npx vitest run
 ```
 
-TypeScript/React tests run via Vitest (`npm test`, or `npx vitest run`); specs live in `lib/__tests__/`. The Rust capture agent has its own `cargo test` suite plus a `cargo-fuzz` target — see `capture-agent/` commands below.
+TypeScript/React tests live in `lib/__tests__/`. The Rust capture agent has its own test suite:
 
-```bash
+```sh
 cd capture-agent
-cargo build --release   # build the capture agent
-cargo test               # run its test suite
-cargo run --release      # run it (listens on 127.0.0.1:9990)
+cargo build --release
+cargo test
+cargo run --release
 ```
 
-## Architecture
-
-This is a Next.js 16 (App Router) + React 19 + Tailwind v4 terminal-style UI ("OSI NetStriker") that visualizes **real** network traffic captured on the local machine, broken down across the 7 OSI layers. It was originally scaffolded via Google AI Studio (see `metadata.json`, `README.md`) as a client-side simulation and was later converted to a real live-capture pipeline; some Google AI Studio scaffolding artifacts (e.g. `GEMINI_API_KEY` in `.env.example`, `majorCapabilities` in `metadata.json`, an empty `app/api/gemini/analyze/` directory) are leftover and not wired to anything — there is no Gemini API call anywhere in the code.
-
-Real traffic flows through three pieces:
-
-1. **`capture-agent/`** — a standalone Rust binary (not started by `npm run dev`; run it separately) that opens a live packet capture on the default network interface via `pcap`, parses frames (`src/parse.rs`), sniffs application-layer protocols (`src/l7.rs`), attributes flows to local processes (`src/process_lookup.rs`), and aggregates them into a flow table (`src/flow.rs`). It listens on a TCP socket bound to `127.0.0.1:9990` and streams newline-delimited JSON events (`src/wire.rs` defines the wire format: `Packet`, `ConnectionUpdate`, `LayerUpdate`, plus the newer `TracerouteHop`/`DecryptedPayload` events below — `geo_hop_update` is *not* one of these, it's synthesized relay-side in `lib/geoip-mapping.ts`, never sent by the agent) to whatever connects — normally the Next.js relay below. It also accepts `pause`/`resume` control messages on the same connection. See `capture-agent/README.md` for one-time macOS `access_bpf` setup (no `sudo` needed at runtime once configured). Three later sub-projects extended it in place, each with its own design spec under `docs/superpowers/specs/`:
-   - **TLS visibility** (epic #25, closed): `src/ja3.rs` computes a JA3 fingerprint from each observed TLS ClientHello (informational only, never an auth signal — trivially spoofable); `src/keylog.rs`'s `KeyLogWatcher` tails an ephemeral `SSLKEYLOGFILE` for a specific opted-in PID, `src/tls_decrypt.rs` decrypts that connection's TLS 1.3 records, `src/http2.rs` reassembles HTTP/2 streams and decodes HPACK, `src/redact.rs` strips sensitive headers, and `src/ring_buffer.rs` holds the resulting decrypted content in a capped, `mlock`'d, zeroed-on-evict buffer (never written to disk). Nothing decrypts unless a process is explicitly opted in via `bin/osi-inspect.js` (below) — this is not a blanket MITM proxy.
-   - **Network path visualization** (epic #24, closed): `src/traceroute.rs` runs a bounded, on-demand ICMP traceroute probe loop using an unprivileged macOS ping-socket (no raw-socket privilege needed), emitting `traceroute_hop` events per hop.
-2. **`lib/agent-client.ts`** — a Node `net.Socket`-based client (`AgentClient`, a singleton stashed on `global.__agentClient`) that connects to the capture agent, parses its newline-delimited JSON stream, and re-emits `'event'`/`'status'` on a Node `EventEmitter`. It auto-reconnects with a fixed delay on disconnect.
-3. **`app/api/stream/route.ts`** — an SSE (`text/event-stream`) API route that subscribes to the shared `AgentClient` singleton and forwards every event to the connected browser tab. `app/api/control/route.ts` is the corresponding POST endpoint the browser uses to send `pause`/`resume` back through the same `AgentClient`. Sibling control/data routes handle the three sub-projects below: `app/api/enrichment/control/route.ts` + `app/api/enrichment/lookup/route.ts` (ownership enrichment), `app/api/traceroute/start/route.ts` + `app/api/geoip/control/route.ts` (path visualization).
-
-On the client:
-
-- `app/page.tsx` — the entire application lives in one client component (`'use client'`). It opens an `EventSource('/api/stream')` in a `useEffect` and folds incoming events into React state: `connection_update` events upsert into `connections`, `packet` events prepend into a capped `packets` buffer, `layer_update` events merge into `liveLayers` (via `mergeLayerStats` from `lib/agent-mapping.ts`), `decrypted_payload`/`traceroute_hop`/`geo_hop_update` events feed the TLS-visibility and path-visualization features below, and a `connection_status` event drives the "agent not connected" banner. There is no simulation loop — all metrics originate from the capture agent. Tab switching, layer selection, and a Unix-style command bar (`handleExecuteCommand`) are handled here rather than via routing — there's only one route. Note: no wire event currently carries system-level stats (hostname, CPU/mem, aggregate interface throughput) — `SystemStats` in `app/page.tsx` is seeded mostly at zero/placeholder values pending a future task to wire that up; don't assume those fields are live.
-- `lib/agent-mapping.ts` — translates raw agent wire JSON into the app's domain types: `mapConnectionEvent`, `mapPacketEvent`, and `mergeLayerStats` (merges live per-layer stats from the agent onto the static per-layer metadata below, sorted descending 7→1 to match display order).
-- `lib/enrichment.ts`, `lib/enrichment/` (`bootstrap.ts`, `cache.ts`, `query-log.ts`, `rdap-client.ts`, `referral-allowlist.ts`, `request-queue.ts`, `reverse-dns.ts`, `scope-filter.ts`, `whois-client.ts`, `types.ts`), and `lib/enrichment-mapping.ts` — **ownership enrichment** (epic #23, closed): opt-in-only (`enrich on` in the command bar, never persisted across a relay restart) WHOIS/RDAP lookups that attribute a remote IP/domain to an owning org. Cache-first (14-day TTL), rate-limited to one in-flight request, SSRF-hardened against a reviewed RDAP/registrar host allowlist. Results and the outbound query audit log live under `.data/enrichment/` (`0600` perms, 30-day retention); `enrich clear` wipes both. See `docs/enrichment-protocol.md` and `docs/superpowers/specs/2026-08-28-ownership-enrichment-design.md`.
-- `lib/decrypted-mapping.ts` and `lib/decrypted-payload-gate.ts` — map the agent's `decrypted_payload` wire event into the app's types and gate rendering it to loopback/mTLS-authenticated transport only, part of the TLS-visibility sub-project above.
-- `lib/geoip.ts`, `lib/geoip-mapping.ts`, and `lib/traceroute-state.ts` — client-side state and mapping for the path-visualization sub-project above (traceroute hop tables plus per-hop geoIP lookups). See `docs/geoip-protocol.md`.
-- `bin/osi-inspect.js` — a standalone Node CLI (published via `package.json`'s `bin` field) that launches exactly one target process with `SSLKEYLOGFILE` pointed at a fresh, ephemeral, `0600` key-log file, then registers that PID as decrypt-eligible with the capture agent over the existing control channel (unregistering on exit). This is the *only* way TLS decryption (above) ever turns on for a process — no CA, no cert forging, no traffic redirection.
-- `lib/osi-engine.ts` — `THEMES` (terminal color schemes), `STATIC_LAYER_INFO` (per-layer metadata: name, PDU, protocol list, badge colors — NOT live values), and formatting helpers (`formatSpeed`, `formatBytes`). It no longer generates fake traffic.
-- `lib/types.ts` — all domain types (`OSILayerInfo`, `NetworkConnection`, `PacketFrame`, `SystemStats`, `ThemeConfig`, `TerminalTheme`). Add new fields here first when extending what's displayed.
-- `components/` — one component per view/tab (`DashboardView`, `LayerDetailView`, `ConnectionsView`, `PacketStreamView`, `ProtocolMatrixView`), plus chrome (`HeaderBar`, `CommandLineBar`, `InstallModal`). All are presentational — they receive `theme: ThemeConfig` plus view-specific data as props from `app/page.tsx`; there's no separate client-side data fetching or state management library. (The old `ScenarioLabView` was removed along with the simulation it drove.) `ConnectionsView` now also renders a JA3 label per connection, an ownership-enrichment lookup trigger, and a "Trace Route" button with a per-hop table; `PacketStreamView` renders decrypted content (when the gate above allows it) behind a persistent "decrypting" banner.
-- `app/api/install/route.ts` — a single API route that serves a generated bash installer script (`GET`), which itself writes a standalone Node CLI script to the user's machine mimicking the terminal UI. Self-contained; not connected to the rest of the app.
-- Theming: `TerminalTheme` (10 variants defined in `THEMES`) drives Tailwind class strings passed down as a `theme` prop — there's no CSS-in-JS or theme context, just plain prop drilling.
-- `next.config.ts` has a webpack tweak that disables file watching when `DISABLE_HMR=true` (used by the AI Studio agent environment to avoid flicker during automated edits) — don't "fix" the watchOptions block. Since Next.js 16 defaults to Turbopack, `dev`/`build` in `package.json` pass `--webpack` explicitly so that hook still applies; don't drop that flag. (The old `eslint.ignoreDuringBuilds` config key was removed in the Next 16 upgrade — it's no longer a recognized option, and `next build` doesn't run ESLint regardless; `npm run lint` — plain `eslint .` — remains the actual lint gate, unaffected.)
-- `npm run dev`/`npm run start` bind Next.js to `127.0.0.1` only (`-H 127.0.0.1`), matching the capture agent's loopback-only bind — don't remove that flag, it's a deliberate security boundary. LAN access is served by Caddy in front of it (see below), never by widening this bind.
-
-Two further self-contained subprojects handle LAN access (neither is started by `npm run dev`):
-
-- **`deploy/`** — a Caddy reverse proxy enforcing mutual TLS in front of `127.0.0.1:3000`, plus `setup-ca.sh` (mkcert-based local CA, server cert, per-device client certs) and `test-mtls-rejection.sh` (three live checks: missing cert rejected, valid cert accepted, untrusted self-signed cert rejected — re-run it after any `Caddyfile` change). `deploy/Caddyfile` ships loopback-only via `bind 127.0.0.1` at `localhost:8443`; the site address is what Caddy *matches* on, `bind` is what selects the interface, and switching to LAN-facing `:443` requires changing both (`deploy/README.md` step 5, deliberately manual — never automate it).
-- **`macos-app/`** — a native SwiftUI/`WKWebView` viewer (built via `xcodegen generate` from `project.yml`; the `.xcodeproj` is gitignored). `NavigationLockDelegate` locks it to a single origin matching on scheme + host + port; `ClientCertStore` provisions a Secure-Enclave-backed mTLS client certificate. Two traps: build/test with `CODE_SIGNING_ALLOWED=NO`, and always use `clean build` when touching `NavigationLockDelegate` — `WKNavigationDelegate`'s methods are all optional, so a signature mismatch (e.g. a missing `@MainActor` on a completion handler) is only a "nearly matches optional requirement" warning that Xcode's incremental cache hides, while the method silently never gets called. The app never reads the CA private key directly (App Sandbox blocks that) — `deploy/sign-native-app-csr.sh` signs its CSR out-of-band instead; see `macos-app/README.md` ("Provisioning the client certificate") for the flow.
-
-## Further documentation
-
-User-facing docs live under `docs/`: [architecture.md](docs/architecture.md), [getting-started.md](docs/getting-started.md), [usage.md](docs/usage.md), [wire-protocol.md](docs/wire-protocol.md) (the full agent↔relay JSON contract — read this before touching `capture-agent/src/wire.rs` or `lib/agent-mapping.ts`), [enrichment-protocol.md](docs/enrichment-protocol.md) (ownership-enrichment wire/control contract), [geoip-protocol.md](docs/geoip-protocol.md) (traceroute/geoIP wire/control contract), [troubleshooting.md](docs/troubleshooting.md), [security.md](docs/security.md) (current posture *and* the known residual risks of the mTLS layer — read before changing anything in `deploy/` or `macos-app/`). Setup instructions for the two LAN-access subprojects live with them, in `deploy/README.md` and `macos-app/README.md`. Design specs and implementation plans for each sub-project live under `docs/superpowers/specs/` and `docs/superpowers/plans/` — read the relevant spec before extending a sub-project, and follow that same spec-then-plan process for new architectural work (see `CONTRIBUTING.md`).
-
-This directory is a git repository (`main` branch); see `CONTRIBUTING.md` for the commit/PR conventions and the design-spec-then-plan workflow expected for new architectural work.
+See `CONTRIBUTING.md` for broader CI, fuzzing, audit, and integration-test requirements.
 
 <!-- BEGIN:nextjs-agent-rules -->
 
