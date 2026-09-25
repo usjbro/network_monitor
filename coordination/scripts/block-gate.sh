@@ -32,7 +32,7 @@ fi
 
 _block_locked() {
   gate_require_status "$GATE_FILE" awaiting-approval || return $?
-  gate_set_field "$GATE_FILE" status blocked
+  gate_set_field "$GATE_FILE" status blocked || return $?
   {
     echo
     echo "## Blocked"

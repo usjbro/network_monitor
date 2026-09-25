@@ -34,7 +34,7 @@ _claim_locked() {
     echo "delegation-claimed"
     return 2
   fi
-  gate_set_field "$GATE_FILE" delegation_claimed true
+  gate_set_field "$GATE_FILE" delegation_claimed true || return $?
   echo "delegation-claimed"
 }
 

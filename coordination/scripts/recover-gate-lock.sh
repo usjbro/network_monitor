@@ -28,6 +28,7 @@ if [[ -L "$LOCK_DIR" || ! -d "$LOCK_DIR" ]]; then
 fi
 
 OWNER_FILE="$LOCK_DIR/pid"
+START_FILE="$LOCK_DIR/start"
 if [[ -e "$OWNER_FILE" ]]; then
   OWNER_PID="$(cat "$OWNER_FILE")"
   if [[ ! "$OWNER_PID" =~ ^[1-9][0-9]*$ ]]; then
@@ -35,10 +36,14 @@ if [[ -e "$OWNER_FILE" ]]; then
     exit 1
   fi
   if kill -0 "$OWNER_PID" 2>/dev/null; then
-    echo "lock owner PID $OWNER_PID is still running; refusing recovery" >&2
-    exit 1
+    RECORDED_START="$(cat "$START_FILE" 2>/dev/null || true)"
+    CURRENT_START="$(LC_ALL=C ps -p "$OWNER_PID" -o lstart= 2>/dev/null || true)"
+    if [[ -z "$RECORDED_START" || -z "$CURRENT_START" || "$RECORDED_START" == "$CURRENT_START" ]]; then
+      echo "lock owner PID $OWNER_PID may still be running; refusing recovery" >&2
+      exit 1
+    fi
   fi
-  rm -f "$OWNER_FILE"
+  rm -f "$OWNER_FILE" "$START_FILE"
 fi
 
 if ! rmdir "$LOCK_DIR"; then

@@ -52,9 +52,9 @@ _mark_locked() {
     echo "delegation-claim-required"
     return 2
   fi
-  gate_set_field "$GATE_FILE" delegated true
-  gate_set_field "$GATE_FILE" delegation_target "$TARGET"
-  gate_set_field "$GATE_FILE" delegation_agent_type "$AGENT_TYPE"
+  gate_set_field "$GATE_FILE" delegation_target "$TARGET" || return $?
+  gate_set_field "$GATE_FILE" delegation_agent_type "$AGENT_TYPE" || return $?
+  gate_set_field "$GATE_FILE" delegated true || return $?
 }
 
 with_gate_lock "$GATE_FILE" _mark_locked

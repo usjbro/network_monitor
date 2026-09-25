@@ -27,7 +27,7 @@ fi
 
 _approve_locked() {
   gate_require_status "$GATE_FILE" awaiting-approval || return $?
-  gate_set_field "$GATE_FILE" status approved
+  gate_set_field "$GATE_FILE" status approved || return $?
   echo "approved"
 }
 

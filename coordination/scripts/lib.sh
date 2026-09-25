@@ -145,9 +145,19 @@ with_gate_lock() {
     echo "could not record lock owner for ${gate_file}" >&2
     return 1
   fi
+  # A PID may later be reused. Record the process start time when ps is
+  # available so recovery can distinguish a new process from this owner.
+  local owner_start
+  owner_start="$(LC_ALL=C ps -p "$$" -o lstart= 2>/dev/null || true)"
+  if [[ -n "$owner_start" ]] && ! printf '%s\n' "$owner_start" > "$lock_dir/start"; then
+    rm -f "$lock_dir/pid"
+    rmdir "$lock_dir" 2>/dev/null || true
+    echo "could not record lock owner start time for ${gate_file}" >&2
+    return 1
+  fi
   local rc=0
   "$@" || rc=$?
-  rm -f "$lock_dir/pid"
+  rm -f "$lock_dir/pid" "$lock_dir/start"
   if ! rmdir "$lock_dir"; then
     echo "could not release lock on ${gate_file}; recover it after confirming no operation is active" >&2
     return 1

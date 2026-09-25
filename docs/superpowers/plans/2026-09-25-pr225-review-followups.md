@@ -4,7 +4,7 @@
 
 **Goal:** Let a later session safely recover an approved gate whose delegation was interrupted, and recover an abandoned filesystem lock without disturbing an active operation.
 
-**Architecture:** Keep the existing local Markdown gate format and `mkdir` lock. Record an atomic delegation claim before dispatch; expose an explicit reset that requires confirmation after checking no delegation is active. Record the lock owner PID and provide an explicit recovery command that refuses a live owner. Update the agent instructions to distinguish pending, claimed, and completed delegation.
+**Architecture:** Keep the existing local Markdown gate format and `mkdir` lock. Record an atomic delegation claim before dispatch; expose an explicit reset that requires confirmation after checking no delegation is active. Record the lock owner PID and process start time when available, and provide an explicit recovery command that refuses a matching live owner. Update the agent instructions to distinguish pending, claimed, and completed delegation.
 
 **Tech Stack:** Bash, awk, POSIX filesystem operations, shell regression tests.
 

@@ -127,7 +127,7 @@ delegation:                 # filled in once approved
 - **Both channels reply close together**: the approved gate's atomic `delegation_claimed` transition ensures only one observer starts dispatch; the other observes the existing claim or completion.
 - **Crash after approval but before a delegation claim**: a later session can claim and resume without asking for approval again.
 - **Crash after a delegation claim but before `delegated: true`**: the existing claim prevents automatic duplicate dispatch. A human must confirm no delegation is active before `reset-gate-delegation-claim.sh` allows a retry.
-- **Interrupted lock holder**: lock metadata records the owner PID. `recover-gate-lock.sh` refuses a live owner and requires explicit confirmation before removing a stale or ownerless lock.
+- **Interrupted lock holder**: lock metadata records the owner PID and process start time when available. `recover-gate-lock.sh` refuses a matching live owner, distinguishes a reused PID by its start time, and requires explicit confirmation before removing a stale or ownerless lock.
 - **Explicit rejection**: `status: blocked`, stops; requires a new human instruction, never auto-retried.
 
 ## Testing Plan

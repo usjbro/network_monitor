@@ -39,9 +39,9 @@ _reset_locked() {
     echo "there is no delegation claim to reset" >&2
     return 2
   fi
-  gate_set_field "$GATE_FILE" delegation_claimed false
-  gate_set_field "$GATE_FILE" delegation_target ""
-  gate_set_field "$GATE_FILE" delegation_agent_type ""
+  gate_set_field "$GATE_FILE" delegation_target "" || return $?
+  gate_set_field "$GATE_FILE" delegation_agent_type "" || return $?
+  gate_set_field "$GATE_FILE" delegation_claimed false || return $?
   echo "delegation-claim-reset"
 }
 
