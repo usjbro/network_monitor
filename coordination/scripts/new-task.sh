@@ -10,8 +10,11 @@
 # match this repo's <branch-prefix>/<linear-id>-<slug> convention. Leave it
 # off for coordination work with no Linear-tracked parent.
 #
-# Requires: git, and SLACK_WEBHOOK_URL exported for the Slack post (optional
-# — the task is still created if it's unset, just no Slack message goes out).
+# Requires: git, and a Slack webhook for the Slack post (optional — the task
+# is still created without one, just no Slack message goes out). Configure
+# it once via coordination/.env (SLACK_WEBHOOK_URL=https://hooks.slack.com/...,
+# gitignored) so it persists across shells, or export SLACK_WEBHOOK_URL
+# yourself for a one-off.
 
 set -euo pipefail
 
@@ -31,6 +34,17 @@ case "$GIT_COMMON_DIR" in
   *)  REPO_ROOT="$(git rev-parse --show-toplevel)" ;;
 esac
 TASKS_DIR="$REPO_ROOT/coordination/tasks"
+
+# Load a locally-configured SLACK_WEBHOOK_URL if present. coordination/.env
+# is gitignored (matches the repo-wide .env* pattern) — never commit a
+# webhook URL. Falls back to an already-exported SLACK_WEBHOOK_URL if no
+# file exists.
+if [[ -f "$REPO_ROOT/coordination/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/coordination/.env"
+  set +a
+fi
 
 # Every real branch in this repo (Linear's own gitBranchName, e.g.
 # jamesmbrownjr/jam-9-...) uses this prefix — it is NOT derivable from local

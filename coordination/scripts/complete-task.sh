@@ -19,6 +19,15 @@ case "$GIT_COMMON_DIR" in
 esac
 TASK_FILE="${REPO_ROOT}/coordination/tasks/${TASK_SLUG}.md"
 
+# Load a locally-configured SLACK_WEBHOOK_URL if present — see the matching
+# comment in new-task.sh.
+if [[ -f "$REPO_ROOT/coordination/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/coordination/.env"
+  set +a
+fi
+
 if [[ ! -f "$TASK_FILE" ]]; then
   echo "No task file found: $TASK_FILE" >&2
   exit 1
