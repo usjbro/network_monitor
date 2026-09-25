@@ -7,11 +7,13 @@ import { ThemeConfig, TerminalTheme } from '@/lib/types';
 interface CommandLineBarProps {
   theme: ThemeConfig;
   onExecuteCommand: (cmd: string) => void;
+  displayFilterError?: string | null;
 }
 
 export const CommandLineBar: React.FC<CommandLineBarProps> = ({
   theme,
   onExecuteCommand,
+  displayFilterError,
 }) => {
   const [command, setCommand] = useState('');
   const [history, setHistory] = useState<string[]>([]);
@@ -84,7 +86,14 @@ export const CommandLineBar: React.FC<CommandLineBarProps> = ({
             <div><strong className="text-emerald-400">capture &lt;path&gt; [ring size|duration|count &lt;n&gt;] [autostop duration|totalSize &lt;n&gt;]</strong>: Start writing a live capture to a pcapng file</div>
             <div><strong className="text-emerald-400">capture stop</strong>: Stop the active capture-to-file</div>
             <div><strong className="text-emerald-400">buffer packets|connections|decrypted &lt;n&gt;</strong>: Adjust how many recent items this browser tab keeps</div>
+            <div><strong className="text-emerald-400">display &lt;expression&gt; / display clear</strong>: Filter buffered packets and connections locally</div>
           </div>
+        </div>
+      )}
+
+      {displayFilterError && (
+        <div role="alert" className="border-t border-rose-800 bg-rose-950 px-3 py-1.5 text-rose-200">
+          {displayFilterError}
         </div>
       )}
 

@@ -51,6 +51,7 @@ import { PacketStreamView } from '@/components/PacketStreamView';
 import { ProtocolMatrixView } from '@/components/ProtocolMatrixView';
 import { InstallModal } from '@/components/InstallModal';
 import { CommandLineBar } from '@/components/CommandLineBar';
+import { compileDisplayFilter, type CompiledDisplayFilter } from '@/lib/display-filter';
 
 export default function TerminalApp() {
   // Application State
@@ -98,6 +99,8 @@ export default function TerminalApp() {
   // happened and isn't itself evidence the rejection was resolved.
   const [captureConfig, setCaptureConfig] = useState<CaptureConfig | null>(null);
   const [captureConfigError, setCaptureConfigError] = useState<string | null>(null);
+  const [displayFilter, setDisplayFilter] = useState<{ expression: string; predicate: CompiledDisplayFilter } | null>(null);
+  const [displayFilterError, setDisplayFilterError] = useState<string | null>(null);
 
   // Interface selection (issue #69) — `availableInterfaces` starts empty
   // and is populated on-demand by an explicit `iface list` (or opening the
@@ -539,6 +542,20 @@ export default function TerminalApp() {
       enrichmentControl('disable_background');
     } else if (mainCmd === 'enrich' && arg1 === 'clear') {
       enrichmentControl('clear');
+    } else if (mainCmd === 'display') {
+      const expression = cmdStr.includes(' ') ? cmdStr.slice(cmdStr.indexOf(' ') + 1).trim() : '';
+      if (expression.toLowerCase() === 'clear') {
+        setDisplayFilter(null);
+        setDisplayFilterError(null);
+      } else {
+        const result = compileDisplayFilter(expression);
+        if (result.ok) {
+          setDisplayFilter({ expression, predicate: result.predicate });
+          setDisplayFilterError(null);
+        } else {
+          setDisplayFilterError(`Display filter error: ${result.error.message} at token "${result.error.token}" (character ${result.error.position + 1}).`);
+        }
+      }
     } else if (mainCmd === 'filter' && arg1 === 'clear') {
       sendCaptureFilter('');
     } else if (mainCmd === 'filter' && arg1) {
@@ -869,6 +886,8 @@ export default function TerminalApp() {
               totalObserved={captureStats?.totalConnectionsObserved}
               capacityEvictions={captureStats?.capacityEvictions}
               bufferLimit={connectionBufferLimit}
+              displayFilter={displayFilter?.predicate}
+              displayFilterExpression={displayFilter?.expression}
             />
           )}
 
@@ -880,6 +899,8 @@ export default function TerminalApp() {
               decryptedSegments={decryptedSegments}
               totalObserved={captureStats?.received}
               bufferLimit={packetBufferLimit}
+              displayFilter={displayFilter?.predicate}
+              displayFilterExpression={displayFilter?.expression}
             />
           )}
 
@@ -904,7 +925,7 @@ export default function TerminalApp() {
       />
 
       {/* Interactive Bottom CLI Command Bar */}
-      <CommandLineBar theme={themeConfig} onExecuteCommand={handleExecuteCommand} />
+      <CommandLineBar theme={themeConfig} onExecuteCommand={handleExecuteCommand} displayFilterError={displayFilterError} />
     </div>
   );
 }
