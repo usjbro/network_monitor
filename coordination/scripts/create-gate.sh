@@ -10,10 +10,9 @@
 # mode "interactive": if the Slack post fails or no webhook is configured,
 #   the gate is still created (approval can still come from this chat
 #   session) — a warning is printed.
-# mode "autonomous": the gate can only ever be approved via Slack (there is
-#   no chat session to fall back to), so a missing/failed Slack post fails
-#   gate creation instead of leaving a task stuck awaiting an approval path
-#   that can never arrive.
+# mode "autonomous": the gate can only be approved via Slack. A later live
+# session must manually inspect the gate and its Slack thread to continue.
+# A missing or failed Slack post refuses creation.
 
 set -euo pipefail
 
@@ -44,7 +43,7 @@ _create_locked() {
   fi
 
   if [[ -z "${SLACK_WEBHOOK_URL:-}" && "$MODE" == "autonomous" ]]; then
-    echo "SLACK_WEBHOOK_URL not set — an autonomous gate has no other approval path, refusing to create it." >&2
+    echo "SLACK_WEBHOOK_URL not set — an autonomous gate has no Slack approval path, refusing to create it." >&2
     return 1
   fi
 
@@ -70,7 +69,7 @@ EOF
   elif ! "$SCRIPT_DIR/slack-notify.sh" "awaiting-approval" "$GATE_TAG" "gate" "$PLAN_SUMMARY"; then
     if [[ "$MODE" == "autonomous" ]]; then
       rm -f "$GATE_FILE"
-      echo "Slack post failed — an autonomous gate has no other approval path, refusing to create it." >&2
+      echo "Slack post failed — an autonomous gate has no Slack approval path, refusing to create it." >&2
       return 1
     fi
     echo "Warning: Slack post failed — this gate can only be approved in this chat session, not remotely via Slack." >&2

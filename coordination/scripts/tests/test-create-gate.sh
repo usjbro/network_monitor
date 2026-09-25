@@ -149,6 +149,19 @@ else
   echo "FAIL: gate was not persisted before the Slack request"
   FAILURES=$((FAILURES + 1))
 fi
+AUTO_SLUG="test-create-gate-autonomous-$$"
+AUTO_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$AUTO_SLUG")"
+AUTO_OBSERVED="$(mktemp)"
+if TEST_GATE_FILE="$AUTO_GATE_FILE" TEST_POST_OBSERVED="$AUTO_OBSERVED" \
+    SLACK_WEBHOOK_URL="https://example.invalid/webhook" PATH="$FAKE_BIN:$PATH" \
+    "$CREATE_GATE" "$TEST_LINEAR_ID" "$AUTO_SLUG" "unattended plan" autonomous >/dev/null 2>&1 \
+    && [[ -f "$AUTO_GATE_FILE" && "$(cat "$AUTO_OBSERVED")" == "observed" ]]; then
+  echo "PASS: unattended mode persists and posts a gate for manual pickup"
+else
+  echo "FAIL: unattended mode did not persist and post a gate"
+  FAILURES=$((FAILURES + 1))
+fi
+rm -f "$AUTO_GATE_FILE" "$AUTO_OBSERVED"
 rm -f "$POST_GATE_FILE" "$POST_OBSERVED" "$FAKE_BIN/curl"
 rmdir "$FAKE_BIN"
 
