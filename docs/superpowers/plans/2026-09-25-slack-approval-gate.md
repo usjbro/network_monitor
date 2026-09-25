@@ -89,7 +89,6 @@ assert_exits_nonzero "gate_path rejects traversal in linear-id" \
   "source '$LIB'; gate_path '../../etc' 'slug'"
 
 RESOLVED="$(bash -c "source '$LIB'; gate_path 'JAM-9' 'field-model-typed-named'")"
-EXPECTED="$REPO_ROOT_FOR_TEST"
 if [[ "$RESOLVED" == *"/coordination/gates/jam-9-field-model-typed-named.md" ]]; then
   echo "PASS: gate_path resolves and lower-cases linear-id"
 else
