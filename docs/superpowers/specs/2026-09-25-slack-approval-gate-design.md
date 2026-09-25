@@ -44,7 +44,7 @@ This spec makes posting-and-waiting-for-approval the default behavior for any Li
                                         │ before implementation begins
                                         ▼
                     ┌─────────────────────────────────────────┐
-                    │ 1. Write coordination/gates/<id>-<slug>.md│
+                    │ 1. Write coordination/gates/<id>__<slug>.md│
                     │    status: awaiting-approval               │
                     │ 2. Post plan to #network-monitor via       │
                     │    the existing webhook (slack-notify.sh)  │
@@ -84,7 +84,7 @@ The "watcher" is not a separate agent — it's the gate-creating session's own o
 
 ## Components
 
-**`coordination/gates/<linear-id>-<slug>.md`** — new directory, new file per gated task. Fields:
+**`coordination/gates/<linear-id>__<slug>.md`** — new directory, new file per gated task. The double underscore separates two validated components unambiguously. Fields:
 
 ```
 linear_id: JAM-9

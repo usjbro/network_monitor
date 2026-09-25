@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Create a Slack approval gate for a Linear-tracked task: writes
-# coordination/gates/<linear-id>-<slug>.md with status: awaiting-approval
+# coordination/gates/<linear-id>__<slug>.md with status: awaiting-approval
 # and posts the plan to the shared Slack channel. See
 # docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md.
 #
@@ -33,7 +33,7 @@ source "$SCRIPT_DIR/lib.sh"
 
 GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
 LINEAR_ID_LOWER="$(echo "$LINEAR_ID" | tr '[:upper:]' '[:lower:]')"
-GATE_TAG="${LINEAR_ID_LOWER}-${SLUG}"
+GATE_TAG="${LINEAR_ID_LOWER}__${SLUG}"
 
 mkdir -p "$REPO_ROOT/coordination/gates"
 

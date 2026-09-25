@@ -43,13 +43,14 @@ validate_slug() {
 
 # Computes the gate file path for a given Linear id + slug, validating both
 # first. linear_id is lower-cased to match this repo's existing branch
-# convention (see new-task.sh's LINEAR_ID_LOWER).
+# convention (see new-task.sh's LINEAR_ID_LOWER). The double underscore is
+# unambiguous because neither validated component can contain an underscore.
 gate_path() {
   local linear_id_lower slug="$2"
   linear_id_lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
   validate_slug "$linear_id_lower" "linear-id"
   validate_slug "$slug" "slug"
-  echo "$REPO_ROOT/coordination/gates/${linear_id_lower}-${slug}.md"
+  echo "$REPO_ROOT/coordination/gates/${linear_id_lower}__${slug}.md"
 }
 
 # Reads a single field's value from a gate file's YAML frontmatter block
@@ -82,7 +83,7 @@ gate_set_field() {
   local tmp mode
   tmp="$(mktemp "${gate_file}.XXXXXX")"
   mode="$(stat -f '%Lp' "$gate_file" 2>/dev/null || stat -c '%a' "$gate_file" 2>/dev/null || true)"
-  awk -v field="$field" -v value="$value" '
+  if ! awk -v field="$field" -v value="$value" '
     BEGIN { delim = 0; found = 0 }
     /^---$/ {
       delim++
@@ -93,9 +94,18 @@ gate_set_field() {
     delim == 1 && index($0, field ":") == 1 { print field ": " value; found = 1; next }
     { print }
     END { if (delim < 2) exit 1 }
-  ' "$gate_file" > "$tmp"
-  [[ -n "$mode" ]] && chmod "$mode" "$tmp"
-  mv "$tmp" "$gate_file"
+  ' "$gate_file" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [[ -n "$mode" ]] && ! chmod "$mode" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$gate_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # Reads a gate's current status and, unless it equals required_status,

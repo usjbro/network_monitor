@@ -42,10 +42,19 @@ assert_exits_nonzero "gate_path rejects traversal in linear-id" \
   "source '$LIB'; gate_path '../../etc' 'slug'"
 
 RESOLVED="$(bash -c "source '$LIB'; gate_path 'JAM-9' 'field-model-typed-named'")"
-if [[ "$RESOLVED" == *"/coordination/gates/jam-9-field-model-typed-named.md" ]]; then
+if [[ "$RESOLVED" == *"/coordination/gates/jam-9__field-model-typed-named.md" ]]; then
   echo "PASS: gate_path resolves and lower-cases linear-id"
 else
   echo "FAIL: gate_path resolves and lower-cases linear-id — got '$RESOLVED'"
+  FAILURES=$((FAILURES + 1))
+fi
+
+PATH_A="$(bash -c "source '$LIB'; gate_path 'JAM-1' '2-foo'")"
+PATH_B="$(bash -c "source '$LIB'; gate_path 'JAM-1-2' 'foo'")"
+if [[ "$PATH_A" != "$PATH_B" ]]; then
+  echo "PASS: distinct Linear ID and slug pairs have distinct gate paths"
+else
+  echo "FAIL: distinct Linear ID and slug pairs collide at '$PATH_A'"
   FAILURES=$((FAILURES + 1))
 fi
 
@@ -107,6 +116,20 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 rm -f "$FIELD_TEST_FILE"
+
+MALFORMED_FILE="$(mktemp)"
+printf '%s\n' '---' 'status: awaiting-approval' > "$MALFORMED_FILE"
+MALFORMED_BEFORE="$(cat "$MALFORMED_FILE")"
+if bash -c "source '$LIB'; gate_set_field '$MALFORMED_FILE' status approved" >/dev/null 2>&1; then
+  echo "FAIL: gate_set_field accepted malformed frontmatter"
+  FAILURES=$((FAILURES + 1))
+elif [[ "$(cat "$MALFORMED_FILE")" == "$MALFORMED_BEFORE" ]]; then
+  echo "PASS: malformed frontmatter is rejected without replacing the gate"
+else
+  echo "FAIL: malformed frontmatter replaced the gate despite an error"
+  FAILURES=$((FAILURES + 1))
+fi
+rm -f "$MALFORMED_FILE" "$MALFORMED_FILE".*
 
 # gate_set_field must preserve the gate file's permission mode — the
 # mktemp+mv rewrite pattern silently downgrades it to mktemp's default
