@@ -228,6 +228,14 @@ else
   echo "FAIL: confirmed ownerless lock was not removed"
   FAILURES=$((FAILURES + 1))
 fi
+mkdir "$LOCK_DIR"
+printf '%s\n' 'orphaned start metadata' > "$LOCK_DIR/start"
+if "$BIN/recover-gate-lock.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 && [[ ! -e "$LOCK_DIR" ]]; then
+  echo "PASS: confirmed ownerless lock with orphaned start metadata is removed"
+else
+  echo "FAIL: ownerless lock with orphaned start metadata was not removed"
+  FAILURES=$((FAILURES + 1))
+fi
 
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."

@@ -43,8 +43,11 @@ if [[ -e "$OWNER_FILE" ]]; then
       exit 1
     fi
   fi
-  rm -f "$OWNER_FILE" "$START_FILE"
 fi
+
+# The owner may have died between removing pid and removing start during
+# normal cleanup. Confirmation also covers that ownerless state.
+rm -f "$OWNER_FILE" "$START_FILE"
 
 if ! rmdir "$LOCK_DIR"; then
   echo "lock directory is not empty; inspect it manually: $LOCK_DIR" >&2
