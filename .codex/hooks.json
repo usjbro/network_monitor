@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "'/Users/jamesbrown/Documents/GitHub/network_monitor/.codex/hooks/pr-review-reminder.sh'"
+          }
+        ]
+      }
+    ]
+  }
+}

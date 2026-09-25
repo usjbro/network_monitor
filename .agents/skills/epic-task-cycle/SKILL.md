@@ -16,7 +16,7 @@ and the appendix records what it cost.
 
 This is scaffolding, not a substitute for reading the actual spec and plan
 for whatever you're touching (`docs/superpowers/specs/`,
-`docs/superpowers/plans/`) or this repo's own `CLAUDE.md`.
+`docs/superpowers/plans/`) or this repo's own `AGENTS.md`.
 
 ## 0. Resolve the epic
 
@@ -267,22 +267,6 @@ having more work left than it did. Do step 2 before step 4, not after.
   session — it rewrites that file as a side effect (a `.next/` vs.
   `.next/dev/` path difference) that has nothing to do with your change and
   shouldn't be committed.
-- **Never commit further work onto a branch whose PR already squash-merged**
-  without rebuilding it first. That branch's merge-base with `main` predates
-  the squash commit, so a new PR from it (or `gh pr diff`, or any reviewer
-  reading it) shows the *entire* already-merged diff again as if it were
-  new — a phantom diff, not an actual conflict. Fix: `git checkout -b
-  <new-branch> origin/main && git cherry-pick <your-new-commits-only>`, then
-  `git diff --stat origin/main <new-branch>` to confirm the diff is exactly
-  what you intended before opening the PR. (Found the hard way reusing a
-  worktree whose feature branch had already shipped in a prior PR.)
-- `main` is GitHub branch-protected (2 required status checks) — a direct
-  `git push origin main` is rejected outright, even for a one-line docs
-  change. Always go through a PR.
-- Run an independent review (`/code-review` or equivalent) before merging,
-  even for docs/tooling-only PRs — self-review misses real things. One
-  session's own coordination-tooling PRs turned up 4 genuine script bugs and
-  5 doc-accuracy issues this way, none caught while writing them.
 
 ## Things not to do
 
