@@ -95,6 +95,7 @@ it('does not make an absent field match !=', () => {
 
 **Files:**
 - Modify: `app/page.tsx`
+- Modify: `components/CommandLineBar.tsx`
 - Test: `lib/__tests__/page-command-bar-display-filter.test.tsx`
 - Read: `components/CommandLineBar.tsx`, `lib/__tests__/page-command-bar-capture.test.tsx`
 
@@ -105,7 +106,7 @@ it('does not make an absent field match !=', () => {
 
 - [ ] **Step 1: Write command-bar tests for activation and clearing.** Submit `display tcp.dst_port == 443`; assert the packet/connection views show the active expression and no `/api/control` request occurs. Submit `display clear`; assert all buffered rows return and no `/api/control` request occurs.
 - [ ] **Step 2: Run the focused command test and confirm `display` is ignored.** Run `npx vitest run lib/__tests__/page-command-bar-display-filter.test.tsx`; expect the active expression/filter behavior to fail.
-- [ ] **Step 3: Add state and command routing.** Preserve expression case by slicing it from original `cmdStr`, as existing BPF command handling does. Add `display` to `CommandLineBar` help text. Pass one compiled predicate to both views.
+- [ ] **Step 3: Add state and command routing.** Preserve expression case by slicing it from original `cmdStr`, as existing BPF command handling does. Add `display` to `CommandLineBar` help text and display parse errors there using a small optional prop. Pass one compiled predicate to both views.
 - [ ] **Step 4: Run activation/clear tests and verify no control request.** Run `npx vitest run lib/__tests__/page-command-bar-display-filter.test.tsx`; expect the display command cases to pass with no fetch to `/api/control`.
 - [ ] **Step 5: Add failing-error retention and capture-filter distinction tests.** Activate a valid display filter, submit malformed `display` syntax, and assert the error identifies display filtering, offending token, and position while the valid filter remains active. Submit `filter host Example.com` and assert it still sends the original case-preserved BPF request; `filter clear` still sends an empty capture filter.
 - [ ] **Step 6: Implement local error feedback and preserve last valid predicate on parse failure.** Do not route display syntax to `sendCaptureFilter`; make `display clear` remove any display parse error.
