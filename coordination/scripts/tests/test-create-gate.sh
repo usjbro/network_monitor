@@ -9,20 +9,7 @@ FAILURES=0
 TEST_LINEAR_ID="ZZZ-999"
 TEST_SLUG="test-create-gate-$$"
 
-# Temporarily hide the main repo's coordination/.env so this worktree's
-# "no .env" scenario is testable (the worktree itself has no .env, and we
-# want lib.sh's sourcing to be a no-op).
-MAIN_REPO_ENV="/Users/jamesbrown/Documents/GitHub/network_monitor/coordination/.env"
-MAIN_REPO_ENV_BACKUP="${MAIN_REPO_ENV}.backup-test-$$"
-if [[ -f "$MAIN_REPO_ENV" ]]; then
-  mv "$MAIN_REPO_ENV" "$MAIN_REPO_ENV_BACKUP"
-fi
-
 cleanup() {
-  # Restore the main repo's .env file
-  if [[ -f "$MAIN_REPO_ENV_BACKUP" ]]; then
-    mv "$MAIN_REPO_ENV_BACKUP" "$MAIN_REPO_ENV"
-  fi
   # shellcheck disable=SC1091
   source "$SCRIPT_DIR/../lib.sh"
   rm -f "$(gate_path "$TEST_LINEAR_ID" "$TEST_SLUG" 2>/dev/null)" 2>/dev/null || true

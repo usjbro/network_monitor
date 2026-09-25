@@ -14,9 +14,10 @@ esac
 
 # Load a locally-configured SLACK_WEBHOOK_URL if present. coordination/.env
 # is gitignored (matches the repo-wide .env* pattern) — never commit a
-# webhook URL. Falls back to an already-exported SLACK_WEBHOOK_URL if no
-# file exists.
-if [[ -f "$REPO_ROOT/coordination/.env" ]]; then
+# webhook URL. A caller-exported SLACK_WEBHOOK_URL (even if set to empty
+# string) takes precedence and suppresses loading from .env — this allows
+# tests and callers to override the default webhook or explicitly disable it.
+if [[ -f "$REPO_ROOT/coordination/.env" && -z "${SLACK_WEBHOOK_URL+x}" ]]; then
   set -a
   # shellcheck disable=SC1091
   source "$REPO_ROOT/coordination/.env"
