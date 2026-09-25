@@ -10,36 +10,35 @@ TASK_SLUG="${1:?usage: complete-task.sh <task-slug> <review|done> \"<summary>\"}
 NEW_STATUS="${2:?usage: complete-task.sh <task-slug> <review|done> \"<summary>\"}"
 SUMMARY="${3:-"<no summary given>"}"
 
-# Always resolve to the main repo root, even when invoked from inside a
-# linked worktree — see the matching comment in new-task.sh.
-GIT_COMMON_DIR="$(git rev-parse --git-common-dir)"
-case "$GIT_COMMON_DIR" in
-  /*) REPO_ROOT="$(cd "$(dirname "$GIT_COMMON_DIR")" && pwd)" ;;
-  *)  REPO_ROOT="$(git rev-parse --show-toplevel)" ;;
-esac
-TASK_FILE="${REPO_ROOT}/coordination/tasks/${TASK_SLUG}.md"
-
-# Load a locally-configured SLACK_WEBHOOK_URL if present — see the matching
-# comment in new-task.sh.
-if [[ -f "$REPO_ROOT/coordination/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$REPO_ROOT/coordination/.env"
-  set +a
+if [[ "$NEW_STATUS" != "review" && "$NEW_STATUS" != "done" ]]; then
+  echo "status must be 'review' or 'done'" >&2
+  exit 1
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib.sh"
+TASK_FILE="${REPO_ROOT}/coordination/tasks/${TASK_SLUG}.md"
 
 if [[ ! -f "$TASK_FILE" ]]; then
   echo "No task file found: $TASK_FILE" >&2
   exit 1
 fi
 
-# Update the status field in the frontmatter.
-sed -i.bak "s/^status: .*/status: ${NEW_STATUS}/" "$TASK_FILE"
-rm -f "${TASK_FILE}.bak"
-
+# Extract everything we need BEFORE mutating the file, so a task file
+# missing an owner:/branch: line (hand-edited, or from an older script
+# version) aborts here — under set -e, via the unset-var check below — with
+# the file untouched, rather than after its status has already been
+# rewritten but before the confirmation/Slack post ever runs.
 OWNER="$(grep '^owner:' "$TASK_FILE" | cut -d' ' -f2)"
 BRANCH="$(grep '^branch:' "$TASK_FILE" | cut -d' ' -f2)"
 LINEAR_ID="$(grep '^linear_id:' "$TASK_FILE" | cut -d' ' -f2- || true)"
+: "${OWNER:?$TASK_FILE has no owner: line}"
+: "${BRANCH:?$TASK_FILE has no branch: line}"
+
+# Update the status field in the frontmatter.
+sed -i.bak "s/^status: .*/status: ${NEW_STATUS}/" "$TASK_FILE"
+rm -f "${TASK_FILE}.bak"
 
 echo "Marked ${TASK_SLUG} as ${NEW_STATUS}."
 echo "Branch: ${BRANCH}"
@@ -51,5 +50,5 @@ if [[ -n "${LINEAR_ID:-}" ]]; then
 fi
 
 if [[ -n "${SLACK_WEBHOOK_URL:-}" ]]; then
-  "$(dirname "$0")/slack-notify.sh" "$NEW_STATUS" "$TASK_SLUG" "$OWNER" "$SUMMARY" || true
+  "$SCRIPT_DIR/slack-notify.sh" "$NEW_STATUS" "$TASK_SLUG" "$OWNER" "$SUMMARY" || true
 fi

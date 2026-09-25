@@ -2,7 +2,7 @@
 task: <task-slug>
 owner: claude-code | codex
 status: open | in-progress | blocked | review | done
-branch: agent/<task-slug>
+branch: jamesmbrownjr/<task-slug>
 depends_on: []
 created: <date>
 ---
@@ -37,4 +37,4 @@ agent/human reads — not the chat transcript.
 - **Files changed:**
 - **Test results:**
 - **Risks / follow-ups:**
-- **Branch:** `agent/<task-slug>`
+- **Branch:** `jamesmbrownjr/<task-slug>`

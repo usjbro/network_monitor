@@ -23,28 +23,10 @@ OWNER="${2:?usage: new-task.sh <task-slug> <claude-code|codex> \"<goal>\" [linea
 GOAL="${3:-"<fill in>"}"
 LINEAR_ID="${4:-}"
 
-# Always resolve to the main repo root, even when invoked from inside a
-# linked worktree (--show-toplevel would return that worktree's own root
-# instead, nesting new worktrees under it). --git-common-dir prints an
-# absolute path to the main .git when run from a worktree, and a relative
-# ".git" when already in the main checkout.
-GIT_COMMON_DIR="$(git rev-parse --git-common-dir)"
-case "$GIT_COMMON_DIR" in
-  /*) REPO_ROOT="$(cd "$(dirname "$GIT_COMMON_DIR")" && pwd)" ;;
-  *)  REPO_ROOT="$(git rev-parse --show-toplevel)" ;;
-esac
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib.sh"
 TASKS_DIR="$REPO_ROOT/coordination/tasks"
-
-# Load a locally-configured SLACK_WEBHOOK_URL if present. coordination/.env
-# is gitignored (matches the repo-wide .env* pattern) — never commit a
-# webhook URL. Falls back to an already-exported SLACK_WEBHOOK_URL if no
-# file exists.
-if [[ -f "$REPO_ROOT/coordination/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$REPO_ROOT/coordination/.env"
-  set +a
-fi
 
 # Every real branch in this repo (Linear's own gitBranchName, e.g.
 # jamesmbrownjr/jam-9-...) uses this prefix — it is NOT derivable from local
@@ -73,6 +55,12 @@ if [[ -f "$TASK_FILE" ]]; then
   echo "Task file already exists: $TASK_FILE" >&2
   exit 1
 fi
+
+# Create the worktree/branch FIRST — it's the more failure-prone step (name
+# collision, a stale .worktrees/<slug> left from an aborted prior run, main
+# not up to date). If it fails, nothing has been written yet, so a retry
+# isn't blocked by a leftover task file tripping the check above.
+git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" main
 
 mkdir -p "$TASKS_DIR"
 
@@ -111,8 +99,6 @@ ${GOAL}
 - **Branch:** \`${BRANCH}\`
 EOF
 
-git -C "$REPO_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" main
-
 echo "Task file:  $TASK_FILE"
 echo "Worktree:   $WORKTREE_DIR"
 echo "Branch:     $BRANCH"
@@ -123,5 +109,5 @@ if [[ -n "$LINEAR_ID" ]]; then
 fi
 
 if [[ -n "${SLACK_WEBHOOK_URL:-}" ]]; then
-  "$(dirname "$0")/slack-notify.sh" "started" "$TASK_SLUG" "$OWNER" "$GOAL" || true
+  "$SCRIPT_DIR/slack-notify.sh" "started" "$TASK_SLUG" "$OWNER" "$GOAL" || true
 fi
