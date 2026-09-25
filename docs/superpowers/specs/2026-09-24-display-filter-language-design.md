@@ -71,6 +71,12 @@ has no value on the record and does not match; paths are not validated against
 the currently buffered packets, so filters can be entered before a matching
 packet arrives.
 
+Parsing is bounded to 2,048 source characters, 256 non-end tokens, 64
+nested `not` operators/parentheses, and 128 literals in an `in` set.
+Oversized display expressions are rejected locally with a structured error
+at the first disallowed source position; they never reach the capture agent.
+The token bound can reject a large `in` set before its set-size bound.
+
 ### Packet values
 
 Packet predicates read the packet's `WireField[]` from `PacketFrame.fields`.

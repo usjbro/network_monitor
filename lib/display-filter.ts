@@ -8,13 +8,24 @@ export type CompiledDisplayFilter = (record: DisplayFilterRecord) => boolean;
 
 type Value = { type: 'number' | 'boolean' | 'string' | 'address' | 'group'; value?: number | boolean | string };
 type Literal = { type: 'number' | 'boolean' | 'string'; value: number | boolean | string };
-type Token = { kind: 'word' | 'number' | 'string' | 'symbol' | 'end'; text: string; position: number; value?: string };
+type Token = { kind: 'word' | 'number' | 'string' | 'symbol' | 'error' | 'end'; text: string; position: number; value?: string; message?: string };
+
+const MAX_SOURCE_LENGTH = 2048;
+const MAX_TOKENS = 256;
+const MAX_NESTING = 64;
+const MAX_SET_SIZE = 128;
 
 function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
+  const error = (message: string, text: string, position: number): Token[] => [
+    ...tokens,
+    { kind: 'error', text, position, message },
+    { kind: 'end', text: '<end>', position: source.length },
+  ];
   let i = 0;
   while (i < source.length) {
     if (/\s/.test(source[i])) { i++; continue; }
+    if (tokens.length === MAX_TOKENS) return error('Token limit exceeded', '<token-limit>', i);
     const position = i;
     const rest = source.slice(i);
     const word = /^[a-z_][a-z_0-9.]*/i.exec(rest);
@@ -27,18 +38,18 @@ function tokenize(source: string): Token[] {
       while (i < source.length && source[i] !== '"') {
         if (source[i] === '\\') {
           i++;
-          if (i >= source.length || (source[i] !== '\\' && source[i] !== '"')) throw { message: 'Invalid string escape', token: source[i] ?? '<end>', position: i };
+          if (i >= source.length || (source[i] !== '\\' && source[i] !== '"')) return error('Invalid string escape', source[i] ?? '<end>', i);
         }
         value += source[i++];
       }
-      if (i >= source.length) throw { message: 'Unterminated string', token: '<end>', position: i };
+      if (i >= source.length) return error('Unterminated string', '<end>', i);
       i++;
       tokens.push({ kind: 'string', text: source.slice(position, i), value, position });
       continue;
     }
     const symbol = /^(==|!=|>=|<=|[><(),{}])/.exec(rest);
     if (symbol) { tokens.push({ kind: 'symbol', text: symbol[0], position }); i += symbol[0].length; continue; }
-    throw { message: 'Unexpected token', token: source[i], position };
+    return error('Unexpected token', source[i], position);
   }
   tokens.push({ kind: 'end', text: '<end>', position: source.length });
   return tokens;
@@ -95,8 +106,12 @@ function compare(value: Value | undefined, operator: string, literal: Literal): 
 class Parser {
   private index = 0;
   constructor(private readonly tokens: Token[]) {}
-  private peek(): Token { return this.tokens[this.index]; }
-  private take(): Token { return this.tokens[this.index++]; }
+  private peek(): Token {
+    const token = this.tokens[this.index];
+    if (token.kind === 'error') throw { message: token.message, token: token.text, position: token.position };
+    return token;
+  }
+  private take(): Token { const token = this.peek(); this.index++; return token; }
   private fail(token = this.peek()): never { throw { message: 'Unexpected token', token: token.text, position: token.position }; }
   private keyword(word: string): boolean { return this.peek().kind === 'word' && this.peek().text.toLowerCase() === word; }
   private symbol(symbol: string): boolean { return this.peek().kind === 'symbol' && this.peek().text === symbol; }
@@ -109,39 +124,41 @@ class Parser {
     return this.fail(token);
   }
   parse(): CompiledDisplayFilter {
-    const predicate = this.or();
+    const predicate = this.or(0);
     if (this.peek().kind !== 'end') this.fail();
     return predicate;
   }
-  private or(): CompiledDisplayFilter {
-    let left = this.and();
+  private or(depth: number): CompiledDisplayFilter {
+    let left = this.and(depth);
     while (this.keyword('or')) {
       this.take();
-      const right = this.and();
+      const right = this.and(depth);
       const previous = left;
       left = record => previous(record) || right(record);
     }
     return left;
   }
-  private and(): CompiledDisplayFilter {
-    let left = this.not();
+  private and(depth: number): CompiledDisplayFilter {
+    let left = this.not(depth);
     while (this.keyword('and')) {
       this.take();
-      const right = this.not();
+      const right = this.not(depth);
       const previous = left;
       left = record => previous(record) && right(record);
     }
     return left;
   }
-  private not(): CompiledDisplayFilter {
+  private not(depth: number): CompiledDisplayFilter {
     if (this.keyword('not')) {
+      if (depth === MAX_NESTING) throw { message: 'Nesting limit exceeded', token: '<nesting-limit>', position: this.peek().position };
       this.take();
-      const child = this.not();
+      const child = this.not(depth + 1);
       return record => !child(record);
     }
     if (this.symbol('(')) {
+      if (depth === MAX_NESTING) throw { message: 'Nesting limit exceeded', token: '<nesting-limit>', position: this.peek().position };
       this.take();
-      const child = this.or();
+      const child = this.or(depth + 1);
       this.expectSymbol(')');
       return child;
     }
@@ -168,11 +185,22 @@ class Parser {
       this.take();
       this.expectSymbol('{');
       const literals: Literal[] = [this.literal()];
-      while (this.symbol(',')) { this.take(); literals.push(this.literal()); }
+      while (this.symbol(',')) {
+        this.take();
+        if (literals.length === MAX_SET_SIZE) throw { message: 'Set size limit exceeded', token: '<set-limit>', position: this.peek().position };
+        literals.push(this.literal());
+      }
       this.expectSymbol('}');
+      const numbers = new Set(literals.filter((literal) => literal.type === 'number').map((literal) => literal.value as number));
+      const booleans = new Set(literals.filter((literal) => literal.type === 'boolean').map((literal) => literal.value as boolean));
+      const strings = new Set(literals.filter((literal) => literal.type === 'string').map((literal) => (literal.value as string).toLowerCase()));
       predicate = record => {
         const value = valueAt(record, path.text.toLowerCase());
-        return literals.some(literal => compare(value, '==', literal));
+        if (!value || value.value === undefined) return false;
+        if (value.type === 'number') return numbers.has(value.value as number);
+        if (value.type === 'boolean') return booleans.has(value.value as boolean);
+        if (value.type === 'string' || value.type === 'address') return strings.has((value.value as string).toLowerCase());
+        return false;
       };
     } else {
       predicate = record => valueAt(record, path.text.toLowerCase()) !== undefined;
@@ -182,6 +210,7 @@ class Parser {
 }
 
 export function compileDisplayFilter(source: string): { ok: true; predicate: CompiledDisplayFilter } | { ok: false; error: DisplayFilterError } {
+  if (source.length > MAX_SOURCE_LENGTH) return { ok: false, error: { message: 'Source length limit exceeded', token: '<source-limit>', position: MAX_SOURCE_LENGTH } };
   try {
     return { ok: true, predicate: new Parser(tokenize(source)).parse() };
   } catch (error) {

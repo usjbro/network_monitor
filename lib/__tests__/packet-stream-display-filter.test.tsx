@@ -18,6 +18,20 @@ const packet = (id: string, summary: string): PacketFrame => ({
 const hidden = packet('pkt-hidden', 'hidden packet summary');
 const match = packet('pkt-match', 'matching packet summary');
 const displayFilter: CompiledDisplayFilter = (record) => record.kind === 'packet' && record.packet.id === 'pkt-match';
+const withFields = (frame: PacketFrame): PacketFrame => ({
+  ...frame,
+  headerHexDump: 'aa bb', hexDump: 'cc dd',
+  fields: [
+    { path: 'tcp.dst_port', label: 'Destination Port', type: 'uint', value: 443,
+      region: 'header', offset: 0, len: 1 },
+    { path: 'tcp.src_port', label: 'Source Port', type: 'uint', value: 55555,
+      region: 'header', offset: 1, len: 1 },
+    { path: 'app.value', label: 'Application Value', type: 'str', value: frame.id,
+      region: 'payload', offset: 0, len: 1 },
+    { path: 'app.other', label: 'Other Application Value', type: 'str', value: 'other',
+      region: 'payload', offset: 1, len: 1 },
+  ],
+});
 
 describe('PacketStreamView shared display filter', () => {
   it('scopes feed and JSON export while reporting matches against the full retained buffer', () => {
@@ -54,5 +68,29 @@ describe('PacketStreamView shared display filter', () => {
     fireEvent.change(screen.getByPlaceholderText(/filter live pcap stream/i), { target: { value: 'absent' } });
     expect(screen.getByText(/1 of 2 buffered packets match/i)).toBeInTheDocument();
     expect(screen.getByText(/0 frames/i)).toBeInTheDocument();
+  });
+
+  it.each(['display', 'local'] as const)('clears inspector field and byte highlights when %s filtering replaces the selected packet', (filterKind) => {
+    const packets = [withFields(hidden), withFields(match)];
+    const props = { packets, theme: THEMES.matrix, onClearPackets: () => {} };
+    const { container, rerender } = render(<PacketStreamView {...props} />);
+    fireEvent.click(container.querySelector('[data-field-path="tcp.dst_port"]')!);
+    fireEvent.click(container.querySelector('[data-field-path="app.value"]')!);
+    fireEvent.mouseEnter(container.querySelector('[data-field-path="tcp.src_port"]')!);
+    fireEvent.mouseEnter(container.querySelector('[data-field-path="app.other"]')!);
+    fireEvent.mouseEnter(container.querySelector('[data-testid="header-hex-dump"] [data-byte-index="1"]')!);
+    fireEvent.mouseEnter(container.querySelector('[data-testid="payload-hex-dump"] [data-byte-index="1"]')!);
+    expect(container.querySelectorAll('[data-field-path][data-highlighted="true"]')).toHaveLength(4);
+
+    if (filterKind === 'display') {
+      rerender(<PacketStreamView {...props} displayFilter={displayFilter} />);
+    } else {
+      fireEvent.change(screen.getByPlaceholderText(/filter live pcap stream/i), { target: { value: 'matching' } });
+    }
+
+    expect(screen.getByText('ID: pkt-match')).toBeInTheDocument();
+    expect(container.querySelectorAll('[data-field-path][data-highlighted="true"]')).toHaveLength(0);
+    expect(container.querySelectorAll('[data-testid="header-hex-dump"] [class*="bg-emerald-500"]')).toHaveLength(0);
+    expect(container.querySelectorAll('[data-testid="payload-hex-dump"] [class*="bg-emerald-500"]')).toHaveLength(0);
   });
 });

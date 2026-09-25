@@ -79,6 +79,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   const [isFrozen, setIsFrozen] = useState(false);
   const [layerFilter, setLayerFilter] = useState<number>(0); // 0 = all
   const [selectedPacket, setSelectedPacket] = useState<PacketFrame | null>(packets[0] || null);
+  const [inspectorPacketId, setInspectorPacketId] = useState<string | null>(packets[0]?.id ?? null);
   // Transient feedback for the hex-dump copy button: a clipboard write can
   // legitimately fail (no permission, or no navigator.clipboard at all on a
   // non-secure origin), and silently doing nothing would read as a broken
@@ -103,6 +104,15 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
     return matchesSearch && pkt.layer === layerFilter;
   });
   const visibleSelectedPacket = displayedPackets.find((packet) => packet.id === selectedPacket?.id) ?? displayedPackets[0] ?? null;
+  if (inspectorPacketId !== (visibleSelectedPacket?.id ?? null)) {
+    setInspectorPacketId(visibleSelectedPacket?.id ?? null);
+    setSelectedHeaderFieldPath(null);
+    setSelectedPayloadFieldPath(null);
+    setHoveredHeaderFieldPath(null);
+    setHoveredPayloadFieldPath(null);
+    setHoveredHeaderByte(null);
+    setHoveredPayloadByte(null);
+  }
   const headerFields = visibleSelectedPacket?.fields.filter((field) => field.region === 'header') ?? [];
   const payloadFields = visibleSelectedPacket?.fields.filter((field) => field.region === 'payload') ?? [];
   const highlightedHeaderPaths = new Set(headerFields.filter((field) => hoveredHeaderByte !== null && hoveredHeaderByte >= field.offset && hoveredHeaderByte < field.offset + field.len).map((field) => field.path));

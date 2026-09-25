@@ -98,4 +98,42 @@ describe('compileDisplayFilter', () => {
     if (!result.ok) expect(result.error).toMatchObject({ token, position });
   });
 
+  it('reports an invalid literal before a later invalid character', () => {
+    const result = compileDisplayFilter('tcp.dst_port == nope @');
+    expect(result).toMatchObject({ ok: false, error: { token: 'nope', position: 16 } });
+  });
+
+  it('accepts the source-length boundary and rejects the first character beyond it', () => {
+    expect(compileDisplayFilter('frame.len'.padEnd(2048))).toMatchObject({ ok: true });
+    expect(compileDisplayFilter('frame.len'.padEnd(2049))).toMatchObject({
+      ok: false, error: { token: '<source-limit>', position: 2048 },
+    });
+  });
+
+  it('accepts 256 tokens and rejects token 257 at its source position', () => {
+    const accepted = Array(128).fill('frame.len').join(' or ');
+    const rejected = `${accepted} or frame.len`;
+    expect(compileDisplayFilter(`not ${accepted}`)).toMatchObject({ ok: true });
+    expect(compileDisplayFilter(rejected)).toMatchObject({
+      ok: false, error: { token: '<token-limit>', position: accepted.length + 4 },
+    });
+  });
+
+  it('bounds nested not and parentheses at the first disallowed opener', () => {
+    expect(compileDisplayFilter(`${'not '.repeat(64)}frame.len`)).toMatchObject({ ok: true });
+    expect(compileDisplayFilter(`${'not '.repeat(65)}frame.len`)).toMatchObject({
+      ok: false, error: { token: '<nesting-limit>', position: 256 },
+    });
+    expect(compileDisplayFilter(`${'('.repeat(64)}frame.len${')'.repeat(64)}`)).toMatchObject({ ok: true });
+    expect(compileDisplayFilter(`${'('.repeat(65)}frame.len${')'.repeat(65)}`)).toMatchObject({
+      ok: false, error: { token: '<nesting-limit>', position: 64 },
+    });
+  });
+
+  it('bounds set parsing before evaluating an oversized membership expression', () => {
+    const source = `frame.len in {${Array(129).fill('1').join(',')}}`;
+    const result = compileDisplayFilter(source);
+    expect(result).toMatchObject({ ok: false, error: { token: '<token-limit>', position: 267 } });
+  });
+
 });
