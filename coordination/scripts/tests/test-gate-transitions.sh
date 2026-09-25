@@ -34,7 +34,7 @@ test
 EOF
 
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$TEST_SLUG")"
-[[ "$STATUS_OUT" == "status=awaiting-approval delegated=false" ]] \
+[[ "$STATUS_OUT" == "status=awaiting-approval delegated=false delegation_claimed=false" ]] \
   && echo "PASS: gate-status.sh reports initial state" \
   || { echo "FAIL: gate-status.sh reports initial state — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 
@@ -61,13 +61,18 @@ fi
 rm -f "$RESULT_A" "$RESULT_B"
 
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$TEST_SLUG")"
-[[ "$STATUS_OUT" == "status=approved delegated=false" ]] \
+[[ "$STATUS_OUT" == "status=approved delegated=false delegation_claimed=false" ]] \
   && echo "PASS: gate is approved after the race, delegated still false" \
   || { echo "FAIL: gate is approved after the race — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 
+"$BIN/claim-gate-delegation.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" >/dev/null
+STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$TEST_SLUG")"
+[[ "$STATUS_OUT" == "status=approved delegated=false delegation_claimed=true" ]] \
+  && echo "PASS: claim-gate-delegation.sh claims the approved gate" \
+  || { echo "FAIL: claim-gate-delegation.sh claims the approved gate — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 "$BIN/mark-gate-delegated.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" in-session network-monitor-developer >/dev/null
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$TEST_SLUG")"
-[[ "$STATUS_OUT" == "status=approved delegated=true" ]] \
+[[ "$STATUS_OUT" == "status=approved delegated=true delegation_claimed=true" ]] \
   && echo "PASS: mark-gate-delegated.sh flips delegated" \
   || { echo "FAIL: mark-gate-delegated.sh flips delegated — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 grep -q "^delegation_target: in-session$" "$GATE_FILE" \
@@ -105,7 +110,7 @@ test
 EOF
 "$BIN/block-gate.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" "scope too broad" >/dev/null
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$TEST_SLUG")"
-[[ "$STATUS_OUT" == "status=blocked delegated=false" ]] \
+[[ "$STATUS_OUT" == "status=blocked delegated=false delegation_claimed=false" ]] \
   && echo "PASS: block-gate.sh sets status=blocked" \
   || { echo "FAIL: block-gate.sh sets status=blocked — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 grep -q "scope too broad" "$GATE_FILE" \
@@ -123,12 +128,12 @@ SLACK_WEBHOOK_URL="" "$BIN/create-gate.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG" \
   "$INJECT_PLAN" \
   interactive >/dev/null 2>&1
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG")"
-[[ "$STATUS_OUT" == "status=awaiting-approval delegated=false" ]] \
+[[ "$STATUS_OUT" == "status=awaiting-approval delegated=false delegation_claimed=false" ]] \
   && echo "PASS: gate-status.sh ignores a look-alike 'status:' line in the plan body" \
   || { echo "FAIL: gate-status.sh ignores a look-alike 'status:' line in the plan body — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 "$BIN/approve-gate.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG" >/dev/null
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG")"
-[[ "$STATUS_OUT" == "status=approved delegated=false" ]] \
+[[ "$STATUS_OUT" == "status=approved delegated=false delegation_claimed=false" ]] \
   && echo "PASS: approve-gate.sh still approves a gate whose plan body contains a look-alike 'status:' line" \
   || { echo "FAIL: approve-gate.sh with look-alike body line — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 rm -f "$INJECT_GATE_FILE"
@@ -145,6 +150,7 @@ linear_id: ${TEST_LINEAR_ID}
 slug: ${GUARD_SLUG}
 status: approved
 delegated: true
+delegation_claimed: true
 posted_at: 2026-09-25T00:00:00Z
 delegation_target: in-session
 delegation_agent_type:
@@ -162,7 +168,7 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$GUARD_SLUG")"
-[[ "$STATUS_OUT" == "status=approved delegated=true" ]] \
+[[ "$STATUS_OUT" == "status=approved delegated=true delegation_claimed=true" ]] \
   && echo "PASS: gate state unchanged after a refused block" \
   || { echo "FAIL: gate state unchanged after a refused block — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 rm -f "$GUARD_GATE_FILE"
@@ -196,7 +202,7 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$DELEGATE_GUARD_SLUG")"
-[[ "$STATUS_OUT" == "status=awaiting-approval delegated=false" ]] \
+[[ "$STATUS_OUT" == "status=awaiting-approval delegated=false delegation_claimed=false" ]] \
   && echo "PASS: gate state unchanged after a refused delegation" \
   || { echo "FAIL: gate state unchanged after a refused delegation — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 rm -f "$DELEGATE_GUARD_FILE"

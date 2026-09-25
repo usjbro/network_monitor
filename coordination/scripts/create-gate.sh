@@ -63,6 +63,7 @@ linear_id: ${LINEAR_ID}
 slug: ${SLUG}
 status: awaiting-approval
 delegated: false
+delegation_claimed: false
 posted_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 delegation_target:
 delegation_agent_type:

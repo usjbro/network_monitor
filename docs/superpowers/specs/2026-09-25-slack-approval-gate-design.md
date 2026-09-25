@@ -91,6 +91,7 @@ linear_id: JAM-9
 slug: field-model-typed-named
 status: awaiting-approval   # -> approved | blocked
 delegated: false            # -> true once delegation actually runs
+delegation_claimed: false    # -> true before dispatch; reset only after human confirms no active dispatch
 posted_at: 2026-09-25T14:00:00Z
 plan_summary: >
   <short restatement of the task's objective/acceptance criteria>
@@ -108,7 +109,7 @@ delegation:                 # filled in once approved
 ## Data Flow — Interactive Case (you're present)
 
 1. You ask for work on a Linear task. The session reads `CURRENT_TASK.md`, writes the gate, posts to Slack, tells you it's posted.
-2. Either: you reply "approved" (or similar) in the same chat, any time later — the session checks the gate is still `awaiting-approval`, flips it to `approved`, decides delegation, runs it, marks `delegated: true`. Or: the session polls `#network-monitor` itself (every 60s, per `coordination/watcher-prompt.md`) and picks up a Slack reply first — same sequence, just triggered by the poll instead of your next message. Whichever happens first wins; the other, on catching up, reports rather than repeats it.
+2. Either: you reply "approved" in chat, or the session reads approval while polling Slack. The observer transitions `awaiting-approval` to `approved`, then atomically claims delegation. Only the observer whose claim succeeds may dispatch. It records `delegated: true` only after dispatch completes. A later session may claim an `approved` gate with no claim; if a claim exists without completed delegation, it must not dispatch again until the human confirms no active dispatch and explicitly resets the claim.
 
 ## Data Flow — Session-Ends-First Case (no longer autonomous — see Non-Goals)
 
@@ -123,8 +124,10 @@ delegation:                 # filled in once approved
 - **No `SLACK_WEBHOOK_URL` configured**: same split as above.
 - **Watcher can't reach Slack on a given wake**: skip, retry next wake, no state change.
 - **Ambiguous reply**: treated as a question, gate stays `awaiting-approval`, a clarifying reply is posted back on the channel it arrived on.
-- **Both channels reply close together**: check-then-act on `status` ensures exactly one delegation; the second observer reports rather than repeats it.
-- **Crash between `status: approved` and `delegated: true`**: the split field lets a retry (next wake, or the session's next turn) detect and resume/retry delegation rather than re-asking for approval.
+- **Both channels reply close together**: the approved gate's atomic `delegation_claimed` transition ensures only one observer starts dispatch; the other observes the existing claim or completion.
+- **Crash after approval but before a delegation claim**: a later session can claim and resume without asking for approval again.
+- **Crash after a delegation claim but before `delegated: true`**: the existing claim prevents automatic duplicate dispatch. A human must confirm no delegation is active before `reset-gate-delegation-claim.sh` allows a retry.
+- **Interrupted lock holder**: lock metadata records the owner PID. `recover-gate-lock.sh` refuses a live owner and requires explicit confirmation before removing a stale or ownerless lock.
 - **Explicit rejection**: `status: blocked`, stops; requires a new human instruction, never auto-retried.
 
 ## Testing Plan

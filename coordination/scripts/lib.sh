@@ -83,10 +83,16 @@ gate_set_field() {
   tmp="$(mktemp "${gate_file}.XXXXXX")"
   mode="$(stat -f '%Lp' "$gate_file" 2>/dev/null || stat -c '%a' "$gate_file" 2>/dev/null || true)"
   awk -v field="$field" -v value="$value" '
-    BEGIN { delim = 0 }
-    /^---$/ { delim++; print; next }
-    delim == 1 && index($0, field ":") == 1 { print field ": " value; next }
+    BEGIN { delim = 0; found = 0 }
+    /^---$/ {
+      delim++
+      if (delim == 2 && !found) { print field ": " value; found = 1 }
+      print
+      next
+    }
+    delim == 1 && index($0, field ":") == 1 { print field ": " value; found = 1; next }
     { print }
+    END { if (delim < 2) exit 1 }
   ' "$gate_file" > "$tmp"
   [[ -n "$mode" ]] && chmod "$mode" "$tmp"
   mv "$tmp" "$gate_file"
@@ -108,11 +114,10 @@ gate_require_status() {
   fi
 }
 
-# Runs "$@" while holding an exclusive, atomic lock on gate_file, so the two
-# gate observers (a chat session's next turn, and the scheduled watcher)
-# can't both act on the same gate transition. Uses mkdir as the lock
-# primitive rather than flock, which isn't reliably available on macOS
-# (where this repo runs); mkdir's atomicity is POSIX-guaranteed.
+# Runs "$@" while holding an exclusive, atomic lock on gate_file. Uses
+# mkdir as the lock primitive rather than flock, which isn't reliably
+# available on macOS. The owner PID lets recover-gate-lock.sh distinguish
+# a live operation from a stale lock after SIGKILL or a machine interruption.
 with_gate_lock() {
   local gate_file="$1"; shift
   local lock_dir="${gate_file}.lock"
@@ -120,13 +125,22 @@ with_gate_lock() {
   until mkdir "$lock_dir" 2>/dev/null; do
     attempts=$((attempts + 1))
     if [[ $attempts -ge 20 ]]; then
-      echo "could not acquire lock on ${gate_file} after ${attempts} attempts (0.1s each)" >&2
+      echo "could not acquire lock on ${gate_file} after ${attempts} attempts (0.1s each); inspect it with recover-gate-lock.sh" >&2
       return 1
     fi
     sleep 0.1
   done
+  if ! printf '%s\n' "$$" > "$lock_dir/pid"; then
+    rmdir "$lock_dir" 2>/dev/null || true
+    echo "could not record lock owner for ${gate_file}" >&2
+    return 1
+  fi
   local rc=0
   "$@" || rc=$?
-  rmdir "$lock_dir"
+  rm -f "$lock_dir/pid"
+  if ! rmdir "$lock_dir"; then
+    echo "could not release lock on ${gate_file}; recover it after confirming no operation is active" >&2
+    return 1
+  fi
   return $rc
 }

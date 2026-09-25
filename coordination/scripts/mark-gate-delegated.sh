@@ -41,6 +41,17 @@ fi
 
 _mark_locked() {
   gate_require_status "$GATE_FILE" approved || return $?
+  local delegated claimed
+  delegated="$(gate_field "$GATE_FILE" delegated)"
+  claimed="$(gate_field "$GATE_FILE" delegation_claimed)"
+  if [[ "$delegated" == "true" ]]; then
+    echo "already-delegated"
+    return 2
+  fi
+  if [[ "$claimed" != "true" ]]; then
+    echo "delegation-claim-required"
+    return 2
+  fi
   gate_set_field "$GATE_FILE" delegated true
   gate_set_field "$GATE_FILE" delegation_target "$TARGET"
   gate_set_field "$GATE_FILE" delegation_agent_type "$AGENT_TYPE"

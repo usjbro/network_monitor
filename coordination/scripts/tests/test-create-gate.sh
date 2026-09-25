@@ -56,6 +56,8 @@ if [[ -f "$GATE_FILE" ]]; then
   echo "PASS: gate file exists after interactive no-webhook creation"
   STATUS="$(grep '^status:' "$GATE_FILE" | cut -d' ' -f2)"
   [[ "$STATUS" == "awaiting-approval" ]] && echo "PASS: status is awaiting-approval" || { echo "FAIL: status is '$STATUS', expected awaiting-approval"; FAILURES=$((FAILURES + 1)); }
+  CLAIMED="$(grep '^delegation_claimed:' "$GATE_FILE" | cut -d' ' -f2)"
+  [[ "$CLAIMED" == "false" ]] && echo "PASS: new gate starts with no delegation claim" || { echo "FAIL: delegation_claimed is '$CLAIMED', expected false"; FAILURES=$((FAILURES + 1)); }
 else
   echo "FAIL: gate file missing after interactive no-webhook creation"
   FAILURES=$((FAILURES + 1))
@@ -74,6 +76,8 @@ if [[ -f "$GATE_FILE" ]]; then
   echo "PASS: gate file exists after interactive unreachable-webhook creation"
   STATUS="$(grep '^status:' "$GATE_FILE" | cut -d' ' -f2)"
   [[ "$STATUS" == "awaiting-approval" ]] && echo "PASS: status is awaiting-approval" || { echo "FAIL: status is '$STATUS', expected awaiting-approval"; FAILURES=$((FAILURES + 1)); }
+  CLAIMED="$(grep '^delegation_claimed:' "$GATE_FILE" | cut -d' ' -f2)"
+  [[ "$CLAIMED" == "false" ]] && echo "PASS: new gate starts with no delegation claim" || { echo "FAIL: delegation_claimed is '$CLAIMED', expected false"; FAILURES=$((FAILURES + 1)); }
 else
   echo "FAIL: gate file missing after interactive unreachable-webhook creation"
   FAILURES=$((FAILURES + 1))

@@ -25,4 +25,6 @@ fi
 
 STATUS="$(gate_field "$GATE_FILE" status)"
 DELEGATED="$(gate_field "$GATE_FILE" delegated)"
-echo "status=${STATUS} delegated=${DELEGATED}"
+DELEGATION_CLAIMED="$(gate_field "$GATE_FILE" delegation_claimed)"
+[[ -n "$DELEGATION_CLAIMED" ]] || DELEGATION_CLAIMED=false
+echo "status=${STATUS} delegated=${DELEGATED} delegation_claimed=${DELEGATION_CLAIMED}"
