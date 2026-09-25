@@ -74,18 +74,38 @@ gate_field() {
 # Rewrites a single frontmatter field's value in place, scoped to the same
 # block gate_field reads from, so a look-alike line in the body can never
 # be mistaken for (or corrupted as) a structured field. VALUE must not
-# contain a newline.
+# contain a newline. Preserves gate_file's existing permission mode —
+# mktemp defaults to 0600, which would otherwise silently downgrade it
+# from the 0644 create-gate.sh's plain `cat >` write leaves it at.
 gate_set_field() {
   local gate_file="$1" field="$2" value="$3"
-  local tmp
+  local tmp mode
   tmp="$(mktemp "${gate_file}.XXXXXX")"
+  mode="$(stat -f '%Lp' "$gate_file" 2>/dev/null || stat -c '%a' "$gate_file" 2>/dev/null || true)"
   awk -v field="$field" -v value="$value" '
     BEGIN { delim = 0 }
     /^---$/ { delim++; print; next }
     delim == 1 && index($0, field ":") == 1 { print field ": " value; next }
     { print }
   ' "$gate_file" > "$tmp"
+  [[ -n "$mode" ]] && chmod "$mode" "$tmp"
   mv "$tmp" "$gate_file"
+}
+
+# Reads a gate's current status and, unless it equals required_status,
+# prints the current status and returns 2 without changing anything.
+# Shared by every gate-mutating script's locked transition so a new
+# mutator can't be added to the state machine without this precondition —
+# the gap that previously let mark-gate-delegated.sh mark a still-pending
+# or blocked gate as delegated with no check.
+gate_require_status() {
+  local gate_file="$1" required_status="$2"
+  local current
+  current="$(gate_field "$gate_file" status)"
+  if [[ "$current" != "$required_status" ]]; then
+    echo "$current"
+    return 2
+  fi
 }
 
 # Runs "$@" while holding an exclusive, atomic lock on gate_file, so the two

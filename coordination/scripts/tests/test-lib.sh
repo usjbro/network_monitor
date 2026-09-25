@@ -108,6 +108,22 @@ else
 fi
 rm -f "$FIELD_TEST_FILE"
 
+# gate_set_field must preserve the gate file's permission mode — the
+# mktemp+mv rewrite pattern silently downgrades it to mktemp's default
+# (0600) otherwise, unlike an in-place sed -i edit.
+PERM_TEST_FILE="$(mktemp)"
+printf -- '---\nstatus: awaiting-approval\n---\n' > "$PERM_TEST_FILE"
+chmod 644 "$PERM_TEST_FILE"
+bash -c "source '$LIB'; gate_set_field '$PERM_TEST_FILE' status approved"
+PERM_AFTER="$(stat -f '%Lp' "$PERM_TEST_FILE" 2>/dev/null || stat -c '%a' "$PERM_TEST_FILE")"
+if [[ "$PERM_AFTER" == "644" ]]; then
+  echo "PASS: gate_set_field preserves the gate file's permission mode"
+else
+  echo "FAIL: gate_set_field preserves the gate file's permission mode — got '$PERM_AFTER', expected 644"
+  FAILURES=$((FAILURES + 1))
+fi
+rm -f "$PERM_TEST_FILE"
+
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."
   exit 1

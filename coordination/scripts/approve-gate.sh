@@ -26,12 +26,7 @@ if [[ ! -f "$GATE_FILE" ]]; then
 fi
 
 _approve_locked() {
-  local current
-  current="$(gate_field "$GATE_FILE" status)"
-  if [[ "$current" != "awaiting-approval" ]]; then
-    echo "$current"
-    return 2
-  fi
+  gate_require_status "$GATE_FILE" awaiting-approval || return $?
   gate_set_field "$GATE_FILE" status approved
   echo "approved"
 }

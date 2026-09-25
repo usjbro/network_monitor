@@ -5,6 +5,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CREATE_GATE="$SCRIPT_DIR/../create-gate.sh"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/../lib.sh"
 FAILURES=0
 TEST_LINEAR_ID="ZZZ-999"
 TEST_SLUG="test-create-gate-$$"
@@ -89,6 +91,27 @@ else
   echo "PASS: creating an already-existing gate fails"
 fi
 rm -f "$GATE_FILE"
+
+# Case 6: two concurrent create-gate.sh calls for the same gate — the
+# existence check + write weren't lock-protected, so both could pass the
+# check before either wrote, duplicate the Slack post, and let one
+# silently clobber the other's gate file. Exactly one call must succeed.
+RACE_SLUG="test-create-gate-race-$$"
+RACE_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$RACE_SLUG")"
+RESULT_A="$(mktemp)"; RESULT_B="$(mktemp)"
+( SLACK_WEBHOOK_URL="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$RACE_SLUG" "race plan" interactive > "$RESULT_A" 2>&1; echo $? >> "$RESULT_A" ) &
+PID_A=$!
+( SLACK_WEBHOOK_URL="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$RACE_SLUG" "race plan" interactive > "$RESULT_B" 2>&1; echo $? >> "$RESULT_B" ) &
+PID_B=$!
+wait "$PID_A" "$PID_B"
+CODE_A="$(tail -n1 "$RESULT_A")"; CODE_B="$(tail -n1 "$RESULT_B")"
+if [[ "$CODE_A $CODE_B" == "0 1" || "$CODE_A $CODE_B" == "1 0" ]]; then
+  echo "PASS: exactly one of two concurrent create-gate.sh calls for the same gate succeeds"
+else
+  echo "FAIL: exactly one of two concurrent create-gate.sh calls succeeds — got exit codes '$CODE_A' and '$CODE_B'"
+  FAILURES=$((FAILURES + 1))
+fi
+rm -f "$RESULT_A" "$RESULT_B" "$RACE_GATE_FILE"
 
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."

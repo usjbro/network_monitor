@@ -167,6 +167,40 @@ STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$GUARD_SLUG")"
   || { echo "FAIL: gate state unchanged after a refused block — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
 rm -f "$GUARD_GATE_FILE"
 
+# mark-gate-delegated.sh must refuse to delegate a gate that isn't
+# approved yet (e.g. still awaiting-approval), mirroring the same guard
+# approve-gate.sh/block-gate.sh already have on their own transitions.
+DELEGATE_GUARD_SLUG="test-transitions-delegate-guard-$$"
+DELEGATE_GUARD_FILE="$(gate_path "$TEST_LINEAR_ID" "$DELEGATE_GUARD_SLUG")"
+mkdir -p "$(dirname "$DELEGATE_GUARD_FILE")"
+cat > "$DELEGATE_GUARD_FILE" <<EOF
+---
+linear_id: ${TEST_LINEAR_ID}
+slug: ${DELEGATE_GUARD_SLUG}
+status: awaiting-approval
+delegated: false
+posted_at: 2026-09-25T00:00:00Z
+delegation_target:
+delegation_agent_type:
+---
+
+## Plan
+
+test
+EOF
+DELEGATE_OUT="$("$BIN/mark-gate-delegated.sh" "$TEST_LINEAR_ID" "$DELEGATE_GUARD_SLUG" in-session 2>&1)"; DELEGATE_CODE=$?
+if [[ "$DELEGATE_CODE" -eq 2 && "$DELEGATE_OUT" == "awaiting-approval" ]]; then
+  echo "PASS: mark-gate-delegated.sh refuses to delegate a gate that isn't approved"
+else
+  echo "FAIL: mark-gate-delegated.sh should refuse a non-approved gate — exit=$DELEGATE_CODE output='$DELEGATE_OUT'"
+  FAILURES=$((FAILURES + 1))
+fi
+STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$DELEGATE_GUARD_SLUG")"
+[[ "$STATUS_OUT" == "status=awaiting-approval delegated=false" ]] \
+  && echo "PASS: gate state unchanged after a refused delegation" \
+  || { echo "FAIL: gate state unchanged after a refused delegation — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
+rm -f "$DELEGATE_GUARD_FILE"
+
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."
   exit 1

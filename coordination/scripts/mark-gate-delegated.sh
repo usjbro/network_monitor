@@ -4,6 +4,11 @@
 # difference between "not yet delegated" and "already delegated" instead
 # of re-approving or silently dropping the task.
 #
+# Exits 0 having recorded delegation only if the gate's status was
+# "approved"; exits 2 and prints the current status (without changing
+# anything) otherwise — refuses to record delegation against a gate that
+# was never approved, or was blocked/still pending.
+#
 # Usage:
 #   ./mark-gate-delegated.sh <linear-id> <slug> <in-session|codex> [agent-type]
 
@@ -35,6 +40,7 @@ if [[ -n "$AGENT_TYPE" ]]; then
 fi
 
 _mark_locked() {
+  gate_require_status "$GATE_FILE" approved || return $?
   gate_set_field "$GATE_FILE" delegated true
   gate_set_field "$GATE_FILE" delegation_target "$TARGET"
   gate_set_field "$GATE_FILE" delegation_agent_type "$AGENT_TYPE"
