@@ -85,7 +85,7 @@ Phase 1 supports `==`, `!=`, `>`, `<`, `>=`, `<=`, `in {value, ...}`, `contains 
 
 An absent field does not match a comparison, including `!=`; an unknown field path is treated as absent. A syntax error identifies the offending token and character position, and leaves the last valid display filter active. Each view shows its display-filter match count. Non-matching records remain in the browser's buffers, so `display clear` restores them; each view's quick search and layer or protocol controls can further narrow its visible rows.
 
-Display expressions are limited to 2,048 source characters, 256 non-end tokens, 64 nested `not` operators/parentheses, and 128 values in an `in` set. Oversized filters are rejected locally with an error at the first disallowed position, leaving the last valid display filter active. The token limit may be reached before the set-size limit.
+Display expressions are limited to 2,048 source characters, 512 non-end tokens, 64 nested `not` operators/parentheses, and 128 values in an `in` set. Oversized filters are rejected locally with an error at the first disallowed position, leaving the last valid display filter active. The token allowance accommodates a full 128-value set.
 
 `display` only changes what this browser tab shows. Use `filter <bpf expression>` and `filter clear` to control what the capture agent receives at the source. A BPF expression such as `tcp port 443` is not display-filter syntax.
 

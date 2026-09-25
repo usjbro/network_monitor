@@ -110,9 +110,9 @@ describe('compileDisplayFilter', () => {
     });
   });
 
-  it('accepts 256 tokens and rejects token 257 at its source position', () => {
-    const accepted = Array(128).fill('frame.len').join(' or ');
-    const rejected = `${accepted} or frame.len`;
+  it('accepts 512 tokens and rejects token 513 at its source position', () => {
+    const accepted = Array(256).fill('a').join(' or ');
+    const rejected = `${accepted} or a`;
     expect(compileDisplayFilter(`not ${accepted}`)).toMatchObject({ ok: true });
     expect(compileDisplayFilter(rejected)).toMatchObject({
       ok: false, error: { token: '<token-limit>', position: accepted.length + 4 },
@@ -130,10 +130,13 @@ describe('compileDisplayFilter', () => {
     });
   });
 
-  it('bounds set parsing before evaluating an oversized membership expression', () => {
-    const source = `frame.len in {${Array(129).fill('1').join(',')}}`;
-    const result = compileDisplayFilter(source);
-    expect(result).toMatchObject({ ok: false, error: { token: '<token-limit>', position: 267 } });
+  it('accepts 128 set members and rejects member 129 at its source position', () => {
+    const accepted = `frame.len in {${Array(128).fill('1').join(',')}}`;
+    const rejected = `frame.len in {${Array(129).fill('1').join(',')}}`;
+    expect(compileDisplayFilter(accepted)).toMatchObject({ ok: true });
+    expect(compileDisplayFilter(rejected)).toMatchObject({
+      ok: false, error: { token: '<set-limit>', position: 270 },
+    });
   });
 
 });

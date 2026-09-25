@@ -11,7 +11,7 @@ type Literal = { type: 'number' | 'boolean' | 'string'; value: number | boolean 
 type Token = { kind: 'word' | 'number' | 'string' | 'symbol' | 'error' | 'end'; text: string; position: number; value?: string; message?: string };
 
 const MAX_SOURCE_LENGTH = 2048;
-const MAX_TOKENS = 256;
+const MAX_TOKENS = 512;
 const MAX_NESTING = 64;
 const MAX_SET_SIZE = 128;
 
