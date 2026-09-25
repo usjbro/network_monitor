@@ -13,9 +13,9 @@ This spec makes posting-and-waiting-for-approval the default behavior for any Li
 ## Goals
 
 - Any session working a Linear-tracked task posts its plan and does not proceed to implementation/delegation until a human reply is observed — including trivial tasks; triviality of the work is not an exemption. Only ad hoc, non-Linear-tracked work (no issue to gate against) skips this entirely.
-- The human can reply either in the same chat session (when one is active and they're present) or in Slack (always available, and the only option for unattended/autonomous sessions).
-- No timeout, ever — silence is never treated as approval.
-- Reuses existing infrastructure: the coordination-kit webhook, the Slack MCP plugin, and the `schedule`/cron feature already available to Claude Code sessions. No new Slack app, bot token, or daemon.
+- The human can reply either in the same chat session or in Slack, checked by that same session while it remains active. **Amendment (2026-09-25, during Task 5 implementation):** a truly unattended/autonomous watcher — something that resolves a gate after the creating session has ended — is explicitly out of scope. The `schedule` skill's cloud agents run in an isolated sandbox on a fresh GitHub clone with no access to local, uncommitted files; `coordination/gates/*.md` (like `coordination/tasks/*.md` before it) is local-only state, so a cloud agent could never see it. Per explicit user direction, this is not being solved here — Slack-reply resolution only works while the gate-creating interactive session is still active and polling.
+- No timeout, ever — silence is never treated as approval. (Within the constraint above: if the session ends first, the gate simply stays `awaiting-approval` until revisited — see Data Flow, Autonomous Case.)
+- Reuses existing infrastructure: the coordination-kit webhook and the Slack MCP plugin already available to Claude Code sessions. No new Slack app, bot token, daemon, or scheduled/cloud agent.
 
 ## Non-Goals
 
@@ -24,6 +24,7 @@ This spec makes posting-and-waiting-for-approval the default behavior for any Li
 - No auto-approval on timeout, no majority-vote or multi-approver logic — a single human reply on either channel is sufficient.
 - No fix, in this spec, for the three review findings described under Purpose (unvalidated `TASK_SLUG`, missing `curl --fail`, ADR-001/ADR-002 contradiction) — those are tracked separately as a follow-up bug-fix task. This design's own new gate-filename construction must not repeat the same class of bug (see Components).
 - No multi-channel routing. One Slack channel (`#network-monitor`), as today.
+- No watcher that survives the gate-creating session ending (revised 2026-09-25 — see Approaches Considered). A gate whose session ends before a Slack reply arrives simply stays `awaiting-approval`; nothing currently resumes it automatically. Solving that — e.g. by making gates git-tracked/pushed so a cloud agent could see them — is future work, not attempted here.
 
 ## Approaches Considered
 
@@ -31,14 +32,14 @@ This spec makes posting-and-waiting-for-approval the default behavior for any Li
 
 **B — bot-token poller usable by any shell.** Stand up a Slack App with a bot OAuth token and `channels:history` scope so any process (not just a live Claude Code session) can poll `conversations.replies` directly. Works from anywhere, including plain bash, but requires new Slack infrastructure (an app registration, token storage, new attack surface) for a capability the chosen approach doesn't need.
 
-**C — decoupled gate file + scheduled watcher agent (chosen).** Approval state persists in a git-tracked gate file, independent of any one session's lifetime. A separate scheduled Claude Code agent — using the `schedule`/cron feature already available, not new infrastructure — wakes periodically, checks Slack for replies, and performs delegation on behalf of whichever session originally posted. This is the only option that satisfies "block indefinitely, survive a session ending" without requiring a new Slack bot token.
+**C — decoupled gate file, checked by the creating session itself (chosen, revised).** Approval state persists in a gate file (locally, not git-tracked — see Components), independent of any single chat turn. Originally specified as a *separate* scheduled Claude Code agent (via the `schedule`/cron feature) waking periodically to check Slack on behalf of sessions that had already ended — during Task 5's implementation this proved impossible: `schedule`'s cloud agents run on a fresh GitHub clone with no access to local, uncommitted files, so a cloud watcher could never see a real gate file. Revised, per explicit user direction: the *same session* that created the gate polls Slack itself (every 60 seconds) while it remains active, instead of a separate process. This still satisfies "no timeout, dual channel, no new Slack infrastructure" — it just no longer covers the case where the creating session has already ended before a Slack reply arrives (see Non-Goals).
 
 ## Architecture
 
 ```
                     ┌─────────────────────────────────────────┐
-                    │  Any session starting a Linear task      │
-                    │  (interactive or autonomous)              │
+                    │  Any interactive session starting a       │
+                    │  Linear task                              │
                     └──────────────────┬────────────────────────┘
                                         │ before implementation begins
                                         ▼
@@ -55,8 +56,8 @@ This spec makes posting-and-waiting-for-approval the default behavior for any Li
         ┌───────────────────────────┐      ┌──────────────────────────────┐
         │ CHANNEL 1: same chat       │      │ CHANNEL 2: Slack reply         │
         │ session's next turn        │      │ (any time, any device)         │
-        │ (only if interactive &     │      │ picked up by the watcher on    │
-        │  human replies there)      │      │ its next scheduled wake        │
+        │ (human replies directly    │      │ picked up by that SAME         │
+        │  in the conversation)      │      │ session's own 60s poll loop    │
         └──────────────┬─────────────┘      └───────────────┬────────────────┘
                         │  check gate status first            │  check gate status first
                         │  (still awaiting-approval?)          │  (still awaiting-approval?)
@@ -72,13 +73,14 @@ This spec makes posting-and-waiting-for-approval the default behavior for any Li
               └─────────────────────────────────────────────────────┘
 ```
 
-The watcher is a Claude Code agent created via the existing `schedule` skill (cron-backed), waking on an interval (default 5 minutes — coarser than the existing 30-second interactive-polling convention in `AGENTS.md`, since a scheduled agent wake is a billed, discrete session start, not a tight in-process loop). Each wake it:
+The "watcher" is not a separate agent — it's the gate-creating session's own optional poll loop, run only while that session is active, at 60-second intervals (per explicit user direction — coarser polling is unnecessary here since it's a live in-process loop, not a billed discrete session start like the originally-specified scheduled-agent approach). While polling:
 
-1. Lists `coordination/gates/*.md` with `status: awaiting-approval`.
-2. For each, reads `#network-monitor` (via its own Slack MCP plugin access — the same mechanism available to any Claude Code session) for messages or thread replies referencing that gate's `linear_id`/`slug`, posted after the gate's `posted_at`.
+1. Checks `coordination/scripts/gate-status.sh <linear_id> <slug>` for its own gate. If no longer `awaiting-approval` (a chat reply resolved it), stop polling.
+2. Reads `#network-monitor` (via the Slack MCP plugin) for messages or thread replies referencing that gate's `linear_id`/`slug`, posted after the gate's `posted_at`.
 3. Classifies any qualifying human reply using its own judgment — approve / reject / question — not a rigid parser.
-4. On approval: re-reads the gate file immediately before acting (to catch a chat-session approval that landed first), and if still `awaiting-approval`, performs delegation itself and updates the gate.
+4. On approval: re-checks gate status immediately before acting (to catch a chat-reply approval that landed in the same window), and if still `awaiting-approval`, performs delegation itself and updates the gate.
 5. On rejection or an unclear reply: replies in the Slack thread, sets `status: blocked` (rejection) or leaves `status: awaiting-approval` (question needing clarification) — never auto-retries a rejection.
+6. If the session ends while a gate is still `awaiting-approval`, polling simply stops with it — see Non-Goals.
 
 ## Components
 
@@ -101,19 +103,18 @@ delegation:                 # filled in once approved
 
 **Gate creation step** — added to the point where a session begins substantive work on a Linear-tracked task (the existing "read `.ai/CURRENT_TASK.md`" step in the required workflow). Writes the gate file, posts to Slack via the existing `coordination/scripts/slack-notify.sh` (tagged with `linear_id`/`slug` in the message text so it's matchable without needing a captured message `ts` — the plain Incoming Webhook doesn't return one), then stops.
 
-**Watcher** — a scheduled Claude Code agent (via the `schedule` skill), running the wake logic described under Architecture. Delegation it performs reuses existing mechanisms unchanged: `coordination/router-checklist.md`'s criteria (extended with one more branch — "fits in the current judgment call → Agent-tool subagent in-session" vs. its existing Claude-Code-vs-Codex split) and `coordination/scripts/new-task.sh` for the Codex path.
+**Watcher** — not a separate component; the poll loop described under Architecture, run by the gate-creating session itself, only while it remains active (see `coordination/watcher-prompt.md` for the exact instructions). Delegation it performs reuses existing mechanisms unchanged: `coordination/router-checklist.md`'s criteria (extended with one more branch — "fits in the current judgment call → Agent-tool subagent in-session" vs. its existing Claude-Code-vs-Codex split) and `coordination/scripts/new-task.sh` for the Codex path.
 
 ## Data Flow — Interactive Case (you're present)
 
-1. You ask for work on a Linear task. The session reads `CURRENT_TASK.md`, writes the gate, posts to Slack, tells you it's posted, and stops.
-2. You reply "approved" (or similar) in the same chat, any time later.
-3. The session checks the gate: if still `awaiting-approval`, it flips to `approved`, decides delegation, runs it, marks `delegated: true`. If the watcher already flipped it (you replied in Slack instead, or first), the session just reports that.
+1. You ask for work on a Linear task. The session reads `CURRENT_TASK.md`, writes the gate, posts to Slack, tells you it's posted.
+2. Either: you reply "approved" (or similar) in the same chat, any time later — the session checks the gate is still `awaiting-approval`, flips it to `approved`, decides delegation, runs it, marks `delegated: true`. Or: the session polls `#network-monitor` itself (every 60s, per `coordination/watcher-prompt.md`) and picks up a Slack reply first — same sequence, just triggered by the poll instead of your next message. Whichever happens first wins; the other, on catching up, reports rather than repeats it.
 
-## Data Flow — Autonomous Case (no one present)
+## Data Flow — Session-Ends-First Case (no longer autonomous — see Non-Goals)
 
-1. A scheduled/unattended session starts a Linear task the same way — writes the gate, posts to Slack, stops (there's no chat to end into in a meaningful sense; the run simply completes having posted).
-2. The task sits `awaiting-approval` until a human replies in Slack.
-3. The watcher's next wake reads the reply, classifies it, and — if approved — performs delegation on the original session's behalf, since that session is no longer running.
+1. A gate is created and posted, but the session ends (or stops polling) before any reply arrives on either channel.
+2. The gate stays `awaiting-approval` indefinitely — nothing currently resumes it automatically. A later session revisiting the same task can check `coordination/scripts/gate-status.sh` and either wait for a fresh reply or, if one already landed in Slack while nothing was watching, read it and act on it manually.
+3. This gap (no automatic resumption once the creating session is gone) is explicitly out of scope per Non-Goals — closing it would require making gates visible to something other than a live local session (e.g. git-tracked gates a cloud agent could see), which is future work.
 
 ## Error Handling
 
@@ -132,11 +133,11 @@ No existing automated test harness covers `coordination/scripts/*` (established 
 
 - Gate lifecycle exercised for real: create → `awaiting-approval` → `approved`/`blocked` → `delegated`.
 - Chat-approval path: create a gated task, approve in-chat, confirm delegation runs and the gate updates correctly.
-- Slack-only path (simulating an autonomous session): create a gated task, reply only in Slack, confirm the watcher's next wake picks it up and delegates — exercised for both delegation targets (in-session Agent subagent, and cross-tool via `new-task.sh`).
+- Slack-only path: create a gated task, reply only in Slack (not in chat), confirm the same session's own poll loop picks it up on its next 60-second check and delegates — exercised for both delegation targets (in-session Agent subagent, and cross-tool via `new-task.sh`).
 - Race case: reply on both channels close together, confirm exactly one delegation occurs.
 - Rejection/question path: confirm the gate stays `blocked`/`awaiting-approval` and a reply is actually posted, not dropped.
-- Failure path: unset the webhook; confirm autonomous gate creation refuses while interactive gate creation still works with a warning.
-- Confirm the scheduled watcher actually wakes at its configured interval, via the `schedule` skill's own verification.
+- Failure path: unset the webhook; confirm autonomous-mode gate creation refuses while interactive-mode gate creation still works with a warning.
+- No scheduled/cloud watcher to verify (removed — see Non-Goals and the Approaches Considered amendment).
 
 ## Open Questions / Deferred
 

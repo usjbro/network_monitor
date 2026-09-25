@@ -6,7 +6,7 @@
 
 **Architecture:** A new `coordination/gates/<linear-id>-<slug>.md` file per gated task, mutated by small single-purpose bash scripts under `coordination/scripts/` (reusing the existing `lib.sh`/`REPO_ROOT` pattern). A scheduled Claude Code agent (the existing `schedule`/cron feature) wakes periodically, checks Slack for replies against pending gates, and performs delegation on behalf of sessions that already ended. Both the owning chat session and the watcher check-then-act on the same gate file so only one of them ever delegates.
 
-**Tech Stack:** bash (existing `coordination/scripts/*` conventions), the Slack MCP plugin (reads), the existing Incoming Webhook (`slack-notify.sh`, posts), the `schedule` skill / CronCreate (the watcher).
+**Tech Stack:** bash (existing `coordination/scripts/*` conventions), the Slack MCP plugin (reads), the existing Incoming Webhook (`slack-notify.sh`, posts). (Revised 2026-09-25: no `schedule`/CronCreate watcher — see Task 5.)
 
 **Spec:** `docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md`
 
@@ -948,17 +948,7 @@ Each time you wake:
 5. Move to the next pending gate and repeat step 2.
 ```
 
-- [ ] **Step 2: Create the scheduled agent**
-
-Invoke the `schedule` skill to create a recurring cloud agent:
-- Interval: every 5 minutes.
-- Task: the contents of `coordination/watcher-prompt.md` (either pasted directly as the scheduled task's prompt, or a short prompt that reads and follows that file, per whatever the `schedule` skill's own interface accepts).
-
-Follow the `schedule` skill's own instructions for the exact tool call — this step's deliverable is a real, confirmed-running scheduled agent, not a specific tool syntax pinned in this plan.
-
-- [ ] **Step 3: Verify it fires**
-
-Use the `schedule` skill's own listing/status mechanism to confirm the agent is registered with a 5-minute interval. Note the time of its next scheduled wake.
+- [x] **Steps 2-3: SUPERSEDED (ruling, 2026-09-25)** — Originally: invoke the `schedule` skill to create a recurring cloud agent (5-minute interval) running `coordination/watcher-prompt.md` as a standing scheduled process. Discovered infeasible when actually invoking the `schedule` skill: its cloud agents run on a fresh GitHub clone in an isolated sandbox with no access to local, uncommitted files — `coordination/gates/*.md` is local-only state (same as `coordination/tasks/*.md`), so a cloud watcher could never see a real gate. Per explicit user direction ("not concerned with the watcher working in cloud, only locally while chat session is active" + "check slack every 60 seconds"), this was replaced with: the gate-creating session polls Slack itself, every 60 seconds, only while it remains active — no separate scheduled/cloud agent. `coordination/watcher-prompt.md` (Step 1) was rewritten to describe this in-session polling model instead of a separate agent's wake cycle. See `docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md`'s Approaches Considered / Non-Goals amendments for the full rationale. No scheduled agent exists or is needed.
 
 - [ ] **Step 4: Commit**
 
@@ -979,9 +969,9 @@ No new files — this task exercises Tasks 1-5 together for real, against the li
 
 In an interactive session: create a real gate (`create-gate.sh <a-real-or-test-linear-id> <slug> "<plan>" interactive`), confirm the post appears in `#network-monitor`, then approve in the same chat. Confirm `gate-status.sh` shows `status=approved delegated=true` afterward and that delegation actually ran (an Agent-tool subagent was spawned, or `new-task.sh` created a worktree/branch — clean up whichever it was).
 
-- [ ] **Step 2: Slack-only path**
+- [ ] **Step 2: Slack-only path (revised — same-session polling, not a scheduled watcher, per the Task 5 ruling above)**
 
-Create a second gate in `autonomous` mode (simulating an unattended session — do not reply in any chat). Reply only in the Slack thread. Wait for the watcher's next scheduled wake (or, if the `schedule` skill supports triggering an immediate run, use that instead of waiting). Confirm the watcher picks it up: `gate-status.sh` shows `status=approved delegated=true`, and delegation happened correctly. Exercise this once with an approval that should route to an in-session Agent subagent, and once with an approval that should route to Codex via `new-task.sh` (per `router-checklist.md`'s criteria) — confirming both delegation targets work, not just one.
+Create a second gate in `interactive` mode. Instead of replying in chat, reply only in the Slack thread, and have the session poll for it per `coordination/watcher-prompt.md` (every 60 seconds) rather than waiting on the next chat message. Confirm the poll picks it up: `gate-status.sh` shows `status=approved delegated=true`, and delegation happened correctly. Exercise this once with an approval that should route to an in-session Agent subagent, and once with an approval that should route to Codex via `new-task.sh` (per `router-checklist.md`'s criteria) — confirming both delegation targets work, not just one.
 
 - [ ] **Step 3: Race case**
 
