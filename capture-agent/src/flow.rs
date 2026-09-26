@@ -43,6 +43,11 @@ struct FlowState {
     ja3_fingerprint: Option<String>,
     ja3_label: Option<&'static str>,
     client_random: Option<Vec<u8>>,
+    // Cached once at flow creation (see `observe()`'s `or_insert_with_key`)
+    // rather than recomputed from FlowKey on every packet — it's a pure
+    // function of a key that never changes for this flow's lifetime, and
+    // observe() runs on every single packet.
+    connection_id: String,
 }
 
 impl Default for FlowState {
@@ -66,6 +71,9 @@ impl Default for FlowState {
             ja3_fingerprint: None,
             ja3_label: None,
             client_random: None,
+            // Always overwritten by `or_insert_with_key` at real
+            // construction time — never actually read as empty.
+            connection_id: String::new(),
         }
     }
 }
@@ -187,10 +195,13 @@ pub struct ObserveResult {
     /// `rst_seen` — `false` for every RST-flagged packet after the first on
     /// an already-reset flow.
     pub rst_transitioned: bool,
-    /// This packet's flow's `FlowKey::connection_id()` — handed back so a
-    /// `connection-reset` finding can be built without the caller needing
-    /// its own copy of the key-derivation logic.
-    pub connection_id: String,
+    /// This packet's flow's `FlowKey::connection_id()`, present only when
+    /// `rst_transitioned` is true — handed back so a `connection-reset`
+    /// finding can be built without the caller needing its own copy of the
+    /// key-derivation logic. `None` otherwise: cloning this on every packet
+    /// regardless of whether it's used would cost every packet on every
+    /// flow to save one clone on the rare RST-transition packet.
+    pub connection_id: Option<String>,
 }
 
 impl FlowTable {
@@ -310,12 +321,18 @@ impl FlowTable {
     pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<ObserveResult> {
         let (key, is_outbound) = self.key_for(packet)?;
         let remote_port = key.remote_port;
-        let connection_id = key.connection_id();
         let is_new = matches!(self.flows.entry(key.clone()), Entry::Vacant(_));
         if is_new {
             self.total_flows_observed += 1;
         }
-        let state = self.flows.entry(key).or_default();
+        // `or_insert_with_key` (not `or_default`) so `connection_id` — a
+        // pure function of a key that never changes for this flow's
+        // lifetime — is computed once, only for a genuinely new flow, not
+        // recomputed from scratch on every one of its packets.
+        let state = self.flows.entry(key).or_insert_with_key(|k| FlowState {
+            connection_id: k.connection_id(),
+            ..Default::default()
+        });
         state.last_seen_ms = now_ms;
 
         if is_outbound {
@@ -353,6 +370,7 @@ impl FlowTable {
 
         let mut is_retransmit = false;
         let mut rst_transitioned = false;
+        let mut connection_id_for_reset: Option<String> = None;
         if let Some(flags) = packet.tcp_flags {
             if flags.syn && !flags.ack {
                 state.syn_sent_at_ms = Some(now_ms);
@@ -374,6 +392,9 @@ impl FlowTable {
                 // RST-flagged packet on an already-reset flow (e.g. a
                 // retransmitted RST).
                 rst_transitioned = !state.rst_seen;
+                if rst_transitioned {
+                    connection_id_for_reset = Some(state.connection_id.clone());
+                }
                 state.established = false;
                 state.rst_seen = true;
             }
@@ -395,8 +416,17 @@ impl FlowTable {
                     // false-positive retransmit as soon as any segment had
                     // already been seen in the other direction — this must
                     // stay scoped per-direction.
+                    // Wraparound-safe "not newer than" comparison (the same
+                    // technique as the Linux kernel's tcp_seq before()/
+                    // after() macros): treating the difference as a signed
+                    // 32-bit value correctly handles a TCP sequence number
+                    // wrapping past u32::MAX on a long-lived, high-
+                    // throughput flow, where a plain `seq <= max_seen`
+                    // would misclassify the first legitimate post-wrap
+                    // segment — and every one after it, since max_seq_seen
+                    // would then never advance again — as retransmissions.
                     is_retransmit = match state.max_seq_seen.get(&is_outbound) {
-                        Some(&max_seen) => seq <= max_seen,
+                        Some(&max_seen) => (seq.wrapping_sub(max_seen) as i32) <= 0,
                         None => false,
                     };
                     if is_retransmit {
@@ -408,7 +438,7 @@ impl FlowTable {
             }
         }
 
-        Some(ObserveResult { is_outbound, is_retransmit, rst_transitioned, connection_id })
+        Some(ObserveResult { is_outbound, is_retransmit, rst_transitioned, connection_id: connection_id_for_reset })
     }
 
     /// Looks up the given flow's observed ClientHello `client_random`, if
@@ -701,6 +731,34 @@ mod tests {
     }
 
     #[test]
+    fn a_wrapped_sequence_number_is_not_misclassified_as_a_retransmit() {
+        // A long-lived, high-throughput flow's sequence number wraps past
+        // u32::MAX; the first legitimate post-wrap segment has a numerically
+        // smaller seq than the last pre-wrap one, but is not a retransmit.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let pre_wrap = ParsedPacket { seq: Some(u32::MAX - 10), ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]) };
+        let post_wrap = ParsedPacket { seq: Some(50), ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![4, 5, 6]) };
+
+        table.observe(&pre_wrap, &L7Info::None, 0).unwrap();
+        let result = table.observe(&post_wrap, &L7Info::None, 1).unwrap();
+        assert!(!result.is_retransmit, "a post-wrap segment must not be flagged just because its numeric seq is smaller");
+    }
+
+    #[test]
+    fn a_genuine_retransmit_is_still_detected_near_the_wraparound_boundary() {
+        // The wraparound-safe comparison must not become permissive near
+        // the boundary — a real retransmit (same seq observed twice) right
+        // before the wrap is still a retransmit.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let near_wrap = ParsedPacket { seq: Some(u32::MAX - 10), ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]) };
+        let repeat = ParsedPacket { seq: Some(u32::MAX - 10), ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]) };
+
+        table.observe(&near_wrap, &L7Info::None, 0).unwrap();
+        let result = table.observe(&repeat, &L7Info::None, 1).unwrap();
+        assert!(result.is_retransmit, "an exact seq repeat near the wraparound boundary is still a retransmit");
+    }
+
+    #[test]
     fn observe_reports_rst_transitioned_only_on_the_first_rst_for_a_flow() {
         // JAM-12: the connection-reset finding must fire once per flow
         // lifetime, not once per RST-flagged packet (a flow can see more
@@ -712,12 +770,15 @@ mod tests {
 
         let syn_result = table.observe(&syn, &L7Info::None, 0).unwrap();
         assert!(!syn_result.rst_transitioned);
+        assert_eq!(syn_result.connection_id, None, "connection_id is only populated on the transitioning packet");
 
         let first_rst = table.observe(&rst1, &L7Info::None, 5).unwrap();
         assert!(first_rst.rst_transitioned, "the first RST on this flow must transition");
+        assert_eq!(first_rst.connection_id.as_deref(), Some("Tcp-192.168.1.10:51000-93.184.216.34:443"));
 
         let second_rst = table.observe(&rst2, &L7Info::None, 10).unwrap();
         assert!(!second_rst.rst_transitioned, "an already-reset flow must not transition again");
+        assert_eq!(second_rst.connection_id, None, "no transition on this packet, so no connection_id either");
     }
 
     /// Builds a bare TCP packet like `tcp_packet`, but lets the caller choose

@@ -1412,6 +1412,15 @@ async fn main() -> std::io::Result<()> {
             // Connection/layer aggregates below are unaffected: `observe()`
             // runs on every packet regardless of this limiter.
             let mut packet_event_limiter = PacketEventLimiter::new(100, 1000);
+            // JAM-12: caps discrete Finding events the same way, but with
+            // its own budget/state — sharing packet_event_limiter would
+            // make a burst of findings (e.g. malformed frames) steal slots
+            // from legitimate packet events instead of just being throttled
+            // on its own terms. 20/sec is plenty to notice something's
+            // wrong without a burst of malformed frames (a corrupt replay
+            // file, a misbehaving driver) flooding the broadcast channel
+            // and displacing other events for a slow consumer.
+            let mut finding_event_limiter = PacketEventLimiter::new(20, 1000);
             // The live pcap handle (when `packet_source` is `Live`) only
             // ever lives on this thread, so polling pcap_stats() has to
             // happen here rather than from the periodic emitter task — see
@@ -1501,6 +1510,7 @@ async fn main() -> std::io::Result<()> {
                             }
                             previous_frame_timestamp = Some(timestamp);
                         }
+                        let now_ms = start.elapsed().as_millis() as u64;
                         let Some(parsed) = parse::parse_packet(&data, link_type) else {
                             unparseable_frames.fetch_add(1, Ordering::Relaxed);
                             // JAM-12 Expert Info: malformed-frame. Neither
@@ -1510,27 +1520,31 @@ async fn main() -> std::io::Result<()> {
                             // this frame (see the design spec's "Deliberate
                             // deviation": this doesn't thread a per-parse-
                             // stage reason out of parse_packet, only what
-                            // this call site already knows).
-                            let finding_epoch_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis())
-                                .unwrap_or(0);
-                            let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
-                            let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
-                                finding: Box::new(wire::FindingJson {
-                                    id: format!("finding-{finding_epoch_ms}-{finding_seq}"),
-                                    timestamp: finding_epoch_ms.to_string(),
-                                    severity: wire::Severity::Warning,
-                                    code: wire::FindingCode::MalformedFrame,
-                                    summary: malformed_frame_summary(link_type, data.len()),
-                                    frame_id: None,
-                                    flow_id: None,
-                                }),
-                            }));
+                            // this call site already knows). Gated by its
+                            // own finding_event_limiter (not shared with
+                            // packet_event_limiter) so a burst of malformed
+                            // frames can't flood the broadcast channel.
+                            if finding_event_limiter.allow(now_ms) {
+                                let finding_epoch_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0);
+                                let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
+                                let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
+                                    finding: Box::new(wire::FindingJson {
+                                        id: format!("finding-{finding_epoch_ms}-{finding_seq}"),
+                                        timestamp: finding_epoch_ms.to_string(),
+                                        severity: wire::Severity::Warning,
+                                        code: wire::FindingCode::MalformedFrame,
+                                        summary: malformed_frame_summary(link_type, data.len()),
+                                        frame_id: None,
+                                        flow_id: None,
+                                    }),
+                                }));
+                            }
                             continue;
                         };
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
-                        let now_ms = start.elapsed().as_millis() as u64;
                         let observe_result = flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
 
                         // Aggregate throughput counters (issue #64) — driven
@@ -1578,7 +1592,7 @@ async fn main() -> std::io::Result<()> {
                                         code: wire::FindingCode::ConnectionReset,
                                         summary: "connection reset".to_string(),
                                         frame_id: None,
-                                        flow_id: Some(result.connection_id.clone()),
+                                        flow_id: result.connection_id.clone(),
                                     }),
                                 }));
                             }
