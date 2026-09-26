@@ -18,7 +18,10 @@ pub struct ConnectionJson {
     pub tx_speed: f64,
     pub rx_bytes_total: u64,
     pub tx_bytes_total: u64,
-    pub latency_ms: f64,
+    // Absent when no RTT was measured (UDP, or a TCP handshake that wasn't
+    // observed) — never a fabricated 0 (JAM-156).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
     pub packet_loss: f64,
     pub status: String,
     pub encryption: String,
@@ -419,7 +422,7 @@ mod tests {
             tx_speed: 512.0,
             rx_bytes_total: 4096,
             tx_bytes_total: 2048,
-            latency_ms: 20.0,
+            latency_ms: Some(20.0),
             packet_loss: 0.0,
             status: "ESTABLISHED".to_string(),
             encryption: "TLS".to_string(),
@@ -427,6 +430,19 @@ mod tests {
             ja3_fingerprint: None,
             ja3_label: None,
         }
+    }
+
+    #[test]
+    fn omits_latency_ms_when_not_measured() {
+        // JAM-156: unmeasured latency is absent on the wire, not 0.
+        let measured = encode_event(&AgentEvent::ConnectionUpdate {
+            connection: Box::new(ConnectionJson { latency_ms: Some(20.0), ..fixture_connection_json() }),
+        });
+        assert!(measured.contains("\"latencyMs\":20.0"), "{measured}");
+        let unmeasured = encode_event(&AgentEvent::ConnectionUpdate {
+            connection: Box::new(ConnectionJson { latency_ms: None, ..fixture_connection_json() }),
+        });
+        assert!(!unmeasured.contains("latencyMs"), "{unmeasured}");
     }
 
     #[test]
