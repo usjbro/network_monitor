@@ -14,11 +14,153 @@ esac
 
 # Load a locally-configured SLACK_WEBHOOK_URL if present. coordination/.env
 # is gitignored (matches the repo-wide .env* pattern) — never commit a
-# webhook URL. Falls back to an already-exported SLACK_WEBHOOK_URL if no
-# file exists.
-if [[ -f "$REPO_ROOT/coordination/.env" ]]; then
+# webhook URL. A caller-exported SLACK_WEBHOOK_URL (even if set to empty
+# string) takes precedence and suppresses loading from .env — this allows
+# tests and callers to override the default webhook or explicitly disable it.
+if [[ -f "$REPO_ROOT/coordination/.env" && -z "${SLACK_WEBHOOK_URL+x}" ]]; then
   set -a
   # shellcheck disable=SC1091
   source "$REPO_ROOT/coordination/.env"
   set +a
 fi
+
+# Validates a value intended for use as a filesystem path component (a task
+# or gate slug, or a lower-cased Linear id). Rejects anything empty, or
+# containing characters other than lowercase letters, digits, and hyphens —
+# in particular this rejects "/" and "..", the exact gap an open review
+# finding flagged against new-task.sh's unvalidated TASK_SLUG (PR #220
+# review comment, 2026-09-25): a value like "../../outside" let
+# WORKTREE_DIR/TASK_FILE escape their intended directories. New path
+# components built from user input must run through this first.
+validate_slug() {
+  local value="$1"
+  local label="${2:-value}"
+  if [[ -z "$value" || ! "$value" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+    echo "invalid ${label}: '${value}' (must match ^[a-z0-9][a-z0-9-]*\$)" >&2
+    exit 1
+  fi
+}
+
+# Computes the gate file path for a given Linear id + slug, validating both
+# first. linear_id is lower-cased to match this repo's existing branch
+# convention (see new-task.sh's LINEAR_ID_LOWER). The double underscore is
+# unambiguous because neither validated component can contain an underscore.
+gate_path() {
+  local linear_id_lower slug="$2"
+  linear_id_lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  validate_slug "$linear_id_lower" "linear-id"
+  validate_slug "$slug" "slug"
+  echo "$REPO_ROOT/coordination/gates/${linear_id_lower}__${slug}.md"
+}
+
+# Reads a single field's value from a gate file's YAML frontmatter block
+# only — the region between the first two "---" lines — never from the
+# free-text Plan/Blocked body below it. A naive `grep '^field:' | cut`
+# over the whole file gets confused if the body happens to contain a line
+# starting with a reserved key (e.g. a plan summary or block reason
+# describing this very gate mechanism, which can legitimately include a
+# line like "status: awaiting-approval" as illustrative text).
+gate_field() {
+  local gate_file="$1" field="$2"
+  awk -v field="$field" '
+    /^---$/ { delim++; next }
+    delim == 1 && index($0, field ":") == 1 {
+      sub("^" field ":[ ]*", "")
+      print
+      exit
+    }
+  ' "$gate_file"
+}
+
+# Rewrites a single frontmatter field's value in place, scoped to the same
+# block gate_field reads from, so a look-alike line in the body can never
+# be mistaken for (or corrupted as) a structured field. VALUE must not
+# contain a newline. Preserves gate_file's existing permission mode —
+# mktemp defaults to 0600, which would otherwise silently downgrade it
+# from the 0644 create-gate.sh's plain `cat >` write leaves it at.
+gate_set_field() {
+  local gate_file="$1" field="$2" value="$3"
+  local tmp mode
+  tmp="$(mktemp "${gate_file}.XXXXXX")"
+  mode="$(stat -f '%Lp' "$gate_file" 2>/dev/null || stat -c '%a' "$gate_file" 2>/dev/null || true)"
+  if ! awk -v field="$field" -v value="$value" '
+    BEGIN { delim = 0; found = 0 }
+    /^---$/ {
+      delim++
+      if (delim == 2 && !found) { print field ": " value; found = 1 }
+      print
+      next
+    }
+    delim == 1 && index($0, field ":") == 1 { print field ": " value; found = 1; next }
+    { print }
+    END { if (delim < 2) exit 1 }
+  ' "$gate_file" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if [[ -n "$mode" ]] && ! chmod "$mode" "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$gate_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+# Reads a gate's current status and, unless it equals required_status,
+# prints the current status and returns 2 without changing anything.
+# Shared by every gate-mutating script's locked transition so a new
+# mutator can't be added to the state machine without this precondition —
+# the gap that previously let mark-gate-delegated.sh mark a still-pending
+# or blocked gate as delegated with no check.
+gate_require_status() {
+  local gate_file="$1" required_status="$2"
+  local current
+  current="$(gate_field "$gate_file" status)"
+  if [[ "$current" != "$required_status" ]]; then
+    echo "$current"
+    return 2
+  fi
+}
+
+# Runs "$@" while holding an exclusive, atomic lock on gate_file. Uses
+# mkdir as the lock primitive rather than flock, which isn't reliably
+# available on macOS. The owner PID lets recover-gate-lock.sh distinguish
+# a live operation from a stale lock after SIGKILL or a machine interruption.
+with_gate_lock() {
+  local gate_file="$1"; shift
+  local lock_dir="${gate_file}.lock"
+  local attempts=0
+  until mkdir "$lock_dir" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [[ $attempts -ge 20 ]]; then
+      echo "could not acquire lock on ${gate_file} after ${attempts} attempts (0.1s each); inspect it with recover-gate-lock.sh" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  if ! printf '%s\n' "$$" > "$lock_dir/pid"; then
+    rmdir "$lock_dir" 2>/dev/null || true
+    echo "could not record lock owner for ${gate_file}" >&2
+    return 1
+  fi
+  # A PID may later be reused. Record the process start time when ps is
+  # available so recovery can distinguish a new process from this owner.
+  local owner_start
+  owner_start="$(LC_ALL=C ps -p "$$" -o lstart= 2>/dev/null || true)"
+  if [[ -n "$owner_start" ]] && ! printf '%s\n' "$owner_start" > "$lock_dir/start"; then
+    rm -f "$lock_dir/pid"
+    rmdir "$lock_dir" 2>/dev/null || true
+    echo "could not record lock owner start time for ${gate_file}" >&2
+    return 1
+  fi
+  local rc=0
+  "$@" || rc=$?
+  rm -f "$lock_dir/pid" "$lock_dir/start"
+  if ! rmdir "$lock_dir"; then
+    echo "could not release lock on ${gate_file}; recover it after confirming no operation is active" >&2
+    return 1
+  fi
+  return $rc
+}

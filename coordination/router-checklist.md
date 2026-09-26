@@ -49,3 +49,14 @@ a planning session) tags each task with an owner using this checklist.
 Default to Claude Code for the first pass on anything new or ambiguous, and
 move to Codex once the task has been broken down into scoped, well-specified
 pieces.
+
+## Choosing an Agent-tool subagent (in-session delegation)
+
+Once a gate's delegation target is `in-session` (see `docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md`), pick the subagent type with the same read as the checklist above:
+
+| Task nature | Subagent |
+|---|---|
+| Cross-subsystem design, ambiguous requirements, security-sensitive architecture | `network-monitor-architect` |
+| Approved, scoped implementation — bug fixes, tests, refactors, docs | `network-monitor-developer` |
+| Reviewing a diff for correctness/regressions/security before merge | `network-monitor-reviewer` |
+| Verifying acceptance criteria via focused unit/integration/e2e tests | `network-monitor-tester` |

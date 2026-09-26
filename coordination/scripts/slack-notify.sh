@@ -27,10 +27,11 @@ fi
 
 EMOJI="🔧"
 case "$STATUS" in
-  started)   EMOJI="🟡" ;;
-  blocked)   EMOJI="🔴" ;;
-  review)    EMOJI="🟣" ;;
-  done)      EMOJI="✅" ;;
+  started)            EMOJI="🟡" ;;
+  awaiting-approval)  EMOJI="⏳" ;;
+  blocked)            EMOJI="🔴" ;;
+  review)             EMOJI="🟣" ;;
+  done)               EMOJI="✅" ;;
 esac
 
 # Keep this format consistent with whatever else posts to the channel so
@@ -46,8 +47,8 @@ print(json.dumps({"text": sys.argv[1]}))
 # Callers invoke this with `|| true` (a failed Slack post shouldn't fail the
 # task-creation/completion flow), so make sure a failure is at least visible
 # here rather than silently swallowed with no trace.
-if ! curl -sS -X POST -H "Content-type: application/json" \
+if ! curl -sS --fail-with-body -X POST -H "Content-type: application/json" \
      --data "$PAYLOAD" "$SLACK_WEBHOOK_URL" > /dev/null; then
-  echo "Slack post failed (curl error) — task status was still updated locally." >&2
+  echo "Slack post failed (curl error, or Slack returned an HTTP error) — task status was still updated locally." >&2
   exit 1
 fi

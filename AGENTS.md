@@ -49,15 +49,16 @@ When sources disagree, explicitly report the disagreement.
 ## Required Workflow
 
 1. Read `.ai/CURRENT_TASK.md`.
-2. Inspect relevant source code and tests.
-3. Read applicable specification/protocol documentation.
-4. Confirm acceptance criteria.
-5. Write/update tests first where practical and demonstrate missing behavior.
-6. Implement the smallest correct change.
-7. Run relevant tests, fix failures, then run broader applicable tests.
-8. Review `git diff`.
-9. Update applicable `.ai/` state and `.ai/HANDOFF.md`.
-10. Commit only when explicitly requested or authorized by the task.
+2. If this task has a Linear id and isn't ad hoc, create a Slack approval gate for it (if one doesn't already exist) and do not proceed past this step until it's approved — see "Slack Approval Gate" below.
+3. Inspect relevant source code and tests.
+4. Read applicable specification/protocol documentation.
+5. Confirm acceptance criteria.
+6. Write/update tests first where practical and demonstrate missing behavior.
+7. Implement the smallest correct change.
+8. Run relevant tests, fix failures, then run broader applicable tests.
+9. Review `git diff`.
+10. Update applicable `.ai/` state and `.ai/HANDOFF.md`.
+11. Commit only when explicitly requested or authorized by the task.
 
 ## Scope Control
 
@@ -167,6 +168,18 @@ When the user asks for ongoing Slack monitoring, monitor the entire designated c
 3. Discuss blockers, interface questions, and plan changes in that Slack thread rather than guessing at another task's interface. See `coordination/router-checklist.md` (main repo root) for whether a piece suits Claude Code or Codex better.
 4. On finish, run `coordination/scripts/complete-task.sh <slug> review "<summary>"` (updates the contract and posts to Slack), fill in its Handoff section by hand, and update the corresponding Linear issue's status per `epic-task-cycle` §2 steps 8-11 — the contract and Linear must agree, not just one of them.
 5. A human (or reviewer agent) merges one branch at a time and removes its worktree, same as any other task branch.
+
+## Slack Approval Gate
+
+Any session working a Linear-tracked task — interactive or autonomous, trivial or not — gates on human approval before implementing. Ad hoc work with no Linear id is exempt. An autonomous session can post the gate and stop only when a later live session can access the same local checkout to pick up the gate and its Slack thread. A cloud session with an ephemeral checkout must defer the task instead. Full design: `docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md`.
+
+1. Before implementing, create the gate: `coordination/scripts/create-gate.sh <linear-id> <slug> "<plan-summary>" <interactive|autonomous>`. Use `interactive` in a live chat session and `autonomous` only for an unattended session in a persistent checkout that a later live session can access. This posts the plan to `#network-monitor` and writes `coordination/gates/<linear-id>__<slug>.md` with `status: awaiting-approval`. Then stop — do not implement anything for this task yet. For an autonomous gate, hand off its Linear ID, slug, and checkout location so a later live session can inspect the gate and Slack thread.
+2. Approval can come from either channel, both handled by the same session that created the gate:
+   - **In-chat**: when the human replies with approval in the same conversation, check `coordination/scripts/gate-status.sh <linear-id> <slug>`. If it is `awaiting-approval`, run `approve-gate.sh`. Before dispatching, run `claim-gate-delegation.sh`; only the session whose claim succeeds may delegate. If the gate is already `approved` with `delegated=false delegation_claimed=false`, claim and resume without asking for approval again. If it is `approved` with `delegation_claimed=true delegated=false`, do not dispatch: ask the human to confirm no delegation is active, then run `reset-gate-delegation-claim.sh <linear-id> <slug> --confirm-no-active-delegation`, claim again, and dispatch. If `delegated=true`, report it as complete. After successful dispatch, run `mark-gate-delegated.sh <linear-id> <slug> <in-session|codex> [agent-type]`.
+   - **Slack reply**: while your session remains active, you can poll `#network-monitor` instead of only waiting on the next chat message — see `coordination/watcher-prompt.md` (every 60 seconds, track last-read, not last-sent). A Slack approval follows the same claim-before-dispatch and interrupted-claim recovery steps as in-chat approval. There is no separate scheduled/cloud watcher: cloud agents cannot see local gate state, so polling only runs in the gate-creating session while it remains active.
+3. On an unclear or negative reply, do not guess: for a clear rejection run `coordination/scripts/block-gate.sh <linear-id> <slug> "<reason>"` and reply explaining why in the same thread/chat; for an ambiguous reply, ask a clarifying question and leave the gate `awaiting-approval`. Never auto-retry a rejection.
+
+If the session ends before a gate is resolved, nothing else picks it up automatically — it stays `awaiting-approval` until either a later session revisits the same task and polls/asks again, or someone notices the Slack post and a session gets started to act on it.
 
 ## Session Completion
 
