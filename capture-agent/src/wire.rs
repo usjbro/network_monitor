@@ -70,6 +70,46 @@ pub struct DecryptedPayloadJson {
     pub data_base64: String,
 }
 
+/// Expert Info (JAM-12) severity — advisory display metadata only, not a
+/// verdict. Mirrors Wireshark's own Expert Info severity vocabulary (the
+/// baseline design document this feature follows cites it directly).
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Error,
+    Warning,
+    Note,
+    Chat,
+}
+
+/// A small, closed, stable set — like a field registry `path`, a code is
+/// additive-only once shipped (see docs/wire-protocol.md's finding section).
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FindingCode {
+    Retransmission,
+    ConnectionReset,
+    MalformedFrame,
+}
+
+/// See docs/superpowers/specs/2026-09-26-expert-info-findings-design.md.
+/// `frame_id`/`flow_id` are independently optional — a `malformed-frame`
+/// finding has neither (no `ParsedPacket`, and therefore no flow, was ever
+/// produced for a frame that failed to decode).
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingJson {
+    pub id: String,
+    pub timestamp: String,
+    pub severity: Severity,
+    pub code: FindingCode,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_id: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -104,6 +144,9 @@ pub enum AgentEvent {
     /// generic error type across them, matching this file's existing
     /// convention.
     CaptureFileError { message: String },
+    /// Expert Info (JAM-12) — an annotated observation, never a verdict. See
+    /// docs/superpowers/specs/2026-09-26-expert-info-findings-design.md.
+    Finding { finding: Box<FindingJson> },
 }
 
 /// One capturable network interface, as reported in response to a
@@ -474,6 +517,67 @@ mod tests {
         assert!(line.ends_with('\n'));
         assert!(line.contains("\"type\":\"connection_closed\""));
         assert!(line.contains("\"id\":\"Tcp-192.168.1.10:51000-93.184.216.34:443\""));
+    }
+
+    #[test]
+    fn encodes_finding_with_both_frame_and_flow_id() {
+        let event = AgentEvent::Finding {
+            finding: Box::new(FindingJson {
+                id: "finding-1000-1".to_string(),
+                timestamp: "1000".to_string(),
+                severity: Severity::Warning,
+                code: FindingCode::Retransmission,
+                summary: "retransmitted segment".to_string(),
+                frame_id: Some("pkt-1000-1".to_string()),
+                flow_id: Some("Tcp-192.168.1.10:51000-93.184.216.34:443".to_string()),
+            }),
+        };
+        let line = encode_event(&event);
+        assert!(line.ends_with('\n'));
+        assert!(line.contains("\"type\":\"finding\""));
+        assert!(line.contains("\"severity\":\"warning\""));
+        assert!(line.contains("\"code\":\"retransmission\""));
+        assert!(line.contains("\"frameId\":\"pkt-1000-1\""));
+        assert!(line.contains("\"flowId\":\"Tcp-192.168.1.10:51000-93.184.216.34:443\""));
+    }
+
+    #[test]
+    fn finding_json_serializes_every_severity_and_code_as_the_spec_s_exact_strings() {
+        let severities = [
+            (Severity::Error, "error"),
+            (Severity::Warning, "warning"),
+            (Severity::Note, "note"),
+            (Severity::Chat, "chat"),
+        ];
+        for (severity, expected) in severities {
+            let s = serde_json::to_string(&severity).unwrap();
+            assert_eq!(s, format!("\"{expected}\""));
+        }
+        let codes = [
+            (FindingCode::Retransmission, "retransmission"),
+            (FindingCode::ConnectionReset, "connection-reset"),
+            (FindingCode::MalformedFrame, "malformed-frame"),
+        ];
+        for (code, expected) in codes {
+            let s = serde_json::to_string(&code).unwrap();
+            assert_eq!(s, format!("\"{expected}\""));
+        }
+    }
+
+    #[test]
+    fn finding_json_omits_frame_and_flow_id_entirely_when_absent() {
+        let json = FindingJson {
+            id: "finding-2000-2".to_string(),
+            timestamp: "2000".to_string(),
+            severity: Severity::Warning,
+            code: FindingCode::MalformedFrame,
+            summary: "58-byte frame did not decode as Ethernet framing".to_string(),
+            frame_id: None,
+            flow_id: None,
+        };
+        let s = serde_json::to_string(&json).unwrap();
+        assert!(!s.contains("frameId"));
+        assert!(!s.contains("flowId"));
     }
 
     #[test]
