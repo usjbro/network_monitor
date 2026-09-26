@@ -914,6 +914,7 @@ export default function TerminalApp() {
               bufferLimit={connectionBufferLimit}
               displayFilter={displayFilter?.predicate}
               displayFilterExpression={displayFilter?.expression}
+              findings={findings}
             />
           )}
 
@@ -927,6 +928,7 @@ export default function TerminalApp() {
               bufferLimit={packetBufferLimit}
               displayFilter={displayFilter?.predicate}
               displayFilterExpression={displayFilter?.expression}
+              findings={findings}
             />
           )}
 

@@ -11,7 +11,7 @@ interface FindingsPanelProps {
   onNavigate: (target: FindingNavigateTarget) => void;
 }
 
-const SEVERITY_CLASS: Record<Finding['severity'], string> = {
+export const SEVERITY_CLASS: Record<Finding['severity'], string> = {
   error: 'bg-rose-950 text-rose-400 border-rose-800/60',
   warning: 'bg-amber-950 text-amber-400 border-amber-800/60',
   note: 'bg-slate-800 text-slate-300 border-slate-700',

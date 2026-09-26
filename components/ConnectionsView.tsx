@@ -9,10 +9,11 @@ import {
   Route,
   Search,
 } from 'lucide-react';
-import { NetworkConnection, ThemeConfig, TracerouteHop } from '@/lib/types';
+import { Finding, NetworkConnection, ThemeConfig, TracerouteHop } from '@/lib/types';
 import { formatSpeed, formatBytes } from '@/lib/osi-engine';
 import { connectionsToCsv, downloadBlob } from '@/lib/export';
 import type { CompiledDisplayFilter } from '@/lib/display-filter';
+import { SEVERITY_CLASS } from '@/components/FindingsPanel';
 
 function downloadConnectionsCsv(connections: NetworkConnection[], totalObserved: number): void {
   downloadBlob(
@@ -52,6 +53,9 @@ interface ConnectionsViewProps {
   bufferLimit?: number;
   displayFilter?: CompiledDisplayFilter;
   displayFilterExpression?: string;
+  // Expert Info (JAM-12) row markers — optional so this component stays
+  // backward compatible with call sites that never pass findings.
+  findings?: Finding[];
 }
 
 export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
@@ -70,10 +74,20 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   bufferLimit,
   displayFilter,
   displayFilterExpression,
+  findings = [],
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [protocolFilter, setProtocolFilter] = useState<string>('ALL');
   const [selectedConnId, setSelectedConnId] = useState<string | null>(connections[0]?.id || null);
+
+  // First finding wins per flow — a row shows one marker, not a stack; the
+  // panel (FindingsPanel) is where every finding for a flow is listed.
+  const findingByFlowId = new Map<string, Finding>();
+  for (const finding of findings) {
+    if (finding.flowId && !findingByFlowId.has(finding.flowId)) {
+      findingByFlowId.set(finding.flowId, finding);
+    }
+  }
 
   const sharedMatches = displayFilter ? connections.filter((connection) => displayFilter({ kind: 'connection', connection })) : connections;
   const filtered = sharedMatches.filter((conn) => {
@@ -188,10 +202,12 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           <tbody className="divide-y divide-slate-800/60">
             {filtered.map((conn) => {
               const isSelected = conn.id === selectedConn?.id;
+              const finding = findingByFlowId.get(conn.id);
 
               return (
                 <tr
                   key={conn.id}
+                  data-connection-row={conn.id}
                   onClick={() => setSelectedConnId(conn.id)}
                   className={`hover:bg-slate-900/80 transition cursor-pointer ${
                     isSelected ? 'bg-slate-900/90 font-semibold' : ''
@@ -246,10 +262,19 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   </td>
 
                   {/* Status */}
-                  <td className="p-2.5 text-center">
+                  <td className="p-2.5 text-center space-x-1">
                     <span className="bg-emerald-950 text-emerald-400 border border-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded">
                       {conn.status}
                     </span>
+                    {finding && (
+                      <span
+                        data-testid="finding-marker"
+                        title={finding.summary}
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded border ${SEVERITY_CLASS[finding.severity]}`}
+                      >
+                        {finding.code}
+                      </span>
+                    )}
                   </td>
                 </tr>
               );

@@ -76,7 +76,7 @@
 
 **Files:** Modify `components/PacketStreamView.tsx`, `components/ConnectionsView.tsx`.
 
-- [ ] Write tests: a packet row whose id has a matching finding shows a severity-colored marker; a connection row whose `flowId` has a matching finding shows the same; a row with no finding shows neither.
-- [ ] Run and confirm fail.
-- [ ] Implement the markers as a small addition next to each row's existing badges (protocol/layer badge for packets, status badge for connections) — additive, not a layout rework.
-- [ ] Run and confirm pass; `npm run lint`; `npm run build`.
+- [x] Write tests: a packet row whose id has a matching finding shows a severity-colored marker; a connection row whose `flowId` has a matching finding shows the same; a row with no finding shows neither.
+- [x] Run and confirm fail.
+- [x] Implement the markers as a small addition next to each row's existing badges (protocol/layer badge for packets, status badge for connections) — additive, not a layout rework.
+- [x] Run and confirm pass; `npm run lint`; `npm run build`.

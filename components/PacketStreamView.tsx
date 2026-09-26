@@ -9,7 +9,8 @@ import {
   Search,
   Trash2,
 } from 'lucide-react';
-import type { DecryptedPayloadSegment, PacketFrame, ThemeConfig, WireField } from '@/lib/types';
+import type { DecryptedPayloadSegment, Finding, PacketFrame, ThemeConfig, WireField } from '@/lib/types';
+import { SEVERITY_CLASS } from '@/components/FindingsPanel';
 import { FieldTree } from '@/components/FieldTree';
 import { mostSpecificFieldAtOffset } from '@/lib/field-tree';
 // Only packetsToJson is imported here. decryptedSegments is deliberately
@@ -36,6 +37,9 @@ interface PacketStreamViewProps {
   bufferLimit?: number;
   displayFilter?: CompiledDisplayFilter;
   displayFilterExpression?: string;
+  // Expert Info (JAM-12) row markers — optional so this component stays
+  // backward compatible with call sites that never pass findings.
+  findings?: Finding[];
 }
 
 function HexPane({ hexDump, fields, activePath, selectedPath, hoveredByte, onHoverByte, onSelectField, testId }: {
@@ -108,6 +112,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   bufferLimit,
   displayFilter,
   displayFilterExpression,
+  findings = [],
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isFrozen, setIsFrozen] = useState(false);
@@ -125,6 +130,15 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   const [hoveredPayloadFieldPath, setHoveredPayloadFieldPath] = useState<string | null>(null);
   const [hoveredHeaderByte, setHoveredHeaderByte] = useState<number | null>(null);
   const [hoveredPayloadByte, setHoveredPayloadByte] = useState<number | null>(null);
+
+  // First finding wins per frame — a row shows one marker, not a stack;
+  // the panel (FindingsPanel) is where every finding for a frame is listed.
+  const findingByFrameId = new Map<string, Finding>();
+  for (const finding of findings) {
+    if (finding.frameId && !findingByFrameId.has(finding.frameId)) {
+      findingByFrameId.set(finding.frameId, finding);
+    }
+  }
 
   const sharedMatches = displayFilter ? packets.filter((packet) => displayFilter({ kind: 'packet', packet })) : packets;
   const displayedPackets = sharedMatches.filter((pkt) => {
@@ -269,10 +283,12 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
           <div className="flex-1 overflow-y-auto divide-y divide-slate-800/80">
             {displayedPackets.map((pkt) => {
               const isSelected = visibleSelectedPacket?.id === pkt.id;
+              const finding = findingByFrameId.get(pkt.id);
 
               return (
                 <div
                   key={pkt.id}
+                  data-packet-row
                   onClick={() => {
                     if (selectedPacket?.id !== pkt.id) {
                       setSelectedHeaderFieldPath(null);
@@ -300,6 +316,17 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                   <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800/60 whitespace-nowrap">
                     {pkt.protocol}
                   </span>
+
+                  {/* Expert Info marker (JAM-12) */}
+                  {finding && (
+                    <span
+                      data-testid="finding-marker"
+                      title={finding.summary}
+                      className={`px-1.5 py-0.2 rounded text-[10px] font-bold border whitespace-nowrap ${SEVERITY_CLASS[finding.severity]}`}
+                    >
+                      {finding.code}
+                    </span>
+                  )}
 
                   {/* Packet summary */}
                   <div className="flex-1 min-w-0 truncate text-slate-200">
