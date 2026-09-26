@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, Copy } from 'lucide-react';
 import { buildFieldTree, type FieldTreeNode } from '@/lib/field-tree';
 import type { ThemeConfig, WireField } from '@/lib/types';
@@ -26,6 +26,11 @@ function formatValue(field: WireField): string | null {
 // localhost, so failure is shown rather than silently doing nothing.
 function CopyButton({ label, text }: { label: string; text: string }) {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  // A rapid second click must restart the reset window, not race the
+  // first click's own — without clearing it, the first click's timer
+  // still fires on schedule and reverts the second click's fresh
+  // indicator back to idle early.
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   return (
     <button
       type="button"
@@ -33,13 +38,14 @@ function CopyButton({ label, text }: { label: string; text: string }) {
       title={label}
       onClick={async (event) => {
         event.stopPropagation();
+        if (resetTimer.current !== null) clearTimeout(resetTimer.current);
         try {
           await navigator.clipboard.writeText(text);
           setState('copied');
         } catch {
           setState('failed');
         }
-        setTimeout(() => setState('idle'), 1500);
+        resetTimer.current = setTimeout(() => setState('idle'), 1500);
       }}
       className={`shrink-0 ${state === 'failed' ? 'text-rose-400' : state === 'copied' ? 'text-emerald-400' : 'text-slate-600 hover:text-emerald-400'}`}
     >

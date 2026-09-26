@@ -84,7 +84,12 @@ function HexPane({ hexDump, fields, activePath, selectedPath, hoveredByte, onHov
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => {
               const field = mostSpecificFieldAtOffset(fields, index);
-              onSelectField(field && field.path === selectedPath ? null : (field?.path ?? null));
+              // A click on a byte no field covers (e.g. raw/unparsed
+              // payload past the decoded portion) is a no-op — it must not
+              // clear an unrelated field still selected elsewhere in this
+              // pane just because this particular byte resolved to nothing.
+              if (!field) return;
+              onSelectField(field.path === selectedPath ? null : field.path);
             }}
             className={`cursor-pointer ${highlighted ? 'bg-emerald-500/40 text-emerald-200 rounded-sm' : ''}`}
           >{byte}{index < bytes.length - 1 ? ' ' : ''}</span>

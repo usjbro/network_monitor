@@ -164,9 +164,39 @@ describe('PacketStreamView field and byte highlighting', () => {
     expect(screen.queryByText('Destination MAC')).not.toBeInTheDocument();
   });
 
+  it('clicking a byte outside any field range does not clear an unrelated selection in the same pane', () => {
+    // Trailing raw payload bytes (e.g. unparsed application data) beyond
+    // tls.handshake.sni's 0-4 range, with no field covering them at all.
+    const longerPayload: PacketFrame = { ...packet, hexDump: '16 03 01 00 a5 ff ff ff' };
+    render(<PacketStreamView packets={[longerPayload]} theme={THEMES.matrix} onClearPackets={() => {}} />);
+    fireEvent.click(screen.getByText('Server Name')); // selects the 5-byte payload field
+    expect(highlightedBytes(screen.getByTestId('payload-hex-dump'))).toHaveLength(5);
+    const outsideByte = screen.getByTestId('payload-hex-dump').querySelector('[data-byte-index="6"]')!;
+    fireEvent.click(outsideByte);
+    expect(highlightedBytes(screen.getByTestId('payload-hex-dump'))).toEqual(['16', '03', '01', '00', 'a5']);
+  });
+
   it('copying a field does not also select/deselect it', () => {
     render(<PacketStreamView packets={[packet]} theme={THEMES.matrix} onClearPackets={() => {}} />);
     fireEvent.click(screen.getByLabelText('Copy abbreviation for Server Name'));
     expect(document.querySelector('[data-field-path="tls.handshake.sni"]')).not.toHaveAttribute('data-highlighted', 'true');
+  });
+
+  it('a second copy click cancels the first one\'s pending reset timer instead of leaving both scheduled', async () => {
+    vi.useFakeTimers();
+    try {
+      render(<PacketStreamView packets={[packet]} theme={THEMES.matrix} onClearPackets={() => {}} />);
+      const button = screen.getByLabelText('Copy abbreviation for Server Name');
+      fireEvent.click(button);
+      await vi.advanceTimersByTimeAsync(0); // flush the clipboard promise so the reset timer is actually scheduled
+      expect(vi.getTimerCount()).toBe(1);
+      fireEvent.click(button);
+      await vi.advanceTimersByTimeAsync(0);
+      // Not 2 — an uncancelled stale timer from the first click would fire
+      // early and revert the second click's still-fresh "copied" indicator.
+      expect(vi.getTimerCount()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
