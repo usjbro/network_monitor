@@ -19,9 +19,9 @@ All shell scripts under `coordination/scripts/` passed `bash -n`. The merged cod
 - Replied to the pending PR #225 status question in [#network-monitor](https://me-hem6828.slack.com/archives/C0C39FJT9DX/p1790381912280419?thread_ts=1790372866.808019&cid=C0C39FJT9DX) with its merge SHA, passing final-head CI, and this documentation follow-up.
 - Added related follow-up comment `1598f7b7-8107-44ca-99fe-4791ae31e919` to [JAM-155](https://linear.app/shmishmorshin/issue/JAM-155/land-shared-agent-coordination-guidance-and-skills). JAM-155 remains Done for PR #224. Its scope explicitly excluded the approval-gate spec/plan; PR #225's spec identifies that work as ad hoc meta/tooling. No dedicated PR #225 issue was found by the Linear searches.
 
-## Remaining Work
+## Publication and Continuation
 
-Independent documentation/security review found no issues, and `git diff --check` passed. Publish the five-file documentation diff, monitor its own required CI/review gates, then merge under the authorized workflow. Link that follow-up PR in the same Slack thread and Linear discussion. Do not describe PR #225's historical CI as a test run of the follow-up commit.
+Independent documentation/security review found no issues, and `git diff --check` passed. The five-file diff is published as [PR #227](https://github.com/usjbro/network_monitor/pull/227), with links posted to the same Slack thread and Linear discussion. Its CI was running at this publication snapshot. Check #227 on GitHub before continuing: if open, resolve any review/check failures and merge only when required gates pass; if merged, this follow-up is complete and no new task is assigned. Do not describe PR #225's historical CI as a test run of the follow-up commit.
 
 ## Known Limits and Follow-ups
 

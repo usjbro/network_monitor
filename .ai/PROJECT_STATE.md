@@ -19,7 +19,7 @@ Evidence: GitHub merged-PR metadata and [PR #225](https://github.com/usjbro/netw
 
 ## Current Work
 
-The approved five-file `.ai/` documentation refresh is on a fresh branch from `e42aeaf7`. PR #225 has no dedicated Linear issue identified; JAM-155 is only the related, completed PR #224 issue. No next epic/task has been selected in this session.
+The approved five-file `.ai/` documentation refresh is published as [PR #227](https://github.com/usjbro/network_monitor/pull/227), on a fresh branch from `e42aeaf7`. Its publication snapshot has CI running; use GitHub for its live lifecycle status. PR #225 has no dedicated Linear issue identified; JAM-155 is only the related, completed PR #224 issue. No next epic/task has been selected in this session.
 
 ## Verified Coordination Behavior
 

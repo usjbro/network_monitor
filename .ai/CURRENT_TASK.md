@@ -16,7 +16,7 @@ Refresh the five `.ai/` state files after the user squash-merged PR #225, and po
 - [x] Reconcile ADR-001 with ADR-002 and record the merged approval-gate decisions with source references.
 - [x] Distinguish current local gate-test results from historical PR CI evidence and unverified project-wide status.
 - [x] Post a merge update to the existing Slack status thread and a related follow-up comment on JAM-155 without changing that issue's scope or status.
-- [ ] Complete independent review and publish this five-file documentation change through a separate PR, following the authorized review/CI/merge workflow.
+- [x] Complete independent review and publish this five-file documentation change as [PR #227](https://github.com/usjbro/network_monitor/pull/227).
 
 ## Constraints
 
@@ -24,4 +24,4 @@ Only `.ai/CURRENT_TASK.md`, `.ai/DECISIONS.md`, `.ai/HANDOFF.md`, `.ai/PROJECT_S
 
 ## Status
 
-PR #225 is merged. Documentation follow-up is prepared; review/publication is the remaining step. See `HANDOFF.md` for continuation details and `TEST_STATUS.md` for evidence.
+PR #225 is merged. This documentation follow-up is published as PR #227 with independent review complete. At this publication snapshot, its own CI is running; consult GitHub for the live merge/check state. If #227 is merged, this follow-up is complete and no next task has been selected. See `HANDOFF.md` for continuation details and `TEST_STATUS.md` for evidence.

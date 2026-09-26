@@ -26,7 +26,7 @@ Verified via `gh pr view 225 --json statusCheckRollup,commits` for final source 
 - [CodeQL run 36197551011](https://github.com/usjbro/network_monitor/actions/runs/36197551011): actions, JavaScript/TypeScript, and Rust analysis all SUCCESS; the separate CodeQL aggregate check was NEUTRAL, not a failure.
 - The fuzz job is path-filtered for pull requests; its successful job status alone does not prove fuzz iterations ran for this tooling change.
 
-These are pre-merge checks of PR #225, not checks of the subsequent documentation commit. This follow-up's own CI must be checked when its PR is published.
+These are pre-merge checks of PR #225, not checks of the subsequent documentation commit. This follow-up is published as [PR #227](https://github.com/usjbro/network_monitor/pull/227). At the publication snapshot its own CI is running; consult that PR for checks of its latest commit, rather than treating this historical result as current-head evidence.
 
 ## Local Application / Live Integration Tests
 
