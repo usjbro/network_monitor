@@ -56,11 +56,11 @@
 
 **Files:** Modify `lib/types.ts`, `lib/agent-mapping.ts`, `docs/wire-protocol.md`; test in `lib/__tests__/`.
 
-- [ ] Write `lib/__tests__/finding-mapping.test.ts`: `mapFindingEvent` maps a well-formed wire event to the `Finding` domain type; throws (loudly, matching every other mapper's convention) on a missing required field (`id`/`timestamp`/`severity`/`code`/`summary`); correctly carries `frameId`/`flowId` when present and omits them when absent.
-- [ ] Run and confirm it fails (type/function don't exist).
-- [ ] Add the `Finding` interface to `lib/types.ts` and `mapFindingEvent` to `lib/agent-mapping.ts`.
-- [ ] Run and confirm pass.
-- [ ] Document the `finding` event in `docs/wire-protocol.md` (own `###` section, matching the existing events' depth: JSON example, field notes, the three codes, the "annotate never conclude" framing, and the malformed-frame non-navigability note).
+- [x] Write `lib/__tests__/finding-mapping.test.ts`: `mapFindingEvent` maps a well-formed wire event to the `Finding` domain type; throws (loudly, matching every other mapper's convention) on a missing required field (`id`/`timestamp`/`severity`/`code`/`summary`); correctly carries `frameId`/`flowId` when present and omits them when absent.
+- [x] Run and confirm it fails (type/function don't exist).
+- [x] Add the `Finding` interface to `lib/types.ts` and `mapFindingEvent` to `lib/agent-mapping.ts`.
+- [x] Run and confirm pass.
+- [x] Document the `finding` event in `docs/wire-protocol.md` (own `###` section, matching the existing events' depth: JSON example, field notes, the three codes, the "annotate never conclude" framing, and the malformed-frame non-navigability note).
 
 ### Task 5: Findings panel and app wiring
 

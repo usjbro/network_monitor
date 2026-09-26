@@ -112,6 +112,36 @@ Top-level groups describe only protocols actually decoded: `eth` appears for Eth
 
 **No rate limiting yet** — every captured packet gets its own event ([issue #27](https://github.com/usjbro/network_monitor/issues/27)). On a busy interface this can mean thousands of these per second.
 
+### `finding`
+
+Sent immediately (like `packet`, not batched) — Expert Info (JAM-12): an annotated observation, never a verdict. No finding's `summary` may assert intent, cause, or maliciousness ("attack", "suspicious", "malicious") — only what was observed.
+
+```json
+{
+  "type": "finding",
+  "finding": {
+    "id": "finding-1790400000000-1",
+    "timestamp": "1790400000000",
+    "severity": "warning",
+    "code": "retransmission",
+    "summary": "retransmitted segment",
+    "frameId": "pkt-1790400000000-1"
+  }
+}
+```
+
+Maps to `Finding` via `mapFindingEvent` (`lib/agent-mapping.ts`), which owns the `finding` envelope unwrap the same way `mapCaptureStatsEvent`/`mapTracerouteHopEvent` do.
+
+Field notes:
+- `severity` is advisory display metadata (`error` / `warning` / `note` / `chat`, mirroring Wireshark's own Expert Info severity vocabulary), not a verdict derived from "how bad is this" — a `connection-reset` finding is `note`, not `error`, because a reset is a normal TCP closing mechanism as often as an abnormal one.
+- `code` is a small, closed, stable set, additive-only once shipped, like a field registry `path`. Three codes ship in JAM-12: `retransmission`, `connection-reset`, `malformed-frame`.
+- `frameId`/`flowId` are each independently optional, and a finding may carry neither. `retransmission` carries `frameId` only; `connection-reset` carries `flowId` only; `malformed-frame` carries **neither** — `parse::parse_packet` failing means no `ParsedPacket`, and therefore no `packet` event or flow, was ever produced for that frame, so there is nothing to navigate to. This is by design, not a gap to fix later (see `docs/superpowers/specs/2026-09-26-expert-info-findings-design.md`).
+- `retransmission`'s `frameId` always corresponds to a `packet` event the UI actually received: both are gated by the same capture-loop rate limiter and generated from the same `pkt-<epoch_ms>-<seq>` id, so a rate-limited-out retransmission simply produces no finding, consistent with producing no `packet` event either.
+- `connection-reset` fires once per flow, on the transition into `rst_seen`, not on every subsequent RST-flagged packet on an already-reset flow (e.g. a retransmitted RST).
+- `malformed-frame`'s `summary` names the active link type and the frame's byte length (e.g. "58-byte frame did not decode as Ethernet framing") — not a per-parse-stage failure reason. Threading a granular reason out of `parse_packet` (this agent's most heavily fuzzed, most-tested public function) is a larger, separately-scoped change; each occurrence is still individually visible here, not just the running `unparseableFrames` total `capture_stats` already reports.
+
+Not yet implemented (deferred, not silently dropped — see the design spec's "Deferred to a later task"): duplicate-ACK and zero-window findings (need new detection state, not just surfacing something already computed), and `capture-drop`/`relay-lag` findings (already covered by the existing capture-degraded banner driven by `capture_stats`).
+
 ### `layer_update`
 
 Sent once per tick (~1 second), one entry per independently-measurable layer.
