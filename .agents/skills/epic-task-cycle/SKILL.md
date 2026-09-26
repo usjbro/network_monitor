@@ -96,6 +96,10 @@ status, review status) in `Notes` instead.
    on it at a time, so each item must merge before the next starts.
    Otherwise the issue's own `gitBranchName` is a fine default.
 3. Mark the task issue "In Progress"; same for a Notion row if one exists.
+   Post 🟡 `started` to `#network-monitor` (`AGENTS.md` "Slack Status
+   Posts") once the item's approval gate is approved. Every Slack post in
+   this cycle is required, not a nice-to-have: skipping them is the
+   observed failure, and a chat message to the user doesn't replace them.
 4. Implement. **Expect the plan document's own code sketch to contain a real
    bug** — this isn't a hedge, it's the observed rate: in JAM-125's final
    three tasks, every single one had at least one verified error in its
@@ -155,7 +159,9 @@ status, review status) in `Notes` instead.
    doesn't exist in the environment, so don't assume either one is
    universally right; verify, don't inherit a stale note from an earlier
    session about what was or wasn't connected *then*. Subscribe to PR
-   activity right after opening it.
+   activity right after opening it, then post 🔗 `pr-opened` to Slack with
+   the PR link. Any time you ask for review, feedback, or a decision while
+   the item is open, also post ❓ `feedback` with the question and link.
 8. Attach the PR to the task issue and set it to `"In Review"`. Two distinct
    Linear quirks, both hit for real:
    - Passing `links` and `state` in the same `save_issue` call can silently
@@ -193,8 +199,10 @@ status, review status) in `Notes` instead.
     convention throughout this repo). This is authorized without an extra
     confirmation prompt once both gates are actually met — they *are* the
     confirmation. Then unsubscribe PR activity, set the task issue to
-    `"Done"`, and update the Notion row (if any) to `"Done"` with a final
-    `Notes` pointing at the merged PR.
+    `"Done"`, update the Notion row (if any) to `"Done"` with a final
+    `Notes` pointing at the merged PR, and post ✅ `done` to Slack. If you
+    stop an item without finishing it, post 🔴 `blocked` with the reason
+    instead.
 12. **Stop and report before starting the next item**, even under a standing
     "continue through everything autonomously" instruction — unless the
     user's most recent message is an unambiguous, specific go-ahead covering
