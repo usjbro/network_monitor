@@ -4,6 +4,10 @@
 # Usage:
 #   ./slack-notify.sh <status> <task-slug> <owner> "<message>"
 #
+# Statuses with their own emoji: started, awaiting-approval, pr-opened,
+# feedback, blocked, review, done. When each one is required is in
+# AGENTS.md "Slack Status Posts".
+#
 # Requires a Slack webhook (Slack app → Incoming Webhooks, pointed at the
 # shared coordination channel) — set via coordination/.env
 # (SLACK_WEBHOOK_URL=https://hooks.slack.com/..., gitignored) or exported
@@ -29,6 +33,8 @@ EMOJI="🔧"
 case "$STATUS" in
   started)            EMOJI="🟡" ;;
   awaiting-approval)  EMOJI="⏳" ;;
+  pr-opened)          EMOJI="🔗" ;;
+  feedback)           EMOJI="❓" ;;
   blocked)            EMOJI="🔴" ;;
   review)             EMOJI="🟣" ;;
   done)               EMOJI="✅" ;;

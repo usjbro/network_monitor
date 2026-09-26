@@ -50,15 +50,17 @@ When sources disagree, explicitly report the disagreement.
 
 1. Read `.ai/CURRENT_TASK.md`.
 2. If this task has a Linear id and isn't ad hoc, create a Slack approval gate for it (if one doesn't already exist) and do not proceed past this step until it's approved — see "Slack Approval Gate" below.
-3. Inspect relevant source code and tests.
-4. Read applicable specification/protocol documentation.
-5. Confirm acceptance criteria.
-6. Write/update tests first where practical and demonstrate missing behavior.
-7. Implement the smallest correct change.
-8. Run relevant tests, fix failures, then run broader applicable tests.
-9. Review `git diff`.
-10. Update applicable `.ai/` state and `.ai/HANDOFF.md`.
-11. Commit only when explicitly requested or authorized by the task.
+3. Post the 🟡 `started` message to Slack — see "Slack Status Posts" below. Required for every task, not only when asked.
+4. Inspect relevant source code and tests.
+5. Read applicable specification/protocol documentation.
+6. Confirm acceptance criteria.
+7. Write/update tests first where practical and demonstrate missing behavior.
+8. Implement the smallest correct change.
+9. Run relevant tests, fix failures, then run broader applicable tests.
+10. Review `git diff`.
+11. Update applicable `.ai/` state and `.ai/HANDOFF.md`.
+12. Commit only when explicitly requested or authorized by the task.
+13. Post to Slack when you open a PR, when you ask anyone for review or feedback, and when the task ends (`review`, `done`, or `blocked`) — see "Slack Status Posts" below.
 
 ## Scope Control
 
@@ -150,6 +152,25 @@ Use agents only when work is genuinely parallel, specialization helps, or indepe
 - Run an independent review (`/code-review` or equivalent) before merging, even for docs/tooling-only changes — self-review misses real things.
 - Push only when authorized (`git push -u origin <branch>`); merge with squash only once CI is green, review has passed, and GitHub reports `mergeable_state: "clean"` — see `epic-task-cycle`'s full gate list.
 
+## Slack Status Posts
+
+These posts are **required**, not optional and not only when the user asks for Slack coordination. They apply to every task — Linear-tracked or ad hoc, solo or parallel, code or docs-only, trivial or not. Do not skip one because the change is small, because you already told the user in chat, or because another agent might post it. Chat replies reach only the current user; `#network-monitor` (`C0C39FJT9DX`) is how the user and every other agent see what is happening. Skipped posts are the observed failure this section exists to fix.
+
+| When | Status | Message content |
+|---|---|---|
+| You start work on a task (after the approval gate is approved, if the task has one) | `started` 🟡 | one-line goal; Linear id if any |
+| You open a pull request | `pr-opened` 🔗 | PR link and one-line summary |
+| You ask anyone — the user, a reviewer, another agent — for review, feedback, or a decision | `feedback` ❓ | the exact question or what to review, with the PR link |
+| The task ends | `review` 🟣 when you hand off or end your session with the PR still waiting on review, `done` ✅ when merged or otherwise finished, `blocked` 🔴 when you stop without finishing | what shipped, what's left, or what's blocking |
+
+How to post, in order of preference:
+
+1. `coordination/scripts/slack-notify.sh <status> <task-slug> <claude-code|codex> "<message>"` when `coordination/.env` (or an exported `SLACK_WEBHOOK_URL`) is available — this is the normal path on the local machine. `new-task.sh`, `complete-task.sh`, and `create-gate.sh` already call it for their own events; don't post those twice.
+2. Otherwise (e.g. a cloud session, which has no `coordination/.env`), send the same text with the Slack connector's send-message tool to channel `C0C39FJT9DX`, starting with the same emoji, owner, task slug, and status so it reads like the script's posts.
+3. If neither works, tell the user in chat that the Slack post did not go out and why. Never skip a post silently.
+
+A `feedback` post doesn't replace asking in chat or on the PR — do both. Post replies about an existing task in its Slack thread where one exists.
+
 ## Multi-Agent Coordination
 
 Linear (via `epic-task-cycle`) stays the single source of truth for which epic task is active; `.ai/CURRENT_TASK.md` mirrors it locally. `coordination/` doesn't replace that — it's for planning and discussing parallel sub-work between agents (Claude Code, Codex, or both) working on independently-scoped pieces at the same time, with status kept truthful in both places.
@@ -158,7 +179,7 @@ Linear (via `epic-task-cycle`) stays the single source of truth for which epic t
 
 Slack posting needs a webhook. Configure it once via `coordination/.env` (`SLACK_WEBHOOK_URL=https://hooks.slack.com/...`, gitignored — the repo-wide `.env*` pattern covers it, never commit it) so it survives across shells/sessions instead of evaporating with an `export`; the scripts fall back to an already-exported `SLACK_WEBHOOK_URL` if no file exists. Note this is a plain Incoming Webhook URL, unrelated to any Claude-side Slack app/plugin connection — a standalone script can't use an MCP tool, so those are two separate integrations.
 
-When the user asks for Slack coordination, post the proposed work in the designated channel and ask for feedback before proceeding when the decision affects scope or approach. Route independent work to the appropriate agent using `coordination/router-checklist.md`; keep ownership and boundaries clear, and discuss blockers in the relevant Slack thread. For the user's PRs, post in Slack asking for review or feedback and link the PR. When a Claude Code change is committed and has a pull request, review the PR and leave a concise GitHub review comment with concrete findings or approval context.
+The status posts in "Slack Status Posts" above happen on every task regardless. Beyond them, post the proposed work in the designated channel and ask for feedback before proceeding when a decision affects scope or approach. Route independent work to the appropriate agent using `coordination/router-checklist.md`; keep ownership and boundaries clear, and discuss blockers in the relevant Slack thread. For every PR — the user's or yours — post in Slack asking for review or feedback and link the PR. When a Claude Code change is committed and has a pull request, review the PR and leave a concise GitHub review comment with concrete findings or approval context.
 
 When the user asks for ongoing Slack monitoring, monitor the entire designated channel for new top-level posts and replies in active threads while the session remains active. Poll every 30 seconds unless the user sets another interval. Track the last-read message, not the last-sent message; on rate limits, back off and avoid repeating the same error notification. Review replies against task scope and repository guidance: implement correct, authorized decisions, and post concise clarification questions in the relevant thread.
 
