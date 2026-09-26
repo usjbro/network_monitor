@@ -37,7 +37,7 @@ Context:
 A downloaded `agent-coordination-kit.zip` proposed a parallel task-contract + Slack-webhook coordination system (`coordination/tasks/*.md`, `agent/<slug>` branches) for running multiple agents. This repo already tracks active work through Linear via the `epic-task-cycle` skill and `.ai/CURRENT_TASK.md`, and branches by the Linear issue's own `gitBranchName` (`<github-username>/<linear-id>-<slug>`).
 
 Decision:
-`coordination/tasks/*.md` contracts are sub-task planning/discussion for parallel agent work *within* an active Linear-tracked epic task, not a replacement tracker. Linear + `.ai/CURRENT_TASK.md` remain the source of truth for which epic task is active; a coordination task's status must be kept in sync with its parent Linear issue, not just the local contract file. `coordination/scripts/new-task.sh` branches as `<github-username>/<slug>` (derived from `git config user.email`), matching this repo's real convention instead of the kit's `agent/<slug>` default, and creates worktrees under `.worktrees/<slug>/` instead of a sibling directory.
+`coordination/tasks/*.md` contracts are sub-task planning/discussion for parallel agent work *within* an active Linear-tracked epic task, not a replacement tracker. Linear + `.ai/CURRENT_TASK.md` remain the source of truth for which epic task is active; a coordination task's status must be kept in sync with its parent Linear issue, not just the local contract file. `coordination/scripts/new-task.sh` uses the configured branch prefix (default `jamesmbrownjr`, overridable with `COORDINATION_BRANCH_PREFIX`), followed by `<slug>` or `<lowercase-linear-id>-<slug>`, and creates worktrees under `.worktrees/<slug>/`. The original email-derived prefix was superseded by ADR-002; this paragraph was reconciled on 2026-09-26 against the merged implementation.
 
 Reasoning:
 Avoids two competing "what's actually being worked on" trackers, and keeps branch/worktree naming consistent with every other branch in this repo.
@@ -95,3 +95,26 @@ A full `AGENTS.md`/`CLAUDE.md` deduplication remains open as a follow-up, not tr
 
 Evidence / References:
 `gh pr diff 221 --name-only` (showed unrelated already-merged files); `/code-review` output on #220 and #222; `git diff --stat origin/main <branch>` confirming #222's corrected diff scope; review-fix verification steps recorded in `TEST_STATUS.md`.
+
+## ADR-004 — Local approval gates and explicit interrupted-operation recovery
+
+Date:
+2026-09-26 (records the September 25 approved design and merged PR #225)
+
+Status:
+Accepted; implemented by PR #225, merge `e42aeaf742e53a851104fae801d0e73c0761f7e6`.
+
+Decision:
+Linear-tracked implementation requires human approval; ad hoc work without a Linear ID is exempt. Persist gate state locally under gitignored `coordination/gates/<lowercase-linear-id>__<slug>.md`, validating both components. The double underscore avoids ambiguous ID/slug concatenation. Persist the gate before posting to Slack. Interactive Slack failures allow in-chat approval; autonomous posting failure aborts creation.
+
+Approval does not itself establish dispatch. Claim delegation atomically before dispatch, then record completion. An approved, unclaimed gate can resume without renewed approval. A claimed but incomplete delegation requires human confirmation that none is active before resetting. Locks record PID and process start time where available; explicit recovery refuses a matching live owner and requires confirmation for stale/ownerless locks.
+
+No daemon or cloud watcher resolves these local files. A live session may poll Slack; later manual pickup requires access to the same persistent checkout. Silence never grants approval, and a rejected gate is not automatically retried.
+
+Consequences:
+Local persistence supports recovery but does not provide cross-machine synchronization or unattended resolution after a session ends. Shell tests establish state-machine behavior, not that a live session is currently monitoring Slack. Gate path validation does not automatically protect legacy `new-task.sh` task paths.
+
+Evidence / References:
+- `docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md` (including its later recovery amendments).
+- `coordination/watcher-prompt.md` and `coordination/scripts/{lib,create-gate,claim-gate-delegation,reset-gate-delegation-claim,recover-gate-lock}.sh`.
+- [PR #225](https://github.com/usjbro/network_monitor/pull/225), verified merged; current shell results in `TEST_STATUS.md`.
