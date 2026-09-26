@@ -170,6 +170,29 @@ fn status_for(state: &FlowState, protocol: TransportProtocol) -> &'static str {
     }
 }
 
+/// `observe()`'s result: the packet's attributed direction (the single
+/// source of truth so callers, e.g. the capture loop's aggregate throughput
+/// counters, don't need their own separate src/dst-vs-local_addrs check that
+/// could drift out of sync with this one), plus two JAM-12 Expert Info
+/// signals computed from the same per-packet state update rather than
+/// requiring a second pass over the flow table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserveResult {
+    /// `true` = outbound/local-to-remote, `false` = inbound.
+    pub is_outbound: bool,
+    /// This specific packet is a retransmission (the same per-direction,
+    /// payload-only detection `observe()` already performed).
+    pub is_retransmit: bool,
+    /// This specific packet is the one that transitioned the flow into
+    /// `rst_seen` — `false` for every RST-flagged packet after the first on
+    /// an already-reset flow.
+    pub rst_transitioned: bool,
+    /// This packet's flow's `FlowKey::connection_id()` — handed back so a
+    /// `connection-reset` finding can be built without the caller needing
+    /// its own copy of the key-derivation logic.
+    pub connection_id: String,
+}
+
 impl FlowTable {
     pub fn new(local_addrs: Vec<String>) -> Self {
         Self::new_with_capacity(local_addrs, DEFAULT_MAX_FLOWS)
@@ -282,15 +305,12 @@ impl FlowTable {
         }
     }
 
-    /// Returns the direction this packet was attributed (`Some(true)` =
-    /// outbound/local-to-remote, `Some(false)` = inbound, `None` = the
-    /// packet matched no tracked flow) — the single source of truth for
-    /// per-packet direction, so callers (e.g. the capture loop's aggregate
-    /// throughput counters) don't need their own separate src/dst-vs-
-    /// local_addrs check that can drift out of sync with this one.
-    pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<bool> {
+    /// Returns `None` when the packet matched no tracked flow (see
+    /// `ObserveResult` for the `Some` case).
+    pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<ObserveResult> {
         let (key, is_outbound) = self.key_for(packet)?;
         let remote_port = key.remote_port;
+        let connection_id = key.connection_id();
         let is_new = matches!(self.flows.entry(key.clone()), Entry::Vacant(_));
         if is_new {
             self.total_flows_observed += 1;
@@ -331,6 +351,8 @@ impl FlowTable {
             }
         }
 
+        let mut is_retransmit = false;
+        let mut rst_transitioned = false;
         if let Some(flags) = packet.tcp_flags {
             if flags.syn && !flags.ack {
                 state.syn_sent_at_ms = Some(now_ms);
@@ -347,6 +369,11 @@ impl FlowTable {
                 state.fin_seen = true;
             }
             if flags.rst {
+                // JAM-12's connection-reset finding fires once per flow, on
+                // the transition into rst_seen — not on every subsequent
+                // RST-flagged packet on an already-reset flow (e.g. a
+                // retransmitted RST).
+                rst_transitioned = !state.rst_seen;
                 state.established = false;
                 state.rst_seen = true;
             }
@@ -368,7 +395,7 @@ impl FlowTable {
                     // false-positive retransmit as soon as any segment had
                     // already been seen in the other direction — this must
                     // stay scoped per-direction.
-                    let is_retransmit = match state.max_seq_seen.get(&is_outbound) {
+                    is_retransmit = match state.max_seq_seen.get(&is_outbound) {
                         Some(&max_seen) => seq <= max_seen,
                         None => false,
                     };
@@ -381,7 +408,7 @@ impl FlowTable {
             }
         }
 
-        Some(is_outbound)
+        Some(ObserveResult { is_outbound, is_retransmit, rst_transitioned, connection_id })
     }
 
     /// Looks up the given flow's observed ClientHello `client_random`, if
@@ -655,6 +682,42 @@ mod tests {
 
         let snap = table.snapshot(1000);
         assert_eq!(snap[0].packet_loss, 0.0);
+    }
+
+    #[test]
+    fn observe_reports_is_retransmit_only_on_the_repeated_segment() {
+        // JAM-12: the retransmission finding needs a per-packet signal, not
+        // just the aggregate packet_loss percentage snapshot() already
+        // reports — same underlying detection, exposed per observe() call.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let out1 = tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]);
+        let out2 = tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]);
+
+        let first = table.observe(&out1, &L7Info::None, 0).unwrap();
+        assert!(!first.is_retransmit, "the first segment in a direction is never a retransmit");
+
+        let second = table.observe(&out2, &L7Info::None, 1).unwrap();
+        assert!(second.is_retransmit, "a repeated sequence number on the same direction is a retransmit");
+    }
+
+    #[test]
+    fn observe_reports_rst_transitioned_only_on_the_first_rst_for_a_flow() {
+        // JAM-12: the connection-reset finding must fire once per flow
+        // lifetime, not once per RST-flagged packet (a flow can see more
+        // than one RST, e.g. a retransmitted RST).
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
+        let rst1 = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: false, rst: true, ..Default::default() }, 60);
+        let rst2 = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: false, rst: true, ..Default::default() }, 60);
+
+        let syn_result = table.observe(&syn, &L7Info::None, 0).unwrap();
+        assert!(!syn_result.rst_transitioned);
+
+        let first_rst = table.observe(&rst1, &L7Info::None, 5).unwrap();
+        assert!(first_rst.rst_transitioned, "the first RST on this flow must transition");
+
+        let second_rst = table.observe(&rst2, &L7Info::None, 10).unwrap();
+        assert!(!second_rst.rst_transitioned, "an already-reset flow must not transition again");
     }
 
     /// Builds a bare TCP packet like `tcp_packet`, but lets the caller choose

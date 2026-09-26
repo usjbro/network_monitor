@@ -377,6 +377,13 @@ fn resolve_link_type(datalink: pcap::Linktype, interface_name: &str) -> parse::L
     })
 }
 
+/// The `malformed-frame` finding's summary (JAM-12) — observational only,
+/// per "annotate, never conclude": states what was observed (a frame of
+/// this size didn't decode under the active link type), never why.
+fn malformed_frame_summary(link_type: parse::LinkType, frame_len: usize) -> String {
+    format!("{frame_len}-byte frame did not decode as {link_type:?} framing")
+}
+
 /// One packet source, abstracting over live capture, a replayed pcapng
 /// file (this agent's own writer output, or any modern tool's), and a
 /// replayed classic-pcap file (legacy Wireshark/tcpdump captures) — see
@@ -1192,6 +1199,8 @@ async fn main() -> std::io::Result<()> {
     // millisecond would otherwise get identical IDs — and the TS side uses
     // pkt.id as a React list key, so a collision causes a rendering bug.
     let packet_seq = Arc::new(AtomicU64::new(0));
+    // Same collision-avoidance role as packet_seq, for finding.id (JAM-12).
+    let finding_seq_counter = Arc::new(AtomicU64::new(0));
     // Latest kernel-side capture stats (issue #61) — written by the capture
     // thread roughly once a second (see below), read by the periodic
     // emitter. `None` until the capture thread's first successful poll.
@@ -1365,6 +1374,7 @@ async fn main() -> std::io::Result<()> {
         let paused = paused.clone();
         let tx = tx.clone();
         let packet_seq = packet_seq.clone();
+        let finding_seq_counter = finding_seq_counter.clone();
         let local_addrs = local_addrs_for_capture;
         let process_map = process_map.clone();
         let keylog_watcher = keylog_watcher.clone();
@@ -1493,11 +1503,35 @@ async fn main() -> std::io::Result<()> {
                         }
                         let Some(parsed) = parse::parse_packet(&data, link_type) else {
                             unparseable_frames.fetch_add(1, Ordering::Relaxed);
+                            // JAM-12 Expert Info: malformed-frame. Neither
+                            // frameId nor flowId — parse_packet failing
+                            // means no ParsedPacket, and therefore no
+                            // packet event or flow, was ever produced for
+                            // this frame (see the design spec's "Deliberate
+                            // deviation": this doesn't thread a per-parse-
+                            // stage reason out of parse_packet, only what
+                            // this call site already knows).
+                            let finding_epoch_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis())
+                                .unwrap_or(0);
+                            let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
+                            let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
+                                finding: Box::new(wire::FindingJson {
+                                    id: format!("finding-{finding_epoch_ms}-{finding_seq}"),
+                                    timestamp: finding_epoch_ms.to_string(),
+                                    severity: wire::Severity::Warning,
+                                    code: wire::FindingCode::MalformedFrame,
+                                    summary: malformed_frame_summary(link_type, data.len()),
+                                    frame_id: None,
+                                    flow_id: None,
+                                }),
+                            }));
                             continue;
                         };
                         let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
                         let now_ms = start.elapsed().as_millis() as u64;
-                        let is_outbound = flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+                        let observe_result = flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
 
                         // Aggregate throughput counters (issue #64) — driven
                         // by the same direction FlowTable::observe just
@@ -1508,7 +1542,7 @@ async fn main() -> std::io::Result<()> {
                         // captured in promiscuous mode) counts toward
                         // neither total, same as before.
                         let len = parsed.total_len as u64;
-                        let direction = match is_outbound {
+                        let direction = match observe_result.as_ref().map(|r| r.is_outbound) {
                             Some(true) => {
                                 total_tx_bytes.fetch_add(len, Ordering::Relaxed);
                                 total_tx_packets.fetch_add(1, Ordering::Relaxed);
@@ -1521,6 +1555,34 @@ async fn main() -> std::io::Result<()> {
                             }
                             None => pcapng::Direction::Unknown,
                         };
+
+                        // JAM-12 Expert Info: connection-reset. Not gated by
+                        // packet_event_limiter below — a flow's
+                        // connection_update has its own independent
+                        // tick-based cadence, unrelated to per-packet
+                        // event limiting, so this finding is emitted
+                        // immediately rather than deferred to the
+                        // rate-limited packet-event section.
+                        if let Some(result) = &observe_result {
+                            if result.rst_transitioned {
+                                let finding_epoch_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis())
+                                    .unwrap_or(0);
+                                let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
+                                let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
+                                    finding: Box::new(wire::FindingJson {
+                                        id: format!("finding-{finding_epoch_ms}-{finding_seq}"),
+                                        timestamp: finding_epoch_ms.to_string(),
+                                        severity: wire::Severity::Note,
+                                        code: wire::FindingCode::ConnectionReset,
+                                        summary: "connection reset".to_string(),
+                                        frame_id: None,
+                                        flow_id: Some(result.connection_id.clone()),
+                                    }),
+                                }));
+                            }
+                        }
 
                         // Capture-to-file (epic #55, JAM-132/GitHub #70):
                         // never on by default, and a cheap atomic check when
@@ -1567,9 +1629,10 @@ async fn main() -> std::io::Result<()> {
                             .map(|d| d.as_millis())
                             .unwrap_or(0);
                         let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
+                        let frame_id = format!("pkt-{epoch_ms}-{seq}");
                         let packet_fields = fields::build_fields(&parsed, &l7_info, link_type);
                         let packet_json = wire::PacketJson {
-                            id: format!("pkt-{epoch_ms}-{seq}"),
+                            id: frame_id.clone(),
                             timestamp: epoch_ms.to_string(),
                             relative_time_ms: now_ms,
                             layer: 4,
@@ -1601,6 +1664,28 @@ async fn main() -> std::io::Result<()> {
                         let _ = tx.send(wire::encode_event(&wire::AgentEvent::Packet {
                             packet: Box::new(packet_json),
                         }));
+
+                        // JAM-12 Expert Info: retransmission. Only emitted
+                        // here, after the packet_event_limiter gate and
+                        // frame_id generation above, so this finding's
+                        // frameId always corresponds to a packet event the
+                        // UI actually received — a rate-limited-out
+                        // retransmission produces no finding, the same as
+                        // it already produces no packet event.
+                        if observe_result.as_ref().is_some_and(|r| r.is_retransmit) {
+                            let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
+                            let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
+                                finding: Box::new(wire::FindingJson {
+                                    id: format!("finding-{epoch_ms}-{finding_seq}"),
+                                    timestamp: epoch_ms.to_string(),
+                                    severity: wire::Severity::Warning,
+                                    code: wire::FindingCode::Retransmission,
+                                    summary: "retransmitted segment".to_string(),
+                                    frame_id: Some(frame_id),
+                                    flow_id: None,
+                                }),
+                            }));
+                        }
                     }
                     SourceFrame::Timeout => continue,
                     SourceFrame::Eof => {
@@ -2074,8 +2159,8 @@ async fn main() -> std::io::Result<()> {
 mod tests {
     use super::{
         build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
-        is_capturable, is_meaningful_override, looks_like_pcapng, parse_max_flows, parse_replay_local_addrs,
-        parse_replay_speed,
+        is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, parse_max_flows,
+        parse_replay_local_addrs, parse_replay_speed,
         resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
     };
@@ -2165,6 +2250,23 @@ mod tests {
         // can't decode (see issue #63) — fail at startup instead, naming
         // the interface so the failure is immediately diagnosable.
         resolve_link_type(pcap::Linktype(113), "utun8"); // DLT_LINUX_SLL
+    }
+
+    #[test]
+    fn malformed_frame_summary_names_the_link_type_and_byte_length_only() {
+        // JAM-12 "annotate, never conclude": states what was observed, not
+        // a guess about why parsing failed.
+        let summary = malformed_frame_summary(LinkType::Ethernet, 58);
+        assert_eq!(summary, "58-byte frame did not decode as Ethernet framing");
+        assert!(!summary.to_lowercase().contains("attack"));
+        assert!(!summary.to_lowercase().contains("malicious"));
+        assert!(!summary.to_lowercase().contains("suspicious"));
+    }
+
+    #[test]
+    fn malformed_frame_summary_reflects_each_link_type() {
+        assert!(malformed_frame_summary(LinkType::NullLoopback, 4).contains("NullLoopback"));
+        assert!(malformed_frame_summary(LinkType::Raw, 20).contains("Raw"));
     }
 
     #[test]
