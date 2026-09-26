@@ -53,11 +53,15 @@ Surface disagreements among sources explicitly. The current epic-cycle skill use
 ## Required Development Workflow
 
 1. Read `CURRENT_TASK.md`; inspect relevant implementation, tests, and architecture.
-2. Read the relevant spec/protocol docs and confirm acceptance criteria.
-3. Use test-first development where practical; show the changed test fails for the missing behavior.
-4. Implement the smallest correct change; run relevant tests, fix failures, then broader applicable checks.
-5. Review `git diff`; update applicable state files and `HANDOFF.md` with verified facts.
-6. Commit only verified work and only when the user explicitly requests a commit.
+2. Post the 🟡 `started` message to `#network-monitor` (after the approval gate is approved, if the task has one).
+3. Read the relevant spec/protocol docs and confirm acceptance criteria.
+4. Use test-first development where practical; show the changed test fails for the missing behavior.
+5. Implement the smallest correct change; run relevant tests, fix failures, then broader applicable checks.
+6. Review `git diff`; update applicable state files and `HANDOFF.md` with verified facts.
+7. Commit only verified work and only when the user explicitly requests a commit.
+8. Post to Slack when you open a PR (`pr-opened`), whenever you ask for review or feedback (`feedback`), and when the task ends (`review`, `done`, or `blocked`).
+
+The Slack posts in steps 2 and 8 are required on every task — ad hoc or Linear-tracked, small or large — not only when the user asks for Slack coordination. Telling the user in chat does not replace them. See `AGENTS.md` "Slack Status Posts" for the message format and how to post from a cloud session with no webhook.
 
 Tests, not compilation, a rendered screen, a file's existence, or tracker status, establish behavior. Never claim completion without evidence.
 
