@@ -79,7 +79,7 @@ pub struct FlowSnapshot {
     pub tx_speed: f64,
     pub rx_bytes_total: u64,
     pub tx_bytes_total: u64,
-    pub latency_ms: f64,
+    pub latency_ms: Option<f64>,
     pub packet_loss: f64,
     pub ja3_fingerprint: Option<String>,
     pub ja3_label: Option<&'static str>,
@@ -416,7 +416,7 @@ impl FlowTable {
                 tx_speed: state.tx_bytes_this_tick as f64 / elapsed_s,
                 rx_bytes_total: state.rx_bytes_total,
                 tx_bytes_total: state.tx_bytes_total,
-                latency_ms: state.rtt_ms.unwrap_or(0.0),
+                latency_ms: state.rtt_ms,
                 packet_loss: packet_loss.min(100.0),
                 ja3_fingerprint: state.ja3_fingerprint.clone(),
                 ja3_label: state.ja3_label,
@@ -574,7 +574,20 @@ mod tests {
 
         let snap = table.snapshot(25);
         assert_eq!(snap[0].status, "ESTABLISHED");
-        assert!((snap[0].latency_ms - 20.0).abs() < 0.01, "expected ~20ms RTT, got {}", snap[0].latency_ms);
+        let rtt = snap[0].latency_ms.expect("handshake was observed, so RTT must be measured");
+        assert!((rtt - 20.0).abs() < 0.01, "expected ~20ms RTT, got {}", rtt);
+    }
+
+    #[test]
+    fn latency_is_absent_when_the_handshake_was_not_observed() {
+        // JAM-156: a flow first seen mid-connection (no SYN/SYN-ACK, e.g. it
+        // predates the agent starting) has no RTT measurement. That must be
+        // reported as absent, never as a fabricated 0 ms.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
+        table.observe(&ack, &L7Info::None, 0);
+        let snap = table.snapshot(10);
+        assert_eq!(snap[0].latency_ms, None);
     }
 
     #[test]

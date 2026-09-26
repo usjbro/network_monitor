@@ -52,7 +52,7 @@ Maps to `NetworkConnection` (`lib/types.ts`) via `mapConnectionEvent` (`lib/agen
 Field notes:
 - `status` — one of `ESTABLISHED` / `SYN_SENT` / `TIME_WAIT` / `CLOSE_WAIT`, derived from observed TCP flags. Non-TCP flows (UDP, ICMP) report `ESTABLISHED` — there's no TCP-style closing state for a connectionless protocol.
 - `packetLoss` — a retransmission-based *approximation*, not a precise measurement. See [troubleshooting.md](troubleshooting.md#what-does-retransmit-anomaly-mean).
-- `latencyMs` — SYN→SYN-ACK round-trip time, `0` if the handshake wasn't observed (e.g. the connection predates the agent starting).
+- `latencyMs` (optional) — SYN→SYN-ACK round-trip time. Absent when no RTT was measured: every non-TCP flow, and any TCP flow whose handshake wasn't observed (e.g. the connection predates the agent starting). Never sent as a placeholder `0` (JAM-156); the Connections view shows `—` for an absent value.
 - `remoteHostname` (optional in the TS type) is never populated by the current agent — reverse-DNS/WHOIS enrichment is a separate, not-yet-built sub-project.
 - `ja3Fingerprint`/`ja3Label` (both optional) — present once the agent has observed this flow's TLS ClientHello; absent for flows without an observed handshake (e.g. non-TLS, or the connection predates the agent starting). `ja3Label` is best-effort and informational only — never treat it as an authenticated client identity, it is trivially spoofable by any TLS client (see `docs/superpowers/specs/2026-08-29-tls-interception-design.md`, Security model).
 

@@ -238,7 +238,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
                   {/* Latency */}
                   <td className="p-2.5 text-center text-slate-300">
-                    <div>{conn.latencyMs} ms</div>
+                    {conn.latencyMs === undefined ? (
+                      <div title="Latency not measured for this flow">—</div>
+                    ) : (
+                      <div>{conn.latencyMs} ms</div>
+                    )}
                     <div className={`text-[10px] ${captureDegraded ? 'text-amber-500' : 'text-slate-500'}`}>
                       {conn.packetLoss.toFixed(2)}% loss
                       {captureDegraded && <span title="Capture is dropping frames — this figure may under-report actual loss">*</span>}

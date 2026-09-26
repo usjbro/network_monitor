@@ -26,7 +26,7 @@ export function mapConnectionEvent(json: unknown): NetworkConnection {
     txSpeed: requireField(w, 'txSpeed'),
     rxBytesTotal: requireField(w, 'rxBytesTotal'),
     txBytesTotal: requireField(w, 'txBytesTotal'),
-    latencyMs: requireField(w, 'latencyMs'),
+    latencyMs: w.latencyMs as number | undefined,
     packetLoss: requireField(w, 'packetLoss'),
     status: requireField(w, 'status'),
     encryption: requireField(w, 'encryption'),
