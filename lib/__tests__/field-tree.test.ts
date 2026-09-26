@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFieldTree } from '@/lib/field-tree';
+import { buildFieldTree, mostSpecificFieldAtOffset } from '@/lib/field-tree';
 import type { WireField } from '@/lib/types';
 
 function field(overrides: Partial<WireField> & Pick<WireField, 'path' | 'label' | 'type'>): WireField {
@@ -43,5 +43,30 @@ describe('buildFieldTree', () => {
 
   it('returns an empty tree for an empty field list', () => {
     expect(buildFieldTree([])).toEqual([]);
+  });
+});
+
+describe('mostSpecificFieldAtOffset', () => {
+  const tcp = field({ path: 'tcp', label: 'TCP', type: 'group', offset: 8, len: 6 });
+  const flags = field({ path: 'tcp.flags', label: 'Flags', type: 'group', group: 'tcp', offset: 13, len: 1 });
+  const syn = field({ path: 'tcp.flags.syn', label: 'SYN', type: 'bool', group: 'tcp.flags', value: true, offset: 13, len: 1 });
+  const ack = field({ path: 'tcp.flags.ack', label: 'ACK', type: 'bool', group: 'tcp.flags', value: false, offset: 13, len: 1 });
+  const srcPort = field({ path: 'tcp.src_port', label: 'Source Port', type: 'uint', group: 'tcp', value: 51000, offset: 8, len: 2 });
+  const fields = [tcp, flags, syn, ack, srcPort];
+
+  it('prefers a non-group leaf over an enclosing group', () => {
+    expect(mostSpecificFieldAtOffset(fields, 8)?.path).toBe('tcp.src_port');
+  });
+
+  it('picks the first leaf in field order when multiple leaves share a byte', () => {
+    expect(mostSpecificFieldAtOffset(fields, 13)?.path).toBe('tcp.flags.syn');
+  });
+
+  it('falls back to the smallest enclosing group when no leaf covers the byte', () => {
+    expect(mostSpecificFieldAtOffset([tcp], 13)?.path).toBe('tcp');
+  });
+
+  it('returns null when no field covers the byte', () => {
+    expect(mostSpecificFieldAtOffset(fields, 0)).toBeNull();
   });
 });
