@@ -7,6 +7,7 @@ import {
   Layers,
   Network,
   Radio,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   AgentStatus,
@@ -14,6 +15,7 @@ import {
   CaptureFileStatus,
   CaptureStats,
   DecryptedPayloadSegment,
+  Finding,
   OSILayerInfo,
   NetworkConnection,
   NetworkInterface,
@@ -33,6 +35,7 @@ import {
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
+  mapFindingEvent,
   mapInterfaceErrorEvent,
   mapInterfaceListEvent,
   mapPacketEvent,
@@ -48,6 +51,7 @@ import { DashboardView } from '@/components/DashboardView';
 import { LayerDetailView } from '@/components/LayerDetailView';
 import { ConnectionsView } from '@/components/ConnectionsView';
 import { PacketStreamView } from '@/components/PacketStreamView';
+import { FindingsPanel, type FindingNavigateTarget } from '@/components/FindingsPanel';
 import { ProtocolMatrixView } from '@/components/ProtocolMatrixView';
 import { InstallModal } from '@/components/InstallModal';
 import { CommandLineBar } from '@/components/CommandLineBar';
@@ -55,7 +59,7 @@ import { compileDisplayFilter, type CompiledDisplayFilter } from '@/lib/display-
 
 export default function TerminalApp() {
   // Application State
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'layer' | 'connections' | 'packets' | 'topology'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'layer' | 'connections' | 'packets' | 'topology' | 'findings'>('dashboard');
   const [selectedLayerNum, setSelectedLayerNum] = useState<OSILayerNumber>(7);
   const [selectedTheme, setSelectedTheme] = useState<TerminalTheme>('sophisticated');
   const [isPaused, setIsPaused] = useState(false);
@@ -114,6 +118,10 @@ export default function TerminalApp() {
   // Connections & Packets State (populated from the live capture stream)
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
   const [packets, setPackets] = useState<PacketFrame[]>([]);
+  // Expert Info (JAM-12) — capped the same way `packets` is, reusing
+  // packetBufferLimitRef rather than introducing a second buffer-limit
+  // command verb for one more stream.
+  const [findings, setFindings] = useState<Finding[]>([]);
   const [historyRx, setHistoryRx] = useState<number[]>([]);
   const [historyTx, setHistoryTx] = useState<number[]>([]);
   // Tier B (opt-in decrypted TLS content) — same 100-entry cap discipline
@@ -209,6 +217,10 @@ export default function TerminalApp() {
         if (data.type === 'packet') {
           const packet = mapPacketEvent(data.packet);
           setPackets((prev) => [packet, ...prev.slice(0, packetBufferLimitRef.current - 1)]);
+        }
+        if (data.type === 'finding') {
+          const finding = mapFindingEvent(data);
+          setFindings((prev) => [finding, ...prev.slice(0, packetBufferLimitRef.current - 1)]);
         }
         if (data.type === 'decrypted_payload') {
           const segment = mapDecryptedPayloadEvent(data);
@@ -521,6 +533,7 @@ export default function TerminalApp() {
       setConnections([]);
       setPackets([]);
       setDecryptedSegments([]);
+      setFindings([]);
     } else if (mainCmd === 'geoip' && arg1 === 'enable') {
       sendGeoIpControl('enable');
     } else if (mainCmd === 'geoip' && arg1 === 'disable') {
@@ -776,6 +789,7 @@ export default function TerminalApp() {
             setConnections([]);
             setPackets([]);
             setDecryptedSegments([]);
+            setFindings([]);
           }}
           crtEnabled={crtEnabled}
           onToggleCrt={() => setCrtEnabled(!crtEnabled)}
@@ -842,6 +856,18 @@ export default function TerminalApp() {
           >
             <Globe className="h-3.5 w-3.5" />
             <span>F5: TOPOLOGY</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('findings')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded transition font-bold ${
+              activeTab === 'findings'
+                ? themeConfig.highlight
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <ShieldAlert className="h-3.5 w-3.5" />
+            <span>F6: FINDINGS ({findings.length})</span>
           </button>
 
         </nav>
@@ -911,6 +937,16 @@ export default function TerminalApp() {
               onSelectLayer={(num) => {
                 setSelectedLayerNum(num);
                 setActiveTab('layer');
+              }}
+            />
+          )}
+
+          {activeTab === 'findings' && (
+            <FindingsPanel
+              findings={findings}
+              theme={themeConfig}
+              onNavigate={(target: FindingNavigateTarget) => {
+                setActiveTab(target.kind === 'frame' ? 'packets' : 'connections');
               }}
             />
           )}

@@ -66,11 +66,11 @@
 
 **Files:** New `components/FindingsPanel.tsx`; modify `app/page.tsx` (state + SSE wiring, matching the existing `packets`/`connections` pattern) and `app/api/stream/route.ts` if it enumerates event types explicitly (check first — it may already forward unknown-to-it event types generically).
 
-- [ ] Write `lib/__tests__/findings-panel.test.tsx`: renders one row per finding grouped by `code`; a `retransmission`/`connection-reset` row is clickable (calls an `onNavigate` callback with the right target) and a `malformed-frame` row is not (no button/clickable affordance, per the spec's non-navigability note) — assert this structurally (no `role="button"`/`onClick` on that row), not just by convention.
-- [ ] Run and confirm it fails.
-- [ ] Implement `FindingsPanel`, matching the terminal aesthetic (`components/PacketStreamView.tsx`'s existing severity-colored badge conventions are the reference, not a new visual language).
-- [ ] Wire it into `app/page.tsx`: a `findings: Finding[]` state array fed by the SSE stream (same pattern as `packets`), a new command-bar/keyboard-shortcut entry point to show it (matching the existing `F1`-`F5` pane convention), capped the same way `packets` already is (reuse the existing buffer-limit mechanism, don't invent a second one).
-- [ ] Run and confirm pass; run the full `npx vitest run` suite to confirm no regression in decrypted-content, display-filter, or export tests.
+- [x] Write `lib/__tests__/findings-panel.test.tsx`: renders one row per finding grouped by `code`; a `retransmission`/`connection-reset` row is clickable (calls an `onNavigate` callback with the right target) and a `malformed-frame` row is not (no button/clickable affordance, per the spec's non-navigability note) — assert this structurally (no `role="button"`/`onClick` on that row), not just by convention.
+- [x] Run and confirm it fails.
+- [x] Implement `FindingsPanel`, matching the terminal aesthetic (`components/PacketStreamView.tsx`'s existing severity-colored badge conventions are the reference, not a new visual language).
+- [x] Wire it into `app/page.tsx`: a `findings: Finding[]` state array fed by the SSE stream (same pattern as `packets`), a new command-bar/keyboard-shortcut entry point to show it (matching the existing `F1`-`F5` pane convention), capped the same way `packets` already is (reuse the existing buffer-limit mechanism, don't invent a second one).
+- [x] Run and confirm pass; run the full `npx vitest run` suite to confirm no regression in decrypted-content, display-filter, or export tests.
 
 ### Task 6: Row markers
 
