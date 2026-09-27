@@ -258,6 +258,20 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
+# A task-slug containing '/' is rejected outright — it's used to build a
+# coordination/tasks|gates/<task-slug>.md path for the slack_ts auto-lookup,
+# and this is the one character that would let it escape that directory.
+reset_files
+RC=0
+STDERR="$(run_bot started "../../etc/passwd" claude-code msg 2>&1 1>/dev/null)" || true
+run_bot started "../../etc/passwd" claude-code msg >/dev/null 2>&1 || RC=$?
+if [[ $RC -ne 0 && "$STDERR" == *"must not contain"* && ! -s "$CURL_ARGS_FILE" ]]; then
+  echo "PASS: a task-slug containing '/' is rejected before any Slack request"
+else
+  echo "FAIL: expected rejection of a task-slug containing '/' — rc=$RC stderr='$STDERR'"
+  FAILURES=$((FAILURES + 1))
+fi
+
 # A non-200 HTTP status (transport-level failure) is also a failure.
 reset_files
 printf '{}' > "$RESPONSE_BODY_FILE"

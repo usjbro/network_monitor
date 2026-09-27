@@ -44,6 +44,17 @@ OWNER="${3:?owner}"
 MESSAGE="${4:-}"
 THREAD_TS="${5:-}"
 
+# task-slug is used below to build a coordination/tasks|gates/<task-slug>.md
+# path for the slack_ts auto-lookup. It's also a gate's "<linear-id>__<slug>"
+# tag (which validate_slug's stricter pattern would reject for its "__"), so
+# just block the one thing that would let it escape that directory.
+case "$TASK_SLUG" in
+  */*)
+    echo "invalid task-slug: '${TASK_SLUG}' must not contain '/'" >&2
+    exit 1
+    ;;
+esac
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
