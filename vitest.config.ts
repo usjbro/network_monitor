@@ -16,9 +16,16 @@ export default defineConfig({
     // e2e/ holds Playwright specs (run via `npm run test:e2e`), which use
     // @playwright/test's own test()/expect() — vitest's default include
     // glob would otherwise also pick up e2e/smoke.spec.ts and fail trying
-    // to run it under the wrong test runner. Extends (not replaces)
-    // vitest's own default exclude list.
-    exclude: [...configDefaults.exclude, 'e2e/**'],
+    // to run it under the wrong test runner. .worktrees/ holds this repo's
+    // own linked-worktree checkouts (see AGENTS.md), each a full nested
+    // copy of the repo with its own node_modules and __tests__ — without
+    // this, running `vitest run` from the main repo root while any
+    // worktree exists also collects and runs that worktree's copy of every
+    // test file, against whatever React/deps version that worktree has
+    // installed (a real observed failure: a stray worktree's own
+    // node_modules caused unrelated test crashes here). Extends (not
+    // replaces) vitest's own default exclude list.
+    exclude: [...configDefaults.exclude, 'e2e/**', '.worktrees/**'],
     // Registers jest-dom's matchers (toBeInTheDocument, etc.) globally for
     // every test file, including ones running under the per-file
     // `// @vitest-environment jsdom` override (e.g.

@@ -161,6 +161,21 @@ export interface CaptureStats {
   idleEvictions: number;
 }
 
+// Expert Info (JAM-12): an annotated observation from the agent, never a
+// verdict — see docs/superpowers/specs/2026-09-26-expert-info-findings-design.md.
+// `frameId`/`flowId` are each independently optional: a `malformed-frame`
+// finding has neither, since no `PacketFrame` (and therefore no flow) was
+// ever produced for a frame that failed to decode.
+export interface Finding {
+  id: string;
+  timestamp: string;
+  severity: 'error' | 'warning' | 'note' | 'chat';
+  code: 'retransmission' | 'connection-reset' | 'malformed-frame';
+  summary: string;
+  frameId?: string;
+  flowId?: string;
+}
+
 // Whether this agent process is capturing live traffic or replaying a
 // previously-captured file — fixed for the life of the process (spec:
 // live/replay is a startup-only choice, never runtime-switchable).
