@@ -24,6 +24,28 @@ if [[ -f "$REPO_ROOT/coordination/.env" && -z "${SLACK_WEBHOOK_URL+x}" ]]; then
   set +a
 fi
 
+# True if slack-notify.sh has any way to post — the preferred bot-token path
+# (SLACK_BOT_TOKEN, threadable) or the webhook fallback (SLACK_WEBHOOK_URL,
+# not threadable). Callers that gate on "is Slack configured at all" (e.g.
+# create-gate.sh refusing an autonomous gate) should use this instead of
+# checking SLACK_WEBHOOK_URL directly, so a bot-token-only setup still works.
+slack_configured() {
+  [[ -n "${SLACK_BOT_TOKEN:-}" || -n "${SLACK_WEBHOOK_URL:-}" ]]
+}
+
+# Reads a task contract's or gate's own recorded slack_ts (if any), so a
+# later post about the same task/gate can thread under its parent instead of
+# starting a new top-level post. Silent (prints nothing) if the file or
+# field doesn't exist yet — callers treat an empty result as "post
+# top-level."
+lookup_slack_ts() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    gate_field "$file" slack_ts
+  fi
+  return 0
+}
+
 # Validates a value intended for use as a filesystem path component (a task
 # or gate slug, or a lower-cased Linear id). Rejects anything empty, or
 # containing characters other than lowercase letters, digits, and hyphens —

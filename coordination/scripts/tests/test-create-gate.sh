@@ -165,6 +165,42 @@ rm -f "$AUTO_GATE_FILE" "$AUTO_OBSERVED"
 rm -f "$POST_GATE_FILE" "$POST_OBSERVED" "$FAKE_BIN/curl"
 rmdir "$FAKE_BIN"
 
+# With a bot token, a successful post's ts is recorded as the gate's own
+# slack_ts, so later posts about it (e.g. an approval reply) can thread.
+TS_SLUG="test-create-gate-slack-ts-$$"
+TS_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$TS_SLUG")"
+TS_FAKE_BIN="$(mktemp -d)"
+TS_RESPONSE_BODY="$(mktemp)"
+printf '{"ok":true,"ts":"1234567890.100200"}' > "$TS_RESPONSE_BODY"
+cat > "$TS_FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+OUT_FILE=""
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  case "${args[$i]}" in
+    -o) OUT_FILE="${args[$((i+1))]}"; i=$((i+2)) ;;
+    *) i=$((i+1)) ;;
+  esac
+done
+cat > /dev/null   # consume the -K config from stdin
+if [[ -n "$OUT_FILE" ]]; then
+  cp "$TEST_RESPONSE_BODY_FILE" "$OUT_FILE"
+fi
+printf '200'
+EOF
+chmod +x "$TS_FAKE_BIN/curl"
+if TEST_RESPONSE_BODY_FILE="$TS_RESPONSE_BODY" SLACK_BOT_TOKEN="fake-token" SLACK_WEBHOOK_URL="" \
+    PATH="$TS_FAKE_BIN:$PATH" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TS_SLUG" "ts plan" interactive >/dev/null 2>&1 \
+    && [[ "$(gate_field "$TS_GATE_FILE" slack_ts)" == "1234567890.100200" ]]; then
+  echo "PASS: a successful bot-token post records its ts as the gate's slack_ts"
+else
+  echo "FAIL: expected the gate's slack_ts to be 1234567890.100200 — got: $(gate_field "$TS_GATE_FILE" slack_ts 2>/dev/null)"
+  FAILURES=$((FAILURES + 1))
+fi
+rm -f "$TS_GATE_FILE" "$TS_RESPONSE_BODY" "$TS_FAKE_BIN/curl"
+rmdir "$TS_FAKE_BIN"
+
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."
   exit 1

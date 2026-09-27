@@ -52,16 +52,18 @@ Surface disagreements among sources explicitly. The current epic-cycle skill use
 
 ## Required Development Workflow
 
-1. Read `CURRENT_TASK.md`; inspect relevant implementation, tests, and architecture.
-2. Post the 🟡 `started` message to `#network-monitor` (after the approval gate is approved, if the task has one).
+1. Read `CURRENT_TASK.md`; inspect relevant implementation, tests, and architecture. Before editing any tracked file, create or enter the task's worktree via `coordination/scripts/new-task.sh` — the main checkout stays on `main` with no local changes; do all edits, tests, and commits in the worktree.
+2. Post the 🟡 `started` message, including the worktree path, to `#network-monitor` (after the approval gate is approved, if the task has one — and a gate is only ever approved by the human typing so directly in this chat session, never by a Slack reply, since a connector-posted message is indistinguishable from one the human typed; see `AGENTS.md` "Slack Approval Gate").
 3. Read the relevant spec/protocol docs and confirm acceptance criteria.
 4. Use test-first development where practical; show the changed test fails for the missing behavior.
 5. Implement the smallest correct change; run relevant tests, fix failures, then broader applicable checks.
 6. Review `git diff`; update applicable state files and `HANDOFF.md` with verified facts.
 7. Commit only verified work and only when the user explicitly requests a commit.
-8. Post to Slack when you open a PR (`pr-opened`), whenever you ask for review or feedback (`feedback`), and when the task ends (`review`, `done`, or `blocked`).
+8. Before posting `review`/`done`/`blocked`, read the entire relevant Slack thread(s) and address every reply from the user or another agent — don't rely on only the last message. Post to Slack when you open a PR (`pr-opened`), whenever you ask for review or feedback (`feedback`), and when the task ends (`review`, `done`, or `blocked`).
 
-The Slack posts in steps 2 and 8 are required on every task — ad hoc or Linear-tracked, small or large — not only when the user asks for Slack coordination. Telling the user in chat does not replace them. See `AGENTS.md` "Slack Status Posts" for the message format and how to post from a cloud session with no webhook.
+The Slack posts in steps 2 and 8 are required on every task — ad hoc or Linear-tracked, small or large — not only when the user asks for Slack coordination. Telling the user in chat does not replace them. See `AGENTS.md` "Slack Status Posts" for the message format and how to post when no bot token or webhook is configured (tell the user in chat — never fall back to posting through a Slack connector, which would post under the human's own identity).
+
+Cross-review is symmetric: ask the other agent (Claude Code ↔ Codex) to review your PR, and review theirs when asked, without being told each time — see `AGENTS.md` "Slack Status Posts" for the `@codex review` convention. Before starting new work, check active Slack threads for a question left unanswered, and answer or acknowledge it first.
 
 Tests, not compilation, a rendered screen, a file's existence, or tracker status, establish behavior. Never claim completion without evidence.
 
