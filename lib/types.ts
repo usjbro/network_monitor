@@ -33,7 +33,7 @@ export interface NetworkConnection {
   id: string;
   protocol: string;
   appLayerProtocol: string;
-  transportProtocol: 'TCP' | 'UDP' | 'QUIC' | 'SCTP' | 'ICMP' | 'RAW';
+  transportProtocol: 'TCP' | 'UDP' | 'SCTP' | 'ICMP' | 'RAW';
   osiStack: string; // e.g., "L7:HTTP/3 -> L6:TLS1.3 -> L5:QUIC -> L4:UDP -> L3:IPv6 -> L2:Eth -> L1:Fiber"
   localAddr: string;
   localPort: number;
