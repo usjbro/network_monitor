@@ -13,8 +13,9 @@
 # Requires: git, and Slack credentials for the started post (optional — the
 # task is still created without them, just no Slack message goes out).
 # Configure once via coordination/.env (gitignored): SLACK_BOT_TOKEN (+
-# optionally SLACK_CHANNEL_ID) for the threadable chat.postMessage path, or
-# SLACK_WEBHOOK_URL as an unthreaded fallback — see slack-notify.sh.
+# optionally SLACK_CHANNEL_ID) for the chat.postMessage path (needed to
+# originate this task's own thread), or SLACK_WEBHOOK_URL as a fallback that
+# can't originate one — see slack-notify.sh.
 
 set -euo pipefail
 

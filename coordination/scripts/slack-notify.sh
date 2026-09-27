@@ -13,24 +13,29 @@
 #   1. chat.postMessage with a bot token — set SLACK_BOT_TOKEN (and
 #      optionally SLACK_CHANNEL_ID, default C0C39FJT9DX) via coordination/.env
 #      (gitignored) the same way SLACK_WEBHOOK_URL is today, or export it
-#      directly. The bot posts as a distinct identity per owner (see
-#      OWNER_DISPLAY_NAME below) so its messages are never mistaken for a
-#      human's, and it can thread: pass thread-ts (this script's own printed
-#      ts from an earlier call, or a task/gate's stored slack_ts) to reply
-#      in-thread instead of starting a new top-level post. When thread-ts is
-#      omitted, this script looks up coordination/tasks/<task-slug>.md's or
-#      coordination/gates/<task-slug>.md's own slack_ts field automatically,
-#      so callers don't have to thread every post by hand.
+#      directly. The bot posts as a distinct identity per owner so its
+#      messages are never mistaken for a human's.
 #   2. The incoming webhook (SLACK_WEBHOOK_URL) — kept only as a fallback for
-#      when no bot token is configured. Incoming webhooks cannot thread or
-#      set a per-owner identity; a webhook post always appears as whatever
-#      generic identity the webhook integration itself was configured with,
-#      and any thread-ts given is ignored with a warning.
+#      when no bot token is configured. It can't set a per-owner identity
+#      (a webhook post always appears as whatever generic identity the
+#      webhook integration itself was configured with), and its response
+#      never returns a ts to capture — but Slack's webhook JSON body does
+#      support thread_ts, so it CAN reply into a thread whose ts is already
+#      known; it just can't originate a new one a later post could thread
+#      under.
+#
+# Either path can thread: pass thread-ts (this script's own printed ts from
+# an earlier bot-token call, or a task/gate's stored slack_ts) to reply
+# in-thread instead of starting a new top-level post. When thread-ts is
+# omitted, this script looks up coordination/tasks/<task-slug>.md's or
+# coordination/gates/<task-slug>.md's own slack_ts field automatically, so
+# callers don't have to thread every post by hand.
 #
 # On a successful bot-token post, this script prints the message's own ts to
 # stdout (and nothing else) so a caller can capture it, e.g. to store as a
 # task/gate's slack_ts. The webhook path prints nothing on success — Slack's
-# incoming-webhook API doesn't return a ts.
+# incoming-webhook API doesn't return a ts, so only a bot-token post's ts can
+# ever become a task/gate's recorded slack_ts.
 #
 # Requires curl and python3 (used to build/parse JSON). Never pass the bot
 # token as a literal curl argument (visible to other processes via `ps`);
@@ -80,6 +85,18 @@ esac
 TEXT="${EMOJI} *${OWNER}* — task \`${TASK_SLUG}\` → *${STATUS}*
 ${MESSAGE}"
 
+# Auto-lookup applies to both posting paths below: a webhook can't create a
+# new thread (its response has no ts to capture), but it CAN reply into a
+# thread whose ts is already known — Slack's incoming-webhook JSON body
+# supports thread_ts same as chat.postMessage; the only real limitation is
+# that the webhook response never returns one to capture for later.
+if [[ -z "$THREAD_TS" ]]; then
+  THREAD_TS="$(lookup_slack_ts "$REPO_ROOT/coordination/tasks/${TASK_SLUG}.md")"
+  if [[ -z "$THREAD_TS" ]]; then
+    THREAD_TS="$(lookup_slack_ts "$REPO_ROOT/coordination/gates/${TASK_SLUG}.md")"
+  fi
+fi
+
 if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
   SLACK_CHANNEL_ID="${SLACK_CHANNEL_ID:-C0C39FJT9DX}"
 
@@ -92,13 +109,6 @@ if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
     gate)        USERNAME="Coordination Gate"; ICON_EMOJI="vertical_traffic_light" ;;
     *)           USERNAME=""; ICON_EMOJI="" ;;
   esac
-
-  if [[ -z "$THREAD_TS" ]]; then
-    THREAD_TS="$(lookup_slack_ts "$REPO_ROOT/coordination/tasks/${TASK_SLUG}.md")"
-    if [[ -z "$THREAD_TS" ]]; then
-      THREAD_TS="$(lookup_slack_ts "$REPO_ROOT/coordination/gates/${TASK_SLUG}.md")"
-    fi
-  fi
 
   PAYLOAD=$(python3 -c '
 import json, sys
@@ -165,15 +175,18 @@ print(ts)
   exit 0
 fi
 
-# Fallback: incoming webhook. No threading, no per-owner identity.
-if [[ -n "$THREAD_TS" ]]; then
-  echo "Warning: SLACK_BOT_TOKEN not set — posting via webhook, which cannot thread; this post will start a new top-level message instead of replying to ${THREAD_TS}." >&2
-fi
-
+# Fallback: incoming webhook. No per-owner identity, and its response
+# never returns a ts to capture — but it CAN reply into an already-known
+# thread (Slack supports thread_ts in the webhook JSON body itself); it
+# just can't originate a new one a later post could thread under.
 PAYLOAD=$(python3 -c '
 import json, sys
-print(json.dumps({"text": sys.argv[1]}))
-' "$TEXT")
+text, thread_ts = sys.argv[1:3]
+body = {"text": text}
+if thread_ts:
+    body["thread_ts"] = thread_ts
+print(json.dumps(body))
+' "$TEXT" "$THREAD_TS")
 
 # Callers invoke this with `|| true` (a failed Slack post shouldn't fail the
 # task-creation/completion flow), so make sure a failure is at least visible

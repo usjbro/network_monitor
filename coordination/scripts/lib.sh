@@ -21,24 +21,31 @@ esac
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Load locally-configured Slack credentials if present. coordination/.env
-# is gitignored (matches the repo-wide .env* pattern) — never commit it. A
-# caller that has already exported EITHER SLACK_WEBHOOK_URL or
-# SLACK_BOT_TOKEN (even to an empty string) suppresses loading from .env
-# entirely, for BOTH variables — this is what lets a test or caller disable
-# Slack entirely (by pre-setting one to "") without the other secret still
-# leaking in from the file. Loading only one of the two from .env while the
-# caller explicitly set the other would silently reintroduce a real
-# credential into what the caller intended as a fully-disabled environment.
-if [[ -f "$REPO_ROOT/coordination/.env" && -z "${SLACK_WEBHOOK_URL+x}" && -z "${SLACK_BOT_TOKEN+x}" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$REPO_ROOT/coordination/.env"
-  set +a
+# is gitignored (matches the repo-wide .env* pattern) — never commit it.
+# Applied per variable, not as an all-or-nothing block: a caller that has
+# already set one of these three (even to "", e.g. a test disabling just
+# one credential) keeps that exact value, while any of the other two still
+# load normally from the file. An earlier version gated the whole file on a
+# single combined check, which had two failure modes an independent review
+# on PR #234 found: (1) explicitly exporting only SLACK_BOT_TOKEN didn't
+# stop coordination/.env from being sourced anyway and silently overwriting
+# it with the file's own value, and (2) explicitly exporting only
+# SLACK_WEBHOOK_URL suppressed the file entirely, so a bot token/channel
+# configured there was ignored even though nothing asked for that.
+if [[ -f "$REPO_ROOT/coordination/.env" ]]; then
+  for _slack_var in SLACK_WEBHOOK_URL SLACK_BOT_TOKEN SLACK_CHANNEL_ID; do
+    if [[ -z "$(eval "echo \"\${${_slack_var}+x}\"")" ]]; then
+      _slack_val="$(grep -m1 "^${_slack_var}=" "$REPO_ROOT/coordination/.env" | cut -d= -f2-)"
+      [[ -n "$_slack_val" ]] && export "${_slack_var}=${_slack_val}"
+    fi
+  done
+  unset _slack_var _slack_val
 fi
 
 # True if slack-notify.sh has any way to post — the preferred bot-token path
-# (SLACK_BOT_TOKEN, threadable) or the webhook fallback (SLACK_WEBHOOK_URL,
-# not threadable). Callers that gate on "is Slack configured at all" (e.g.
+# (SLACK_BOT_TOKEN, can originate or reply to a thread) or the webhook
+# fallback (SLACK_WEBHOOK_URL, can only reply to a thread whose ts is
+# already known). Callers that gate on "is Slack configured at all" (e.g.
 # create-gate.sh refusing an autonomous gate) should use this instead of
 # checking SLACK_WEBHOOK_URL directly, so a bot-token-only setup still works.
 slack_configured() {

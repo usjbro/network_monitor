@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # Create a Slack approval gate for a Linear-tracked task: writes
 # coordination/gates/<linear-id>__<slug>.md with status: awaiting-approval
-# and posts the plan to the shared Slack channel. See
-# docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md.
+# and posts the plan to the shared Slack channel for visibility/discussion.
+# The plan/design doc predates AGENTS.md "Slack Approval Gate", which
+# supersedes it on how a gate gets approved: only a human typing directly
+# in a live chat session counts, never a Slack reply (a connector-posted
+# message is indistinguishable from one the human typed — see that section
+# for the full basis). See docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md
+# for everything else (file layout, locking, delegation).
 #
 # Usage:
 #   ./create-gate.sh <linear-id> <slug> "<plan-summary>" <interactive|autonomous>
 #
-# mode "interactive": if the Slack post fails or no webhook is configured,
-#   the gate is still created (approval can still come from this chat
-#   session) — a warning is printed.
-# mode "autonomous": the gate can only be approved via Slack. A later live
-# session must manually inspect the gate and its Slack thread to continue.
-# A missing or failed Slack post refuses creation.
+# mode "interactive": if the Slack post fails or nothing is configured, the
+#   gate is still created (approval can still come from this chat session)
+#   — a warning is printed.
+# mode "autonomous": posts for visibility only; there is currently no safe
+# remote-approval path, so a later live session must approve it directly in
+# chat after inspecting the gate and its Slack thread for context. A
+# missing or failed Slack post refuses creation.
 
 set -euo pipefail
 

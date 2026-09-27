@@ -128,15 +128,16 @@ else
   FAILURES=$((FAILURES + 1))
 fi
 
-# Webhook path warns (but still posts, unthreaded) when a thread-ts is given
-# — webhooks can't thread.
+# The webhook path can't originate a new thread (its response returns no
+# ts), but it CAN reply into an already-known one — Slack's webhook JSON
+# body supports thread_ts same as chat.postMessage.
 reset_files
-STDERR="$(TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="https://example.invalid/webhook" SLACK_BOT_TOKEN="" \
-    PATH="$FAKE_BIN:$PATH" "$NOTIFY" started "some-task" "claude-code" "msg" "1111.2222" 2>&1 1>/dev/null)"
-if [[ -s "$PAYLOAD_FILE" ]] && [[ "$STDERR" == *"cannot thread"* ]]; then
-  echo "PASS: webhook path warns and posts unthreaded when a thread-ts is given"
+TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="https://example.invalid/webhook" SLACK_BOT_TOKEN="" \
+    PATH="$FAKE_BIN:$PATH" "$NOTIFY" started "some-task" "claude-code" "msg" "1111.2222" >/dev/null 2>&1
+if [[ "$(json_get "$PAYLOAD_FILE" thread_ts)" == "1111.2222" ]]; then
+  echo "PASS: webhook path includes a known thread-ts in its payload"
 else
-  echo "FAIL: webhook path should warn and still post unthreaded — stderr: $STDERR"
+  echo "FAIL: webhook path should include thread_ts=1111.2222 — got: $(cat "$PAYLOAD_FILE")"
   FAILURES=$((FAILURES + 1))
 fi
 
@@ -219,6 +220,35 @@ else
   echo "FAIL: expected empty result for a missing file — got: $GOT_TS_MISSING"
   FAILURES=$((FAILURES + 1))
 fi
+
+# End-to-end: the auto-lookup actually fires through $NOTIFY itself (not
+# just the lib.sh unit above) for BOTH posting paths, since TASK_SLUG
+# resolves against the real $REPO_ROOT/coordination/tasks/, not a fixture
+# directory. Uses a unique slug and cleans up immediately after.
+REAL_TASKS_DIR="$REPO_ROOT/coordination/tasks"
+E2E_SLUG="test-slack-notify-e2e-$$"
+mkdir -p "$REAL_TASKS_DIR"
+printf -- '---\nslack_ts: 1660000000.777777\n---\n' > "$REAL_TASKS_DIR/${E2E_SLUG}.md"
+
+reset_files
+run_bot started "$E2E_SLUG" claude-code msg >/dev/null 2>&1
+if [[ "$(json_get "$PAYLOAD_FILE" thread_ts)" == "1660000000.777777" ]]; then
+  echo "PASS: bot-token path auto-threads under a real task file's stored slack_ts"
+else
+  echo "FAIL: expected auto-lookup thread_ts=1660000000.777777 — got: $(cat "$PAYLOAD_FILE")"
+  FAILURES=$((FAILURES + 1))
+fi
+
+reset_files
+TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="https://example.invalid/webhook" SLACK_BOT_TOKEN="" \
+    PATH="$FAKE_BIN:$PATH" "$NOTIFY" started "$E2E_SLUG" claude-code msg >/dev/null 2>&1
+if [[ "$(json_get "$PAYLOAD_FILE" thread_ts)" == "1660000000.777777" ]]; then
+  echo "PASS: webhook path also auto-threads under a real task file's stored slack_ts"
+else
+  echo "FAIL: expected auto-lookup thread_ts=1660000000.777777 on the webhook path — got: $(cat "$PAYLOAD_FILE")"
+  FAILURES=$((FAILURES + 1))
+fi
+rm -f "$REAL_TASKS_DIR/${E2E_SLUG}.md"
 
 # ok:false is treated as a failure even though Slack returns HTTP 200.
 reset_files
