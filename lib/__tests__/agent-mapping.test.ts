@@ -52,6 +52,18 @@ describe('mapConnectionEvent', () => {
     expect(() => mapConnectionEvent({ id: 'incomplete' })).toThrow();
   });
 
+  it('leaves latencyMs undefined when the agent measured none (JAM-156)', () => {
+    const wire = {
+      id: 'udp-192.168.1.10:53000-8.8.8.8:53', protocol: 'DNS', appLayerProtocol: 'DNS',
+      transportProtocol: 'UDP', osiStack: 'L4:UDP -> L3:IP', localAddr: '192.168.1.10',
+      localPort: 53000, remoteAddr: '8.8.8.8', remotePort: 53, processName: 'mDNSResponder',
+      pid: 99, rxSpeed: 0, txSpeed: 0, rxBytesTotal: 0, txBytesTotal: 0, packetLoss: 0,
+      status: 'ESTABLISHED', encryption: '', sparkline: [],
+    };
+    expect(mapConnectionEvent(wire).latencyMs).toBeUndefined();
+    expect(mapConnectionEvent({ ...wire, latencyMs: 12.5 }).latencyMs).toBe(12.5);
+  });
+
   it('carries ja3Fingerprint/ja3Label through when present', () => {
     const wire = {
       id: 'tcp-192.168.1.10:51000-93.184.216.34:443',
