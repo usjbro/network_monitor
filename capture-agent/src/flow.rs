@@ -119,6 +119,15 @@ pub struct FlowTable {
     /// Cumulative count of flows evicted for going idle past their
     /// status-appropriate threshold, distinct from `capacity_evictions`.
     idle_evictions: u64,
+    /// JAM-13: measured protocol hierarchy, rooted here rather than derived
+    /// from `flows` at snapshot time — a per-flow rollup would forget a
+    /// closed/evicted flow's contribution the moment it left `flows`, which
+    /// is exactly the "hierarchy that forgets closed flows is misleading"
+    /// trap the task calls out. Every packet `observe()`s is added here
+    /// once, permanently; nothing ever subtracts from it. Not reset by
+    /// `reset()` either, matching `total_flows_observed`'s cumulative-
+    /// since-capture-start contract.
+    protocol_tree: ProtocolNode,
 }
 
 /// `evict_stale`'s result, split by eviction reason so a caller (the
@@ -145,6 +154,35 @@ impl EvictedFlows {
 
     pub fn iter(&self) -> impl Iterator<Item = &FlowKey> {
         self.idle.iter().chain(self.capacity.iter())
+    }
+}
+
+/// A node in the measured protocol hierarchy (JAM-13): cumulative bytes and
+/// packets for one layer's label, nested under its parent so the tree
+/// reflects real traversal — eth -> ip -> tcp/udp/icmp -> app-protocol —
+/// rather than the flat leaf-protocol tally the task's spec explicitly
+/// warns against. A node's `bytes`/`packets` always equal the sum of its
+/// own children's, by construction (`add` increments every node on the
+/// path, never just the leaf), which is what "percentages sum correctly at
+/// each level" reduces to.
+#[derive(Debug, Clone, Default)]
+pub struct ProtocolNode {
+    pub bytes: u64,
+    pub packets: u64,
+    children: HashMap<String, ProtocolNode>,
+}
+
+impl ProtocolNode {
+    fn add(&mut self, path: &[&str], bytes: u64) {
+        self.bytes += bytes;
+        self.packets += 1;
+        if let Some((head, rest)) = path.split_first() {
+            self.children.entry((*head).to_string()).or_default().add(rest, bytes);
+        }
+    }
+
+    pub fn children(&self) -> impl Iterator<Item = (&str, &ProtocolNode)> {
+        self.children.iter().map(|(k, v)| (k.as_str(), v))
     }
 }
 
@@ -221,7 +259,14 @@ impl FlowTable {
             total_flows_observed: 0,
             capacity_evictions: 0,
             idle_evictions: 0,
+            protocol_tree: ProtocolNode::default(),
         }
+    }
+
+    /// The measured protocol hierarchy accumulated since capture start —
+    /// see `ProtocolNode`. Never reflects only currently-live flows.
+    pub fn protocol_hierarchy(&self) -> &ProtocolNode {
+        &self.protocol_tree
     }
 
     fn is_local(&self, addr: &str) -> bool {
@@ -321,6 +366,7 @@ impl FlowTable {
     pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<ObserveResult> {
         let (key, is_outbound) = self.key_for(packet)?;
         let remote_port = key.remote_port;
+        let transport_protocol = key.protocol;
         let is_new = matches!(self.flows.entry(key.clone()), Entry::Vacant(_));
         if is_new {
             self.total_flows_observed += 1;
@@ -367,6 +413,24 @@ impl FlowTable {
                 }
             }
         }
+
+        // JAM-13: fold this packet into the measured protocol hierarchy,
+        // using the same app_layer_protocol classification the match above
+        // just settled on — no separate inference logic to drift out of
+        // sync with it. ICMP/Other have no app-layer concept in this model,
+        // so their path stops at the transport label rather than adding a
+        // spurious always-"Unknown" leaf.
+        let transport_label = match transport_protocol {
+            TransportProtocol::Tcp => "TCP",
+            TransportProtocol::Udp => "UDP",
+            TransportProtocol::Icmp => "ICMP",
+            TransportProtocol::Other => "Other",
+        };
+        let mut hierarchy_path = vec!["Ethernet", "IP", transport_label];
+        if matches!(transport_protocol, TransportProtocol::Tcp | TransportProtocol::Udp) {
+            hierarchy_path.push(state.app_layer_protocol.as_str());
+        }
+        self.protocol_tree.add(&hierarchy_path, packet.total_len as u64);
 
         let mut is_retransmit = false;
         let mut rst_transitioned = false;
@@ -1254,5 +1318,148 @@ mod tests {
         assert_eq!(evicted.idle.len(), 0);
         assert_eq!(table.capacity_evictions(), 1);
         assert_eq!(table.idle_evictions(), 0);
+    }
+
+    fn udp_packet_to(local_is_src: bool, remote_port: u16, len: u16) -> ParsedPacket {
+        let (src_ip, dst_ip, src_port, dst_port) = if local_is_src {
+            ("192.168.1.10".to_string(), "93.184.216.34".to_string(), 51000u16, remote_port)
+        } else {
+            ("93.184.216.34".to_string(), "192.168.1.10".to_string(), remote_port, 51000u16)
+        };
+        ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip,
+            dst_ip,
+            protocol: TransportProtocol::Udp,
+            src_port: Some(src_port),
+            dst_port: Some(dst_port),
+            tcp_flags: None,
+            seq: None,
+            ttl: 64,
+            total_len: len,
+            payload: vec![],
+            header_bytes: vec![],
+            ip_header_len: 20,
+            transport_header_len: 8,
+            ip_version: 4,
+            ip_checksum: Some(0),
+            vlan_tag: None,
+        }
+    }
+
+    // JAM-13: measured protocol hierarchy. `protocol_hierarchy()` must nest
+    // eth -> ip -> transport -> app-protocol so percentages at every level
+    // are derived from real counters, not the static per-layer illustration
+    // `ProtocolMatrixView` used to render.
+
+    #[test]
+    fn protocol_hierarchy_nests_a_single_packet_by_layer() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let http = tcp_packet_with_payload(
+            true,
+            TcpFlags { ack: true, ..Default::default() },
+            100,
+            b"GET / HTTP/1.1".to_vec(),
+        );
+        table.observe(&http, &L7Info::Http { method: "GET".to_string(), path: "/".to_string() }, 0);
+
+        let root = table.protocol_hierarchy();
+        assert_eq!(root.bytes, 100);
+        assert_eq!(root.packets, 1);
+
+        let eth = root.children().find(|(name, _)| *name == "Ethernet").map(|(_, n)| n).expect("Ethernet node");
+        assert_eq!(eth.bytes, 100);
+
+        let ip = eth.children().find(|(name, _)| *name == "IP").map(|(_, n)| n).expect("IP node");
+        assert_eq!(ip.bytes, 100);
+
+        let tcp = ip.children().find(|(name, _)| *name == "TCP").map(|(_, n)| n).expect("TCP node");
+        assert_eq!(tcp.bytes, 100);
+        assert_eq!(tcp.packets, 1);
+
+        let http_node = tcp.children().find(|(name, _)| *name == "HTTP").map(|(_, n)| n).expect("HTTP node");
+        assert_eq!(http_node.bytes, 100);
+        assert_eq!(http_node.packets, 1);
+    }
+
+    #[test]
+    fn protocol_hierarchy_separates_transport_protocols_under_ip() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let tcp_pkt = tcp_packet_to(true, TcpFlags { ack: true, ..Default::default() }, 443);
+        let tcp_pkt = ParsedPacket { total_len: 60, ..tcp_pkt };
+        let udp_pkt = udp_packet_to(true, 53, 40);
+
+        table.observe(&tcp_pkt, &L7Info::None, 0);
+        table.observe(&udp_pkt, &L7Info::Dns { query_name: "example.com".to_string() }, 0);
+
+        let root = table.protocol_hierarchy();
+        let ip = root
+            .children()
+            .find(|(name, _)| *name == "Ethernet")
+            .map(|(_, n)| n)
+            .unwrap()
+            .children()
+            .find(|(name, _)| *name == "IP")
+            .map(|(_, n)| n)
+            .unwrap();
+
+        let tcp = ip.children().find(|(name, _)| *name == "TCP").map(|(_, n)| n).expect("TCP node");
+        let udp = ip.children().find(|(name, _)| *name == "UDP").map(|(_, n)| n).expect("UDP node");
+        assert_eq!(tcp.bytes, 60);
+        assert_eq!(udp.bytes, 40);
+        // Children must sum exactly to the parent — this is what "percentages
+        // sum correctly at each level" reduces to as an invariant on the tree.
+        assert_eq!(ip.bytes, tcp.bytes + udp.bytes);
+
+        let dns = udp.children().find(|(name, _)| *name == "DNS").map(|(_, n)| n).expect("DNS node");
+        assert_eq!(dns.bytes, 40);
+    }
+
+    #[test]
+    fn protocol_hierarchy_has_a_visible_undecoded_bucket() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        // Port 9999 matches no well_known_protocol guess and carries no
+        // recognized L7Info, so it must still show up somewhere in the
+        // tree — never silently rounded away.
+        let unidentified = tcp_packet_to(true, TcpFlags { ack: true, ..Default::default() }, 9999);
+        table.observe(&unidentified, &L7Info::None, 0);
+
+        let root = table.protocol_hierarchy();
+        let tcp = root
+            .children()
+            .find(|(name, _)| *name == "Ethernet")
+            .map(|(_, n)| n)
+            .unwrap()
+            .children()
+            .find(|(name, _)| *name == "IP")
+            .map(|(_, n)| n)
+            .unwrap()
+            .children()
+            .find(|(name, _)| *name == "TCP")
+            .map(|(_, n)| n)
+            .unwrap();
+
+        let undecoded = tcp.children().find(|(name, _)| *name == "Unknown").map(|(_, n)| n);
+        assert!(undecoded.is_some(), "unidentified traffic must have its own visible bucket, not be dropped");
+        assert_eq!(undecoded.unwrap().bytes, 60);
+    }
+
+    #[test]
+    fn protocol_hierarchy_survives_flow_eviction() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let syn = tcp_packet(true, TcpFlags { syn: true, ..Default::default() }, 60);
+        table.observe(&syn, &L7Info::None, 0);
+        assert_eq!(table.protocol_hierarchy().bytes, 60);
+
+        // Evict every flow in the table (past the SYN_SENT idle ceiling).
+        let evicted = table.evict_stale(30_001);
+        assert_eq!(evicted.len(), 1);
+        assert!(table.snapshot(30_001).is_empty(), "flow must actually be gone from the live table");
+
+        // The cumulative hierarchy must not have forgotten the traffic that
+        // already happened — this is the main correctness trap the task
+        // calls out (flow.rs's eviction, not the hierarchy itself).
+        assert_eq!(table.protocol_hierarchy().bytes, 60);
     }
 }

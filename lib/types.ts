@@ -163,6 +163,21 @@ export interface CaptureStats {
   idleEvictions: number;
 }
 
+// Measured protocol hierarchy (JAM-13), from the agent's
+// `protocol_hierarchy_update` wire event (docs/wire-protocol.md). Cumulative
+// since capture start, not derived from currently-live flows — a node's
+// `bytes`/`packets` always equal the sum of its own `children`'s, so a
+// percentage at any level is just `child.bytes / parent.bytes`.
+// `children` is `[]` at a leaf, never omitted. An "Unknown" child under a
+// transport-protocol node is real, unidentified traffic — not to be dropped
+// or rounded away.
+export interface ProtocolNode {
+  name: string;
+  bytes: number;
+  packets: number;
+  children: ProtocolNode[];
+}
+
 // Expert Info (JAM-12): an annotated observation from the agent, never a
 // verdict — see docs/superpowers/specs/2026-09-26-expert-info-findings-design.md.
 // `frameId`/`flowId` are each independently optional: a `malformed-frame`

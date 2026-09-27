@@ -6,19 +6,84 @@ import {
   ArrowUp,
   Layers,
 } from 'lucide-react';
-import { OSILayerInfo, ThemeConfig, OSILayerNumber } from '@/lib/types';
+import { OSILayerInfo, ThemeConfig, OSILayerNumber, ProtocolNode } from '@/lib/types';
 import { formatSpeed } from '@/lib/osi-engine';
 
 interface ProtocolMatrixViewProps {
   layers: OSILayerInfo[];
   theme: ThemeConfig;
   onSelectLayer: (num: OSILayerNumber) => void;
+  // JAM-13: the measured protocol hierarchy from the agent's
+  // protocol_hierarchy_update event. Absent until the first tick arrives.
+  hierarchy?: ProtocolNode | null;
 }
+
+interface MeasuredShare {
+  name: string;
+  bytes: number;
+  packets: number;
+  percent: number;
+}
+
+function findChild(node: ProtocolNode | undefined, name: string): ProtocolNode | undefined {
+  return node?.children.find((c) => c.name === name);
+}
+
+// Rolls up the tree's transport-protocol level (TCP/UDP/ICMP/Other) directly
+// under IP — this is what Layer 4's card shows measured shares for.
+function measuredTransportShares(hierarchy: ProtocolNode | null | undefined): MeasuredShare[] {
+  const ip = findChild(findChild(hierarchy ?? undefined, 'Ethernet'), 'IP');
+  if (!ip || ip.bytes === 0) return [];
+  return ip.children
+    .map((t) => ({ name: t.name, bytes: t.bytes, packets: t.packets, percent: (t.bytes / ip.bytes) * 100 }))
+    .sort((a, b) => b.bytes - a.bytes);
+}
+
+// Rolls up the tree's app-protocol level, merged across every transport it
+// rode over (Layer 7 doesn't care whether HTTP arrived over TCP) — this is
+// what Layer 7's card shows measured shares for. An "Unknown" entry here is
+// real, unidentified traffic (JAM-13's acceptance criteria) and is never
+// filtered out.
+function measuredAppShares(hierarchy: ProtocolNode | null | undefined): MeasuredShare[] {
+  const ip = findChild(findChild(hierarchy ?? undefined, 'Ethernet'), 'IP');
+  if (!ip || ip.bytes === 0) return [];
+  const totals = new Map<string, { bytes: number; packets: number }>();
+  for (const transport of ip.children) {
+    for (const app of transport.children) {
+      const existing = totals.get(app.name) ?? { bytes: 0, packets: 0 };
+      totals.set(app.name, { bytes: existing.bytes + app.bytes, packets: existing.packets + app.packets });
+    }
+  }
+  return Array.from(totals.entries())
+    .map(([name, v]) => ({ name, bytes: v.bytes, packets: v.packets, percent: (v.bytes / ip.bytes) * 100 }))
+    .sort((a, b) => b.bytes - a.bytes);
+}
+
+const MeasuredShares: React.FC<{ shares: MeasuredShare[] }> = ({ shares }) => {
+  if (shares.length === 0) {
+    return <span className="text-slate-500 italic">not yet measured</span>;
+  }
+  return (
+    <div className="flex items-center space-x-1.5">
+      {shares.map((s) => (
+        <span
+          key={s.name}
+          title={`${s.bytes} bytes, ${s.packets} packets`}
+          className="bg-slate-900 text-slate-300 border border-slate-800 px-2 py-0.5 rounded text-[10px] flex items-center space-x-1"
+        >
+          <span>{s.name}</span>
+          <span className="text-slate-500">{s.percent.toFixed(1)}%</span>
+        </span>
+      ))}
+    </div>
+  );
+};
 
 export const ProtocolMatrixView: React.FC<ProtocolMatrixViewProps> = ({
   layers,
   theme,
   onSelectLayer,
+  hierarchy,
 }) => {
   const [direction, setDirection] = useState<'ENCAPSULATION' | 'DECAPSULATION'>('ENCAPSULATION');
 
@@ -88,14 +153,13 @@ export const ProtocolMatrixView: React.FC<ProtocolMatrixViewProps> = ({
                   </span>
                 </div>
 
-                {/* Protocol Badges */}
-                <div className="flex items-center space-x-1.5">
-                  {layer.protocols.map((p) => (
-                    <span key={p} className="bg-slate-900 text-slate-300 border border-slate-800 px-2 py-0.5 rounded text-[10px]">
-                      {p}
-                    </span>
-                  ))}
-                </div>
+                {/* Measured protocol shares — real counters, not the old
+                    static per-layer illustration. Only layers 4 (transport)
+                    and 7 (application) have an independent measured
+                    breakdown in this tree; other layers show nothing here
+                    rather than a static list presented as if it were real. */}
+                {layer.layer === 7 && <MeasuredShares shares={measuredAppShares(hierarchy)} />}
+                {layer.layer === 4 && <MeasuredShares shares={measuredTransportShares(hierarchy)} />}
               </div>
 
               {/* Data Flow Indicator / Payload Envelope Box */}

@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -56,6 +56,26 @@ export function mapTracerouteHopEvent(json: unknown): TracerouteHop {
     rttMs: w.rttMs as number | undefined,
     location: undefined,
   };
+}
+
+function mapProtocolNode(w: Record<string, unknown>): ProtocolNode {
+  return {
+    name: requireField(w, 'name'),
+    bytes: requireField(w, 'bytes'),
+    packets: requireField(w, 'packets'),
+    children: ((w.children as Record<string, unknown>[] | undefined) ?? []).map(mapProtocolNode),
+  };
+}
+
+// JAM-13. Same envelope convention as mapTracerouteHopEvent above (fields
+// nest under `hierarchy`, not flat on the event) — see docs/wire-protocol.md.
+export function mapProtocolHierarchyEvent(json: unknown): ProtocolNode {
+  const envelope = json as { hierarchy?: Record<string, unknown> };
+  const w = envelope.hierarchy;
+  if (!w) {
+    throw new Error('malformed protocol_hierarchy_update event: missing "hierarchy" field');
+  }
+  return mapProtocolNode(w);
 }
 
 // Accepts the full `finding` event envelope, not just its `finding`
