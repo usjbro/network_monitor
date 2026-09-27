@@ -138,7 +138,7 @@ PERM_TEST_FILE="$(mktemp)"
 printf -- '---\nstatus: awaiting-approval\n---\n' > "$PERM_TEST_FILE"
 chmod 644 "$PERM_TEST_FILE"
 bash -c "source '$LIB'; gate_set_field '$PERM_TEST_FILE' status approved"
-PERM_AFTER="$(stat -f '%Lp' "$PERM_TEST_FILE" 2>/dev/null || stat -c '%a' "$PERM_TEST_FILE")"
+PERM_AFTER="$(stat -c '%a' "$PERM_TEST_FILE" 2>/dev/null)" || PERM_AFTER="$(stat -f '%Lp' "$PERM_TEST_FILE")"
 if [[ "$PERM_AFTER" == "644" ]]; then
   echo "PASS: gate_set_field preserves the gate file's permission mode"
 else

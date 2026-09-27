@@ -82,7 +82,12 @@ gate_set_field() {
   local gate_file="$1" field="$2" value="$3"
   local tmp mode
   tmp="$(mktemp "${gate_file}.XXXXXX")"
-  mode="$(stat -f '%Lp' "$gate_file" 2>/dev/null || stat -c '%a' "$gate_file" 2>/dev/null || true)"
+  # GNU form first, each attempt captured on its own: on Linux `stat -f`
+  # means "filesystem status" — it prints to stdout *and* exits 1, so a
+  # single `$(bsd || gnu)` substitution would capture both outputs.
+  mode="$(stat -c '%a' "$gate_file" 2>/dev/null)" \
+    || mode="$(stat -f '%Lp' "$gate_file" 2>/dev/null)" \
+    || mode=""
   if ! awk -v field="$field" -v value="$value" '
     BEGIN { delim = 0; found = 0 }
     /^---$/ {
