@@ -9,8 +9,10 @@ import {
   Search,
   Trash2,
 } from 'lucide-react';
-import type { DecryptedPayloadSegment, PacketFrame, ThemeConfig, WireField } from '@/lib/types';
+import type { DecryptedPayloadSegment, Finding, PacketFrame, ThemeConfig, WireField } from '@/lib/types';
+import { SEVERITY_CLASS } from '@/components/FindingsPanel';
 import { FieldTree } from '@/components/FieldTree';
+import { mostSpecificFieldAtOffset } from '@/lib/field-tree';
 // Only packetsToJson is imported here. decryptedSegments is deliberately
 // never passed to it — see lib/export.ts's header and
 // lib/__tests__/decrypted-export-exclusion.test.ts.
@@ -35,14 +37,28 @@ interface PacketStreamViewProps {
   bufferLimit?: number;
   displayFilter?: CompiledDisplayFilter;
   displayFilterExpression?: string;
+  // Expert Info (JAM-12) row markers — optional so this component stays
+  // backward compatible with call sites that never pass findings.
+  findings?: Finding[];
 }
 
-function HexPane({ hexDump, fields, activePath, hoveredByte, onHoverByte, testId }: {
+function HexPane({ hexDump, fields, activePath, selectedPath, hoveredByte, onHoverByte, onSelectField, testId }: {
   hexDump: string;
   fields: WireField[];
+  // The byte range to visually highlight — hover-or-selected, so previewing
+  // a tree row's bytes on hover doesn't require actually selecting it.
   activePath: string | null;
+  // The true click-selection only, independent of any hover preview. A
+  // byte click's toggle-off must compare against this, not `activePath` —
+  // otherwise a tree row left hovered (mouse resting there right up until
+  // the click, which a real browser reports via mouseenter/leave but a
+  // fast synthetic click might not) makes activePath equal the clicked
+  // field's path even when nothing is actually selected yet, so the first
+  // click would toggle off a selection that was never made.
+  selectedPath: string | null;
   hoveredByte: number | null;
   onHoverByte: (index: number | null) => void;
+  onSelectField: (path: string | null) => void;
   testId: string;
 }) {
   const selected = fields.find((field) => field.path === activePath);
@@ -50,14 +66,36 @@ function HexPane({ hexDump, fields, activePath, hoveredByte, onHoverByte, testId
   // available bytes naturally clips a field whose range continues beyond it.
   const bytes = hexDump.trim() ? hexDump.trim().split(/\s+/) : [];
   return (
-    <pre data-testid={testId} className="p-2 bg-black text-emerald-400 text-[10px] rounded border border-slate-800 leading-tight overflow-x-auto select-all">
+    // No `select-all` here (JAM-11): now that individual bytes are
+    // clickable, a pane-wide `user-select: all` makes a plain click drag-
+    // select the entire dump as native browser text, visually burying the
+    // per-field highlight under a selection overlay. Whole-dump copying
+    // has its own explicit "COPY HEX" button; per-field copying has its
+    // own button in the field tree.
+    <pre data-testid={testId} className="p-2 bg-black text-emerald-400 text-[10px] rounded border border-slate-800 leading-tight overflow-x-auto">
       {bytes.map((byte, index) => {
         const inSelectedRange = selected && index >= selected.offset && index < selected.offset + selected.len;
         const highlighted = inSelectedRange || hoveredByte === index;
         return (
           <span key={index} data-byte-index={index}
             onMouseEnter={() => onHoverByte(index)} onMouseLeave={() => onHoverByte(null)}
-            className={highlighted ? 'bg-emerald-500/40 text-emerald-200 rounded-sm' : undefined}
+            // Bytes -> field (JAM-11): a click resolves to one deterministic
+            // field even when siblings share this byte (see
+            // mostSpecificFieldAtOffset) and mirrors the field-tree click's
+            // own toggle-off-on-reclick behaviour. preventDefault on
+            // mousedown stops an incidental native drag-selection from a
+            // fast click without blocking the click event itself.
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              const field = mostSpecificFieldAtOffset(fields, index);
+              // A click on a byte no field covers (e.g. raw/unparsed
+              // payload past the decoded portion) is a no-op — it must not
+              // clear an unrelated field still selected elsewhere in this
+              // pane just because this particular byte resolved to nothing.
+              if (!field) return;
+              onSelectField(field.path === selectedPath ? null : field.path);
+            }}
+            className={`cursor-pointer ${highlighted ? 'bg-emerald-500/40 text-emerald-200 rounded-sm' : ''}`}
           >{byte}{index < bytes.length - 1 ? ' ' : ''}</span>
         );
       })}
@@ -74,6 +112,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   bufferLimit,
   displayFilter,
   displayFilterExpression,
+  findings = [],
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isFrozen, setIsFrozen] = useState(false);
@@ -91,6 +130,15 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   const [hoveredPayloadFieldPath, setHoveredPayloadFieldPath] = useState<string | null>(null);
   const [hoveredHeaderByte, setHoveredHeaderByte] = useState<number | null>(null);
   const [hoveredPayloadByte, setHoveredPayloadByte] = useState<number | null>(null);
+
+  // First finding wins per frame — a row shows one marker, not a stack;
+  // the panel (FindingsPanel) is where every finding for a frame is listed.
+  const findingByFrameId = new Map<string, Finding>();
+  for (const finding of findings) {
+    if (finding.frameId && !findingByFrameId.has(finding.frameId)) {
+      findingByFrameId.set(finding.frameId, finding);
+    }
+  }
 
   const sharedMatches = displayFilter ? packets.filter((packet) => displayFilter({ kind: 'packet', packet })) : packets;
   const displayedPackets = sharedMatches.filter((pkt) => {
@@ -235,10 +283,12 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
           <div className="flex-1 overflow-y-auto divide-y divide-slate-800/80">
             {displayedPackets.map((pkt) => {
               const isSelected = visibleSelectedPacket?.id === pkt.id;
+              const finding = findingByFrameId.get(pkt.id);
 
               return (
                 <div
                   key={pkt.id}
+                  data-packet-row
                   onClick={() => {
                     if (selectedPacket?.id !== pkt.id) {
                       setSelectedHeaderFieldPath(null);
@@ -266,6 +316,17 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                   <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-950 text-emerald-400 border border-emerald-800/60 whitespace-nowrap">
                     {pkt.protocol}
                   </span>
+
+                  {/* Expert Info marker (JAM-12) */}
+                  {finding && (
+                    <span
+                      data-testid="finding-marker"
+                      title={finding.summary}
+                      className={`px-1.5 py-0.2 rounded text-[10px] font-bold border whitespace-nowrap ${SEVERITY_CLASS[finding.severity]}`}
+                    >
+                      {finding.code}
+                    </span>
+                  )}
 
                   {/* Packet summary */}
                   <div className="flex-1 min-w-0 truncate text-slate-200">
@@ -310,8 +371,9 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
               <div className="space-y-1">
                 <div className="text-[10px] font-bold text-slate-400">HEADER BYTES</div>
                 <HexPane testId="header-hex-dump" hexDump={visibleSelectedPacket.headerHexDump} fields={headerFields}
-                  activePath={hoveredHeaderFieldPath ?? selectedHeaderFieldPath}
-                  hoveredByte={hoveredHeaderByte} onHoverByte={setHoveredHeaderByte} />
+                  activePath={hoveredHeaderFieldPath ?? selectedHeaderFieldPath} selectedPath={selectedHeaderFieldPath}
+                  hoveredByte={hoveredHeaderByte} onHoverByte={setHoveredHeaderByte}
+                  onSelectField={setSelectedHeaderFieldPath} />
               </div>
 
               {payloadFields.length > 0 && (
@@ -351,8 +413,9 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                   </button>
                 </div>
                 <HexPane testId="payload-hex-dump" hexDump={visibleSelectedPacket.hexDump} fields={payloadFields}
-                  activePath={hoveredPayloadFieldPath ?? selectedPayloadFieldPath}
-                  hoveredByte={hoveredPayloadByte} onHoverByte={setHoveredPayloadByte} />
+                  activePath={hoveredPayloadFieldPath ?? selectedPayloadFieldPath} selectedPath={selectedPayloadFieldPath}
+                  hoveredByte={hoveredPayloadByte} onHoverByte={setHoveredPayloadByte}
+                  onSelectField={setSelectedPayloadFieldPath} />
               </div>
             </>
           ) : (
