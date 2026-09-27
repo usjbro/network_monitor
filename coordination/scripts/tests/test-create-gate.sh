@@ -18,8 +18,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Every $CREATE_GATE invocation below explicitly sets BOTH SLACK_WEBHOOK_URL
+# and SLACK_BOT_TOKEN (never just one) — sourcing lib.sh above may have
+# loaded a real coordination/.env into THIS process, and a real
+# SLACK_BOT_TOKEN left over from that would otherwise leak into any call
+# below that only overrides SLACK_WEBHOOK_URL, silently making it hit real
+# Slack with a real credential instead of exercising the intended fake path.
+
 # Case 1: autonomous mode, no webhook configured -> must refuse, no gate file.
-if SLACK_WEBHOOK_URL="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" autonomous >/dev/null 2>&1; then
+if SLACK_WEBHOOK_URL="" SLACK_BOT_TOKEN="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" autonomous >/dev/null 2>&1; then
   echo "FAIL: autonomous mode with no webhook should refuse to create a gate"
   FAILURES=$((FAILURES + 1))
 else
@@ -37,7 +44,7 @@ else
 fi
 
 # Case 2: autonomous mode, webhook set but unreachable -> must refuse.
-if SLACK_WEBHOOK_URL="http://127.0.0.1:1/unreachable" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" autonomous >/dev/null 2>&1; then
+if SLACK_WEBHOOK_URL="http://127.0.0.1:1/unreachable" SLACK_BOT_TOKEN="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" autonomous >/dev/null 2>&1; then
   echo "FAIL: autonomous mode with an unreachable webhook should refuse to create a gate"
   FAILURES=$((FAILURES + 1))
 else
@@ -46,7 +53,7 @@ fi
 [[ -f "$GATE_FILE" ]] && { echo "FAIL: gate file should not exist after refusal"; rm -f "$GATE_FILE"; FAILURES=$((FAILURES + 1)); }
 
 # Case 3: interactive mode, no webhook configured -> still creates the gate, warns.
-if SLACK_WEBHOOK_URL="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" interactive >/dev/null 2>/tmp/create-gate-warn-$$; then
+if SLACK_WEBHOOK_URL="" SLACK_BOT_TOKEN="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" interactive >/dev/null 2>/tmp/create-gate-warn-$$; then
   echo "PASS: interactive mode with no webhook still creates the gate"
 else
   echo "FAIL: interactive mode with no webhook should still create the gate"
@@ -72,7 +79,7 @@ grep -qi "warning" /tmp/create-gate-warn-$$ && echo "PASS: a warning was printed
 rm -f /tmp/create-gate-warn-$$ "$GATE_FILE"
 
 # Case 4: interactive mode, webhook set but unreachable -> still creates the gate, warns.
-if SLACK_WEBHOOK_URL="http://127.0.0.1:1/unreachable" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" interactive >/dev/null 2>/tmp/create-gate-warn-$$; then
+if SLACK_WEBHOOK_URL="http://127.0.0.1:1/unreachable" SLACK_BOT_TOKEN="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" interactive >/dev/null 2>/tmp/create-gate-warn-$$; then
   echo "PASS: interactive mode with unreachable webhook still creates the gate"
 else
   echo "FAIL: interactive mode with unreachable webhook should still create the gate"
@@ -94,7 +101,7 @@ rm -f /tmp/create-gate-warn-$$ "$GATE_FILE"
 # Case 5: creating a gate that already exists must fail.
 mkdir -p "$(dirname "$GATE_FILE")"
 echo "status: awaiting-approval" > "$GATE_FILE"
-if SLACK_WEBHOOK_URL="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" interactive >/dev/null 2>&1; then
+if SLACK_WEBHOOK_URL="" SLACK_BOT_TOKEN="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$TEST_SLUG" "test plan" interactive >/dev/null 2>&1; then
   echo "FAIL: creating an already-existing gate should fail"
   FAILURES=$((FAILURES + 1))
 else
@@ -109,9 +116,9 @@ rm -f "$GATE_FILE"
 RACE_SLUG="test-create-gate-race-$$"
 RACE_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$RACE_SLUG")"
 RESULT_A="$(mktemp)"; RESULT_B="$(mktemp)"
-( SLACK_WEBHOOK_URL="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$RACE_SLUG" "race plan" interactive > "$RESULT_A" 2>&1; echo $? >> "$RESULT_A" ) &
+( SLACK_WEBHOOK_URL="" SLACK_BOT_TOKEN="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$RACE_SLUG" "race plan" interactive > "$RESULT_A" 2>&1; echo $? >> "$RESULT_A" ) &
 PID_A=$!
-( SLACK_WEBHOOK_URL="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$RACE_SLUG" "race plan" interactive > "$RESULT_B" 2>&1; echo $? >> "$RESULT_B" ) &
+( SLACK_WEBHOOK_URL="" SLACK_BOT_TOKEN="" "$CREATE_GATE" "$TEST_LINEAR_ID" "$RACE_SLUG" "race plan" interactive > "$RESULT_B" 2>&1; echo $? >> "$RESULT_B" ) &
 PID_B=$!
 wait "$PID_A" "$PID_B"
 CODE_A="$(tail -n1 "$RESULT_A")"; CODE_B="$(tail -n1 "$RESULT_B")"
@@ -141,7 +148,7 @@ exit 1
 EOF
 chmod +x "$FAKE_BIN/curl"
 if TEST_GATE_FILE="$POST_GATE_FILE" TEST_POST_OBSERVED="$POST_OBSERVED" \
-    SLACK_WEBHOOK_URL="https://example.invalid/webhook" PATH="$FAKE_BIN:$PATH" \
+    SLACK_WEBHOOK_URL="https://example.invalid/webhook" SLACK_BOT_TOKEN="" PATH="$FAKE_BIN:$PATH" \
     "$CREATE_GATE" "$TEST_LINEAR_ID" "$POST_SLUG" "post order plan" autonomous >/dev/null 2>&1 \
     && [[ "$(cat "$POST_OBSERVED")" == "observed" ]]; then
   echo "PASS: gate is persisted before the Slack request"
@@ -153,7 +160,7 @@ AUTO_SLUG="test-create-gate-autonomous-$$"
 AUTO_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$AUTO_SLUG")"
 AUTO_OBSERVED="$(mktemp)"
 if TEST_GATE_FILE="$AUTO_GATE_FILE" TEST_POST_OBSERVED="$AUTO_OBSERVED" \
-    SLACK_WEBHOOK_URL="https://example.invalid/webhook" PATH="$FAKE_BIN:$PATH" \
+    SLACK_WEBHOOK_URL="https://example.invalid/webhook" SLACK_BOT_TOKEN="" PATH="$FAKE_BIN:$PATH" \
     "$CREATE_GATE" "$TEST_LINEAR_ID" "$AUTO_SLUG" "unattended plan" autonomous >/dev/null 2>&1 \
     && [[ -f "$AUTO_GATE_FILE" && "$(cat "$AUTO_OBSERVED")" == "observed" ]]; then
   echo "PASS: unattended mode persists and posts a gate for manual pickup"

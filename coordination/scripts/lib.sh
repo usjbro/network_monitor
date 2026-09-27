@@ -12,12 +12,16 @@ case "$GIT_COMMON_DIR" in
   *)  REPO_ROOT="$(git rev-parse --show-toplevel)" ;;
 esac
 
-# Load a locally-configured SLACK_WEBHOOK_URL if present. coordination/.env
-# is gitignored (matches the repo-wide .env* pattern) — never commit a
-# webhook URL. A caller-exported SLACK_WEBHOOK_URL (even if set to empty
-# string) takes precedence and suppresses loading from .env — this allows
-# tests and callers to override the default webhook or explicitly disable it.
-if [[ -f "$REPO_ROOT/coordination/.env" && -z "${SLACK_WEBHOOK_URL+x}" ]]; then
+# Load locally-configured Slack credentials if present. coordination/.env
+# is gitignored (matches the repo-wide .env* pattern) — never commit it. A
+# caller that has already exported EITHER SLACK_WEBHOOK_URL or
+# SLACK_BOT_TOKEN (even to an empty string) suppresses loading from .env
+# entirely, for BOTH variables — this is what lets a test or caller disable
+# Slack entirely (by pre-setting one to "") without the other secret still
+# leaking in from the file. Loading only one of the two from .env while the
+# caller explicitly set the other would silently reintroduce a real
+# credential into what the caller intended as a fully-disabled environment.
+if [[ -f "$REPO_ROOT/coordination/.env" && -z "${SLACK_WEBHOOK_URL+x}" && -z "${SLACK_BOT_TOKEN+x}" ]]; then
   set -a
   # shellcheck disable=SC1091
   source "$REPO_ROOT/coordination/.env"

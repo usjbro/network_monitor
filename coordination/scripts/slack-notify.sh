@@ -137,16 +137,27 @@ CURLCFG
   fi
 
   # Slack returns HTTP 200 even for a rejected request; the real result is
-  # the body's "ok" field, so that's what determines success here.
+  # the body's "ok" field, so that's what determines success here. Also
+  # reject a "ts" that isn't Slack's own <digits>.<digits> shape before it
+  # goes anywhere — callers (create-gate.sh, new-task.sh) write this value
+  # verbatim into a gate/task file's YAML frontmatter via gate_set_field,
+  # whose own contract requires no embedded newline; this is the one call
+  # site feeding it a value that ultimately originates from a network
+  # response rather than a CLI argument, so don't rely on Slack's response
+  # always being well-formed.
   if ! RESULT_TS="$(python3 -c '
-import json, sys
+import json, re, sys
 resp = json.load(open(sys.argv[1]))
 if not resp.get("ok"):
     print(resp.get("error", "unknown error"), file=sys.stderr)
     sys.exit(1)
-print(resp["ts"])
+ts = resp.get("ts", "")
+if not re.fullmatch(r"[0-9]+\.[0-9]+", ts):
+    print(f"unexpected ts format in Slack response: {ts!r}", file=sys.stderr)
+    sys.exit(1)
+print(ts)
 ' "$RESPONSE_FILE")"; then
-    echo "Slack post rejected (ok:false) — task status was still updated locally." >&2
+    echo "Slack post rejected or returned an unexpected response — task status was still updated locally." >&2
     exit 1
   fi
 
