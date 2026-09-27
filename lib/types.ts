@@ -46,7 +46,9 @@ export interface NetworkConnection {
   txSpeed: number; // B/s
   rxBytesTotal: number;
   txBytesTotal: number;
-  latencyMs: number;
+  // Absent when the agent measured no RTT (UDP, or a TCP handshake it didn't
+  // observe) — never a fabricated 0 (JAM-156).
+  latencyMs?: number;
   packetLoss: number; // %
   status: 'ESTABLISHED' | 'SYN_SENT' | 'LISTEN' | 'TIME_WAIT' | 'CLOSE_WAIT';
   encryption: string;
