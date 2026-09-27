@@ -33,7 +33,7 @@ export interface NetworkConnection {
   id: string;
   protocol: string;
   appLayerProtocol: string;
-  transportProtocol: 'TCP' | 'UDP' | 'QUIC' | 'SCTP' | 'ICMP' | 'RAW';
+  transportProtocol: 'TCP' | 'UDP' | 'SCTP' | 'ICMP' | 'RAW';
   osiStack: string; // e.g., "L7:HTTP/3 -> L6:TLS1.3 -> L5:QUIC -> L4:UDP -> L3:IPv6 -> L2:Eth -> L1:Fiber"
   localAddr: string;
   localPort: number;
@@ -46,7 +46,9 @@ export interface NetworkConnection {
   txSpeed: number; // B/s
   rxBytesTotal: number;
   txBytesTotal: number;
-  latencyMs: number;
+  // Absent when the agent measured no RTT (UDP, or a TCP handshake it didn't
+  // observe) — never a fabricated 0 (JAM-156).
+  latencyMs?: number;
   packetLoss: number; // %
   status: 'ESTABLISHED' | 'SYN_SENT' | 'LISTEN' | 'TIME_WAIT' | 'CLOSE_WAIT';
   encryption: string;

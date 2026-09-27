@@ -101,7 +101,6 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
     if (protocolFilter === 'ALL') return matchesSearch;
     if (protocolFilter === 'TCP') return matchesSearch && conn.transportProtocol === 'TCP';
     if (protocolFilter === 'UDP') return matchesSearch && conn.transportProtocol === 'UDP';
-    if (protocolFilter === 'QUIC') return matchesSearch && conn.transportProtocol === 'QUIC';
     return matchesSearch && conn.appLayerProtocol.toUpperCase().includes(protocolFilter);
   });
 
@@ -125,7 +124,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
         {/* Protocol Filter Tabs */}
         <div className="flex items-center space-x-1">
           <Filter className="h-3.5 w-3.5 opacity-50 mr-1" />
-          {['ALL', 'TCP', 'UDP', 'QUIC', 'HTTPS', 'DNS'].map((proto) => (
+          {['ALL', 'TCP', 'UDP', 'HTTPS', 'DNS'].map((proto) => (
             <button
               key={proto}
               onClick={() => setProtocolFilter(proto)}
@@ -254,7 +253,11 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
 
                   {/* Latency */}
                   <td className="p-2.5 text-center text-slate-300">
-                    <div>{conn.latencyMs} ms</div>
+                    {conn.latencyMs === undefined ? (
+                      <div title="Latency not measured for this flow">—</div>
+                    ) : (
+                      <div>{conn.latencyMs} ms</div>
+                    )}
                     <div className={`text-[10px] ${captureDegraded ? 'text-amber-500' : 'text-slate-500'}`}>
                       {conn.packetLoss.toFixed(2)}% loss
                       {captureDegraded && <span title="Capture is dropping frames — this figure may under-report actual loss">*</span>}
