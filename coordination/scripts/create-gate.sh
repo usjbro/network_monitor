@@ -70,21 +70,13 @@ EOF
     return 0
   fi
 
-  local slack_ts slack_post_failed=0
-  slack_ts="$("$SCRIPT_DIR/slack-notify.sh" "awaiting-approval" "$GATE_TAG" "gate" "$PLAN_SUMMARY")" || slack_post_failed=1
-
-  if [[ "$slack_post_failed" == "1" ]]; then
+  if ! slack_post_and_record "$GATE_FILE" "awaiting-approval" "$GATE_TAG" "gate" "$PLAN_SUMMARY"; then
     if [[ "$MODE" == "autonomous" ]]; then
       rm -f "$GATE_FILE"
       echo "Slack post failed — an autonomous gate has no Slack approval path, refusing to create it." >&2
       return 1
     fi
     echo "Warning: Slack post failed — this gate can only be approved in this chat session, not remotely via Slack." >&2
-    return 0
-  fi
-
-  if [[ -n "$slack_ts" ]]; then
-    gate_set_field "$GATE_FILE" slack_ts "$slack_ts"
   fi
 }
 

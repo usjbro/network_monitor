@@ -12,6 +12,14 @@ case "$GIT_COMMON_DIR" in
   *)  REPO_ROOT="$(git rev-parse --show-toplevel)" ;;
 esac
 
+# The directory lib.sh itself lives in — always the same coordination/scripts/
+# as its sibling scripts (slack-notify.sh, create-gate.sh, ...) in whichever
+# checkout is currently running, unlike REPO_ROOT (always the MAIN checkout,
+# even from a worktree). A helper that invokes a sibling script must use
+# this, not REPO_ROOT, or it would silently run the main checkout's
+# possibly-stale copy instead of the currently-running branch's own.
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Load locally-configured Slack credentials if present. coordination/.env
 # is gitignored (matches the repo-wide .env* pattern) — never commit it. A
 # caller that has already exported EITHER SLACK_WEBHOOK_URL or
@@ -46,6 +54,30 @@ lookup_slack_ts() {
   local file="$1"
   if [[ -f "$file" ]]; then
     gate_field "$file" slack_ts
+  fi
+  return 0
+}
+
+# Shared by new-task.sh, create-gate.sh, and complete-task.sh: posts a Slack
+# status update via slack-notify.sh and, only if FILE doesn't already have a
+# slack_ts, records the post's own ts into FILE's slack_ts field. Never
+# overwrites an existing slack_ts — Slack's own API docs warn against using
+# a reply's ts as a later thread_ts (only the root message's ts is safe to
+# thread under), so once a task/gate's root post is recorded, a later
+# post's ts (itself a reply, once slack_ts is set) must never replace it.
+# Returns slack-notify.sh's own exit status, so callers keep their own
+# success/failure policy (e.g. create-gate.sh's autonomous-mode rollback).
+slack_post_and_record() {
+  local file="$1" status="$2" task_slug="$3" owner="$4" message="$5"
+  local ts existing
+  if ! ts="$("$LIB_DIR/slack-notify.sh" "$status" "$task_slug" "$owner" "$message")"; then
+    return 1
+  fi
+  if [[ -n "$ts" ]]; then
+    existing="$(lookup_slack_ts "$file")"
+    if [[ -z "$existing" ]]; then
+      gate_set_field "$file" slack_ts "$ts"
+    fi
   fi
   return 0
 }

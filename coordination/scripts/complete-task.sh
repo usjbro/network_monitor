@@ -49,6 +49,6 @@ if [[ -n "${LINEAR_ID:-}" ]]; then
   echo "Remember: also update ${LINEAR_ID}'s status in Linear (epic-task-cycle §2 steps 8-11) — this file and Linear must agree."
 fi
 
-if [[ -n "${SLACK_WEBHOOK_URL:-}" ]]; then
-  "$SCRIPT_DIR/slack-notify.sh" "$NEW_STATUS" "$TASK_SLUG" "$OWNER" "$SUMMARY" || true
+if slack_configured; then
+  slack_post_and_record "$TASK_FILE" "$NEW_STATUS" "$TASK_SLUG" "$OWNER" "$SUMMARY" || true
 fi

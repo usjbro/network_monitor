@@ -112,8 +112,5 @@ fi
 if slack_configured; then
   SLACK_MESSAGE="${GOAL}
 Worktree: \`${WORKTREE_DIR}\`"
-  SLACK_TS="$("$SCRIPT_DIR/slack-notify.sh" "started" "$TASK_SLUG" "$OWNER" "$SLACK_MESSAGE")" || SLACK_TS=""
-  if [[ -n "$SLACK_TS" ]]; then
-    gate_set_field "$TASK_FILE" slack_ts "$SLACK_TS"
-  fi
+  slack_post_and_record "$TASK_FILE" "started" "$TASK_SLUG" "$OWNER" "$SLACK_MESSAGE" || true
 fi

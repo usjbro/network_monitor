@@ -101,7 +101,7 @@ run_bot() {
 expect_emoji() {
   local status="$1" emoji="$2"
   reset_files
-  if TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="https://example.invalid/webhook" \
+  if TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="https://example.invalid/webhook" SLACK_BOT_TOKEN="" \
       PATH="$FAKE_BIN:$PATH" "$NOTIFY" "$status" "some-task" "claude-code" "msg" >/dev/null 2>&1 \
       && python3 -c 'import json,sys; t=json.load(open(sys.argv[1]))["text"]; sys.exit(0 if t.startswith(sys.argv[2] + " ") and ("*" + sys.argv[3] + "*") in t else 1)' \
          "$PAYLOAD_FILE" "$emoji" "$status"; then
@@ -120,7 +120,7 @@ expect_emoji done "✅"
 
 # No webhook, no bot token -> skips without posting and exits 0.
 reset_files
-if TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="" PATH="$FAKE_BIN:$PATH" \
+if TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="" SLACK_BOT_TOKEN="" PATH="$FAKE_BIN:$PATH" \
     "$NOTIFY" started "some-task" "claude-code" "msg" >/dev/null 2>&1 && [[ ! -s "$PAYLOAD_FILE" ]]; then
   echo "PASS: no bot token or webhook skips the post"
 else
@@ -131,7 +131,7 @@ fi
 # Webhook path warns (but still posts, unthreaded) when a thread-ts is given
 # — webhooks can't thread.
 reset_files
-STDERR="$(TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="https://example.invalid/webhook" \
+STDERR="$(TEST_PAYLOAD_FILE="$PAYLOAD_FILE" SLACK_WEBHOOK_URL="https://example.invalid/webhook" SLACK_BOT_TOKEN="" \
     PATH="$FAKE_BIN:$PATH" "$NOTIFY" started "some-task" "claude-code" "msg" "1111.2222" 2>&1 1>/dev/null)"
 if [[ -s "$PAYLOAD_FILE" ]] && [[ "$STDERR" == *"cannot thread"* ]]; then
   echo "PASS: webhook path warns and posts unthreaded when a thread-ts is given"
