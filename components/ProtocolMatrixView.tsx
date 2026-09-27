@@ -29,10 +29,18 @@ function findChild(node: ProtocolNode | undefined, name: string): ProtocolNode |
   return node?.children.find((c) => c.name === name);
 }
 
+// The tree's fixed root path (Ethernet -> IP) both rollups below start
+// from — kept in one place so a future change to that path (e.g. a new
+// intermediate layer) can't update one rollup and silently leave the other
+// stale.
+function getIpNode(hierarchy: ProtocolNode | null | undefined): ProtocolNode | undefined {
+  return findChild(findChild(hierarchy ?? undefined, 'Ethernet'), 'IP');
+}
+
 // Rolls up the tree's transport-protocol level (TCP/UDP/ICMP/Other) directly
 // under IP — this is what Layer 4's card shows measured shares for.
 function measuredTransportShares(hierarchy: ProtocolNode | null | undefined): MeasuredShare[] {
-  const ip = findChild(findChild(hierarchy ?? undefined, 'Ethernet'), 'IP');
+  const ip = getIpNode(hierarchy);
   if (!ip || ip.bytes === 0) return [];
   return ip.children
     .map((t) => ({ name: t.name, bytes: t.bytes, packets: t.packets, percent: (t.bytes / ip.bytes) * 100 }))
@@ -45,7 +53,7 @@ function measuredTransportShares(hierarchy: ProtocolNode | null | undefined): Me
 // real, unidentified traffic (JAM-13's acceptance criteria) and is never
 // filtered out.
 function measuredAppShares(hierarchy: ProtocolNode | null | undefined): MeasuredShare[] {
-  const ip = findChild(findChild(hierarchy ?? undefined, 'Ethernet'), 'IP');
+  const ip = getIpNode(hierarchy);
   if (!ip || ip.bytes === 0) return [];
   const totals = new Map<string, { bytes: number; packets: number }>();
   for (const transport of ip.children) {
