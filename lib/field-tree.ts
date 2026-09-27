@@ -24,3 +24,19 @@ export function buildFieldTree(fields: WireField[]): FieldTreeNode[] {
   }
   return roots;
 }
+
+/**
+ * Finds the field a hex-pane byte click should select. Sibling fields can
+ * legitimately share a byte (a group and its leaf, or several bit flags in
+ * one byte — see docs/wire-protocol.md), so this picks one deterministic
+ * answer rather than a set: the covering field with the smallest byte
+ * range, preferring a non-group leaf over an enclosing group, and the
+ * first match in wire order when multiple leaves tie exactly.
+ */
+export function mostSpecificFieldAtOffset(fields: WireField[], index: number): WireField | null {
+  const covering = fields.filter((f) => index >= f.offset && index < f.offset + f.len);
+  if (covering.length === 0) return null;
+  const leaves = covering.filter((f) => f.type !== 'group');
+  const candidates = leaves.length > 0 ? leaves : covering;
+  return candidates.reduce((best, f) => (f.len < best.len ? f : best));
+}

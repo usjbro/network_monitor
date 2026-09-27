@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -55,6 +55,27 @@ export function mapTracerouteHopEvent(json: unknown): TracerouteHop {
     hopIp: w.hopIp as string | undefined,
     rttMs: w.rttMs as number | undefined,
     location: undefined,
+  };
+}
+
+// Accepts the full `finding` event envelope, not just its `finding`
+// payload — mirrors mapTracerouteHopEvent's/mapCaptureStatsEvent's shape
+// above (the mapper owns the envelope unwrap, per issue #46), rather than
+// mapPacketEvent's older caller-does-the-unwrap convention.
+export function mapFindingEvent(json: unknown): Finding {
+  const envelope = json as { finding?: Record<string, unknown> };
+  const w = envelope.finding;
+  if (!w) {
+    throw new Error('malformed finding event: missing "finding" field');
+  }
+  return {
+    id: requireField(w, 'id'),
+    timestamp: requireField(w, 'timestamp'),
+    severity: requireField(w, 'severity'),
+    code: requireField(w, 'code'),
+    summary: requireField(w, 'summary'),
+    frameId: w.frameId as string | undefined,
+    flowId: w.flowId as string | undefined,
   };
 }
 
