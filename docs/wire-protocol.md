@@ -161,6 +161,64 @@ Only layers 3, 4, and 7 are ever present — the agent has no independent way to
 
 `rxPacketsPerSec`/`txPacketsPerSec` are always `0` currently — not implemented.
 
+### `protocol_hierarchy_update`
+
+Sent once per tick (~1 second), immediately after that tick's `layer_update`. Measured protocol hierarchy (JAM-13/GitHub #80): cumulative bytes/packets since capture start, nested by the layers a frame actually traversed — replaces the static, always-the-same protocol lists `ProtocolMatrixView` used to render regardless of real traffic.
+
+```json
+{
+  "type": "protocol_hierarchy_update",
+  "hierarchy": {
+    "name": "Capture",
+    "bytes": 214300,
+    "packets": 940,
+    "children": [
+      {
+        "name": "Ethernet",
+        "bytes": 214300,
+        "packets": 940,
+        "children": [
+          {
+            "name": "IP",
+            "bytes": 214300,
+            "packets": 940,
+            "children": [
+              {
+                "name": "TCP",
+                "bytes": 198100,
+                "packets": 810,
+                "children": [
+                  { "name": "HTTPS/TLS", "bytes": 150200, "packets": 520, "children": [] },
+                  { "name": "HTTP", "bytes": 30100, "packets": 180, "children": [] },
+                  { "name": "Unknown", "bytes": 17800, "packets": 110, "children": [] }
+                ]
+              },
+              {
+                "name": "UDP",
+                "bytes": 16200,
+                "packets": 130,
+                "children": [
+                  { "name": "DNS", "bytes": 16200, "packets": 130, "children": [] }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Note the nesting: fields sit under a `hierarchy` key, same convention as `traceroute_hop`'s `hop` key (`capture-agent/src/wire.rs`'s `ProtocolHierarchyUpdate { hierarchy: Box<ProtocolNodeJson> }`). `mapProtocolHierarchyEvent` (`lib/agent-mapping.ts`) owns this unwrap and the recursive conversion; pass it the full event, not `event.hierarchy`.
+
+Field notes:
+- Every node's `bytes`/`packets` equal the sum of its own `children`'s, by construction — a percentage at any level is `child.bytes / parent.bytes`. This is cumulative since capture start and, unlike `layer_update`'s L3/L4 aggregates, is never derived from currently-live flows: a closed or capacity-evicted connection's already-observed traffic still counts, permanently (see `flow::ProtocolNode`'s doc comment in `capture-agent/src/flow.rs`).
+- `children` is `[]` at a leaf, never omitted — same convention as `sparkline: []` elsewhere in this document.
+- `Ethernet` and `IP` are always the entire capture's totals (100% of `bytes`) — every currently-decoded frame that reaches `FlowTable::observe` has already been parsed at both layers. The transport level (`TCP`/`UDP`/`ICMP`/`Other`) is where real variation first appears.
+- An app-protocol child (`HTTP`, `DNS`, `HTTPS/TLS`, or a well-known-port guess) only nests under `TCP`/`UDP` — `ICMP`/`Other` have no app-layer concept in this model, so their path stops at the transport label.
+- `Unknown` under a transport node is real, unidentified traffic — deliberately visible rather than rounded away, per the task's "identify unknown traffic honestly" requirement. Its size is a useful signal for prioritizing future dissector work (epic JAM-128/GitHub #58).
+
 ### `capture_stats`
 
 Sent once per tick (~1 second), immediately after that tick's `layer_update`. Reports capture health — issue #61.

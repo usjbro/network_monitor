@@ -46,6 +46,18 @@ pub struct LayerStatsJson {
     pub sparkline: Vec<u32>,
 }
 
+/// One node of the measured protocol hierarchy (JAM-13) — see
+/// `flow::ProtocolNode`. `children` is empty (not omitted) at a leaf, same
+/// convention as `sparkline: []` elsewhere in this file.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtocolNodeJson {
+    pub name: String,
+    pub bytes: u64,
+    pub packets: u64,
+    pub children: Vec<ProtocolNodeJson>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PacketJson {
@@ -150,6 +162,12 @@ pub enum AgentEvent {
     /// Expert Info (JAM-12) — an annotated observation, never a verdict. See
     /// docs/superpowers/specs/2026-09-26-expert-info-findings-design.md.
     Finding { finding: Box<FindingJson> },
+    /// Measured protocol hierarchy (JAM-13) — cumulative since capture
+    /// start, not a snapshot of currently-live flows. Boxed for the same
+    /// `clippy::large_enum_variant` reason as `ConnectionUpdate`/`Packet`
+    /// above; the tree itself can grow arbitrarily wide as new protocols
+    /// are observed.
+    ProtocolHierarchyUpdate { hierarchy: Box<ProtocolNodeJson> },
 }
 
 /// One capturable network interface, as reported in response to a

@@ -20,6 +20,7 @@ import {
   NetworkConnection,
   NetworkInterface,
   PacketFrame,
+  ProtocolNode,
   SystemStats,
   TerminalTheme,
   ThemeConfig,
@@ -39,6 +40,7 @@ import {
   mapInterfaceErrorEvent,
   mapInterfaceListEvent,
   mapPacketEvent,
+  mapProtocolHierarchyEvent,
   mapSystemStatsEvent,
   mapTracerouteHopEvent,
   mergeLayerStats,
@@ -78,6 +80,10 @@ export default function TerminalApp() {
   const [captureFileStatus, setCaptureFileStatus] = useState<CaptureFileStatus | null>(null);
   const [liveLayers, setLiveLayers] = useState<Record<OSILayerNumber, Partial<OSILayerInfo>>>({} as never);
   const layers = useMemo(() => mergeLayerStats(liveLayers), [liveLayers]);
+  // JAM-13: measured protocol hierarchy. null until the agent's first
+  // protocol_hierarchy_update tick arrives — ProtocolMatrixView shows an
+  // honest "not yet measured" state for that gap, never a fabricated one.
+  const [protocolHierarchy, setProtocolHierarchy] = useState<ProtocolNode | null>(null);
   // Capture health (issue #61) — null until the agent's first capture_stats
   // tick arrives, distinct from "zero drops so far" (a real, healthy state).
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
@@ -234,6 +240,9 @@ export default function TerminalApp() {
             }
             return next;
           });
+        }
+        if (data.type === 'protocol_hierarchy_update') {
+          setProtocolHierarchy(mapProtocolHierarchyEvent(data));
         }
         if (data.type === 'capture_stats') {
           setCaptureStats(mapCaptureStatsEvent(data));
@@ -936,6 +945,7 @@ export default function TerminalApp() {
             <ProtocolMatrixView
               layers={layers}
               theme={themeConfig}
+              hierarchy={protocolHierarchy}
               onSelectLayer={(num) => {
                 setSelectedLayerNum(num);
                 setActiveTab('layer');

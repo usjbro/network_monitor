@@ -1049,6 +1049,24 @@ fn apply_interface_switch_request(
 /// periodic-emitter loop that calls it, so the mapping from these inputs to
 /// the wire shape is unit-testable without a real capture handle or a
 /// running tokio runtime — see issue #61.
+/// Converts a `flow::ProtocolNode` into its wire shape, recursively —
+/// `flow.rs` stays wire-agnostic (same layering as `FlowSnapshot` ->
+/// `ConnectionJson` above), so this conversion lives here rather than on
+/// `ProtocolNode` itself. `name` labels the node being converted; the root
+/// itself is labeled "Capture" since it represents the whole tick's traffic,
+/// not any one layer.
+fn protocol_node_to_json(name: &str, node: &flow::ProtocolNode) -> wire::ProtocolNodeJson {
+    wire::ProtocolNodeJson {
+        name: name.to_string(),
+        bytes: node.bytes,
+        packets: node.packets,
+        children: node
+            .children()
+            .map(|(child_name, child)| protocol_node_to_json(child_name, child))
+            .collect(),
+    }
+}
+
 fn build_capture_stats_json(
     stat: Option<pcap::Stat>,
     relay_lagged_events: u64,
@@ -1761,7 +1779,7 @@ async fn main() -> std::io::Result<()> {
                 // Evict first so a flow that goes stale this tick emits only
                 // a ConnectionClosed event, not also a now-stale
                 // connection_update in the same pass.
-                let (evicted, snapshots, total_flows_observed, capacity_evictions, idle_evictions, direction_attribution_unavailable) = {
+                let (evicted, snapshots, total_flows_observed, capacity_evictions, idle_evictions, direction_attribution_unavailable, protocol_hierarchy) = {
                     let mut ft = flow_table.lock().unwrap();
                     let evicted = ft.evict_stale(now_ms);
                     let snapshots = ft.snapshot(now_ms);
@@ -1778,6 +1796,10 @@ async fn main() -> std::io::Result<()> {
                         // `interface` below re-reads `current_interface`
                         // instead of the frozen startup value.
                         ft.direction_attribution_unavailable(),
+                        // JAM-13: cloned while still holding the lock, same
+                        // as `snapshots` above — cheap (a handful of nodes)
+                        // and lets the JSON conversion happen after release.
+                        ft.protocol_hierarchy().clone(),
                     )
                 };
                 let processes = process_map.lock().unwrap();
@@ -1903,6 +1925,14 @@ async fn main() -> std::io::Result<()> {
                     },
                 ];
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::LayerUpdate { layers }));
+
+                // JAM-13: measured protocol hierarchy, cumulative since
+                // capture start — see flow::ProtocolNode's doc comment for
+                // why this is never derived from `snapshots` above.
+                let hierarchy_json = protocol_node_to_json("Capture", &protocol_hierarchy);
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ProtocolHierarchyUpdate {
+                    hierarchy: Box::new(hierarchy_json),
+                }));
 
                 let stat = *capture_stats.lock().unwrap();
                 let lagged = relay_lagged_events.load(Ordering::Relaxed);
@@ -2174,10 +2204,12 @@ mod tests {
     use super::{
         build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
         is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, parse_max_flows,
-        parse_replay_local_addrs, parse_replay_speed,
+        parse_replay_local_addrs, parse_replay_speed, protocol_node_to_json,
         resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
     };
+    use capture_agent::flow::FlowTable;
+    use capture_agent::l7::L7Info;
     use capture_agent::parse::LinkType;
     use std::path::Path;
     use tokio::sync::broadcast;
@@ -2476,6 +2508,47 @@ mod tests {
         assert_eq!(json.total_connections_observed, 0);
         assert_eq!(json.capacity_evictions, 0);
         assert_eq!(json.idle_evictions, 0);
+    }
+
+    #[test]
+    fn protocol_node_to_json_converts_the_full_tree_recursively() {
+        use capture_agent::parse::{ParsedPacket, TransportProtocol};
+
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let packet = ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: "192.168.1.10".into(),
+            dst_ip: "93.184.216.34".into(),
+            protocol: TransportProtocol::Udp,
+            src_port: Some(51000),
+            dst_port: Some(53),
+            tcp_flags: None,
+            seq: None,
+            ttl: 64,
+            total_len: 40,
+            payload: vec![],
+            header_bytes: vec![],
+            ip_header_len: 20,
+            transport_header_len: 8,
+            ip_version: 4,
+            ip_checksum: Some(0),
+            vlan_tag: None,
+        };
+        table.observe(&packet, &L7Info::Dns { query_name: "example.com".to_string() }, 0);
+
+        let json = protocol_node_to_json("Capture", table.protocol_hierarchy());
+        assert_eq!(json.name, "Capture");
+        assert_eq!(json.bytes, 40);
+        assert_eq!(json.packets, 1);
+
+        let eth = json.children.iter().find(|c| c.name == "Ethernet").expect("Ethernet child");
+        let ip = eth.children.iter().find(|c| c.name == "IP").expect("IP child");
+        let udp = ip.children.iter().find(|c| c.name == "UDP").expect("UDP child");
+        let dns = udp.children.iter().find(|c| c.name == "DNS").expect("DNS child");
+        assert_eq!(dns.bytes, 40);
+        assert_eq!(dns.packets, 1);
+        assert!(dns.children.is_empty(), "a leaf's children must be an empty array, not omitted");
     }
 
     #[test]

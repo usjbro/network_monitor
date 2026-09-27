@@ -10,6 +10,7 @@ import {
   mapInterfaceErrorEvent,
   mapInterfaceListEvent,
   mapPacketEvent,
+  mapProtocolHierarchyEvent,
   mapSystemStatsEvent,
   mapTracerouteHopEvent,
 } from '../agent-mapping';
@@ -216,6 +217,40 @@ describe('mapTracerouteHopEvent', () => {
   it('throws on an event with no "hop" field at all', () => {
     const event = { type: 'traceroute_hop', targetIp: '93.184.216.34', hopNumber: 4 };
     expect(() => mapTracerouteHopEvent(event)).toThrow('missing "hop" field');
+  });
+});
+
+describe('mapProtocolHierarchyEvent', () => {
+  // Real wire shape (capture-agent/src/wire.rs's `ProtocolHierarchyUpdate {
+  // hierarchy: Box<ProtocolNodeJson> }`): fields nest under `hierarchy`, not
+  // flat on the event — same envelope convention as traceroute_hop above.
+  it('maps a nested tree recursively, preserving every level', () => {
+    const event = {
+      type: 'protocol_hierarchy_update',
+      hierarchy: {
+        name: 'Capture',
+        bytes: 100,
+        packets: 1,
+        children: [
+          {
+            name: 'Ethernet',
+            bytes: 100,
+            packets: 1,
+            children: [{ name: 'IP', bytes: 100, packets: 1, children: [] }],
+          },
+        ],
+      },
+    };
+    const hierarchy = mapProtocolHierarchyEvent(event);
+    expect(hierarchy.name).toBe('Capture');
+    expect(hierarchy.bytes).toBe(100);
+    expect(hierarchy.children[0].name).toBe('Ethernet');
+    expect(hierarchy.children[0].children[0].name).toBe('IP');
+  });
+
+  it('throws on an event with no "hierarchy" field at all', () => {
+    const event = { type: 'protocol_hierarchy_update', bytes: 100 };
+    expect(() => mapProtocolHierarchyEvent(event)).toThrow('missing "hierarchy" field');
   });
 });
 
