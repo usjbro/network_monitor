@@ -12,17 +12,82 @@ case "$GIT_COMMON_DIR" in
   *)  REPO_ROOT="$(git rev-parse --show-toplevel)" ;;
 esac
 
-# Load a locally-configured SLACK_WEBHOOK_URL if present. coordination/.env
-# is gitignored (matches the repo-wide .env* pattern) — never commit a
-# webhook URL. A caller-exported SLACK_WEBHOOK_URL (even if set to empty
-# string) takes precedence and suppresses loading from .env — this allows
-# tests and callers to override the default webhook or explicitly disable it.
-if [[ -f "$REPO_ROOT/coordination/.env" && -z "${SLACK_WEBHOOK_URL+x}" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$REPO_ROOT/coordination/.env"
-  set +a
+# The directory lib.sh itself lives in — always the same coordination/scripts/
+# as its sibling scripts (slack-notify.sh, create-gate.sh, ...) in whichever
+# checkout is currently running, unlike REPO_ROOT (always the MAIN checkout,
+# even from a worktree). A helper that invokes a sibling script must use
+# this, not REPO_ROOT, or it would silently run the main checkout's
+# possibly-stale copy instead of the currently-running branch's own.
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load locally-configured Slack credentials if present. coordination/.env
+# is gitignored (matches the repo-wide .env* pattern) — never commit it.
+# Applied per variable, not as an all-or-nothing block: a caller that has
+# already set one of these three (even to "", e.g. a test disabling just
+# one credential) keeps that exact value, while any of the other two still
+# load normally from the file. An earlier version gated the whole file on a
+# single combined check, which had two failure modes an independent review
+# on PR #234 found: (1) explicitly exporting only SLACK_BOT_TOKEN didn't
+# stop coordination/.env from being sourced anyway and silently overwriting
+# it with the file's own value, and (2) explicitly exporting only
+# SLACK_WEBHOOK_URL suppressed the file entirely, so a bot token/channel
+# configured there was ignored even though nothing asked for that.
+if [[ -f "$REPO_ROOT/coordination/.env" ]]; then
+  for _slack_var in SLACK_WEBHOOK_URL SLACK_BOT_TOKEN SLACK_CHANNEL_ID; do
+    if [[ -z "$(eval "echo \"\${${_slack_var}+x}\"")" ]]; then
+      _slack_val="$(grep -m1 "^${_slack_var}=" "$REPO_ROOT/coordination/.env" | cut -d= -f2-)"
+      [[ -n "$_slack_val" ]] && export "${_slack_var}=${_slack_val}"
+    fi
+  done
+  unset _slack_var _slack_val
 fi
+
+# True if slack-notify.sh has any way to post — the preferred bot-token path
+# (SLACK_BOT_TOKEN, can originate or reply to a thread) or the webhook
+# fallback (SLACK_WEBHOOK_URL, can only reply to a thread whose ts is
+# already known). Callers that gate on "is Slack configured at all" (e.g.
+# create-gate.sh refusing an autonomous gate) should use this instead of
+# checking SLACK_WEBHOOK_URL directly, so a bot-token-only setup still works.
+slack_configured() {
+  [[ -n "${SLACK_BOT_TOKEN:-}" || -n "${SLACK_WEBHOOK_URL:-}" ]]
+}
+
+# Reads a task contract's or gate's own recorded slack_ts (if any), so a
+# later post about the same task/gate can thread under its parent instead of
+# starting a new top-level post. Silent (prints nothing) if the file or
+# field doesn't exist yet — callers treat an empty result as "post
+# top-level."
+lookup_slack_ts() {
+  local file="$1"
+  if [[ -f "$file" ]]; then
+    gate_field "$file" slack_ts
+  fi
+  return 0
+}
+
+# Shared by new-task.sh, create-gate.sh, and complete-task.sh: posts a Slack
+# status update via slack-notify.sh and, only if FILE doesn't already have a
+# slack_ts, records the post's own ts into FILE's slack_ts field. Never
+# overwrites an existing slack_ts — Slack's own API docs warn against using
+# a reply's ts as a later thread_ts (only the root message's ts is safe to
+# thread under), so once a task/gate's root post is recorded, a later
+# post's ts (itself a reply, once slack_ts is set) must never replace it.
+# Returns slack-notify.sh's own exit status, so callers keep their own
+# success/failure policy (e.g. create-gate.sh's autonomous-mode rollback).
+slack_post_and_record() {
+  local file="$1" status="$2" task_slug="$3" owner="$4" message="$5"
+  local ts existing
+  if ! ts="$("$LIB_DIR/slack-notify.sh" "$status" "$task_slug" "$owner" "$message")"; then
+    return 1
+  fi
+  if [[ -n "$ts" ]]; then
+    existing="$(lookup_slack_ts "$file")"
+    if [[ -z "$existing" ]]; then
+      gate_set_field "$file" slack_ts "$ts"
+    fi
+  fi
+  return 0
+}
 
 # Validates a value intended for use as a filesystem path component (a task
 # or gate slug, or a lower-cased Linear id). Rejects anything empty, or

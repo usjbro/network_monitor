@@ -147,6 +147,52 @@ else
 fi
 rm -f "$PERM_TEST_FILE"
 
+# slack_post_and_record must never overwrite an existing slack_ts — once a
+# task/gate's root post is recorded, a later post's own ts is itself a
+# reply, and Slack's docs warn against using a reply's ts as a future
+# thread_ts (only the root message's ts is safe to thread under).
+FAKE_BIN="$(mktemp -d)"
+cat > "$FAKE_BIN/curl" <<'EOF'
+#!/usr/bin/env bash
+OUT_FILE=""
+args=("$@")
+i=0
+while [[ $i -lt ${#args[@]} ]]; do
+  case "${args[$i]}" in
+    -o) OUT_FILE="${args[$((i+1))]}"; i=$((i+2)) ;;
+    *) i=$((i+1)) ;;
+  esac
+done
+cat > /dev/null
+[[ -n "$OUT_FILE" ]] && printf '%s' "$TEST_RESPONSE_BODY" > "$OUT_FILE"
+printf '200'
+EOF
+chmod +x "$FAKE_BIN/curl"
+
+RECORD_TEST_FILE="$(mktemp)"
+printf -- '---\nslack_ts:\n---\n' > "$RECORD_TEST_FILE"
+TEST_RESPONSE_BODY='{"ok":true,"ts":"1700000000.111111"}' SLACK_BOT_TOKEN="fake" SLACK_WEBHOOK_URL="" \
+  PATH="$FAKE_BIN:$PATH" bash -c "source '$LIB'; slack_post_and_record '$RECORD_TEST_FILE' started some-slug claude-code msg"
+FIRST_TS="$(bash -c "source '$LIB'; gate_field '$RECORD_TEST_FILE' slack_ts")"
+if [[ "$FIRST_TS" == "1700000000.111111" ]]; then
+  echo "PASS: slack_post_and_record records the first post's ts"
+else
+  echo "FAIL: expected slack_ts=1700000000.111111 — got '$FIRST_TS'"
+  FAILURES=$((FAILURES + 1))
+fi
+
+TEST_RESPONSE_BODY='{"ok":true,"ts":"1700000000.222222"}' SLACK_BOT_TOKEN="fake" SLACK_WEBHOOK_URL="" \
+  PATH="$FAKE_BIN:$PATH" bash -c "source '$LIB'; slack_post_and_record '$RECORD_TEST_FILE' review some-slug claude-code msg"
+SECOND_TS="$(bash -c "source '$LIB'; gate_field '$RECORD_TEST_FILE' slack_ts")"
+if [[ "$SECOND_TS" == "1700000000.111111" ]]; then
+  echo "PASS: slack_post_and_record never overwrites an already-recorded slack_ts"
+else
+  echo "FAIL: slack_ts should stay at the root post's ts — got '$SECOND_TS'"
+  FAILURES=$((FAILURES + 1))
+fi
+rm -f "$RECORD_TEST_FILE" "$FAKE_BIN/curl"
+rmdir "$FAKE_BIN"
+
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."
   exit 1

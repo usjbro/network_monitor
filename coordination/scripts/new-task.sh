@@ -10,11 +10,12 @@
 # match this repo's <branch-prefix>/<linear-id>-<slug> convention. Leave it
 # off for coordination work with no Linear-tracked parent.
 #
-# Requires: git, and a Slack webhook for the Slack post (optional — the task
-# is still created without one, just no Slack message goes out). Configure
-# it once via coordination/.env (SLACK_WEBHOOK_URL=https://hooks.slack.com/...,
-# gitignored) so it persists across shells, or export SLACK_WEBHOOK_URL
-# yourself for a one-off.
+# Requires: git, and Slack credentials for the started post (optional — the
+# task is still created without them, just no Slack message goes out).
+# Configure once via coordination/.env (gitignored): SLACK_BOT_TOKEN (+
+# optionally SLACK_CHANNEL_ID) for the chat.postMessage path (needed to
+# originate this task's own thread), or SLACK_WEBHOOK_URL as a fallback that
+# can't originate one — see slack-notify.sh.
 
 set -euo pipefail
 
@@ -73,6 +74,7 @@ branch: ${BRANCH}
 linear_id: ${LINEAR_ID}
 depends_on: []
 created: $(date +%Y-%m-%d)
+slack_ts:
 ---
 
 ## Goal
@@ -108,6 +110,8 @@ if [[ -n "$LINEAR_ID" ]]; then
   echo "Remember: also update ${LINEAR_ID}'s status in Linear when this task's status changes."
 fi
 
-if [[ -n "${SLACK_WEBHOOK_URL:-}" ]]; then
-  "$SCRIPT_DIR/slack-notify.sh" "started" "$TASK_SLUG" "$OWNER" "$GOAL" || true
+if slack_configured; then
+  SLACK_MESSAGE="${GOAL}
+Worktree: \`${WORKTREE_DIR}\`"
+  slack_post_and_record "$TASK_FILE" "started" "$TASK_SLUG" "$OWNER" "$SLACK_MESSAGE" || true
 fi

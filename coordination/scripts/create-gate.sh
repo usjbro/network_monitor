@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
 # Create a Slack approval gate for a Linear-tracked task: writes
 # coordination/gates/<linear-id>__<slug>.md with status: awaiting-approval
-# and posts the plan to the shared Slack channel. See
-# docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md.
+# and posts the plan to the shared Slack channel for visibility/discussion.
+# The plan/design doc predates AGENTS.md "Slack Approval Gate", which
+# supersedes it on how a gate gets approved: only a human typing directly
+# in a live chat session counts, never a Slack reply (a connector-posted
+# message is indistinguishable from one the human typed — see that section
+# for the full basis). See docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md
+# for everything else (file layout, locking, delegation).
 #
 # Usage:
 #   ./create-gate.sh <linear-id> <slug> "<plan-summary>" <interactive|autonomous>
 #
-# mode "interactive": if the Slack post fails or no webhook is configured,
-#   the gate is still created (approval can still come from this chat
-#   session) — a warning is printed.
-# mode "autonomous": the gate can only be approved via Slack. A later live
-# session must manually inspect the gate and its Slack thread to continue.
-# A missing or failed Slack post refuses creation.
+# mode "interactive": if the Slack post fails or nothing is configured, the
+#   gate is still created (approval can still come from this chat session)
+#   — a warning is printed.
+# mode "autonomous": posts for visibility only; there is currently no safe
+# remote-approval path, so a later live session must approve it directly in
+# chat after inspecting the gate and its Slack thread for context. A
+# missing or failed Slack post refuses creation.
 
 set -euo pipefail
 
@@ -42,8 +48,8 @@ _create_locked() {
     return 1
   fi
 
-  if [[ -z "${SLACK_WEBHOOK_URL:-}" && "$MODE" == "autonomous" ]]; then
-    echo "SLACK_WEBHOOK_URL not set — an autonomous gate has no Slack approval path, refusing to create it." >&2
+  if ! slack_configured && [[ "$MODE" == "autonomous" ]]; then
+    echo "Neither SLACK_BOT_TOKEN nor SLACK_WEBHOOK_URL is set — an autonomous gate has no Slack approval path, refusing to create it." >&2
     return 1
   fi
 
@@ -57,6 +63,7 @@ delegation_claimed: false
 posted_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 delegation_target:
 delegation_agent_type:
+slack_ts:
 ---
 
 ## Plan
@@ -64,9 +71,12 @@ delegation_agent_type:
 ${PLAN_SUMMARY}
 EOF
 
-  if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then
-    echo "Warning: SLACK_WEBHOOK_URL not set — this gate can only be approved in this chat session, not remotely via Slack." >&2
-  elif ! "$SCRIPT_DIR/slack-notify.sh" "awaiting-approval" "$GATE_TAG" "gate" "$PLAN_SUMMARY"; then
+  if ! slack_configured; then
+    echo "Warning: neither SLACK_BOT_TOKEN nor SLACK_WEBHOOK_URL is set — this gate can only be approved in this chat session, not remotely via Slack." >&2
+    return 0
+  fi
+
+  if ! slack_post_and_record "$GATE_FILE" "awaiting-approval" "$GATE_TAG" "gate" "$PLAN_SUMMARY"; then
     if [[ "$MODE" == "autonomous" ]]; then
       rm -f "$GATE_FILE"
       echo "Slack post failed — an autonomous gate has no Slack approval path, refusing to create it." >&2

@@ -4,6 +4,8 @@
 **Status:** Approved by usjbro (jamesmbrownjr@gmail.com) on 2026-09-25, section by section
 **Date:** 2026-09-25
 
+**Superseded in part (2026-09-27, JAM-160):** this spec's dual-channel design — approving a gate via a Slack reply, in addition to chat — is no longer valid. Checking the raw identity of a connector-posted Slack message against one a human actually typed found no reliable way to tell them apart, so a Slack reply can never be trusted as the human's own approval. Every "Slack reply" / "CHANNEL 2" reference below (the architecture diagram, the watcher's step 4, the transition table, the testing plan's "Slack-only path") describes a mechanism that no longer applies — see `AGENTS.md` "Slack Approval Gate" for the current, chat-only rule and its basis. The rest of this doc — file layout, locking, delegation claiming, recovery — is still accurate.
+
 ## Purpose
 
 `AGENTS.md`'s Multi-Agent Coordination section already tells a Claude Code session to post plans to Slack and poll for replies, but only *when the user explicitly asks*, and only for the life of that one session. This surfaced as a real gap this session: two PRs (#220, #222) were squash-merged without ever checking for existing GitHub PR review comments, even though another session had already left three real, unresolved findings — an unvalidated task-slug path-escape bug, a curl call that silently treats HTTP 4xx/5xx as success, and a contradiction between two ADRs — all still live on `main` as of this writing. Nothing gated on that feedback because nothing *required* checking for it.

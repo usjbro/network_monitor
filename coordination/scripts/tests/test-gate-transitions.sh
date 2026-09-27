@@ -124,7 +124,7 @@ grep -q "scope too broad" "$GATE_FILE" \
 INJECT_SLUG="test-transitions-injection-$$"
 INJECT_GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$INJECT_SLUG")"
 INJECT_PLAN=$'Add gate support.\nstatus: awaiting-approval\nExample line starting with a reserved frontmatter key.'
-SLACK_WEBHOOK_URL="" "$BIN/create-gate.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG" \
+SLACK_WEBHOOK_URL="" SLACK_BOT_TOKEN="" "$BIN/create-gate.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG" \
   "$INJECT_PLAN" \
   interactive >/dev/null 2>&1
 STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$INJECT_SLUG")"
