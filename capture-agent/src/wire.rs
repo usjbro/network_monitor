@@ -32,6 +32,54 @@ pub struct ConnectionJson {
     pub ja3_label: Option<String>,
 }
 
+/// One remote host's cumulative traffic rollup (JAM-14) — see
+/// `flow::EndpointSnapshot`. Sent as a full replacement list every tick
+/// (same "always-current snapshot" convention as `layer_update`), not
+/// incremental — a host's totals only ever grow, so a client just replaces
+/// its whole endpoint table on every event rather than diffing.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointJson {
+    pub host: String,
+    pub rx_bytes_total: u64,
+    pub tx_bytes_total: u64,
+    pub rx_packets_total: u64,
+    pub tx_packets_total: u64,
+    pub rx_speed: f64,
+    pub tx_speed: f64,
+    pub flow_count: u64,
+    pub first_seen_ms: u64,
+    pub last_seen_ms: u64,
+    pub process_name: String,
+    pub pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ja3_label: Option<String>,
+}
+
+/// One (local, remote) pair's cumulative traffic rollup (JAM-14) — see
+/// `flow::ConversationSnapshot`. Same full-replacement-per-tick contract as
+/// `EndpointJson` above.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationJson {
+    pub local_addr: String,
+    pub remote_addr: String,
+    pub rx_bytes_total: u64,
+    pub tx_bytes_total: u64,
+    pub rx_packets_total: u64,
+    pub tx_packets_total: u64,
+    pub rx_speed: f64,
+    pub tx_speed: f64,
+    pub flow_count: u64,
+    pub first_seen_ms: u64,
+    pub last_seen_ms: u64,
+    pub duration_ms: u64,
+    pub process_name: String,
+    pub pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ja3_label: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LayerStatsJson {
@@ -168,6 +216,12 @@ pub enum AgentEvent {
     /// above; the tree itself can grow arbitrarily wide as new protocols
     /// are observed.
     ProtocolHierarchyUpdate { hierarchy: Box<ProtocolNodeJson> },
+    /// Per-remote-host traffic rollups (JAM-14) — cumulative since capture
+    /// start, surviving flow eviction; see `flow::EndpointSnapshot`.
+    EndpointUpdate { endpoints: Vec<EndpointJson> },
+    /// Per-(local,remote)-pair traffic rollups (JAM-14) — see
+    /// `flow::ConversationSnapshot`.
+    ConversationUpdate { conversations: Vec<ConversationJson> },
 }
 
 /// One capturable network interface, as reported in response to a
@@ -1056,5 +1110,63 @@ mod tests {
         assert!(line.contains("\"rxPpsTotal\":480.0"));
         assert!(line.contains("\"txPpsTotal\":220.0"));
         assert!(line.contains("\"totalPacketsCaptured\":184200"));
+    }
+
+    #[test]
+    fn encodes_endpoint_update_camel_case_and_omits_ja3_label_when_absent() {
+        let event = AgentEvent::EndpointUpdate {
+            endpoints: vec![EndpointJson {
+                host: "93.184.216.34".to_string(),
+                rx_bytes_total: 4096,
+                tx_bytes_total: 2048,
+                rx_packets_total: 12,
+                tx_packets_total: 8,
+                rx_speed: 1024.0,
+                tx_speed: 512.0,
+                flow_count: 3,
+                first_seen_ms: 10,
+                last_seen_ms: 5000,
+                process_name: "Safari".to_string(),
+                pid: 1234,
+                ja3_label: None,
+            }],
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"endpoint_update\""));
+        assert!(line.contains("\"host\":\"93.184.216.34\""));
+        assert!(line.contains("\"flowCount\":3"));
+        assert!(line.contains("\"firstSeenMs\":10"));
+        assert!(line.contains("\"lastSeenMs\":5000"));
+        assert!(line.contains("\"processName\":\"Safari\""));
+        assert!(!line.contains("ja3Label"), "absent JA3 label must be omitted, not null: {line}");
+    }
+
+    #[test]
+    fn encodes_conversation_update_with_duration_and_ja3_label() {
+        let event = AgentEvent::ConversationUpdate {
+            conversations: vec![ConversationJson {
+                local_addr: "192.168.1.10".to_string(),
+                remote_addr: "93.184.216.34".to_string(),
+                rx_bytes_total: 4096,
+                tx_bytes_total: 2048,
+                rx_packets_total: 12,
+                tx_packets_total: 8,
+                rx_speed: 1024.0,
+                tx_speed: 512.0,
+                flow_count: 2,
+                first_seen_ms: 10,
+                last_seen_ms: 310,
+                duration_ms: 300,
+                process_name: "unknown".to_string(),
+                pid: 0,
+                ja3_label: Some("matches Chrome 12x".to_string()),
+            }],
+        };
+        let line = encode_event(&event);
+        assert!(line.contains("\"type\":\"conversation_update\""));
+        assert!(line.contains("\"localAddr\":\"192.168.1.10\""));
+        assert!(line.contains("\"remoteAddr\":\"93.184.216.34\""));
+        assert!(line.contains("\"durationMs\":300"));
+        assert!(line.contains("\"ja3Label\":\"matches Chrome 12x\""));
     }
 }

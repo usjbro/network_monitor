@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, Endpoint, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -244,6 +244,68 @@ export function mapInterfaceListEvent(json: unknown): NetworkInterface[] {
 export function mapInterfaceErrorEvent(json: unknown): string {
   const w = json as Record<string, unknown>;
   return requireField(w, 'message');
+}
+
+// JAM-14. Accepts the full `endpoint_update` event envelope — same
+// array-under-a-key convention as mapInterfaceListEvent above. Sent as a
+// full replacement list every tick (the agent's rollups only ever grow, so
+// there's nothing to diff); a missing/malformed `endpoints` array throws
+// rather than silently rendering an empty table. `enrichment` always comes
+// back `undefined` here — it's filled in client-side, once per host, the
+// same way `NetworkConnection.enrichment` is per flow.
+export function mapEndpointUpdateEvent(json: unknown): Endpoint[] {
+  const w = json as { endpoints?: unknown[] };
+  if (!w.endpoints) {
+    throw new Error('malformed endpoint_update event: missing "endpoints" field');
+  }
+  return w.endpoints.map((entry) => {
+    const e = entry as Record<string, unknown>;
+    return {
+      host: requireField<string>(e, 'host'),
+      rxBytesTotal: requireField<number>(e, 'rxBytesTotal'),
+      txBytesTotal: requireField<number>(e, 'txBytesTotal'),
+      rxPacketsTotal: requireField<number>(e, 'rxPacketsTotal'),
+      txPacketsTotal: requireField<number>(e, 'txPacketsTotal'),
+      rxSpeed: requireField<number>(e, 'rxSpeed'),
+      txSpeed: requireField<number>(e, 'txSpeed'),
+      flowCount: requireField<number>(e, 'flowCount'),
+      firstSeenMs: requireField<number>(e, 'firstSeenMs'),
+      lastSeenMs: requireField<number>(e, 'lastSeenMs'),
+      processName: requireField<string>(e, 'processName'),
+      pid: requireField<number>(e, 'pid'),
+      ja3Label: e.ja3Label as string | undefined,
+      enrichment: undefined,
+    };
+  });
+}
+
+// JAM-14. Same array-under-a-key convention as mapEndpointUpdateEvent above.
+export function mapConversationUpdateEvent(json: unknown): Conversation[] {
+  const w = json as { conversations?: unknown[] };
+  if (!w.conversations) {
+    throw new Error('malformed conversation_update event: missing "conversations" field');
+  }
+  return w.conversations.map((entry) => {
+    const c = entry as Record<string, unknown>;
+    return {
+      localAddr: requireField<string>(c, 'localAddr'),
+      remoteAddr: requireField<string>(c, 'remoteAddr'),
+      rxBytesTotal: requireField<number>(c, 'rxBytesTotal'),
+      txBytesTotal: requireField<number>(c, 'txBytesTotal'),
+      rxPacketsTotal: requireField<number>(c, 'rxPacketsTotal'),
+      txPacketsTotal: requireField<number>(c, 'txPacketsTotal'),
+      rxSpeed: requireField<number>(c, 'rxSpeed'),
+      txSpeed: requireField<number>(c, 'txSpeed'),
+      flowCount: requireField<number>(c, 'flowCount'),
+      firstSeenMs: requireField<number>(c, 'firstSeenMs'),
+      lastSeenMs: requireField<number>(c, 'lastSeenMs'),
+      durationMs: requireField<number>(c, 'durationMs'),
+      processName: requireField<string>(c, 'processName'),
+      pid: requireField<number>(c, 'pid'),
+      ja3Label: c.ja3Label as string | undefined,
+      enrichment: undefined,
+    };
+  });
 }
 
 export function mapPacketEvent(json: unknown): PacketFrame {

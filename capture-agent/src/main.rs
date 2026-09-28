@@ -1779,13 +1779,31 @@ async fn main() -> std::io::Result<()> {
                 // Evict first so a flow that goes stale this tick emits only
                 // a ConnectionClosed event, not also a now-stale
                 // connection_update in the same pass.
-                let (evicted, snapshots, total_flows_observed, capacity_evictions, idle_evictions, direction_attribution_unavailable, protocol_hierarchy) = {
+                let (
+                    evicted,
+                    snapshots,
+                    endpoint_snapshots,
+                    conversation_snapshots,
+                    total_flows_observed,
+                    capacity_evictions,
+                    idle_evictions,
+                    direction_attribution_unavailable,
+                    protocol_hierarchy,
+                ) = {
                     let mut ft = flow_table.lock().unwrap();
                     let evicted = ft.evict_stale(now_ms);
                     let snapshots = ft.snapshot(now_ms);
+                    // JAM-14: per-host/per-pair rollups, cumulative since
+                    // capture start -- same "gather under the lock, convert
+                    // to wire JSON after release" pattern as protocol_tree
+                    // below.
+                    let endpoint_snapshots = ft.endpoint_snapshot(now_ms);
+                    let conversation_snapshots = ft.conversation_snapshot(now_ms);
                     (
                         evicted,
                         snapshots,
+                        endpoint_snapshots,
+                        conversation_snapshots,
                         ft.total_flows_observed(),
                         ft.capacity_evictions(),
                         ft.idle_evictions(),
@@ -1803,6 +1821,94 @@ async fn main() -> std::io::Result<()> {
                     )
                 };
                 let processes = process_map.lock().unwrap();
+
+                // JAM-14: process attribution for endpoint/conversation
+                // rollups isn't itself tracked in FlowTable (process_map is
+                // main.rs-only, keyed by local port) -- so, per host/pair,
+                // pick whichever of this tick's currently-live flows was
+                // last active (largest last_seen_ms) and use its process
+                // lookup. A host/pair with zero currently-live flows (every
+                // contributing flow evicted, only the cumulative rollup
+                // survives) has no attribution available this tick and
+                // falls back to "unknown"/0, same as an unrecognized local
+                // port already does for ConnectionJson below.
+                let mut endpoint_attribution: HashMap<String, (String, u32, u64)> = HashMap::new();
+                let mut conversation_attribution: HashMap<(String, String), (String, u32, u64)> = HashMap::new();
+                for snap in &snapshots {
+                    let proc_info = processes.get(&snap.key.local_port);
+                    let name = proc_info.map(|p| p.name.clone()).unwrap_or_else(|| "unknown".to_string());
+                    let pid = proc_info.map(|p| p.pid).unwrap_or(0);
+                    let last_seen = snap.last_seen_ms;
+                    endpoint_attribution
+                        .entry(snap.key.remote_addr.clone())
+                        .and_modify(|existing| {
+                            if last_seen > existing.2 {
+                                *existing = (name.clone(), pid, last_seen);
+                            }
+                        })
+                        .or_insert_with(|| (name.clone(), pid, last_seen));
+                    conversation_attribution
+                        .entry((snap.key.local_addr.clone(), snap.key.remote_addr.clone()))
+                        .and_modify(|existing| {
+                            if last_seen > existing.2 {
+                                *existing = (name.clone(), pid, last_seen);
+                            }
+                        })
+                        .or_insert_with(|| (name, pid, last_seen));
+                }
+                let endpoints: Vec<wire::EndpointJson> = endpoint_snapshots
+                    .into_iter()
+                    .map(|endpoint| {
+                        let (process_name, pid, _) = endpoint_attribution
+                            .get(&endpoint.host)
+                            .cloned()
+                            .unwrap_or_else(|| ("unknown".to_string(), 0, 0));
+                        wire::EndpointJson {
+                            host: endpoint.host,
+                            rx_bytes_total: endpoint.rx_bytes_total,
+                            tx_bytes_total: endpoint.tx_bytes_total,
+                            rx_packets_total: endpoint.rx_packets_total,
+                            tx_packets_total: endpoint.tx_packets_total,
+                            rx_speed: endpoint.rx_speed,
+                            tx_speed: endpoint.tx_speed,
+                            flow_count: endpoint.flow_count,
+                            first_seen_ms: endpoint.first_seen_ms,
+                            last_seen_ms: endpoint.last_seen_ms,
+                            process_name,
+                            pid,
+                            ja3_label: endpoint.ja3_label.map(|s| s.to_string()),
+                        }
+                    })
+                    .collect();
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::EndpointUpdate { endpoints }));
+
+                let conversations: Vec<wire::ConversationJson> = conversation_snapshots
+                    .into_iter()
+                    .map(|conversation| {
+                        let (process_name, pid, _) = conversation_attribution
+                            .get(&(conversation.local_addr.clone(), conversation.remote_addr.clone()))
+                            .cloned()
+                            .unwrap_or_else(|| ("unknown".to_string(), 0, 0));
+                        wire::ConversationJson {
+                            local_addr: conversation.local_addr,
+                            remote_addr: conversation.remote_addr,
+                            rx_bytes_total: conversation.rx_bytes_total,
+                            tx_bytes_total: conversation.tx_bytes_total,
+                            rx_packets_total: conversation.rx_packets_total,
+                            tx_packets_total: conversation.tx_packets_total,
+                            rx_speed: conversation.rx_speed,
+                            tx_speed: conversation.tx_speed,
+                            flow_count: conversation.flow_count,
+                            first_seen_ms: conversation.first_seen_ms,
+                            last_seen_ms: conversation.last_seen_ms,
+                            duration_ms: conversation.duration_ms,
+                            process_name,
+                            pid,
+                            ja3_label: conversation.ja3_label.map(|s| s.to_string()),
+                        }
+                    })
+                    .collect();
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConversationUpdate { conversations }));
 
                 // Per-layer aggregates for the layer_update event, accumulated
                 // alongside the per-connection events below. This agent only

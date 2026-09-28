@@ -288,3 +288,51 @@ export interface NetworkInterface {
   name: string;
   addresses: string[];
 }
+
+// Per-remote-host traffic rollup (JAM-14), from the agent's
+// `endpoint_update` wire event (docs/wire-protocol.md). Cumulative since
+// capture start, aggregated in the agent — not derived from `connections`
+// client-side, so totals survive a flow closing/evicting and the 200-row
+// connection cap (app/page.tsx). `enrichment` is populated the same way
+// `NetworkConnection.enrichment` is: opt-in, looked up once per host here
+// rather than once per flow.
+export interface Endpoint {
+  host: string;
+  rxBytesTotal: number;
+  txBytesTotal: number;
+  rxPacketsTotal: number;
+  txPacketsTotal: number;
+  rxSpeed: number;
+  txSpeed: number;
+  flowCount: number;
+  firstSeenMs: number;
+  lastSeenMs: number;
+  processName: string;
+  pid: number;
+  ja3Label?: string;
+  enrichment?: NetworkConnection['enrichment'];
+}
+
+// Per-(local,remote)-pair traffic rollup (JAM-14), from the agent's
+// `conversation_update` wire event. Same cumulative-since-capture-start
+// contract as `Endpoint` above; distinct from it in that a local host
+// isn't collapsed away — two local addresses talking to the same remote
+// host are two separate conversations but one combined endpoint.
+export interface Conversation {
+  localAddr: string;
+  remoteAddr: string;
+  rxBytesTotal: number;
+  txBytesTotal: number;
+  rxPacketsTotal: number;
+  txPacketsTotal: number;
+  rxSpeed: number;
+  txSpeed: number;
+  flowCount: number;
+  firstSeenMs: number;
+  lastSeenMs: number;
+  durationMs: number;
+  processName: string;
+  pid: number;
+  ja3Label?: string;
+  enrichment?: NetworkConnection['enrichment'];
+}

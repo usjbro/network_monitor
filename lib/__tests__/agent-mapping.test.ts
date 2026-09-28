@@ -7,6 +7,8 @@ import {
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
+  mapConversationUpdateEvent,
+  mapEndpointUpdateEvent,
   mapInterfaceErrorEvent,
   mapInterfaceListEvent,
   mapPacketEvent,
@@ -550,6 +552,110 @@ describe('mapInterfaceListEvent', () => {
   it('throws on an event with no "interfaces" field at all', () => {
     const event = { type: 'interface_list' };
     expect(() => mapInterfaceListEvent(event)).toThrow('missing "interfaces" field');
+  });
+});
+
+describe('mapEndpointUpdateEvent', () => {
+  it('maps a list of per-host rollups, camelCase fields intact', () => {
+    const event = {
+      type: 'endpoint_update',
+      endpoints: [
+        {
+          host: '93.184.216.34',
+          rxBytesTotal: 4096,
+          txBytesTotal: 2048,
+          rxPacketsTotal: 12,
+          txPacketsTotal: 8,
+          rxSpeed: 1024,
+          txSpeed: 512,
+          flowCount: 3,
+          firstSeenMs: 10,
+          lastSeenMs: 5000,
+          processName: 'Safari',
+          pid: 1234,
+        },
+      ],
+    };
+    expect(mapEndpointUpdateEvent(event)).toEqual([
+      {
+        host: '93.184.216.34',
+        rxBytesTotal: 4096,
+        txBytesTotal: 2048,
+        rxPacketsTotal: 12,
+        txPacketsTotal: 8,
+        rxSpeed: 1024,
+        txSpeed: 512,
+        flowCount: 3,
+        firstSeenMs: 10,
+        lastSeenMs: 5000,
+        processName: 'Safari',
+        pid: 1234,
+        ja3Label: undefined,
+        enrichment: undefined,
+      },
+    ]);
+  });
+
+  it('maps an empty list without throwing (nothing captured yet)', () => {
+    const event = { type: 'endpoint_update', endpoints: [] };
+    expect(mapEndpointUpdateEvent(event)).toEqual([]);
+  });
+
+  it('throws on an event with no "endpoints" field at all', () => {
+    const event = { type: 'endpoint_update' };
+    expect(() => mapEndpointUpdateEvent(event)).toThrow('missing "endpoints" field');
+  });
+});
+
+describe('mapConversationUpdateEvent', () => {
+  it('maps a list of per-pair rollups including duration and JA3 label', () => {
+    const event = {
+      type: 'conversation_update',
+      conversations: [
+        {
+          localAddr: '192.168.1.10',
+          remoteAddr: '93.184.216.34',
+          rxBytesTotal: 4096,
+          txBytesTotal: 2048,
+          rxPacketsTotal: 12,
+          txPacketsTotal: 8,
+          rxSpeed: 1024,
+          txSpeed: 512,
+          flowCount: 2,
+          firstSeenMs: 10,
+          lastSeenMs: 310,
+          durationMs: 300,
+          processName: 'unknown',
+          pid: 0,
+          ja3Label: 'matches Chrome 12x',
+        },
+      ],
+    };
+    expect(mapConversationUpdateEvent(event)).toEqual([
+      {
+        localAddr: '192.168.1.10',
+        remoteAddr: '93.184.216.34',
+        rxBytesTotal: 4096,
+        txBytesTotal: 2048,
+        rxPacketsTotal: 12,
+        txPacketsTotal: 8,
+        rxSpeed: 1024,
+        txSpeed: 512,
+        flowCount: 2,
+        firstSeenMs: 10,
+        lastSeenMs: 310,
+        durationMs: 300,
+        processName: 'unknown',
+        pid: 0,
+        ja3Label: 'matches Chrome 12x',
+        enrichment: undefined,
+      },
+    ]);
+  });
+
+  it('throws on an event with no "conversations" field at all', () => {
+    const event = { type: 'conversation_update' };
+    expect(() => mapConversationUpdateEvent(event)).toThrow('missing "conversations" field');
   });
 });
 

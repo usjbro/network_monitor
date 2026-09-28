@@ -8,13 +8,16 @@ import {
   Network,
   Radio,
   ShieldAlert,
+  Users,
 } from 'lucide-react';
 import {
   AgentStatus,
   CaptureConfig,
   CaptureFileStatus,
   CaptureStats,
+  Conversation,
   DecryptedPayloadSegment,
+  Endpoint,
   Finding,
   OSILayerInfo,
   NetworkConnection,
@@ -36,6 +39,8 @@ import {
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
+  mapConversationUpdateEvent,
+  mapEndpointUpdateEvent,
   mapFindingEvent,
   mapInterfaceErrorEvent,
   mapInterfaceListEvent,
@@ -55,13 +60,14 @@ import { ConnectionsView } from '@/components/ConnectionsView';
 import { PacketStreamView } from '@/components/PacketStreamView';
 import { FindingsPanel, type FindingNavigateTarget } from '@/components/FindingsPanel';
 import { ProtocolMatrixView } from '@/components/ProtocolMatrixView';
+import { EndpointsView } from '@/components/EndpointsView';
 import { InstallModal } from '@/components/InstallModal';
 import { CommandLineBar } from '@/components/CommandLineBar';
 import { compileDisplayFilter, type CompiledDisplayFilter } from '@/lib/display-filter';
 
 export default function TerminalApp() {
   // Application State
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'layer' | 'connections' | 'packets' | 'topology' | 'findings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'layer' | 'connections' | 'hosts' | 'packets' | 'topology' | 'findings'>('dashboard');
   const [selectedLayerNum, setSelectedLayerNum] = useState<OSILayerNumber>(7);
   const [selectedTheme, setSelectedTheme] = useState<TerminalTheme>('sophisticated');
   const [isPaused, setIsPaused] = useState(false);
@@ -84,6 +90,13 @@ export default function TerminalApp() {
   // protocol_hierarchy_update tick arrives — ProtocolMatrixView shows an
   // honest "not yet measured" state for that gap, never a fabricated one.
   const [protocolHierarchy, setProtocolHierarchy] = useState<ProtocolNode | null>(null);
+  // JAM-14: per-host/per-pair traffic rollups, aggregated in the agent so
+  // totals survive flow eviction — see docs/wire-protocol.md's
+  // endpoint_update/conversation_update events. Each tick's event is a full
+  // replacement list (the agent's own rollups only ever grow), so these are
+  // just overwritten wholesale rather than upserted like `connections`.
+  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
   // Capture health (issue #61) — null until the agent's first capture_stats
   // tick arrives, distinct from "zero drops so far" (a real, healthy state).
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
@@ -244,6 +257,12 @@ export default function TerminalApp() {
         if (data.type === 'protocol_hierarchy_update') {
           setProtocolHierarchy(mapProtocolHierarchyEvent(data));
         }
+        if (data.type === 'endpoint_update') {
+          setEndpoints(mapEndpointUpdateEvent(data));
+        }
+        if (data.type === 'conversation_update') {
+          setConversations(mapConversationUpdateEvent(data));
+        }
         if (data.type === 'capture_stats') {
           setCaptureStats(mapCaptureStatsEvent(data));
         }
@@ -285,6 +304,23 @@ export default function TerminalApp() {
         }
         if (data.type === 'connection_enrichment') {
           setConnections((prev) => applyEnrichmentEvent(prev, data));
+          // JAM-14: requestEndpointLookup below reuses this same event by
+          // passing a host string as connectionId (no separate wire event
+          // exists for host-keyed lookups) — patch any endpoint/
+          // conversation row whose host matches. A no-op array-copy when
+          // data.connectionId is a real connection id, not a host, since
+          // findIndex then finds nothing.
+          setEndpoints((prev) => {
+            const idx = prev.findIndex((e) => e.host === data.connectionId);
+            if (idx === -1) return prev;
+            const next = [...prev];
+            next[idx] = { ...next[idx], enrichment: data.enrichment };
+            return next;
+          });
+          setConversations((prev) => {
+            if (!prev.some((c) => c.remoteAddr === data.connectionId)) return prev;
+            return prev.map((c) => (c.remoteAddr === data.connectionId ? { ...c, enrichment: data.enrichment } : c));
+          });
           // A result arrived for this connectionId — it's no longer "in
           // flight," and if it had previously timed out into "unavailable"
           // (e.g. a slow background-mode lookup that finished late), a real
@@ -405,6 +441,15 @@ export default function TerminalApp() {
       body: JSON.stringify({ connectionId, remoteAddr }),
     });
   };
+
+  // JAM-14: ownership lookup for an Endpoints-table row. Reuses
+  // requestLookup wholesale rather than a parallel implementation — there's
+  // no dedicated host-keyed wire event, so the host string itself stands in
+  // for connectionId (EnrichmentClient's cache is keyed by remoteAddr
+  // regardless, same as it already is for multiple per-flow lookups against
+  // one host today). The connection_enrichment handler above matches the
+  // echoed-back connectionId against `endpoints`/`conversations` by host.
+  const requestEndpointLookup = (host: string) => requestLookup(host, host);
 
   // Traceroute is on-demand only — this is the sole trigger for a trace
   // anywhere in the app (see the design spec's Explicitly out of scope
@@ -844,6 +889,18 @@ export default function TerminalApp() {
           </button>
 
           <button
+            onClick={() => setActiveTab('hosts')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded transition font-bold ${
+              activeTab === 'hosts'
+                ? themeConfig.highlight
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+          >
+            <Users className="h-3.5 w-3.5" />
+            <span>F7: HOSTS ({endpoints.length})</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('packets')}
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded transition font-bold ${
               activeTab === 'packets'
@@ -924,6 +981,18 @@ export default function TerminalApp() {
               displayFilter={displayFilter?.predicate}
               displayFilterExpression={displayFilter?.expression}
               findings={findings}
+            />
+          )}
+
+          {activeTab === 'hosts' && (
+            <EndpointsView
+              endpoints={endpoints}
+              conversations={conversations}
+              theme={themeConfig}
+              enrichmentMode={enrichmentMode}
+              onRequestLookup={requestEndpointLookup}
+              lookingUpIds={lookingUpIds}
+              unavailableIds={unavailableIds}
             />
           )}
 
