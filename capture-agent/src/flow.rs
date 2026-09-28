@@ -296,10 +296,25 @@ pub struct ConversationSnapshot {
 
 fn well_known_protocol(port: u16) -> Option<&'static str> {
     match port {
+        20 => Some("FTP-DATA"),
+        21 => Some("FTP"),
+        25 => Some("SMTP"),
         80 => Some("HTTP"),
         443 => Some("HTTPS/TLS"),
         53 => Some("DNS"),
         22 => Some("SSH"),
+        67 | 68 => Some("DHCP"),
+        110 => Some("POP3"),
+        123 => Some("NTP"),
+        143 => Some("IMAP"),
+        445 => Some("SMB"),
+        993 => Some("IMAPS"),
+        995 => Some("POP3S"),
+        1433 => Some("Microsoft SQL Server"),
+        3306 => Some("MySQL"),
+        3389 => Some("RDP"),
+        5353 => Some("mDNS"),
+        5432 => Some("PostgreSQL"),
         _ => None,
     }
 }
@@ -1936,5 +1951,18 @@ mod tests {
 
         assert!(table.endpoint_snapshot(1000).is_empty());
         assert!(table.conversation_snapshot(1000).is_empty());
+    }
+
+    #[test]
+    fn common_service_ports_are_named_without_network_lookups() {
+        for (port, expected) in [
+            (20, "FTP-DATA"), (21, "FTP"), (22, "SSH"), (25, "SMTP"),
+            (53, "DNS"), (67, "DHCP"), (80, "HTTP"), (110, "POP3"),
+            (123, "NTP"), (143, "IMAP"), (443, "HTTPS/TLS"),
+            (445, "SMB"), (993, "IMAPS"), (995, "POP3S"), (3306, "MySQL"),
+        ] {
+            assert_eq!(well_known_protocol(port), Some(expected), "port {port}");
+        }
+        assert_eq!(well_known_protocol(49152), None);
     }
 }
