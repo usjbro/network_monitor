@@ -193,7 +193,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
           >
             All Layers
           </button>
-          {[7, 6, 5, 4, 3, 2, 1].map((l) => (
+          {[7, 4, 3].map((l) => (
             <button
               key={l}
               onClick={() => setLayerFilter(l)}
