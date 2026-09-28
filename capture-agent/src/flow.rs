@@ -398,7 +398,13 @@ impl FlowTable {
 
     /// `key_for` always orders (local, remote) so both packet directions of
     /// one connection map to the same FlowKey.
-    fn key_for(&self, packet: &ParsedPacket) -> Option<(FlowKey, bool /* is_outbound */)> {
+    ///
+    /// Public (JAM-16) so `reassembly.rs` can key TCP segment reassembly on
+    /// exactly this flow identity and direction rather than deriving its own.
+    /// A second copy of this logic could drift from the table's, which would
+    /// mean reassembly and the flow it annotates disagreeing about which
+    /// connection — or which direction — a segment belongs to.
+    pub fn key_for(&self, packet: &ParsedPacket) -> Option<(FlowKey, bool /* is_outbound */)> {
         let (src_port, dst_port) = (packet.src_port?, packet.dst_port?);
         if self.is_local(&packet.src_ip) {
             Some((
@@ -887,6 +893,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         }
     }
 
@@ -1097,6 +1105,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         }
     }
 
@@ -1245,6 +1255,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         };
         table.observe(&outbound, &L7Info::None, 0);
         let snap = table.snapshot(0);
@@ -1317,6 +1329,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         };
         table.observe(&udp_packet, &L7Info::None, 0);
 
@@ -1428,6 +1442,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         };
         table.observe(&udp_packet, &L7Info::None, 0);
 
@@ -1455,6 +1471,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         }
     }
 
@@ -1519,6 +1537,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         };
         let b = ParsedPacket { dst_port: Some(444), ..a.clone() }; // distinct key from a
         table.observe(&a, &L7Info::None, 0);
@@ -1556,6 +1576,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         }
     }
 
@@ -1694,6 +1716,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         }
     }
 
@@ -1876,6 +1900,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         };
         table.observe(&other, &L7Info::None, 0);
 

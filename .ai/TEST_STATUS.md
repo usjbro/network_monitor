@@ -2,36 +2,32 @@
 
 ## Last Verified
 
-2026-09-26 UTC, against the merged PR #225 snapshot `e42aeaf742e53a851104fae801d0e73c0761f7e6`. The current follow-up changes documentation only.
+2026-09-28, in `.worktrees/stream-reassembly-ip-fragments-and-tcp-segments` (branch `jamesmbrownjr/jam-16-stream-reassembly-ip-fragments-and-tcp-segments`, based on `main` at `3140d89d`), for JAM-16 (stream reassembly: IP fragments and TCP segments). Commands below were run twice independently — once by the implementing agent, once by the reviewing session — with matching results.
 
-## Local Coordination Checks
-
-Exported `coordination/` and `.gitignore` with `git archive HEAD` from the fresh worktree into a temporary directory, then ran `git init -q` there. `SLACK_WEBHOOK_URL` was set to the empty string, preventing the shared webhook configuration from loading. Tests exercised temporary local state, not the main checkout's gates.
+## Rust (`capture-agent/`)
 
 | Command | Result |
 | --- | --- |
-| `bash -n <script>` for every `.sh` under `coordination/scripts/` | PASS |
-| `bash coordination/scripts/tests/test-lib.sh` | PASS — 13 assertions |
-| `bash coordination/scripts/tests/test-create-gate.sh` | PASS — 18 assertions |
-| `bash coordination/scripts/tests/test-gate-transitions.sh` | PASS — 16 assertions |
-| `bash coordination/scripts/tests/test-recovery.sh` | PASS — 18 assertions |
+| `cargo build --release --locked` | PASS — clean release build |
+| `cargo test --locked` | PASS — 258 lib tests + 51 main-bin tests + 2 no_disk_write_invariant + 3 pcapng_roundtrip + 1 protocol_regression = 315 passing, 0 failed, 3 ignored (2 live_loopback need `CAP_NET_RAW`, 1 pre-existing) |
+| `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings |
+| `cargo +nightly fuzz run stream_reassembly -- -max_total_time=45` | PASS — two independent runs (421,330 and 199,510 executions), no crash, no cap-assertion failure |
 
-All four suites exited 0: 65 passing assertions, no failures. Coverage includes concurrent creation/approval, frontmatter isolation, failed writes, exclusive delegation claims, and confirmed stale-lock recovery.
+New: `capture-agent/src/reassembly.rs` (IP fragment + TCP segment reassemblers, 38 tests), `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs` (new fuzz target, wired into `.github/workflows/ci.yml`'s fuzz job and its path filter). Modified: `parse.rs` (+`ip_declared_payload_len`, `ip_fragment` fields, 7 new tests), `l7.rs` (desegmentation hand-off `sniff_l7_desegmenting`/`L7Sniff`, 11 new tests, plus a truncated-start-line fix to `sniff_http`/`sniff_http_response` — see Decisions/Handoff below), `flow.rs` (`FlowTable::key_for` made public), `fields.rs`/`main.rs` (wiring + snap-length-truncation attribution).
 
-## Historical PR #225 CI
+## TypeScript / Web
 
-Verified via `gh pr view 225 --json statusCheckRollup,commits` for final source head `f1e7a393422e4f6f11215ade4dbade9cb6c08da7`:
+| Command | Result |
+| --- | --- |
+| `npx vitest run` | PASS — 72 files, 497/497 tests (no wire/type change — confirms no TS-visible regression) |
 
-- [CI run 36197554609](https://github.com/usjbro/network_monitor/actions/runs/36197554609): Web (Next.js), Rust (capture-agent), E2E smoke test, and Fuzz targets jobs all SUCCESS.
-- [CodeQL run 36197551011](https://github.com/usjbro/network_monitor/actions/runs/36197551011): actions, JavaScript/TypeScript, and Rust analysis all SUCCESS; the separate CodeQL aggregate check was NEUTRAL, not a failure.
-- The fuzz job is path-filtered for pull requests; its successful job status alone does not prove fuzz iterations ran for this tooling change.
+No `lib/types.ts` or `docs/wire-protocol.md` change; reassembly is internal to the capture agent (see spec's Deferred section for the wire-visible-status follow-up).
 
-These are pre-merge checks of PR #225, not checks of the subsequent documentation commit. This follow-up is published as [PR #227](https://github.com/usjbro/network_monitor/pull/227). At the publication snapshot its own CI is running; consult that PR for checks of its latest commit, rather than treating this historical result as current-head evidence.
+## Security Review
 
-## Local Application / Live Integration Tests
+Manual review by the implementing agent (the `security-review` skill's own harness produced an empty diff in that context) plus the fuzz run above. No HIGH/MEDIUM findings. Two robustness issues found and fixed during that review (an `unwrap_or` decoupled from its invariant; an unbounded printable-ASCII scan, now capped at 2048 bytes) — see PR description for detail. An independent code-review/security-review pass is run by the orchestrating session before merge, per this repo's standing convention.
 
-TypeScript, Rust, build, Playwright, live packet capture, and a real Slack approval-to-dispatch flow were NOT RUN locally during this documentation-only follow-up. No claim is made about those local results. The GitHub CI evidence above is recorded separately.
+## Known Limits
 
-## Known Failures / Remaining Validation
-
-No failures in the four gate suites. Independent documentation/security review found no issues, and `git diff --check` passed. The follow-up PR's own CI/merge gates remain part of publication. Historical coordination-kit test notes are preserved at `8557704:.ai/TEST_STATUS.md`.
+- Live capture against a real interface was not exercised for this task (no `CAP_NET_RAW` in this environment); reassembly correctness is established by the unit/fuzz suite, not a live run.
+- A pre-existing, unrelated bug was found in the course of this work: `parse_packet` returns `None` (not a partial parse) for any frame shorter than its declared IP header length, so a narrowed `snaplen` currently causes affected frames to disappear entirely rather than show as truncated. Documented on `ReassemblyStatus` rather than silently assumed fixed; not in JAM-16's scope to fix the root cause. See task contract Handoff for tracker follow-up.

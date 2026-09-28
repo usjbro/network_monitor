@@ -447,6 +447,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0xbeef),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         }
     }
 

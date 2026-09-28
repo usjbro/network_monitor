@@ -79,6 +79,63 @@ pub struct ParsedPacket {
     /// honest value for it. Only the outermost tag is reported when a frame
     /// is double-tagged (QinQ); see `docs/wire-protocol.md`.
     pub vlan_tag: Option<String>,
+    /// How many payload bytes the IP header itself says follow it: IPv4's
+    /// `total_length` minus its header length, or IPv6's `payload_length`
+    /// minus its extension headers. Saturating throughout, so a header
+    /// declaring less than its own length yields 0 rather than underflowing.
+    ///
+    /// Distinct from `payload.len()` on purpose (JAM-16): the two differ
+    /// exactly when the capture cut a frame short of what the sender
+    /// actually sent, and `payload.len()` alone cannot tell that apart from
+    /// a frame that was simply never captured. See
+    /// `docs/superpowers/specs/2026-09-28-stream-reassembly-design.md`, and
+    /// note the reachability caveat recorded there and on
+    /// `reassembly::ReassemblyStatus`: `parse_packet` currently rejects a
+    /// frame shorter than its declared length outright, so today this
+    /// equals the captured transport payload length for every packet that
+    /// parses at all.
+    pub ip_declared_payload_len: u32,
+    /// Present only for an IPv4 frame that is a fragment — `more_fragments`
+    /// set, or a nonzero fragment offset. `None` for every unfragmented
+    /// packet, which is the overwhelming majority of real traffic.
+    pub ip_fragment: Option<Ipv4Fragment>,
+}
+
+/// One IPv4 fragment's reassembly inputs, carried separately from
+/// `ParsedPacket`'s own fields because a fragment has no transport layer for
+/// etherparse to decode (see `parse_packet`'s
+/// `parses_a_non_first_ipv4_fragment_...` test) and therefore no `payload`,
+/// `src_port`, or `dst_port` of its own until something rejoins it.
+///
+/// `ParsedPacket::payload` deliberately stays empty for a fragment —
+/// unchanged existing behavior, so nothing about per-frame output (the
+/// packet event's `hexDump`, the field registry) moves because reassembly
+/// was added. The fragment's bytes live here instead.
+#[derive(Debug, Clone)]
+pub struct Ipv4Fragment {
+    /// The IPv4 header's identification field — part of RFC 791's
+    /// reassembly key, together with source, destination, and protocol.
+    pub identification: u16,
+    /// This fragment's payload offset within the reassembled datagram, in
+    /// bytes (the header's 13-bit fragment offset, which counts 8-byte
+    /// units, already multiplied out).
+    pub offset_bytes: u32,
+    /// The header's MF bit. The one fragment with this clear is the last,
+    /// and is what makes the datagram's total length knowable.
+    pub more_fragments: bool,
+    /// The IPv4 header's protocol number, part of the reassembly key: two
+    /// datagrams between the same hosts can reuse an identification value
+    /// for different protocols.
+    pub protocol: u8,
+    /// This fragment's own IPv4 header bytes exactly as captured, including
+    /// options. Kept so a completed reassembly can rebuild a *real* IPv4
+    /// datagram (header, with length and fragment fields fixed up, followed
+    /// by the rejoined payload) and hand it straight back to `parse_packet`
+    /// — reusing all existing transport decoding rather than growing a
+    /// second copy of it.
+    pub header: Vec<u8>,
+    /// This fragment's payload bytes as captured.
+    pub payload: Vec<u8>,
 }
 
 fn mac_to_string(mac: [u8; 6]) -> String {
@@ -145,27 +202,68 @@ fn build_parsed_packet(
     vlan_tag: Option<String>,
     frame_data: &[u8],
 ) -> Option<ParsedPacket> {
-    let (src_ip, dst_ip, ttl, ip_version, ip_checksum, ip_header_len) = match &sliced.net {
-        Some(NetSlice::Ipv4(ipv4)) => (
-            ipv4.header().source_addr().to_string(),
-            ipv4.header().destination_addr().to_string(),
-            ipv4.header().ttl(),
-            4u8,
-            Some(ipv4.header().header_checksum()),
-            (ipv4.header().slice().len()
-                + ipv4.extensions().auth.map_or(0, |auth| auth.slice().len())) as u32,
-        ),
-        Some(NetSlice::Ipv6(ipv6)) => (
-            ipv6.header().source_addr().to_string(),
-            ipv6.header().destination_addr().to_string(),
-            ipv6.header().hop_limit(),
-            6u8,
-            None,
-            (ipv6.header().slice().len() + ipv6.extensions().slice().len()) as u32,
-        ),
-        None => return None,
-        _ => return None,
-    };
+    let (src_ip, dst_ip, ttl, ip_version, ip_checksum, ip_header_len, ip_declared_payload_len, ip_fragment) =
+        match &sliced.net {
+            Some(NetSlice::Ipv4(ipv4)) => {
+                let header = ipv4.header();
+                let auth_len = ipv4.extensions().auth.map_or(0, |auth| auth.slice().len());
+                let ip_header_len = (header.slice().len() + auth_len) as u32;
+                // The header's own declared payload length. `saturating_sub`
+                // because `total_len` is attacker-controlled and can be
+                // smaller than the header it precedes.
+                let declared_payload_len = (header.total_len() as u32).saturating_sub(ip_header_len);
+                let offset_bytes = header.fragments_offset().value() as u32 * 8;
+                let is_fragment = header.more_fragments() || offset_bytes != 0;
+                // An authentication extension header sits between the IPv4
+                // header slice and the fragment payload, so rebuilding a
+                // datagram from `header` + rejoined payload would silently
+                // drop it. Fragmented-plus-AH is vanishingly rare; skipping
+                // reassembly for it is an explicit, narrow refusal rather
+                // than an unnoticed corruption.
+                let fragment = if is_fragment && auth_len == 0 {
+                    Some(Ipv4Fragment {
+                        identification: header.identification(),
+                        offset_bytes,
+                        more_fragments: header.more_fragments(),
+                        protocol: header.protocol().0,
+                        header: header.slice().to_vec(),
+                        payload: ipv4.payload().payload.to_vec(),
+                    })
+                } else {
+                    None
+                };
+                (
+                    header.source_addr().to_string(),
+                    header.destination_addr().to_string(),
+                    header.ttl(),
+                    4u8,
+                    Some(header.header_checksum()),
+                    ip_header_len,
+                    declared_payload_len,
+                    fragment,
+                )
+            }
+            Some(NetSlice::Ipv6(ipv6)) => {
+                let exts_len = ipv6.extensions().slice().len() as u32;
+                (
+                    ipv6.header().source_addr().to_string(),
+                    ipv6.header().destination_addr().to_string(),
+                    ipv6.header().hop_limit(),
+                    6u8,
+                    None,
+                    ipv6.header().slice().len() as u32 + exts_len,
+                    // IPv6's payload_length counts everything after the
+                    // fixed 40-byte header, extension headers included, so
+                    // the transport-and-beyond length is that minus them.
+                    (ipv6.header().payload_length() as u32).saturating_sub(exts_len),
+                    // IPv6 fragment extension headers are out of JAM-16's
+                    // stated scope (IPv4 fragments and TCP segments only).
+                    None,
+                )
+            }
+            None => return None,
+            _ => return None,
+        };
 
     let (protocol, src_port, dst_port, tcp_flags, seq, payload, transport_header_len) = match &sliced.transport {
         Some(TransportSlice::Tcp(tcp)) => (
@@ -220,6 +318,8 @@ fn build_parsed_packet(
         ip_version,
         ip_checksum,
         vlan_tag,
+        ip_declared_payload_len,
+        ip_fragment,
     })
 }
 
@@ -377,6 +477,130 @@ mod tests {
         assert_eq!(parsed.protocol, TransportProtocol::Other);
         assert_eq!(parsed.src_port, None);
         assert_eq!(parsed.dst_port, None);
+        // ParsedPacket::payload must stay empty for a fragment — JAM-16 added
+        // reassembly without moving any per-frame output.
+        assert!(parsed.payload.is_empty());
+    }
+
+    #[test]
+    fn a_non_first_fragment_carries_its_reassembly_key_and_its_own_bytes() {
+        // JAM-16: the same fragment as the test above, now also asserting the
+        // fields reassembly keys on. Offset 185 counts 8-byte units, so it
+        // must be reported as 1480 bytes, not 185.
+        let payload = b"raw-fragment-bytes-not-a-udp-header";
+        let mut ip =
+            Ipv4Header::new(payload.len() as u16, 64, IpNumber::UDP, [192, 168, 1, 10], [93, 184, 216, 34]).unwrap();
+        ip.identification = 0xbeef;
+        ip.more_fragments = false;
+        ip.fragment_offset = IpFragOffset::try_new(185).unwrap();
+        ip.header_checksum = ip.calc_header_checksum();
+
+        let mut data = Vec::new();
+        ip.write(&mut data).unwrap();
+        data.extend_from_slice(payload);
+
+        let parsed = parse_packet(&data, LinkType::Raw).expect("a fragment must still parse");
+        let fragment = parsed.ip_fragment.expect("a nonzero fragment offset makes this a fragment");
+        assert_eq!(fragment.identification, 0xbeef);
+        assert_eq!(fragment.offset_bytes, 185 * 8);
+        assert!(!fragment.more_fragments, "this is the last fragment");
+        assert_eq!(fragment.protocol, IpNumber::UDP.0);
+        assert_eq!(fragment.payload, payload);
+        assert_eq!(fragment.header, &data[..20]);
+    }
+
+    #[test]
+    fn a_first_fragment_with_more_fragments_set_is_a_fragment_even_at_offset_zero() {
+        let payload = [0x41u8; 64];
+        let mut ip = Ipv4Header::new(payload.len() as u16, 64, IpNumber::TCP, [10, 0, 0, 1], [10, 0, 0, 2]).unwrap();
+        ip.identification = 7;
+        ip.more_fragments = true;
+        ip.header_checksum = ip.calc_header_checksum();
+        let mut data = Vec::new();
+        ip.write(&mut data).unwrap();
+        data.extend_from_slice(&payload);
+
+        let fragment = parse_packet(&data, LinkType::Raw)
+            .expect("should parse")
+            .ip_fragment
+            .expect("MF set at offset 0 is still a fragment");
+        assert_eq!(fragment.offset_bytes, 0);
+        assert!(fragment.more_fragments);
+    }
+
+    #[test]
+    fn an_unfragmented_packet_reports_no_fragment_at_all() {
+        let builder = PacketBuilder::ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64).udp(53, 12345);
+        let mut data = Vec::new();
+        builder.write(&mut data, &[9, 9, 9]).unwrap();
+
+        let parsed = parse_packet(&data, LinkType::Raw).expect("should parse");
+        assert!(
+            parsed.ip_fragment.is_none(),
+            "an ordinary packet must not read as a fragment — that would send every packet through reassembly"
+        );
+    }
+
+    #[test]
+    fn declared_payload_length_comes_from_the_ip_header_not_the_captured_length() {
+        // A well-formed packet: the two agree, and the declared value is the
+        // transport header plus its payload, not the whole datagram.
+        let payload = b"hello world";
+        let builder = PacketBuilder::ipv4([10, 0, 0, 1], [10, 0, 0, 2], 64).udp(53, 12345);
+        let mut data = Vec::new();
+        builder.write(&mut data, payload).unwrap();
+
+        let parsed = parse_packet(&data, LinkType::Raw).expect("should parse");
+        assert_eq!(parsed.ip_declared_payload_len, (8 + payload.len()) as u32);
+        assert_eq!(
+            parsed.ip_declared_payload_len,
+            parsed.transport_header_len + parsed.payload.len() as u32,
+            "for an untruncated capture the declared and captured lengths must agree exactly"
+        );
+    }
+
+    #[test]
+    fn declared_payload_length_for_a_fragment_covers_its_own_fragment_bytes() {
+        let payload = [0x41u8; 128];
+        let mut ip = Ipv4Header::new(payload.len() as u16, 64, IpNumber::TCP, [10, 0, 0, 1], [10, 0, 0, 2]).unwrap();
+        ip.more_fragments = true;
+        ip.header_checksum = ip.calc_header_checksum();
+        let mut data = Vec::new();
+        ip.write(&mut data).unwrap();
+        data.extend_from_slice(&payload);
+
+        let parsed = parse_packet(&data, LinkType::Raw).expect("should parse");
+        assert_eq!(parsed.ip_declared_payload_len, payload.len() as u32);
+    }
+
+    #[test]
+    fn declared_payload_length_saturates_rather_than_underflowing_on_a_lying_header() {
+        // An IPv4 header claiming a total_length smaller than the header it
+        // sits in. etherparse rejects this outright today, so the assertion
+        // that matters is the weaker one: no panic, whatever the outcome.
+        let mut ip = Ipv4Header::new(0, 64, IpNumber::TCP, [10, 0, 0, 1], [10, 0, 0, 2]).unwrap();
+        ip.header_checksum = ip.calc_header_checksum();
+        let mut data = Vec::new();
+        ip.write(&mut data).unwrap();
+        data[2] = 0;
+        data[3] = 4; // total_length = 4, less than the 20-byte header
+        if let Some(parsed) = parse_packet(&data, LinkType::Raw) {
+            assert_eq!(parsed.ip_declared_payload_len, 0);
+        }
+    }
+
+    #[test]
+    fn an_ipv6_packet_reports_a_declared_payload_length_and_never_a_fragment() {
+        let payload = b"abcd";
+        let builder = PacketBuilder::ipv6([1; 16], [2; 16], 64).udp(53, 12345);
+        let mut data = Vec::new();
+        builder.write(&mut data, payload).unwrap();
+
+        let parsed = parse_packet(&data, LinkType::Raw).expect("should parse IPv6");
+        assert_eq!(parsed.ip_version, 6);
+        assert_eq!(parsed.ip_declared_payload_len, (8 + payload.len()) as u32);
+        // IPv6 fragment extension headers are out of JAM-16's scope.
+        assert!(parsed.ip_fragment.is_none());
     }
 
     #[test]
@@ -463,3 +687,4 @@ mod tests {
         assert_eq!(parsed.header_bytes, &ip_packet[..ip_packet.len() - payload.len()]);
     }
 }
+

@@ -1,32 +1,32 @@
 # Session Handoff
 
-## Verified State — 2026-09-26 UTC
+## Verified State — 2026-09-28
 
-The user squash-merged [PR #225](https://github.com/usjbro/network_monitor/pull/225) at 00:16:31 UTC (September 25, 8:16 PM EDT). GitHub reports `MERGED`, merge commit `e42aeaf742e53a851104fae801d0e73c0761f7e6`. Its final source head was `f1e7a393422e4f6f11215ade4dbade9cb6c08da7`; its CI checks passed before merge. The old handoff describing PRs #220/#222 as pending was stale; both are merged.
+JAM-16 (stream reassembly: IP fragments and TCP segments) was dispatched to an Opus-backed agent given its security-sensitive-design profile (this repo's own Model Routing guidance). It wrote a design spec, implemented both reassemblers, ran its own security review (found and fixed two robustness issues), and verified build/test/clippy/fuzz/TS locally — all real command output, reproduced independently by the orchestrating session with matching results (see `TEST_STATUS.md`).
 
-## Current Follow-up
+## What Shipped
 
-The user approved refreshing all five `.ai/` files and posting updates to Slack and Linear. Work is isolated on `jamesmbrownjr/refresh-ai-state-after-pr225`, in `.worktrees/refresh-ai-state-after-pr225`, created from the PR #225 merge on `origin/main`. The original `slack-approval-gate` worktree remains on its old local commit and must not be reused for new commits after the squash merge.
+- `capture-agent/src/reassembly.rs` (new): `FragmentReassembler` (IP, keyed on src/dst/id/protocol) and `StreamReassembler` (TCP, keyed on the flow table's own `FlowKey` + direction via newly-public `FlowTable::key_for`). Overlap policy: first-seen-bytes-win (documented security rationale: prevents an attacker from retroactively rewriting bytes already reported). Caps: 8 MiB worst case combined; enforced inside `feed`, not only at eviction.
+- `capture-agent/src/l7.rs`: `sniff_l7_desegmenting`/`L7Sniff` (Decided/NeedMoreBytes/Undecided) alongside the unchanged `sniff_l7`. `sniff_http`/`sniff_http_response` now require a terminated start line — fixes a real bug where a truncated request line (e.g. `GET /index.h` with no segment boundary yet) decoded as a complete, wrong request.
+- `capture-agent/src/parse.rs`: two new internal `ParsedPacket` fields (`ip_declared_payload_len`, `ip_fragment`) — no wire exposure.
+- `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs` (new) + CI wiring (`.github/workflows/ci.yml`, hand-listed fuzz steps + path filter).
+- `docs/superpowers/specs/2026-09-28-stream-reassembly-design.md`: the reviewable record of the overlap-policy, cap-size, and desegmentation-interface decisions.
 
-The five-file refresh records the merge, corrects the ADR branch-prefix contradiction, documents local approval/delegation recovery, and replaces contradictory test-status placeholders. It is an ad hoc documentation task, not new implementation under JAM-155.
+## Two Real Bugs Found While Implementing (Not JAM-16's Own Scope)
 
-## Verification
+1. **`parse_packet` silently drops any frame shorter than its declared IP header length** — meaning a narrowed `snaplen` today makes affected frames disappear entirely rather than show as truncated, so JAM-16's `incomplete — frames truncated at capture` status is correct-but-currently-unreachable from the live capture loop for that specific case (it does fire via a separate signal: the capture loop knows when pcap itself cut a frame at the active snap length, and attributes gaps to that for 5s). Root-causing this needs a separate, larger change to how `parse_packet` handles truncation, with its own wire-surface questions. This is direct, concrete evidence for **JAM-165** ("confirm whether JAM-16 explains the climbing 'frames could not be parsed' counter"), already filed and blocked on this task — added as a comment there rather than filing a duplicate issue.
+2. Fixed directly as part of this task (not filed separately, since it's a precondition for the desegmentation hand-off): the truncated-start-line detector bug above.
 
-All shell scripts under `coordination/scripts/` passed `bash -n`. The merged code was exported with `git archive` into an isolated temporary Git repository, with `SLACK_WEBHOOK_URL` explicitly empty. Four existing gate suites passed: library 13 assertions, creation 18, transitions 16, recovery 18 (65 total). No shared gate state or real Slack webhook was used by those tests. See `TEST_STATUS.md` for commands and CI links.
+## Independent Verification (Orchestrating Session)
 
-## External Updates
-
-- Replied to the pending PR #225 status question in [#network-monitor](https://me-hem6828.slack.com/archives/C0C39FJT9DX/p1790381912280419?thread_ts=1790372866.808019&cid=C0C39FJT9DX) with its merge SHA, passing final-head CI, and this documentation follow-up.
-- Added related follow-up comment `1598f7b7-8107-44ca-99fe-4791ae31e919` to [JAM-155](https://linear.app/shmishmorshin/issue/JAM-155/land-shared-agent-coordination-guidance-and-skills). JAM-155 remains Done for PR #224. Its scope explicitly excluded the approval-gate spec/plan; PR #225's spec identifies that work as ad hoc meta/tooling. No dedicated PR #225 issue was found by the Linear searches.
+Reproduced, not just trusted: `cargo build --release --locked`, `cargo test --locked` (315 passing, matches reported counts exactly), `cargo clippy --all-targets --locked -- -D warnings` (clean), `npx vitest run` (497/497). Spot-checked `first_complete_line`/`unterminated_http_start_line` in `l7.rs` directly — bounded (2048-byte probe cap), no panics, correct method-token-boundary handling. Read the full design spec.
 
 ## Publication and Continuation
 
-Independent documentation/security review found no issues, and `git diff --check` passed. The five-file diff is published as [PR #227](https://github.com/usjbro/network_monitor/pull/227), with links posted to the same Slack thread and Linear discussion. Its CI was running at this publication snapshot. Check #227 on GitHub before continuing: if open, resolve any review/check failures and merge only when required gates pass; if merged, this follow-up is complete and no new task is assigned. Do not describe PR #225's historical CI as a test run of the follow-up commit.
+Committing, pushing, and opening the PR from here (the implementing agent was cut off twice — once by a rate limit, once by a handback-enforcement limit — before reaching these steps; all code was already correct and verified, nothing was redone). Independent code-review and security-review passes run before merge, per this repo's standing convention (self-review misses real things). Check the PR on GitHub before continuing: if open, resolve any review/CI findings and merge only when `mergeable_state: clean`; if merged, this task is complete.
 
 ## Known Limits and Follow-ups
 
-- No full application test suite was rerun locally for this documentation-only update.
-- No live Slack approval-to-dispatch exercise was performed; the shell regression tests do not establish that a session is actively polling.
-- `new-task.sh` still uses unvalidated task path components; the gate path validator does not establish that legacy task creation is safe. This previously documented issue is outside the five-file scope.
-- The main checkout and other worktrees were not synchronized or cleaned. The JAM-153 worktree has unrelated uncommitted changes; preserve them.
-- The old handoff's detailed coordination-kit history remains in Git at `8557704:.ai/HANDOFF.md`.
+- Live capture against a real interface was not exercised (no `CAP_NET_RAW` in this environment).
+- Wire-visible reassembly status (a `reassembly-incomplete` finding code) is deliberately deferred — needs the Rust + TS + docs + both-sides-test treatment this repo requires for any wire change.
+- The `parse_packet`-truncation bug above needs its own tracked follow-up if JAM-165 (already filed, blocked on this task) doesn't fully cover it once re-diagnosed post-merge.

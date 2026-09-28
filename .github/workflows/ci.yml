@@ -101,13 +101,19 @@ jobs:
       - name: Decide whether this run needs to fuzz
         id: filter
         run: |
-          # Issue #66: fuzzing is slow (3 x 30s per run, plus a nightly
+          # Issue #66: fuzzing is slow (4 x 30s per run, plus a nightly
           # toolchain + cargo-fuzz install) relative to the rest of CI, so
-          # an ordinary PR only pays that cost when it touches the three
-          # files these targets actually cover or the fuzz harness itself.
+          # an ordinary PR only pays that cost when it touches the files
+          # these targets actually cover or the fuzz harness itself.
           # src/pcapng.rs joined that set with JAM-125: like parse.rs and
           # http2.rs it decodes untrusted bytes (a capture file from
           # anywhere), and its reader is reachable from REPLAY_FILE.
+          # src/reassembly.rs joined with JAM-16: it buffers attacker-shaped
+          # fragments and segments, so an unbounded-growth regression there
+          # is exactly what the stream_reassembly target's cap assertions
+          # exist to catch. src/l7.rs is included with it because the
+          # desegmentation hand-off it owns is part of that target's
+          # reachable surface.
           # Every push to main always fuzzes regardless of paths, so a
           # regression can never land unobserved via an unrelated path
           # (e.g. a dependency bump, like this same issue's own fix).
@@ -119,7 +125,7 @@ jobs:
           changed="$(git diff --name-only "$merge_base" ${{ github.sha }})"
           echo "Changed files vs merge-base:"
           echo "$changed"
-          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|src/pcapng\.rs|fuzz/)'; then
+          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|src/pcapng\.rs|src/reassembly\.rs|src/l7\.rs|fuzz/)'; then
             echo "run_fuzz=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_fuzz=false" >> "$GITHUB_OUTPUT"
@@ -161,6 +167,13 @@ jobs:
       - name: Fuzz pcapng_reader
         if: steps.filter.outputs.run_fuzz == 'true'
         run: cargo +nightly fuzz run pcapng_reader -- -max_total_time=30
+
+      # JAM-16. Asserts the reassembly memory caps hold, not only that
+      # nothing panics — see the target's own comment for why that
+      # distinction is the point.
+      - name: Fuzz stream_reassembly
+        if: steps.filter.outputs.run_fuzz == 'true'
+        run: cargo +nightly fuzz run stream_reassembly -- -max_total_time=30
 
       - name: Upload crash artifacts
         if: failure() && steps.filter.outputs.run_fuzz == 'true'
