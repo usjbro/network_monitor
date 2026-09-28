@@ -16,3 +16,4 @@ pub mod http2;
 pub mod pcapng;
 pub mod ring;
 pub mod fields;
+pub mod reassembly;
