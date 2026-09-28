@@ -121,6 +121,44 @@ describe('EndpointsView', () => {
     expect(hostsInOrder).toEqual(['b.example', 'c.example', 'a.example']);
   });
 
+  it('sorts by process name when the Process (PID) header is clicked', () => {
+    render(
+      <EndpointsView
+        endpoints={[
+          endpoint({ host: 'a.example', processName: 'Chrome', rxBytesTotal: 300 }),
+          endpoint({ host: 'b.example', processName: 'Firefox', rxBytesTotal: 200 }),
+          endpoint({ host: 'c.example', processName: 'Safari', rxBytesTotal: 100 }),
+        ]}
+        conversations={[]}
+        theme={theme}
+      />,
+    );
+    fireEvent.click(screen.getByText(/process \(pid\)/i));
+    const rows = screen.getAllByRole('row').slice(1);
+    expect(rows.map((row) => within(row).getAllByRole('cell')[0].textContent)).toEqual([
+      'c.example', 'b.example', 'a.example',
+    ]);
+  });
+
+  it('sorts by combined RX and TX rate when the Rate header is clicked', () => {
+    render(
+      <EndpointsView
+        endpoints={[
+          endpoint({ host: 'a.example', rxBytesTotal: 900, rxSpeed: 1, txSpeed: 0 }),
+          endpoint({ host: 'b.example', rxBytesTotal: 500, rxSpeed: 4, txSpeed: 5 }),
+          endpoint({ host: 'c.example', rxBytesTotal: 100, rxSpeed: 3, txSpeed: 1 }),
+        ]}
+        conversations={[]}
+        theme={theme}
+      />,
+    );
+    fireEvent.click(screen.getByText(/rate \(rx\/tx\)/i));
+    const rows = screen.getAllByRole('row').slice(1);
+    expect(rows.map((row) => within(row).getAllByRole('cell')[0].textContent)).toEqual([
+      'b.example', 'c.example', 'a.example',
+    ]);
+  });
+
   it('switches to the Conversations table and shows local<->remote pairs with duration', () => {
     render(
       <EndpointsView
@@ -146,6 +184,22 @@ describe('EndpointsView', () => {
     fireEvent.change(screen.getByPlaceholderText(/filter by host or process/i), { target: { value: 'match' } });
     expect(screen.getByText('match.example')).toBeInTheDocument();
     expect(screen.queryByText('other.example')).not.toBeInTheDocument();
+  });
+
+  it('shows and filters endpoint rows by the PTR hostname from ownership enrichment', () => {
+    render(
+      <EndpointsView
+        endpoints={[endpoint({ host: '93.184.216.34', remoteHostname: 'edge.example.net' })]}
+        conversations={[]}
+        theme={theme}
+      />,
+    );
+
+    expect(screen.getByText('edge.example.net')).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText(/filter by host or process/i), {
+      target: { value: 'edge.example.net' },
+    });
+    expect(screen.getByText('93.184.216.34')).toBeInTheDocument();
   });
 
   describe('Ownership section', () => {

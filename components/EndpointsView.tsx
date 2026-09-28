@@ -7,8 +7,10 @@ import { formatBytes, formatSpeed } from '@/lib/osi-engine';
 
 type SortKey =
   | 'name'
+  | 'process'
   | 'bytes'
   | 'packets'
+  | 'rate'
   | 'flowCount'
   | 'firstSeen'
   | 'lastSeen'
@@ -42,8 +44,13 @@ interface Row {
 function endpointToRow(e: Endpoint): Row {
   return {
     key: e.host,
-    name: <span className="font-bold text-slate-200">{e.host}</span>,
-    searchText: e.host + ' ' + e.processName,
+    name: (
+      <span>
+        <span className="font-bold text-slate-200">{e.host}</span>
+        {e.remoteHostname && <span className="block text-[10px] text-slate-500">{e.remoteHostname}</span>}
+      </span>
+    ),
+    searchText: `${e.host} ${e.remoteHostname ?? ''} ${e.processName}`,
     rxBytesTotal: e.rxBytesTotal,
     txBytesTotal: e.txBytesTotal,
     rxPacketsTotal: e.rxPacketsTotal,
@@ -69,9 +76,10 @@ function conversationToRow(c: Conversation): Row {
         <span className="text-slate-400">{c.localAddr}</span>
         <span className="text-slate-600"> ↔ </span>
         <span className="font-bold text-slate-200">{c.remoteAddr}</span>
+        {c.remoteHostname && <span className="block text-[10px] text-slate-500">{c.remoteHostname}</span>}
       </span>
     ),
-    searchText: `${c.localAddr} ${c.remoteAddr} ${c.processName}`,
+    searchText: `${c.localAddr} ${c.remoteAddr} ${c.remoteHostname ?? ''} ${c.processName}`,
     rxBytesTotal: c.rxBytesTotal,
     txBytesTotal: c.txBytesTotal,
     rxPacketsTotal: c.rxPacketsTotal,
@@ -93,11 +101,16 @@ function conversationToRow(c: Conversation): Row {
 function sortValue(row: Row, key: SortKey): number | string {
   switch (key) {
     case 'name':
-      return row.searchText;
+      return row.key;
+    case 'process':
+      return `${row.processName.toLowerCase()}\0${row.pid.toString().padStart(10, '0')}`;
     case 'bytes':
       return row.rxBytesTotal + row.txBytesTotal;
     case 'packets':
       return row.rxPacketsTotal + row.txPacketsTotal;
+    case 'rate':
+      // RX/TX is one paired column, so sort by its combined throughput.
+      return row.rxSpeed + row.txSpeed;
     case 'flowCount':
       return row.flowCount;
     case 'firstSeen':
@@ -229,10 +242,10 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
           <thead>
             <tr className="bg-slate-950/80 text-slate-400 border-b border-slate-800 text-[10px] uppercase">
               <SortHeader label={mode === 'endpoints' ? 'Host' : 'Local ↔ Remote'} ownKey="name" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
-              <th className="p-2.5">Process (PID)</th>
+              <SortHeader label="Process (PID)" ownKey="process" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} />
               <SortHeader label="Bytes (RX/TX)" ownKey="bytes" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} align="right" />
               <SortHeader label="Packets" ownKey="packets" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} align="right" />
-              <th className="p-2.5 text-right">Rate (RX/TX)</th>
+              <SortHeader label="Rate (RX/TX)" ownKey="rate" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} align="right" />
               <SortHeader label="Flows" ownKey="flowCount" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} align="right" />
               <SortHeader label="First Seen" ownKey="firstSeen" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} align="right" />
               <SortHeader label="Last Seen" ownKey="lastSeen" sortKey={sortKey} sortDir={sortDir} onSort={handleSort} align="right" />

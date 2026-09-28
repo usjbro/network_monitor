@@ -52,6 +52,12 @@ import {
 } from '@/lib/agent-mapping';
 import { mapDecryptedPayloadEvent } from '@/lib/decrypted-mapping';
 import { applyEnrichmentEvent } from '@/lib/enrichment-mapping';
+import {
+  applyConversationEnrichment,
+  applyEndpointEnrichment,
+  mergeConversationSnapshot,
+  mergeEndpointSnapshot,
+} from '@/lib/rollup-state';
 import { isTraceComplete, mergeGeoHopUpdate, mergeTracerouteHop } from '@/lib/traceroute-state';
 import { HeaderBar } from '@/components/HeaderBar';
 import { DashboardView } from '@/components/DashboardView';
@@ -258,10 +264,12 @@ export default function TerminalApp() {
           setProtocolHierarchy(mapProtocolHierarchyEvent(data));
         }
         if (data.type === 'endpoint_update') {
-          setEndpoints(mapEndpointUpdateEvent(data));
+          const incoming = mapEndpointUpdateEvent(data);
+          setEndpoints((prev) => mergeEndpointSnapshot(prev, incoming));
         }
         if (data.type === 'conversation_update') {
-          setConversations(mapConversationUpdateEvent(data));
+          const incoming = mapConversationUpdateEvent(data);
+          setConversations((prev) => mergeConversationSnapshot(prev, incoming));
         }
         if (data.type === 'capture_stats') {
           setCaptureStats(mapCaptureStatsEvent(data));
@@ -304,23 +312,16 @@ export default function TerminalApp() {
         }
         if (data.type === 'connection_enrichment') {
           setConnections((prev) => applyEnrichmentEvent(prev, data));
-          // JAM-14: requestEndpointLookup below reuses this same event by
-          // passing a host string as connectionId (no separate wire event
-          // exists for host-keyed lookups) — patch any endpoint/
-          // conversation row whose host matches. A no-op array-copy when
-          // data.connectionId is a real connection id, not a host, since
-          // findIndex then finds nothing.
-          setEndpoints((prev) => {
-            const idx = prev.findIndex((e) => e.host === data.connectionId);
-            if (idx === -1) return prev;
-            const next = [...prev];
-            next[idx] = { ...next[idx], enrichment: data.enrichment };
-            return next;
-          });
-          setConversations((prev) => {
-            if (!prev.some((c) => c.remoteAddr === data.connectionId)) return prev;
-            return prev.map((c) => (c.remoteAddr === data.connectionId ? { ...c, enrichment: data.enrichment } : c));
-          });
+          // JAM-14: on-demand lookups use the host as connectionId, while
+          // background lookups use a real connection id. Both carry the
+          // shared remoteAddr field, so merge rollup metadata by that host.
+          const rollupEnrichment = {
+            remoteAddr: data.remoteAddr,
+            remoteHostname: data.remoteHostname,
+            enrichment: data.enrichment,
+          };
+          setEndpoints((prev) => applyEndpointEnrichment(prev, rollupEnrichment));
+          setConversations((prev) => applyConversationEnrichment(prev, rollupEnrichment));
           // A result arrived for this connectionId — it's no longer "in
           // flight," and if it had previously timed out into "unavailable"
           // (e.g. a slow background-mode lookup that finished late), a real
@@ -447,8 +448,8 @@ export default function TerminalApp() {
   // no dedicated host-keyed wire event, so the host string itself stands in
   // for connectionId (EnrichmentClient's cache is keyed by remoteAddr
   // regardless, same as it already is for multiple per-flow lookups against
-  // one host today). The connection_enrichment handler above matches the
-  // echoed-back connectionId against `endpoints`/`conversations` by host.
+  // one host today). The connection_enrichment handler applies the result to
+  // all matching endpoint/conversation rows by the event's remoteAddr.
   const requestEndpointLookup = (host: string) => requestLookup(host, host);
 
   // Traceroute is on-demand only — this is the sole trigger for a trace

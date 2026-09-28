@@ -298,6 +298,8 @@ export interface NetworkInterface {
 // rather than once per flow.
 export interface Endpoint {
   host: string;
+  // PTR name comes from relay-side connection_enrichment, not the agent rollup wire event.
+  remoteHostname?: string;
   rxBytesTotal: number;
   txBytesTotal: number;
   rxPacketsTotal: number;
@@ -321,6 +323,8 @@ export interface Endpoint {
 export interface Conversation {
   localAddr: string;
   remoteAddr: string;
+  // Shared with the endpoint row for this remote host after opt-in enrichment.
+  remoteHostname?: string;
   rxBytesTotal: number;
   txBytesTotal: number;
   rxPacketsTotal: number;
