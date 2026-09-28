@@ -219,6 +219,69 @@ Field notes:
 - An app-protocol child (`HTTP`, `DNS`, `HTTPS/TLS`, or a well-known-port guess) only nests under `TCP`/`UDP` — `ICMP`/`Other` have no app-layer concept in this model, so their path stops at the transport label.
 - `Unknown` under a transport node is real, unidentified traffic — deliberately visible rather than rounded away, per the task's "identify unknown traffic honestly" requirement. Its size is a useful signal for prioritizing future dissector work (epic JAM-128/GitHub #58).
 
+### `endpoint_update` / `conversation_update`
+
+Sent once per tick (~1 second), immediately after that tick's `protocol_hierarchy_update`. Per-remote-host (`endpoint_update`) and per-(local,remote)-pair (`conversation_update`) traffic rollups (JAM-14/GitHub #81): "Conversations and Endpoints — per-pair and per-host byte, packet and duration totals." Same permanence contract as `protocol_hierarchy_update` — cumulative since capture start, never derived from currently-live flows, so a host's total survives every one of its flows closing or being evicted (see `flow::RollupState`'s doc comment in `capture-agent/src/flow.rs`). Each event is a full replacement list, not incremental — the agent's own rollups only ever grow, so a client just replaces its whole table on every event rather than diffing.
+
+```json
+{
+  "type": "endpoint_update",
+  "endpoints": [
+    {
+      "host": "93.184.216.34",
+      "rxBytesTotal": 40960,
+      "txBytesTotal": 20480,
+      "rxPacketsTotal": 120,
+      "txPacketsTotal": 80,
+      "rxSpeed": 1024.0,
+      "txSpeed": 512.0,
+      "flowCount": 50,
+      "firstSeenMs": 1200,
+      "lastSeenMs": 61200,
+      "processName": "Safari",
+      "pid": 1234,
+      "ja3Label": "matches Chrome 12x"
+    }
+  ]
+}
+```
+
+```json
+{
+  "type": "conversation_update",
+  "conversations": [
+    {
+      "localAddr": "192.168.1.10",
+      "remoteAddr": "93.184.216.34",
+      "rxBytesTotal": 40960,
+      "txBytesTotal": 20480,
+      "rxPacketsTotal": 120,
+      "txPacketsTotal": 80,
+      "rxSpeed": 1024.0,
+      "txSpeed": 512.0,
+      "flowCount": 50,
+      "firstSeenMs": 1200,
+      "lastSeenMs": 61200,
+      "durationMs": 60000,
+      "processName": "Safari",
+      "pid": 1234,
+      "ja3Label": "matches Chrome 12x"
+    }
+  ]
+}
+```
+
+Both are flat arrays under their own key (`mapEndpointUpdateEvent`/`mapConversationUpdateEvent` in `lib/agent-mapping.ts` own the unwrap, same convention as `mapInterfaceListEvent`'s `interfaces` key) — not nested under a singular envelope key the way `protocol_hierarchy_update`'s `hierarchy` is.
+
+Field notes:
+- `host` (endpoint) is always the flow's *remote* address — the local side is "this machine" and isn't itself an interesting dimension to break `endpoint_update` down by. `localAddr`/`remoteAddr` (conversation) keep both: two local addresses talking to the same remote host are two separate conversations but one combined endpoint.
+- A host that opened many short-lived flows (e.g. a browser opening 50 connections to one CDN endpoint) always collapses to exactly one row — `flowCount` is the number of distinct flows that ever contributed, not a count of currently-live ones.
+- `rxSpeed`/`txSpeed` are this-tick-only rates (same tick-elapsed/drain contract as `connection_update`'s own `rxSpeed`/`txSpeed`) — every other numeric field is a running cumulative total.
+- `processName`/`pid` reflect whichever of this tick's currently-*live* flows contributing to that host/pair was most recently active (largest `last_seen_ms`) — a host with zero currently-live flows (every contributing flow evicted, only the cumulative rollup surviving) reports `"unknown"`/`0`, the same fallback `connection_update` uses for an unrecognized local port.
+- `ja3Label` is the most recently observed non-empty label across every flow contributing to that host/pair — deliberately not "first ClientHello wins" the way a single connection's own `ja3Label` is, since a host with many short-lived TLS flows should show its current fingerprint. Omitted (not `null`) when no flow contributing to that host/pair has ever completed a TLS handshake.
+- `durationMs` (conversation only) is `lastSeenMs - firstSeenMs`.
+- Reverse-DNS/ownership and geoIP enrichment are not part of this wire event at all — they're looked up client-side, opt-in, exactly as `connection_update`'s own `enrichment` already is, just triggered once per `host` row instead of once per flow.
+
 ### `capture_stats`
 
 Sent once per tick (~1 second), immediately after that tick's `layer_update`. Reports capture health — issue #61.

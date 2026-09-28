@@ -91,6 +91,13 @@ pub struct FlowSnapshot {
     pub packet_loss: f64,
     pub ja3_fingerprint: Option<String>,
     pub ja3_label: Option<&'static str>,
+    /// JAM-14: which of a host's/pair's several concurrently-live flows is
+    /// "freshest" for attaching process/JA3 attribution to its endpoint or
+    /// conversation rollup — a rollup's own totals have no per-flow
+    /// timestamp of their own (they're cumulative sums), so the caller
+    /// (main.rs) picks the live flow with the largest `last_seen_ms` per
+    /// host/pair.
+    pub last_seen_ms: u64,
     // Server-side-only lookup key for Tier B decrypt eligibility — never
     // serialized onto any wire event (see l7::L7Info::TlsClientHello's
     // client_random field doc comment).
@@ -128,6 +135,14 @@ pub struct FlowTable {
     /// `reset()` either, matching `total_flows_observed`'s cumulative-
     /// since-capture-start contract.
     protocol_tree: ProtocolNode,
+    /// JAM-14: per-remote-host traffic rollup, keyed by `FlowKey::remote_addr`
+    /// — see `RollupState`/`EndpointSnapshot`.
+    endpoint_rollups: HashMap<String, RollupState>,
+    /// JAM-14: per-(local,remote)-pair traffic rollup — see
+    /// `RollupState`/`ConversationSnapshot`.
+    conversation_rollups: HashMap<(String, String), RollupState>,
+    last_endpoint_snapshot_ms: u64,
+    last_conversation_snapshot_ms: u64,
 }
 
 /// `evict_stale`'s result, split by eviction reason so a caller (the
@@ -188,6 +203,95 @@ impl ProtocolNode {
     pub fn children(&self) -> impl Iterator<Item = (&str, &ProtocolNode)> {
         self.children.iter().map(|(k, v)| (k.as_str(), v))
     }
+}
+
+/// Cumulative traffic totals for one remote host (Endpoint, JAM-14) or one
+/// local<->remote pair (Conversation, JAM-14). Updated on every `observe()`
+/// call and never removed by `evict_stale`/`reset` — same permanence
+/// contract as `ProtocolNode` above, so a host's or pair's total footprint
+/// survives every one of its individual flows closing or being evicted.
+/// `_this_tick` counters are drained by `endpoint_snapshot`/
+/// `conversation_snapshot` exactly like `FlowState`'s own tick counters are
+/// drained by `snapshot()`.
+#[derive(Debug, Clone, Default)]
+struct RollupState {
+    rx_bytes_total: u64,
+    tx_bytes_total: u64,
+    rx_packets_total: u64,
+    tx_packets_total: u64,
+    rx_bytes_this_tick: u64,
+    tx_bytes_this_tick: u64,
+    /// Count of distinct flows that have ever contributed to this host/pair
+    /// — incremented once per new flow (see `observe`'s own `is_new`), never
+    /// once per packet.
+    flow_count: u64,
+    /// `None` until the first packet is recorded. Deliberately not a plain
+    /// `u64` defaulting to 0: the very first packet can legitimately arrive
+    /// at `now_ms == 0` (e.g. in tests), and a "0 means unset" sentinel
+    /// would then keep resetting this on every later packet too.
+    first_seen_ms: Option<u64>,
+    last_seen_ms: u64,
+    /// The most recently observed non-empty JA3 label across every flow
+    /// contributing to this host/pair — a host with many short-lived TLS
+    /// flows should show its current fingerprint, not whichever flow
+    /// happened to be first (contrast `FlowState.ja3_label`'s own
+    /// first-ClientHello-wins rule, which is scoped to a single flow).
+    ja3_label: Option<&'static str>,
+}
+
+impl RollupState {
+    fn record(&mut self, is_outbound: bool, bytes: u64, now_ms: u64, is_new_flow: bool) {
+        if is_outbound {
+            self.tx_bytes_total += bytes;
+            self.tx_bytes_this_tick += bytes;
+            self.tx_packets_total += 1;
+        } else {
+            self.rx_bytes_total += bytes;
+            self.rx_bytes_this_tick += bytes;
+            self.rx_packets_total += 1;
+        }
+        self.first_seen_ms.get_or_insert(now_ms);
+        self.last_seen_ms = now_ms;
+        if is_new_flow {
+            self.flow_count += 1;
+        }
+    }
+}
+
+/// One remote host's cumulative traffic rollup (JAM-14) — see `RollupState`.
+pub struct EndpointSnapshot {
+    pub host: String,
+    pub rx_bytes_total: u64,
+    pub tx_bytes_total: u64,
+    pub rx_packets_total: u64,
+    pub tx_packets_total: u64,
+    pub rx_speed: f64,
+    pub tx_speed: f64,
+    pub flow_count: u64,
+    pub first_seen_ms: u64,
+    pub last_seen_ms: u64,
+    pub ja3_label: Option<&'static str>,
+}
+
+/// One (local, remote) pair's cumulative traffic rollup (JAM-14) — see
+/// `RollupState`. Distinct from `EndpointSnapshot` in that it does not
+/// collapse across multiple local addresses: two local hosts talking to the
+/// same remote host are two separate conversations but one combined
+/// endpoint.
+pub struct ConversationSnapshot {
+    pub local_addr: String,
+    pub remote_addr: String,
+    pub rx_bytes_total: u64,
+    pub tx_bytes_total: u64,
+    pub rx_packets_total: u64,
+    pub tx_packets_total: u64,
+    pub rx_speed: f64,
+    pub tx_speed: f64,
+    pub flow_count: u64,
+    pub first_seen_ms: u64,
+    pub last_seen_ms: u64,
+    pub duration_ms: u64,
+    pub ja3_label: Option<&'static str>,
 }
 
 fn well_known_protocol(port: u16) -> Option<&'static str> {
@@ -264,6 +368,10 @@ impl FlowTable {
             capacity_evictions: 0,
             idle_evictions: 0,
             protocol_tree: ProtocolNode::default(),
+            endpoint_rollups: HashMap::new(),
+            conversation_rollups: HashMap::new(),
+            last_endpoint_snapshot_ms: 0,
+            last_conversation_snapshot_ms: 0,
         }
     }
 
@@ -388,10 +496,25 @@ impl FlowTable {
 
         let (key, is_outbound) = self.key_for(packet)?;
         let remote_port = key.remote_port;
+        // Saved before `key` is consumed by `self.flows.entry(key)` below —
+        // JAM-14's endpoint/conversation rollups are keyed independently of
+        // the flow table itself.
+        let local_addr = key.local_addr.clone();
+        let remote_addr = key.remote_addr.clone();
         let is_new = matches!(self.flows.entry(key.clone()), Entry::Vacant(_));
         if is_new {
             self.total_flows_observed += 1;
         }
+        self.endpoint_rollups.entry(remote_addr.clone()).or_default().record(
+            is_outbound,
+            packet.total_len as u64,
+            now_ms,
+            is_new,
+        );
+        self.conversation_rollups
+            .entry((local_addr.clone(), remote_addr.clone()))
+            .or_default()
+            .record(is_outbound, packet.total_len as u64, now_ms, is_new);
         // `or_insert_with_key` (not `or_default`) so `connection_id` — a
         // pure function of a key that never changes for this flow's
         // lifetime — is computed once, only for a genuinely new flow, not
@@ -424,6 +547,18 @@ impl FlowTable {
                     state.ja3_fingerprint = ja3.clone();
                     state.ja3_label = *ja3_label;
                     state.client_random = client_random.clone();
+                }
+                // JAM-14: unlike FlowState's own first-ClientHello-wins rule
+                // above, the host/pair rollup always takes the freshest
+                // label — a host with many short-lived TLS flows should show
+                // its current fingerprint.
+                if ja3_label.is_some() {
+                    if let Some(rollup) = self.endpoint_rollups.get_mut(&remote_addr) {
+                        rollup.ja3_label = *ja3_label;
+                    }
+                    if let Some(rollup) = self.conversation_rollups.get_mut(&(local_addr.clone(), remote_addr.clone())) {
+                        rollup.ja3_label = *ja3_label;
+                    }
                 }
             }
             L7Info::None => {
@@ -556,6 +691,7 @@ impl FlowTable {
                 ja3_fingerprint: state.ja3_fingerprint.clone(),
                 ja3_label: state.ja3_label,
                 client_random: state.client_random.clone(),
+                last_seen_ms: state.last_seen_ms,
             });
 
             state.rx_bytes_this_tick = 0;
@@ -633,6 +769,67 @@ impl FlowTable {
 
     pub fn idle_evictions(&self) -> u64 {
         self.idle_evictions
+    }
+
+    /// Per-remote-host traffic rollup (JAM-14), cumulative since capture
+    /// start — never derived from currently-live flows, so a host's total
+    /// survives every one of its flows closing or being evicted. Drains
+    /// each rollup's `_this_tick` counters, same tick-elapsed contract as
+    /// `snapshot()`.
+    pub fn endpoint_snapshot(&mut self, now_ms: u64) -> Vec<EndpointSnapshot> {
+        let elapsed_s = ((now_ms.saturating_sub(self.last_endpoint_snapshot_ms)).max(1)) as f64 / 1000.0;
+        self.last_endpoint_snapshot_ms = now_ms;
+
+        let mut result = Vec::with_capacity(self.endpoint_rollups.len());
+        for (host, state) in self.endpoint_rollups.iter_mut() {
+            result.push(EndpointSnapshot {
+                host: host.clone(),
+                rx_bytes_total: state.rx_bytes_total,
+                tx_bytes_total: state.tx_bytes_total,
+                rx_packets_total: state.rx_packets_total,
+                tx_packets_total: state.tx_packets_total,
+                rx_speed: state.rx_bytes_this_tick as f64 / elapsed_s,
+                tx_speed: state.tx_bytes_this_tick as f64 / elapsed_s,
+                flow_count: state.flow_count,
+                first_seen_ms: state.first_seen_ms.unwrap_or(0),
+                last_seen_ms: state.last_seen_ms,
+                ja3_label: state.ja3_label,
+            });
+            state.rx_bytes_this_tick = 0;
+            state.tx_bytes_this_tick = 0;
+        }
+        result
+    }
+
+    /// Per-(local,remote)-pair traffic rollup (JAM-14) — see
+    /// `endpoint_snapshot`'s doc comment for the permanence/tick-draining
+    /// contract, identical here.
+    pub fn conversation_snapshot(&mut self, now_ms: u64) -> Vec<ConversationSnapshot> {
+        let elapsed_s = ((now_ms.saturating_sub(self.last_conversation_snapshot_ms)).max(1)) as f64 / 1000.0;
+        self.last_conversation_snapshot_ms = now_ms;
+
+        let mut result = Vec::with_capacity(self.conversation_rollups.len());
+        for ((local_addr, remote_addr), state) in self.conversation_rollups.iter_mut() {
+            let first_seen_ms = state.first_seen_ms.unwrap_or(0);
+            result.push(ConversationSnapshot {
+                local_addr: local_addr.clone(),
+                remote_addr: remote_addr.clone(),
+                rx_bytes_total: state.rx_bytes_total,
+                tx_bytes_total: state.tx_bytes_total,
+                rx_packets_total: state.rx_packets_total,
+                tx_packets_total: state.tx_packets_total,
+                rx_speed: state.rx_bytes_this_tick as f64 / elapsed_s,
+                tx_speed: state.tx_bytes_this_tick as f64 / elapsed_s,
+                flow_count: state.flow_count,
+                first_seen_ms,
+                last_seen_ms: state.last_seen_ms,
+                duration_ms: state.last_seen_ms.saturating_sub(first_seen_ms),
+                ja3_label: state.ja3_label,
+            });
+            state.rx_bytes_this_tick = 0;
+            state.tx_bytes_this_tick = 0;
+        }
+        result
     }
 
     /// Discards every tracked flow and replaces the local-address list used
@@ -1558,5 +1755,186 @@ mod tests {
             .unwrap();
         let names: Vec<&str> = ip.children().map(|(name, _)| name).collect();
         assert_eq!(names, vec!["ICMP", "TCP", "UDP"], "children must always read back in a fixed order");
+    }
+
+    // JAM-14: per-host (endpoint) and per-(local,remote)-pair (conversation)
+    // rollups, aggregated in the agent so totals survive flow eviction —
+    // same permanence contract as protocol_tree above.
+
+    #[test]
+    fn fifty_short_lived_flows_to_one_host_collapse_into_one_endpoint_row() {
+        // Acceptance criterion: "A host that opened 50 short-lived
+        // connections appears as one endpoint row with correct totals."
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        for port in 1..=50u16 {
+            let out = tcp_packet_to(true, TcpFlags::default(), port);
+            table.observe(&out, &L7Info::None, 0);
+        }
+        let endpoints = table.endpoint_snapshot(1000);
+        assert_eq!(endpoints.len(), 1, "50 flows to the same remote host must collapse into one endpoint row");
+        assert_eq!(endpoints[0].host, "93.184.216.34");
+        assert_eq!(endpoints[0].flow_count, 50);
+        assert_eq!(endpoints[0].tx_bytes_total, 50 * 60);
+        assert_eq!(endpoints[0].tx_packets_total, 50);
+    }
+
+    #[test]
+    fn endpoint_totals_survive_eviction_of_every_contributing_flow() {
+        // Acceptance criterion: "Totals include evicted and closed flows."
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false, ..Default::default() }, 100);
+        table.observe(&fin, &L7Info::None, 0);
+
+        // idle = 120_001ms > the TIME_WAIT/CLOSE_WAIT threshold -- evicts the
+        // only flow that ever contributed to this endpoint.
+        let evicted = table.evict_stale(120_001);
+        assert_eq!(evicted.len(), 1);
+        assert!(table.snapshot(120_001).is_empty(), "the underlying flow is gone");
+
+        let endpoints = table.endpoint_snapshot(120_001);
+        assert_eq!(endpoints.len(), 1, "the endpoint rollup must survive its only flow's eviction");
+        assert_eq!(endpoints[0].tx_bytes_total, 100);
+        assert_eq!(endpoints[0].flow_count, 1);
+    }
+
+    #[test]
+    fn endpoint_rollup_tracks_byte_and_packet_totals_by_direction() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let out = tcp_packet(true, TcpFlags::default(), 100);
+        let inb = tcp_packet(false, TcpFlags::default(), 250);
+        table.observe(&out, &L7Info::None, 0);
+        table.observe(&inb, &L7Info::None, 0);
+
+        let endpoints = table.endpoint_snapshot(1000);
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].tx_bytes_total, 100);
+        assert_eq!(endpoints[0].rx_bytes_total, 250);
+        assert_eq!(endpoints[0].tx_packets_total, 1);
+        assert_eq!(endpoints[0].rx_packets_total, 1);
+    }
+
+    #[test]
+    fn endpoint_rollup_records_first_and_last_seen_across_multiple_flows() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.observe(&tcp_packet_to(true, TcpFlags::default(), 1), &L7Info::None, 10);
+        table.observe(&tcp_packet_to(true, TcpFlags::default(), 2), &L7Info::None, 500);
+
+        let endpoints = table.endpoint_snapshot(1000);
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].first_seen_ms, 10);
+        assert_eq!(endpoints[0].last_seen_ms, 500);
+    }
+
+    #[test]
+    fn endpoint_rollup_first_seen_is_correct_even_when_the_first_packet_is_at_time_zero() {
+        // Regression guard: a naive "first_seen == 0 means uninitialized"
+        // sentinel would keep resetting first_seen on every later packet
+        // when the very first packet legitimately arrives at now_ms == 0.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 0);
+        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 200);
+
+        let endpoints = table.endpoint_snapshot(1000);
+        assert_eq!(endpoints[0].first_seen_ms, 0);
+        assert_eq!(endpoints[0].last_seen_ms, 200);
+    }
+
+    #[test]
+    fn endpoint_rollup_computes_current_rate_from_this_tick_bytes_only() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.observe(&tcp_packet(true, TcpFlags::default(), 100), &L7Info::None, 0);
+        let first = table.endpoint_snapshot(1000); // 1000ms elapsed
+        assert_eq!(first[0].tx_speed, 100.0 / 1.0);
+
+        // No new packets this tick -- rate must fall back to 0, not keep
+        // reporting the previous tick's speed forever (same tick-draining
+        // contract as FlowTable::snapshot's rx/tx_speed).
+        let second = table.endpoint_snapshot(2000);
+        assert_eq!(second[0].tx_speed, 0.0);
+    }
+
+    #[test]
+    fn distinct_remote_hosts_get_distinct_endpoint_rows() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.observe(&tcp_packet_to(true, TcpFlags::default(), 1), &L7Info::None, 0);
+        let other = ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: "192.168.1.10".to_string(),
+            dst_ip: "8.8.8.8".to_string(),
+            protocol: TransportProtocol::Tcp,
+            src_port: Some(51000),
+            dst_port: Some(1),
+            tcp_flags: Some(TcpFlags::default()),
+            seq: Some(1000),
+            ttl: 64,
+            total_len: 60,
+            payload: vec![],
+            header_bytes: vec![],
+            ip_header_len: 20,
+            transport_header_len: 20,
+            ip_version: 4,
+            ip_checksum: Some(0),
+            vlan_tag: None,
+        };
+        table.observe(&other, &L7Info::None, 0);
+
+        let endpoints = table.endpoint_snapshot(1000);
+        assert_eq!(endpoints.len(), 2);
+        let hosts: std::collections::HashSet<&str> = endpoints.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(hosts, ["93.184.216.34", "8.8.8.8"].into_iter().collect());
+    }
+
+    #[test]
+    fn conversation_rollup_is_keyed_by_local_and_remote_pair() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.observe(&tcp_packet_to(true, TcpFlags::default(), 1), &L7Info::None, 0);
+        table.observe(&tcp_packet_to(true, TcpFlags::default(), 2), &L7Info::None, 0);
+
+        let conversations = table.conversation_snapshot(1000);
+        assert_eq!(conversations.len(), 1, "both flows share the same (local, remote) pair despite different remote ports");
+        assert_eq!(conversations[0].local_addr, "192.168.1.10");
+        assert_eq!(conversations[0].remote_addr, "93.184.216.34");
+        assert_eq!(conversations[0].flow_count, 2);
+    }
+
+    #[test]
+    fn conversation_rollup_reports_duration_from_first_to_last_seen() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 10);
+        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 310);
+
+        let conversations = table.conversation_snapshot(1000);
+        assert_eq!(conversations[0].duration_ms, 300);
+    }
+
+    #[test]
+    fn endpoint_rollup_records_the_most_recently_observed_ja3_label_for_the_host() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let packet = tcp_packet(true, TcpFlags::default(), 60);
+        let hello = L7Info::TlsClientHello {
+            sni: "example.com".to_string(),
+            ja3: Some("abc".to_string()),
+            ja3_label: Some("matches Chrome 12x"),
+            client_random: None,
+            sni_offset: 0,
+            sni_len: 0,
+        };
+        table.observe(&packet, &hello, 0);
+
+        let endpoints = table.endpoint_snapshot(1000);
+        assert_eq!(endpoints[0].ja3_label, Some("matches Chrome 12x"));
+    }
+
+    #[test]
+    fn icmp_and_other_transport_traffic_never_creates_endpoint_or_conversation_rows() {
+        // ICMP/Other have no port pair and no flow concept in this model
+        // (see key_for) -- Endpoints/Conversations are flow-scoped, same as
+        // ConnectionsView, so they must not appear here either.
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.observe(&icmp_packet(60), &L7Info::None, 0);
+
+        assert!(table.endpoint_snapshot(1000).is_empty());
+        assert!(table.conversation_snapshot(1000).is_empty());
     }
 }
