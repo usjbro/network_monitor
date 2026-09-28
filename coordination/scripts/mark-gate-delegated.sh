@@ -54,6 +54,7 @@ _mark_locked() {
   fi
   gate_set_field "$GATE_FILE" delegation_target "$TARGET" || return $?
   gate_set_field "$GATE_FILE" delegation_agent_type "$AGENT_TYPE" || return $?
+  gate_set_field "$GATE_FILE" delegated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return $?
   gate_set_field "$GATE_FILE" delegated true || return $?
 }
 

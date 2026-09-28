@@ -117,6 +117,8 @@ expect_emoji pr-opened "🔗"
 expect_emoji feedback "❓"
 expect_emoji review "🟣"
 expect_emoji done "✅"
+expect_emoji idle "⚪"
+expect_emoji reclaimed "🔄"
 
 # No webhook, no bot token -> skips without posting and exits 0.
 reset_files
