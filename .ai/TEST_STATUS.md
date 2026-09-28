@@ -44,7 +44,7 @@ PR #240's CI also passed Rust, Web, Playwright E2E, fuzz targets, and all CodeQL
 | Command | Result |
 | --- | --- |
 | `cargo build --release --locked` | PASS — clean release build |
-| `cargo test --locked` | PASS — 258 lib tests + 51 main-bin tests + 2 no_disk_write_invariant + 3 pcapng_roundtrip + 1 protocol_regression = 315 passing, 0 failed, 3 ignored (2 live_loopback need `CAP_NET_RAW`, 1 pre-existing) |
+| `cargo test --locked` | PASS — 259 lib tests + 51 main-bin tests + 2 no_disk_write_invariant + 3 pcapng_roundtrip + 1 protocol_regression = 316 passing, 0 failed, 3 ignored (2 live_loopback need `CAP_NET_RAW`, 1 pre-existing) |
 | `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings |
 | `cargo +nightly fuzz run stream_reassembly -- -max_total_time=45` | PASS — two independent runs (421,330 and 199,510 executions), no crash, no cap-assertion failure |
 
@@ -60,7 +60,9 @@ No `lib/types.ts` or `docs/wire-protocol.md` change; reassembly is internal to t
 
 ### Security Review
 
-Manual review by the implementing agent (the `security-review` skill's own harness produced an empty diff in that context) plus the fuzz run above. No HIGH/MEDIUM findings. Two robustness issues found and fixed during that review (an `unwrap_or` decoupled from its invariant; an unbounded printable-ASCII scan, now capped at 2048 bytes) — see PR description for detail. An independent code-review/security-review pass is run by the orchestrating session before merge, per this repo's standing convention.
+Manual review by the implementing agent (the `security-review` skill's own harness produced an empty diff in that context) plus the fuzz run above. Two robustness issues found and fixed during that review (an `unwrap_or` decoupled from its invariant; an unbounded printable-ASCII scan, now capped at 2048 bytes).
+
+An independent security-review pass by the orchestrating session (on the actual pushed PR diff) then found a real, concrete Medium-High severity bug: `TcpStream::rebase`'s only guard was `shift > MAX_TCP_STREAM_BYTES`, not `shift + already-held bytes`, so a crafted backward-sequence segment could silently truncate away already-filled (first-seen) bytes and their `filled` markers — voiding the documented first-seen-wins guarantee for the truncated range, since a later segment could then write different content there without being counted as a conflict. Reproduced with a failing regression test first (`a_backward_shift_that_would_truncate_already_held_bytes_is_rejected_not_silently_evicted`), then fixed by checking `shift + stream.data.len()` against the cap instead of `shift` alone. Re-verified after the fix: full test suite green (316 passing, +1 for the regression test), clippy clean, fuzz re-run 45s / 179,169 executions with no crash.
 
 ### Known Limits
 
