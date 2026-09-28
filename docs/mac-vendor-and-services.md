@@ -1,0 +1,9 @@
+# Offline MAC vendor and service labels
+
+`lib/data/ieee-ma-l.json` is a checked-in snapshot of the IEEE MA-L public listing. It was downloaded directly from the [IEEE Registration Authority public listing](https://standards.ieee.org/products-programs/regauth/) on 2026-09-28 and reduced to assignment-to-organization-name entries. IEEE describes MA-L as allocations containing an OUI and EUI address blocks. Debian's packaged copy of IEEE's 2014 statement records that IEEE does not assert copyright in the OUI public listing or restrict distribution, and encourages obtaining it directly from IEEE and refreshing regularly ([Debian copyright record](https://sources.debian.org/src/ieee-data/20240722/debian/copyright)).
+
+To refresh, download the current `IEEE MA-L Assignments (CSV)` from the IEEE page above, then convert the CSV's `Assignment` and `Organization Name` columns into the compact JSON object used by `lib/mac-vendor.ts`. Keep MA-L assignments only, preserve UTF-8 names, update this snapshot date, and verify the known-prefix and unknown-prefix tests. The application does not fetch the listing at runtime.
+
+Lookup uses an exact 24-bit prefix match. It returns unknown for unassigned prefixes, malformed addresses, multicast/group addresses, locally administered addresses (including randomized MACs), and the all-zero synthetic address used when the capture link has no MAC. A listed organization is the assignee of an address block; it does not prove which product or physical device emitted a packet.
+
+The Rust `well_known_protocol` table is a small, offline display aid based on common registered port conventions. Port numbers are not proof of the application protocol, so parsed application data continues to take precedence and unlisted ports remain `Unknown`. Neither label source makes DNS, HTTP, or other network requests, and this feature does not change the opt-in ownership-enrichment boundary.

@@ -1,5 +1,11 @@
 # Session Handoff
 
+## JAM-27 — 2026-09-28
+
+Implemented an offline exact-prefix lookup using the checked-in IEEE MA-L snapshot (`lib/data/ieee-ma-l.json`) and annotated Ethernet source/destination fields in the packet inspector. Unknown, malformed, multicast, locally administered, and synthetic all-zero addresses do not receive a vendor attribution. Expanded the capture agent's offline common port/service table without changing L7 parser precedence. Added source, refresh, and interpretation notes in `docs/mac-vendor-and-services.md`; no wire schema or opt-in enrichment behavior changed.
+
+The new resolver and packet-inspector tests passed red before implementation and green afterward. Full Vitest (501 tests/75 files), TypeScript, lint, Rust tests, clippy, release build, and diff check pass. See `TEST_STATUS.md` for commands. Implementation is ready for PR/review; no PR has been opened yet.
+
 ## JAM-164 — 2026-09-28
 
 PR #240 updates live packet layer tagging in `capture-agent/src/main.rs`: recognized L7 data maps to layer 7, TCP/UDP without recognized L7 maps to layer 4, and ICMP/other unparsed transports map to layer 3. `components/PacketStreamView.tsx` now offers only L3/L4/L7 filters, the layers the live capture path can classify. No wire schema or mapping changes were needed.

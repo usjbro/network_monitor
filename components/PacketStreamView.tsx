@@ -13,6 +13,7 @@ import type { DecryptedPayloadSegment, Finding, PacketFrame, ThemeConfig, WireFi
 import { SEVERITY_CLASS } from '@/components/FindingsPanel';
 import { FieldTree } from '@/components/FieldTree';
 import { mostSpecificFieldAtOffset } from '@/lib/field-tree';
+import { lookupMacVendor } from '@/lib/mac-vendor';
 // Only packetsToJson is imported here. decryptedSegments is deliberately
 // never passed to it — see lib/export.ts's header and
 // lib/__tests__/decrypted-export-exclusion.test.ts.
@@ -162,6 +163,9 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
     setHoveredPayloadByte(null);
   }
   const headerFields = visibleSelectedPacket?.fields.filter((field) => field.region === 'header') ?? [];
+  const macVendorAnnotations = new Map(headerFields
+    .filter((field) => (field.path === 'eth.src' || field.path === 'eth.dst') && typeof field.value === 'string')
+    .map((field) => [field.path, lookupMacVendor(String(field.value)) ?? 'Unknown vendor']));
   const payloadFields = visibleSelectedPacket?.fields.filter((field) => field.region === 'payload') ?? [];
   const highlightedHeaderPaths = new Set(headerFields.filter((field) => hoveredHeaderByte !== null && hoveredHeaderByte >= field.offset && hoveredHeaderByte < field.offset + field.len).map((field) => field.path));
   const highlightedPayloadPaths = new Set(payloadFields.filter((field) => hoveredPayloadByte !== null && hoveredPayloadByte >= field.offset && hoveredPayloadByte < field.offset + field.len).map((field) => field.path));
@@ -365,7 +369,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                 <div className="text-[10px] font-bold text-slate-400">HEADER FIELDS</div>
                 <FieldTree fields={headerFields} theme={theme} selectedPath={selectedHeaderFieldPath}
                   highlightedPaths={highlightedHeaderPaths} onSelectField={setSelectedHeaderFieldPath}
-                  onHoverField={setHoveredHeaderFieldPath} />
+                  onHoverField={setHoveredHeaderFieldPath} annotations={macVendorAnnotations} />
               </div>
 
               <div className="space-y-1">

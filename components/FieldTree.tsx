@@ -12,6 +12,7 @@ interface FieldTreeProps {
   highlightedPaths: ReadonlySet<string>;
   onSelectField: (path: string | null) => void;
   onHoverField: (path: string | null) => void;
+  annotations?: ReadonlyMap<string, string>;
 }
 
 function formatValue(field: WireField): string | null {
@@ -54,13 +55,14 @@ function CopyButton({ label, text }: { label: string; text: string }) {
   );
 }
 
-function Row({ node, theme, selectedPath, highlightedPaths, onSelectField, onHoverField }: {
+function Row({ node, theme, selectedPath, highlightedPaths, onSelectField, onHoverField, annotations }: {
   node: FieldTreeNode;
   theme: ThemeConfig;
   selectedPath: string | null;
   highlightedPaths: ReadonlySet<string>;
   onSelectField: (path: string | null) => void;
   onHoverField: (path: string | null) => void;
+  annotations?: ReadonlyMap<string, string>;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
@@ -92,6 +94,7 @@ function Row({ node, theme, selectedPath, highlightedPaths, onSelectField, onHov
         ) : <span className="w-3" />}
         <span className="text-slate-300">{node.field.label}</span>
         {value !== null && <span className="text-emerald-400 font-mono">{value}</span>}
+        {annotations?.get(path) && <span className="text-sky-300">({annotations.get(path)})</span>}
         <span className="flex-1" />
         <CopyButton label={`Copy abbreviation for ${node.field.label}`} text={path} />
         {value !== null && <CopyButton label={`Copy value for ${node.field.label}`} text={value} />}
@@ -106,8 +109,8 @@ function Row({ node, theme, selectedPath, highlightedPaths, onSelectField, onHov
         <div className="pl-3.5">
           {node.children.map((child) => (
             <Row key={child.field.path} node={child} theme={theme}
-              selectedPath={selectedPath} highlightedPaths={highlightedPaths}
-              onSelectField={onSelectField} onHoverField={onHoverField} />
+            selectedPath={selectedPath} highlightedPaths={highlightedPaths}
+            onSelectField={onSelectField} onHoverField={onHoverField} annotations={annotations} />
           ))}
         </div>
       )}
@@ -115,7 +118,7 @@ function Row({ node, theme, selectedPath, highlightedPaths, onSelectField, onHov
   );
 }
 
-export const FieldTree: React.FC<FieldTreeProps> = ({ fields, theme, selectedPath, highlightedPaths, onSelectField, onHoverField }) => {
+export const FieldTree: React.FC<FieldTreeProps> = ({ fields, theme, selectedPath, highlightedPaths, onSelectField, onHoverField, annotations }) => {
   const roots = buildFieldTree(fields);
   if (roots.length === 0) return null;
   return (
@@ -123,7 +126,7 @@ export const FieldTree: React.FC<FieldTreeProps> = ({ fields, theme, selectedPat
       {roots.map((node) => (
         <Row key={node.field.path} node={node} theme={theme}
           selectedPath={selectedPath} highlightedPaths={highlightedPaths}
-          onSelectField={onSelectField} onHoverField={onHoverField} />
+          onSelectField={onSelectField} onHoverField={onHoverField} annotations={annotations} />
       ))}
     </div>
   );
