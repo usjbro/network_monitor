@@ -36,6 +36,18 @@ type DecryptState = HashMap<String, (Http2Reassembler, DecryptedRingBuffer)>;
 /// connection grow without bound for the lifetime of the agent process.
 const DECRYPT_RING_CAP_BYTES: usize = 256 * 1024;
 
+/// Returns the deepest OSI layer this packet was actually decoded through.
+/// Live capture only exposes L3, L4, and L7 packet classifications today.
+fn packet_osi_layer(protocol: parse::TransportProtocol, l7_info: &l7::L7Info) -> u8 {
+    if !matches!(l7_info, l7::L7Info::None) {
+        7
+    } else if matches!(protocol, parse::TransportProtocol::Tcp | parse::TransportProtocol::Udp) {
+        4
+    } else {
+        3
+    }
+}
+
 /// Returns this packet's local-side port (the process-attribution key used
 /// by `process_map`), using the same local-address check `FlowTable`
 /// applies internally — duplicated here (rather than locking `FlowTable`
@@ -1667,7 +1679,7 @@ async fn main() -> std::io::Result<()> {
                             id: frame_id.clone(),
                             timestamp: epoch_ms.to_string(),
                             relative_time_ms: now_ms,
-                            layer: 4,
+                            layer: packet_osi_layer(parsed.protocol, &l7_info),
                             protocol: format!("{:?}", parsed.protocol).to_uppercase(),
                             src: format!("{}:{}", parsed.src_ip, parsed.src_port.unwrap_or(0)),
                             dst: format!("{}:{}", parsed.dst_ip, parsed.dst_port.unwrap_or(0)),
@@ -2311,12 +2323,12 @@ mod tests {
         build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
         is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, parse_max_flows,
         parse_replay_local_addrs, parse_replay_speed, protocol_node_to_json,
-        resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
+        packet_osi_layer, resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::flow::FlowTable;
     use capture_agent::l7::L7Info;
-    use capture_agent::parse::LinkType;
+    use capture_agent::parse::{LinkType, TransportProtocol};
     use std::path::Path;
     use tokio::sync::broadcast;
 
@@ -2327,6 +2339,41 @@ mod tests {
             addresses: vec![],
             flags: pcap::DeviceFlags::empty(),
         }
+    }
+
+    #[test]
+    fn packet_osi_layer_reports_transport_only_and_network_only_packets() {
+        assert_eq!(packet_osi_layer(TransportProtocol::Tcp, &L7Info::None), 4);
+        assert_eq!(packet_osi_layer(TransportProtocol::Udp, &L7Info::None), 4);
+        assert_eq!(packet_osi_layer(TransportProtocol::Icmp, &L7Info::None), 3);
+        assert_eq!(packet_osi_layer(TransportProtocol::Other, &L7Info::None), 3);
+    }
+
+    #[test]
+    fn packet_osi_layer_reports_application_layer_for_recognized_protocols() {
+        assert_eq!(
+            packet_osi_layer(TransportProtocol::Tcp, &L7Info::Http { method: "GET".into(), path: "/".into() }),
+            7
+        );
+        assert_eq!(
+            packet_osi_layer(TransportProtocol::Tcp, &L7Info::HttpResponse { status: "200".into() }),
+            7
+        );
+        assert_eq!(packet_osi_layer(TransportProtocol::Udp, &L7Info::Dns { query_name: "example.com".into() }), 7);
+        assert_eq!(
+            packet_osi_layer(
+                TransportProtocol::Tcp,
+                &L7Info::TlsClientHello {
+                    sni: "example.com".into(),
+                    ja3: None,
+                    ja3_label: None,
+                    client_random: None,
+                    sni_offset: 0,
+                    sni_len: 11,
+                },
+            ),
+            7
+        );
     }
 
     #[test]

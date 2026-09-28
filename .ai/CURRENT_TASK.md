@@ -2,26 +2,23 @@
 
 ## Objective
 
-Refresh the five `.ai/` state files after the user squash-merged PR #225, and post the verified result to Slack and Linear. This is an explicitly approved, ad hoc documentation follow-up; it has no dedicated Linear issue and does not reopen JAM-155.
+Complete JAM-164: make live packet stream OSI layers truthful and ensure the layer filter buttons match the layers this capture path can report.
 
-## Verified Baseline
+## Baseline
 
-- PR #225 merged at 2026-09-26 00:16:31 UTC (September 25, 8:16 PM EDT) as `e42aeaf742e53a851104fae801d0e73c0761f7e6`.
-- Fresh branch: `jamesmbrownjr/refresh-ai-state-after-pr225`, based on that merge commit. Do not reuse the squash-merged `slack-approval-gate` branch.
-- Earlier coordination PRs #220 and #222 are merged. PR #224 is merged, and its Linear issue JAM-155 is Done.
+- Issue: [JAM-164](https://linear.app/shmishmorshin/issue/JAM-164/live-pcap-per-packet-layer-field-is-hardcoded-to-4-breaking-the)
+- Branch: `jamesmbrownjr/jam-164-live-pcap-per-packet-layer-field-is-hardcoded-to-4-breaking`
+- Worktree: `.worktrees/live-pcap-per-packet-layer-field-is-hardcoded-to-4-breaking`
+- Pull request: [#240](https://github.com/usjbro/network_monitor/pull/240)
 
-## Scope and Acceptance Criteria
+## Acceptance Criteria
 
-- [x] Replace obsolete active-task and handoff records with verified PR #225 merge context.
-- [x] Reconcile ADR-001 with ADR-002 and record the merged approval-gate decisions with source references.
-- [x] Distinguish current local gate-test results from historical PR CI evidence and unverified project-wide status.
-- [x] Post a merge update to the existing Slack status thread and a related follow-up comment on JAM-155 without changing that issue's scope or status.
-- [x] Complete independent review and publish this five-file documentation change as [PR #227](https://github.com/usjbro/network_monitor/pull/227).
-
-## Constraints
-
-Only `.ai/CURRENT_TASK.md`, `.ai/DECISIONS.md`, `.ai/HANDOFF.md`, `.ai/PROJECT_STATE.md`, and `.ai/TEST_STATUS.md` are owned by this follow-up. No application, gate-script, workflow-policy, or dependency changes. Other worktrees and their uncommitted files are outside scope.
+- [x] TCP/UDP without recognized application data is tagged L4; ICMP and other unparsed transports are tagged L3.
+- [x] Recognized HTTP, HTTP response, DNS, and TLS ClientHello packets are tagged L7.
+- [x] Live packet layer filters show only supported L3, L4, and L7 controls.
+- [x] Rust classification tests cover the transport, network, and application cases.
+- [x] Component test proves L3/L4/L7 filters narrow a mixed packet feed and unsupported layer buttons are absent.
 
 ## Status
 
-PR #225 is merged. This documentation follow-up is published as PR #227 with independent review complete. At this publication snapshot, its own CI is running; consult GitHub for the live merge/check state. If #227 is merged, this follow-up is complete and no next task has been selected. See `HANDOFF.md` for continuation details and `TEST_STATUS.md` for evidence.
+Implementation and validation are complete. PR #240 is open, attached to JAM-164, and Linear is In Review. CI is green and GitHub reports a clean mergeable state. Codex's independent code review found no actionable issues; Claude Code cross-review was requested in the task's Slack thread and is still pending. Before merge, recheck that PR #239's stream-reassembly changes do not require syncing this branch. See `HANDOFF.md` and `TEST_STATUS.md` for evidence.
