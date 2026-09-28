@@ -13,27 +13,32 @@
 #   - the gate is approved and delegated (a dispatch actually completed)
 #   - its task contract's status is still "open" (review/done means real
 #     progress was already recorded — never reclaim that)
-#   - no commit unique to its branch (ahead of main), and its task
-#     contract file's own mtime, are both older than the staleness window
-#     — an agent actively committing without a PR yet is not stale, even
-#     if it hasn't touched the task file itself in a while
+#   - no commit unique to its branch (ahead of main), and the gate's own
+#     delegated_at field (set once, under this same lock, by
+#     mark-gate-delegated.sh — not any working-directory file's freely
+#     rewritable mtime), are both older than the staleness window
 #   - no PR (open, closed, or merged) exists for that branch — real,
 #     externally-visible work in flight is never reclaimed regardless of
-#     how quiet the gate/task file look
+#     how quiet the gate looks; and if the PR check itself can't be
+#     completed (gh failure), this refuses rather than assuming "no PR"
 #
 # Reclaiming only resets the gate's delegation fields back to "approved,
 # unclaimed" so claim-gate-delegation.sh can run again — it does NOT touch
 # the task contract, worktree, or branch, which stay exactly as they were
 # in case the original agent comes back: a reclaiming agent re-enters that
-# existing worktree rather than running new-task.sh again.
+# existing worktree rather than running new-task.sh again. It also posts
+# `reclaimed` to Slack, since the whole reason no human confirmation is
+# required here is that the action stays visible.
 #
 # Usage:
 #   ./reclaim-stale-gate.sh <linear-id> <slug>
 #
 # Exit 0 and prints "reclaimed" if this call reclaimed the gate. Exit 2 and
 # prints why ("not-delegated", "already-progressed", "not-stale",
-# "pr-exists") if it refused, without changing anything. Exit 1 on a real
-# error (no such gate, or no task contract for it at all).
+# "pr-exists", or the gate's actual status if it isn't "approved" at all)
+# if it refused, without changing anything. Exit 1 on a real error (no such
+# gate, no task contract for a delegated gate, a delegated gate with no
+# delegated_at recorded, or the PR-existence check itself failing).
 
 set -euo pipefail
 
@@ -52,6 +57,8 @@ if [[ ! -f "$GATE_FILE" ]]; then
   exit 1
 fi
 
+LINEAR_ID_LOWER="$(echo "$LINEAR_ID" | tr '[:upper:]' '[:lower:]')"
+GATE_TAG="${LINEAR_ID_LOWER}__${SLUG}"
 TASK_FILE="$REPO_ROOT/coordination/tasks/${SLUG}.md"
 
 _reclaim_locked() {
@@ -75,13 +82,21 @@ _reclaim_locked() {
     return 2
   fi
 
-  local branch task_mtime unique_commit_epoch last_activity now_epoch age
+  local branch delegated_at delegated_at_epoch unique_commit_epoch last_activity now_epoch age
   branch="$(gate_field "$TASK_FILE" branch)"
-  task_mtime="$(file_mtime_epoch "$TASK_FILE")"
+  delegated_at="$(gate_field "$GATE_FILE" delegated_at)"
+  if [[ -z "$delegated_at" ]]; then
+    echo "delegated gate has no delegated_at recorded: $GATE_FILE" >&2
+    return 1
+  fi
+  delegated_at_epoch="$(iso8601_to_epoch "$delegated_at")"
   # No `set -e` trip on a branch with no unique commits (or no longer
-  # present locally) — that's the common case, not an error.
-  unique_commit_epoch="$(git -C "$REPO_ROOT" log "$branch" ^main --format=%ct -1 2>/dev/null || true)"
-  last_activity="$task_mtime"
+  # present locally) — that's the common case, not an error. --end-of-options
+  # keeps a branch name that happens to start with "-" (e.g.
+  # "--output=/some/path") from being parsed as a git flag instead of a
+  # revision — the argument-injection gap an independent review flagged.
+  unique_commit_epoch="$(git -C "$REPO_ROOT" log --format=%ct -1 --end-of-options "$branch" ^main 2>/dev/null || true)"
+  last_activity="$delegated_at_epoch"
   if [[ -n "$unique_commit_epoch" && "$unique_commit_epoch" -gt "$last_activity" ]]; then
     last_activity="$unique_commit_epoch"
   fi
@@ -92,8 +107,12 @@ _reclaim_locked() {
     return 2
   fi
 
-  local pr_json
-  pr_json="$(cd "$REPO_ROOT" && gh pr list --head "$branch" --state all --json number 2>/dev/null)" || pr_json="[]"
+  local pr_json pr_rc=0
+  pr_json="$(cd "$REPO_ROOT" && gh pr list --head "$branch" --state all --json number 2>/dev/null)" || pr_rc=$?
+  if [[ $pr_rc -ne 0 ]]; then
+    echo "could not verify PR status for branch ${branch} (gh exited ${pr_rc}) — refusing to reclaim rather than assume no PR exists" >&2
+    return 1
+  fi
   if [[ -n "$pr_json" && "$pr_json" != "[]" ]]; then
     echo "pr-exists"
     return 2
@@ -103,6 +122,10 @@ _reclaim_locked() {
   gate_set_field "$GATE_FILE" delegation_claimed false || return $?
   gate_set_field "$GATE_FILE" delegation_target "" || return $?
   gate_set_field "$GATE_FILE" delegation_agent_type "" || return $?
+  gate_set_field "$GATE_FILE" delegated_at "" || return $?
+  if ! slack_post_and_record "$GATE_FILE" "reclaimed" "$GATE_TAG" "gate" "Auto-reclaimed after ${age}s with no commit, no PR, and task status still open — available for claim-gate-delegation.sh again."; then
+    echo "reclaimed the gate, but the Slack post about it failed — tell James directly" >&2
+  fi
   echo "reclaimed"
 }
 

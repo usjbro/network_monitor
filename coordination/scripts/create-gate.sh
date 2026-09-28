@@ -61,6 +61,7 @@ status: awaiting-approval
 delegated: false
 delegation_claimed: false
 posted_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+delegated_at:
 delegation_target:
 delegation_agent_type:
 slack_ts:

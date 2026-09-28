@@ -194,13 +194,20 @@ gate_require_status() {
   fi
 }
 
-# Cross-platform (GNU/BSD) file modification time, in epoch seconds — same
-# GNU-first-then-BSD-fallback pattern as gate_set_field's permission-mode
-# read above, for the same reason (macOS's `stat` flags mean something
-# else entirely on Linux). Used by reclaim-stale-gate.sh's staleness check.
-file_mtime_epoch() {
-  local file="$1"
-  stat -c '%Y' "$file" 2>/dev/null || stat -f '%m' "$file"
+# Parses an ISO-8601 UTC timestamp (YYYY-MM-DDTHH:MM:SSZ — the format
+# create-gate.sh's posted_at and mark-gate-delegated.sh's delegated_at both
+# use) into epoch seconds. Same GNU-first-then-BSD-fallback pattern as
+# gate_set_field's permission-mode read above. Used by
+# reclaim-stale-gate.sh's staleness check: it deliberately reads this from
+# the gate file's own delegated_at field (written once, under this same
+# lock, when delegation happened) rather than any working-directory file's
+# mtime — a filesystem mtime is trivially rewritable by any co-located
+# process (`touch -d`) without going through a locked mutation at all,
+# which would let the staleness clock be backdated to force a premature
+# reclaim.
+iso8601_to_epoch() {
+  local ts="$1"
+  date -u -d "$ts" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s
 }
 
 # Runs "$@" while holding an exclusive, atomic lock on gate_file. Uses
