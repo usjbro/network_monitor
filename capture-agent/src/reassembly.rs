@@ -753,9 +753,20 @@ impl TcpReassembler {
             // it can occupy offset 0 — this is what makes genuine
             // out-of-order arrival work instead of being discarded.
             let shift = rel.unsigned_abs() as usize;
-            if shift > MAX_TCP_STREAM_BYTES {
+            if shift.saturating_add(stream.data.len()) > MAX_TCP_STREAM_BYTES {
                 // Too far back to be part of the same window; more likely a
                 // wrapped or spoofed sequence number than real reordering.
+                //
+                // Checked against shift + the bytes already held, not shift
+                // alone: rebase() truncates its shifted buffer back to
+                // MAX_TCP_STREAM_BYTES, so a shift that passes a bound on
+                // itself but not combined with existing data would silently
+                // evict already-filled (first-seen) bytes and their `filled`
+                // markers — opening a window for a later segment to rewrite
+                // that range without ever being counted as a conflict. That
+                // breaks the first-seen-wins guarantee this reassembler
+                // exists to enforce, so it is rejected here instead, the
+                // same as an ordinary too-far-back segment.
                 return None;
             }
             stream.rebase(shift, seq);
@@ -1589,6 +1600,39 @@ mod tests {
         r.feed(&key, base, b"ABCD", 4, 0);
         r.feed(&key, base.wrapping_add(4), b"EFGH", 4, 1);
         assert_eq!(r.prefix(&key), b"ABCDEFGH", "the wrap must not be read as a gap or a wild offset");
+    }
+
+    #[test]
+    fn a_backward_shift_that_would_truncate_already_held_bytes_is_rejected_not_silently_evicted() {
+        // Security regression: rebase() truncates the shifted buffer back to
+        // MAX_TCP_STREAM_BYTES, so a shift that individually passes the
+        // "too far back" check can still, combined with data already held,
+        // truncate away already-filled (first-seen) bytes along with their
+        // `filled` markers -- opening a window for a later segment to
+        // rewrite that range without it ever being counted as a conflict.
+        // That silently breaks the documented first-seen-wins guarantee
+        // ("the monitor's view is immutable once written"). The fix is to
+        // reject the shift outright, the same as an ordinary too-far-back
+        // segment, rather than accept it at the cost of evicting held data.
+        let mut r = TcpReassembler::new();
+        let key = stream_key();
+        r.feed(&key, 100, b"hello", 5, 0);
+        assert_eq!(r.prefix(&key), b"hello");
+
+        // A shift alone within MAX_TCP_STREAM_BYTES, but shift + the 5 bytes
+        // already held exceeds it -- the exact combination the old bound on
+        // `shift` alone missed.
+        let shift = MAX_TCP_STREAM_BYTES - 2;
+        let far_earlier_seq = 100u32.wrapping_sub(shift as u32);
+        assert!(
+            r.feed(&key, far_earlier_seq, b"xx", 2, 1).is_none(),
+            "a shift that would truncate already-held bytes must be rejected, not accepted at their expense"
+        );
+        assert_eq!(
+            r.prefix(&key),
+            b"hello",
+            "the originally held bytes must be completely undisturbed by the rejected shift"
+        );
     }
 
     // =====================================================================
