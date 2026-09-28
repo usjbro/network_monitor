@@ -67,7 +67,7 @@ Cross-review is symmetric: ask the other agent (Claude Code ↔ Codex) to review
 
 Tests, not compilation, a rendered screen, a file's existence, or tracker status, establish behavior. Never claim completion without evidence.
 
-When told to keep working through many Linear issues without re-prompting for each one, follow `AGENTS.md` "Continuous Work Queue": post an `idle` Slack status before picking the next issue, claim it via the real gate lock (`create-gate.sh`/`claim-gate-delegation.sh`) rather than trusting a Slack post alone, and only skip re-asking for approval per task when the human's own standing instruction clearly covers the whole sequence. A gate `delegated` for 60+ minutes with no progress and no PR may be auto-reclaimed by `reclaim-stale-gate.sh` — a narrow, explicitly James-approved exception to gate resets otherwise always needing a human; don't extend that exception anywhere else.
+When told to keep working through many Linear issues without re-prompting for each one, follow `AGENTS.md` "Continuous Work Queue": post an `idle` Slack status before picking the next issue, claim it via the real gate lock (`create-gate.sh`/`claim-gate-delegation.sh`) rather than trusting a Slack post alone, and only skip re-asking for approval per task when the human's own standing instruction clearly covers the whole sequence. A claimed gate never expires on a timer: `reclaim-stale-gate.sh` only hands a `delegated` gate with no progress and no PR to another agent when a human explicitly says so in a live chat session (`--confirm-human-authorized-takeover`) — the earlier 60-minute no-confirmation auto-reclaim (JAM-161) was removed at James's request; see `AGENTS.md` "Stale-gate reclaim."
 
 ## Trust Boundaries
 

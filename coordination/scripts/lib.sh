@@ -198,13 +198,10 @@ gate_require_status() {
 # create-gate.sh's posted_at and mark-gate-delegated.sh's delegated_at both
 # use) into epoch seconds. Same GNU-first-then-BSD-fallback pattern as
 # gate_set_field's permission-mode read above. Used by
-# reclaim-stale-gate.sh's staleness check: it deliberately reads this from
-# the gate file's own delegated_at field (written once, under this same
-# lock, when delegation happened) rather than any working-directory file's
-# mtime — a filesystem mtime is trivially rewritable by any co-located
-# process (`touch -d`) without going through a locked mutation at all,
-# which would let the staleness clock be backdated to force a premature
-# reclaim.
+# reclaim-stale-gate.sh to report how long a gate has been delegated as
+# context in its Slack post — informational only, since a human's explicit
+# --confirm-human-authorized-takeover is what actually authorizes a
+# reclaim, not elapsed time.
 iso8601_to_epoch() {
   local ts="$1"
   date -u -d "$ts" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$ts" +%s
