@@ -194,6 +194,15 @@ gate_require_status() {
   fi
 }
 
+# Cross-platform (GNU/BSD) file modification time, in epoch seconds — same
+# GNU-first-then-BSD-fallback pattern as gate_set_field's permission-mode
+# read above, for the same reason (macOS's `stat` flags mean something
+# else entirely on Linux). Used by reclaim-stale-gate.sh's staleness check.
+file_mtime_epoch() {
+  local file="$1"
+  stat -c '%Y' "$file" 2>/dev/null || stat -f '%m' "$file"
+}
+
 # Runs "$@" while holding an exclusive, atomic lock on gate_file. Uses
 # mkdir as the lock primitive rather than flock, which isn't reliably
 # available on macOS. The owner PID lets recover-gate-lock.sh distinguish

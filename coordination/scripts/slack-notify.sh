@@ -5,8 +5,11 @@
 #   ./slack-notify.sh <status> <task-slug> <owner> "<message>" [thread-ts]
 #
 # Statuses with their own emoji: started, awaiting-approval, pr-opened,
-# feedback, blocked, review, done. When each one is required is in
-# AGENTS.md "Slack Status Posts".
+# feedback, blocked, review, done, idle (an agent has nothing claimed and
+# is looking for the next Linear issue — see AGENTS.md "Continuous Work
+# Queue"), reclaimed (a stale, delegated-but-stalled gate was
+# automatically reclaimed). When each one is required is in AGENTS.md
+# "Slack Status Posts".
 #
 # Posting path, in order of preference:
 #
@@ -78,6 +81,8 @@ case "$STATUS" in
   blocked)             EMOJI="🔴" ;;
   review)             EMOJI="🟣" ;;
   done)               EMOJI="✅" ;;
+  idle)               EMOJI="⚪" ;;
+  reclaimed)          EMOJI="🔄" ;;
 esac
 
 # Keep this format consistent with whatever else posts to the channel so
