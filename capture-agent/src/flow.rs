@@ -482,6 +482,36 @@ impl FlowTable {
     /// Returns `None` when the packet matched no tracked flow (see
     /// `ObserveResult` for the `Some` case).
     pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<ObserveResult> {
+        self.observe_inner(packet, l7, now_ms, true)
+    }
+
+    /// Counts the completing fragment as a physical frame, then attributes
+    /// the completed datagram once using its reconstructed transport identity.
+    /// Earlier fragments have already been counted by `observe`; suppressing
+    /// hierarchy accounting for the reconstructed packet keeps physical byte
+    /// and packet totals from counting those bytes a second time.
+    pub fn observe_reassembled(
+        &mut self,
+        physical_fragment: &ParsedPacket,
+        reassembled: &ParsedPacket,
+        l7: &L7Info,
+        now_ms: u64,
+    ) -> Option<ObserveResult> {
+        if physical_fragment.ip_fragment.is_none() {
+            return self.observe(physical_fragment, l7, now_ms);
+        }
+
+        let _ = self.observe(physical_fragment, &L7Info::None, now_ms);
+        self.observe_inner(reassembled, l7, now_ms, false)
+    }
+
+    fn observe_inner(
+        &mut self,
+        packet: &ParsedPacket,
+        l7: &L7Info,
+        now_ms: u64,
+        account_protocol_hierarchy: bool,
+    ) -> Option<ObserveResult> {
         let transport_label = match packet.protocol {
             TransportProtocol::Tcp => "TCP",
             TransportProtocol::Udp => "UDP",
@@ -496,7 +526,7 @@ impl FlowTable {
         // hierarchy right here, before that early return would otherwise
         // make them vanish from it entirely. No app-layer child: neither
         // has an app-layer concept in this model.
-        if !matches!(packet.protocol, TransportProtocol::Tcp | TransportProtocol::Udp) {
+        if account_protocol_hierarchy && !matches!(packet.protocol, TransportProtocol::Tcp | TransportProtocol::Udp) {
             self.protocol_tree.add(&["Ethernet", "IP", transport_label], packet.total_len as u64);
         }
 
@@ -582,10 +612,12 @@ impl FlowTable {
         // sync with it. Reaching here means `key_for` succeeded, which only
         // happens for Tcp/Udp (ICMP/Other were already folded and returned
         // above), so an app-layer child is always meaningful here.
-        self.protocol_tree.add(
-            &["Ethernet", "IP", transport_label, state.app_layer_protocol.as_str()],
-            packet.total_len as u64,
-        );
+        if account_protocol_hierarchy {
+            self.protocol_tree.add(
+                &["Ethernet", "IP", transport_label, state.app_layer_protocol.as_str()],
+                packet.total_len as u64,
+            );
+        }
 
         let mut is_retransmit = false;
         let mut rst_transitioned = false;

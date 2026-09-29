@@ -1,5 +1,17 @@
 # Test Status
 
+## JAM-166 — 2026-09-29
+
+Validated on the JAM-166 branch based on PR #239 head `1b925abd`.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked reassembled_http_uses_transport_identity_for_flow_attribution_once` | PASS — the fragmented HTTP request retains TCP ports and HTTP classification; the endpoint flow records one reconstructed datagram. |
+| `cargo test --locked` | PASS — 261 lib + 51 main-bin + 2 no-disk-write + 3 pcapng + 1 protocol-regression tests; 318 passed, 2 live-loopback tests ignored. |
+| `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings. |
+| `cargo build --release --locked` | PASS. |
+| `cargo fmt --all -- --check` | Does not pass on the PR #239 base because many existing lines in `main.rs` and `reassembly.rs` are unformatted; the new/changed lines were adjusted to rustfmt output without reformatting unrelated code. |
+
 ## Last Verified
 
 2026-09-28, in `.worktrees/stream-reassembly-ip-fragments-and-tcp-segments` (branch `jamesmbrownjr/jam-16-stream-reassembly-ip-fragments-and-tcp-segments`, based on `main` at `3140d89d`), for JAM-16 (stream reassembly: IP fragments and TCP segments). Commands below were run twice independently — once by the implementing agent, once by the reviewing session — with matching results.

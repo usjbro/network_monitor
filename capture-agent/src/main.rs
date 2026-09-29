@@ -1608,11 +1608,30 @@ async fn main() -> std::io::Result<()> {
                         // single-segment case this is the existing per-packet
                         // `sniff_l7` with nothing buffered.
                         let flow_ident = flow_table.lock().unwrap().key_for(&parsed);
-                        let l7_info = reassembly
-                            .sniff(&parsed, flow_ident.as_ref().map(|(key, outbound)| (key, *outbound)), now_ms)
-                            .info;
+                        let sniff_outcome = reassembly.sniff(
+                            &parsed,
+                            flow_ident.as_ref().map(|(key, outbound)| (key, *outbound)),
+                            now_ms,
+                        );
+                        let flow_packet =
+                            sniff_outcome.reassembled_packet.as_ref().unwrap_or(&parsed);
+                        let l7_info = sniff_outcome.info;
                         reassembly.maybe_evict(now_ms);
-                        let observe_result = flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+                        // A completed IP-fragment group has both physical and
+                        // logical accounting: record this captured fragment
+                        // once in the protocol hierarchy, then attribute the
+                        // reconstructed datagram to its transport flow without
+                        // counting its bytes as another physical frame.
+                        // `parsed` remains the packet-event/capture-file data.
+                        let observe_result = {
+                            let mut table = flow_table.lock().unwrap();
+                            match sniff_outcome.reassembled_packet.as_ref() {
+                                Some(reassembled) => {
+                                    table.observe_reassembled(&parsed, reassembled, &l7_info, now_ms)
+                                }
+                                None => table.observe(&parsed, &l7_info, now_ms),
+                            }
+                        };
 
                         // Aggregate throughput counters (issue #64) — driven
                         // by the same direction FlowTable::observe just
@@ -1622,7 +1641,7 @@ async fn main() -> std::io::Result<()> {
                         // tracked flow (e.g. broadcast/multicast traffic
                         // captured in promiscuous mode) counts toward
                         // neither total, same as before.
-                        let len = parsed.total_len as u64;
+                        let len = flow_packet.total_len as u64;
                         let direction = match observe_result.as_ref().map(|r| r.is_outbound) {
                             Some(true) => {
                                 total_tx_bytes.fetch_add(len, Ordering::Relaxed);

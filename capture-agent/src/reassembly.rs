@@ -882,7 +882,7 @@ impl TcpReassembler {
 
 /// What sniffing one captured frame produced, with reassembly applied where it
 /// helps.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct SniffOutcome {
     /// What the flow table should record — the same `L7Info` the per-frame
     /// `sniff_l7` would have produced, except that a message split across
@@ -897,6 +897,11 @@ pub struct SniffOutcome {
     /// `L7Sniff::NeedMoreBytes` for why this is a lower bound rather than a
     /// prediction.
     pub need_more_bytes: Option<usize>,
+    /// Present only when an IP fragment group completed. The reconstructed
+    /// packet retains the transport protocol and ports decoded from the full
+    /// datagram, so the capture loop can attribute flow state to the real
+    /// connection while continuing to emit the original physical frame.
+    pub reassembled_packet: Option<ParsedPacket>,
 }
 
 /// Both reassemblers plus the capture-truncation signal, in the shape the
@@ -1002,15 +1007,27 @@ impl StreamReassembler {
         // so reassembly is the only way it gets an application layer at all.
         if packet.ip_fragment.is_some() {
             let Some(datagram) = self.fragments.feed(packet, now_ms) else {
-                return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None };
+                return SniffOutcome {
+                    info: L7Info::None,
+                    status: None,
+                    need_more_bytes: None,
+                    reassembled_packet: None,
+                };
             };
             let status = self.attribute(datagram.status, now_ms);
             // Back through the ordinary parser, so a reassembled datagram's
             // ports and payload come from the same path as any other packet's.
-            let info = parse_packet(&datagram.bytes, LinkType::Raw)
+            let reassembled_packet = parse_packet(&datagram.bytes, LinkType::Raw);
+            let info = reassembled_packet
+                .as_ref()
                 .map(|rejoined| sniff_l7(&rejoined.payload, rejoined.dst_port))
                 .unwrap_or(L7Info::None);
-            return SniffOutcome { info, status: Some(status), need_more_bytes: None };
+            return SniffOutcome {
+                info,
+                status: Some(status),
+                need_more_bytes: None,
+                reassembled_packet,
+            };
         }
 
         // This frame's own payload first. For the overwhelmingly common case
@@ -1030,35 +1047,55 @@ impl StreamReassembler {
         };
         let Some((key, seq)) = stream_target else {
             return match own {
-                L7Sniff::Decided(info) => SniffOutcome { info, status: None, need_more_bytes: None },
+                L7Sniff::Decided(info) => SniffOutcome {
+                    info,
+                    status: None,
+                    need_more_bytes: None,
+                    reassembled_packet: None,
+                },
                 L7Sniff::NeedMoreBytes { at_least } => {
-                    SniffOutcome { info: L7Info::None, status: None, need_more_bytes: Some(at_least) }
+                    SniffOutcome {
+                        info: L7Info::None,
+                        status: None,
+                        need_more_bytes: Some(at_least),
+                        reassembled_packet: None,
+                    }
                 }
-                L7Sniff::Undecided => SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None },
+                L7Sniff::Undecided => SniffOutcome {
+                    info: L7Info::None,
+                    status: None,
+                    need_more_bytes: None,
+                    reassembled_packet: None,
+                },
             };
         };
         if let L7Sniff::Decided(info) = own {
             // Decided on one segment. Release any buffer this direction had —
             // there is nothing left to wait for.
             self.segments.finish(&key, ReassemblyStatus::Reassembled);
-            return SniffOutcome { info, status: None, need_more_bytes: None };
+            return SniffOutcome { info, status: None, need_more_bytes: None, reassembled_packet: None };
         }
 
         let declared = packet.ip_declared_payload_len.saturating_sub(packet.transport_header_len);
         let Some(raw_status) = self.segments.feed(&key, seq, &packet.payload, declared, now_ms) else {
             // Nothing changed — e.g. a retransmission of bytes already held.
-            return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None };
+            return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None, reassembled_packet: None };
         };
         let status = self.attribute(raw_status, now_ms);
         match sniff_l7_desegmenting(self.segments.prefix(&key), packet.dst_port) {
             L7Sniff::Decided(info) => {
                 self.segments.finish(&key, status);
-                SniffOutcome { info, status: Some(status), need_more_bytes: None }
+                SniffOutcome { info, status: Some(status), need_more_bytes: None, reassembled_packet: None }
             }
             L7Sniff::NeedMoreBytes { at_least } => {
-                SniffOutcome { info: L7Info::None, status: Some(status), need_more_bytes: Some(at_least) }
+                SniffOutcome { info: L7Info::None, status: Some(status), need_more_bytes: Some(at_least), reassembled_packet: None }
             }
-            L7Sniff::Undecided => SniffOutcome { info: L7Info::None, status: Some(status), need_more_bytes: None },
+            L7Sniff::Undecided => SniffOutcome {
+                info: L7Info::None,
+                status: Some(status),
+                need_more_bytes: None,
+                reassembled_packet: None,
+            },
         }
     }
 }
@@ -1067,6 +1104,7 @@ impl StreamReassembler {
 mod tests {
     use super::*;
     use crate::l7::build_client_hello;
+    use crate::flow::FlowTable;
     use crate::parse::Ipv4Fragment;
     use etherparse::{IpFragOffset, IpNumber, Ipv4Header, TcpHeader};
 
@@ -1142,6 +1180,15 @@ mod tests {
         out
     }
 
+    fn tcp_http_datagram() -> Vec<u8> {
+        let mut tcp = TcpHeader::new(51_000, 80, 1, 65_535);
+        tcp.ack = true;
+        let mut out = Vec::new();
+        tcp.write(&mut out).expect("test TCP header write");
+        out.extend_from_slice(b"GET /fragmented HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        out
+    }
+
     fn flow_key() -> FlowKey {
         FlowKey {
             protocol: TransportProtocol::Tcp,
@@ -1190,6 +1237,59 @@ mod tests {
         }
         assert_eq!(r.bytes_held(), 0, "a completed group must not stay held");
         assert_eq!(r.counters().completed, 1);
+    }
+
+    #[test]
+    fn reassembled_http_uses_transport_identity_for_flow_attribution_once() {
+        let datagram = tcp_http_datagram();
+        // Keep each non-final fragment's payload 8-byte aligned. The first
+        // fragment includes the TCP header and part of the HTTP request.
+        let (head, tail) = datagram.split_at(24);
+        let first = ipv4_fragment("10.0.0.1", "10.0.0.2", 43, IpNumber::TCP, 0, true, head);
+        let last = ipv4_fragment("10.0.0.1", "10.0.0.2", 43, IpNumber::TCP, 24, false, tail);
+        let mut reassembly = StreamReassembler::new();
+        let mut flows = FlowTable::new(vec!["10.0.0.1".to_string()]);
+
+        let first_outcome = reassembly.sniff(&first, None, 0);
+        assert!(first_outcome.reassembled_packet.is_none());
+        assert!(flows.observe(&first, &first_outcome.info, 0).is_none());
+        assert!(flows.snapshot(0).is_empty(), "an incomplete datagram has no transport flow identity yet");
+
+        let outcome = reassembly.sniff(&last, None, 1);
+        let reconstructed = outcome.reassembled_packet.as_ref().expect("completed datagram must carry its parsed transport identity");
+        assert_eq!(reconstructed.protocol, TransportProtocol::Tcp);
+        assert_eq!(reconstructed.src_port, Some(51_000));
+        assert_eq!(reconstructed.dst_port, Some(80));
+        assert!(matches!(outcome.info, L7Info::Http { .. }));
+
+        // Count the completing physical frame, then attribute the completed
+        // IP datagram once without adding its reconstructed length to the
+        // physical protocol hierarchy a second time.
+        let flow_packet = outcome.reassembled_packet.as_ref().unwrap_or(&last);
+        assert!(std::ptr::eq(flow_packet, reconstructed));
+        flows.observe_reassembled(&last, flow_packet, &outcome.info, 1).expect("reconstructed packet must produce a flow");
+        let snapshots = flows.snapshot(1);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].key.protocol, TransportProtocol::Tcp);
+        assert_eq!(snapshots[0].key.local_port, 51_000);
+        assert_eq!(snapshots[0].key.remote_port, 80);
+        assert_eq!(snapshots[0].app_layer_protocol, "HTTP");
+        assert_eq!(snapshots[0].tx_bytes_total, reconstructed.total_len as u64);
+
+        let endpoints = flows.endpoint_snapshot(1);
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].tx_packets_total, 1, "one reassembled datagram creates one attributed flow packet");
+        assert_eq!(endpoints[0].tx_bytes_total, reconstructed.total_len as u64);
+
+        let physical_bytes = first.total_len as u64 + last.total_len as u64;
+        let hierarchy = flows.protocol_hierarchy();
+        assert_eq!(hierarchy.bytes, physical_bytes, "protocol hierarchy must count captured frame bytes once");
+        assert_eq!(hierarchy.packets, 2, "protocol hierarchy must count the two captured fragments");
+        let ethernet = hierarchy.children().find(|(name, _)| *name == "Ethernet").map(|(_, node)| node).unwrap();
+        let ip = ethernet.children().find(|(name, _)| *name == "IP").map(|(_, node)| node).unwrap();
+        let fragmented = ip.children().find(|(name, _)| *name == "Other").map(|(_, node)| node).unwrap();
+        assert_eq!(fragmented.bytes, physical_bytes);
+        assert_eq!(fragmented.packets, 2);
     }
 
     #[test]
