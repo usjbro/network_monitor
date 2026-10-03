@@ -71,11 +71,6 @@ An independent security-review pass by the orchestrating session (on the actual 
 
 ## JAM-166 — verified 2026-10-03
 
-Fix for PR #239 review finding #2 (reconstructed transport identity lost for flow tracking), merged via PR #242 into the JAM-16 branch as commit `1dd1999`. Re-verified independently in `.worktrees/preserve-reconstructed-transport-identity` before merge, and again in `.worktrees/stream-reassembly-ip-fragments-and-tcp-segments` after rebasing the JAM-16 branch onto `main` at `539f055`.
-
-| Command | Result |
-| --- | --- |
-| `cargo test --locked` | PASS — 260 lib + 51 main-bin + 0/2 ignored (live-loopback) + 2 no_disk_write + 3 pcapng + 1 protocol_regression = 317 passed, 0 failed, 3 ignored |
-| `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings |
+Fix for PR #239 review finding #2 (reconstructed transport identity lost for flow tracking), merged via PR #242 into the JAM-16 branch as commit `1dd1999`. Verified independently in `.worktrees/preserve-reconstructed-transport-identity` before merge (`cargo test --locked` 318 passed/0 failed/2 ignored, clippy clean), then again in `.worktrees/stream-reassembly-ip-fragments-and-tcp-segments` after rebasing the whole JAM-16 branch onto `main` at `539f055` — see the post-rebase re-verification entry below for the authoritative current numbers.
 
 Remaining PR #239 review findings (JAM-169 `[P1]`, JAM-167/168/170 `[P2]`) are not yet fixed — see `HANDOFF.md`.
