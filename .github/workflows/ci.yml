@@ -186,7 +186,16 @@ jobs:
         run: npm ci
 
       - name: Audit dependencies (npm advisory database)
-        run: npm audit --audit-level=high
+        # Plain `npm audit --audit-level=high` can't distinguish a fixable
+        # advisory from one with no patched version upstream at all (see
+        # JAM-171 -- braces/GHSA-vfj7-8cjw-p6xm, reached only through
+        # eslint-config-next's lint-only dependency chain). This checks both
+        # prod and dev dependencies (a dev-only advisory can still have a
+        # real fix -- e.g. undici, pulled in via jsdom -- and should still
+        # fail CI) against a small, explicit, documented allowlist instead.
+        run: |
+          npm audit --json > /tmp/npm-audit.json || true
+          node .github/scripts/check-npm-audit.mjs /tmp/npm-audit.json
 
       - name: Type check
         run: npx tsc --noEmit
