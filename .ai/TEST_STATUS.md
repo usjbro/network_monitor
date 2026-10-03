@@ -71,6 +71,16 @@ An independent security-review pass by the orchestrating session (on the actual 
 
 ## JAM-166 — verified 2026-10-03
 
-Fix for PR #239 review finding #2 (reconstructed transport identity lost for flow tracking), merged via PR #242 into the JAM-16 branch as commit `1dd1999`. Verified independently in `.worktrees/preserve-reconstructed-transport-identity` before merge (`cargo test --locked` 318 passed/0 failed/2 ignored, clippy clean), then again in `.worktrees/stream-reassembly-ip-fragments-and-tcp-segments` after rebasing the whole JAM-16 branch onto `main` at `539f055` — see the post-rebase re-verification entry below for the authoritative current numbers.
+Fix for PR #239 review finding #2 (reconstructed transport identity lost for flow tracking), merged via PR #242 into the JAM-16 branch as commit `1dd1999`. Verified independently in `.worktrees/preserve-reconstructed-transport-identity` before merge (`cargo test --locked` 318 passed/0 failed/2 ignored, clippy clean).
+
+## Post-rebase re-verification — 2026-10-03
+
+Rebased the JAM-16 branch onto `main` at `539f055` to clear PR #239's merge conflict. The rebase produced a **clean-but-wrong merge** in `capture-agent/src/main.rs`'s `use capture_agent::{...}` block: it silently dropped the `l7` import (still needed by `packet_osi_layer`'s `l7::L7Info` reference) because this branch's own commit removed the only other usage (`l7::sniff_l7`, replaced by the reassembler) in the same import list, and `origin/main` had reordered that same hunk — `cargo build` failed with `error[E0433]: cannot find module or crate l7`, not a silent `git rebase` success. Fixed by re-adding `l7` to the import list; no other changes needed.
+
+| Command | Result |
+| --- | --- |
+| `cargo build --release --locked` | PASS — clean release build |
+| `cargo test --locked` | PASS — 261 lib + 53 main-bin + 0/2 ignored (live-loopback) + 2 no_disk_write + 3 pcapng + 1 protocol_regression = 320 passed, 0 failed, 3 ignored |
+| `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings |
 
 Remaining PR #239 review findings (JAM-169 `[P1]`, JAM-167/168/170 `[P2]`) are not yet fixed — see `HANDOFF.md`.

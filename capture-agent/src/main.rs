@@ -5,7 +5,7 @@ use capture_agent::{
     host_stats,
     http2::{FrameOutcome, Http2Reassembler},
     keylog::KeyLogWatcher,
-    parse, pcapng, process_lookup,
+    l7, parse, pcapng, process_lookup,
     rate_limit::PacketEventLimiter,
     reassembly::{ReassemblyStatus, StreamReassembler},
     ring,

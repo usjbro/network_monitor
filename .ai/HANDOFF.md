@@ -33,7 +33,7 @@ PR #239's independent review found 5 issues required before merge, each filed as
 
 A separate, already-fixed finding (TCP `rebase()` truncation, commit `1b925ab`) predates this list and is not one of the 5.
 
-Branch rebased onto `main` at `539f055` on 2026-10-03 to clear PR #239's merge conflict — only `.ai/` state-file conflicts (resolved by keeping this branch's own entries), no source conflicts; `capture-agent/src/flow.rs` and `main.rs` auto-merged cleanly against the JAM-166 fix already on this branch.
+Branch rebased onto `main` at `539f055` on 2026-10-03 to clear PR #239's merge conflict — `.ai/` state-file conflicts (resolved by keeping this branch's own entries). `capture-agent/src/main.rs` auto-merged **without a CONFLICT marker but produced broken code**: the `use capture_agent::{...}` import list silently lost its `l7` import (still needed by `packet_osi_layer`), caught by `cargo build` (`error[E0433]`), not by git. Fixed by re-adding `l7` to the import list; re-verified clean (see `TEST_STATUS.md`'s "Post-rebase re-verification" entry — 320 passed, 0 failed, clippy clean). Don't trust a rebase/merge that reports success for a file touched by multiple commits without rebuilding.
 
 ## Publication and Continuation
 
