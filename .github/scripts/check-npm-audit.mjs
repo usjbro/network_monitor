@@ -33,9 +33,23 @@ if (!path) {
 }
 
 const data = JSON.parse(readFileSync(path, "utf8"));
+
+// `npm audit --json` doesn't always produce a report: on a registry/network
+// failure it exits non-zero and prints `{"message": ..., "error": {...}}`
+// instead, with no `vulnerabilities` key at all. Defaulting that to `{}`
+// would make this script report "OK -- no advisories" on a run that never
+// actually audited anything -- fail-open on exactly the failure mode this
+// gate exists to catch. Treat a missing `vulnerabilities` key as a hard
+// failure, not as a clean result.
+if (data.error || !data.vulnerabilities) {
+  console.error("npm audit did not produce a usable report:");
+  console.error(JSON.stringify(data, null, 2));
+  process.exit(1);
+}
+
 const found = new Set();
 
-for (const vuln of Object.values(data.vulnerabilities ?? {})) {
+for (const vuln of Object.values(data.vulnerabilities)) {
   if ((SEVERITY_ORDER[vuln.severity] ?? 0) < THRESHOLD) continue;
   for (const via of vuln.via ?? []) {
     if (typeof via === "object" && via.url) {
