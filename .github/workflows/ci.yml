@@ -186,7 +186,13 @@ jobs:
         run: npm ci
 
       - name: Audit dependencies (npm advisory database)
-        run: npm audit --audit-level=high
+        # --omit=dev: lint/build-only tooling (e.g. eslint-config-next's
+        # braces/micromatch/fast-glob chain) is never shipped or run against
+        # untrusted input, and some of its advisories currently have no
+        # patched version upstream at all (see JAM-171) -- scoping to
+        # production dependencies keeps this gate meaningful instead of
+        # permanently red on unfixable dev-tool noise.
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Type check
         run: npx tsc --noEmit
