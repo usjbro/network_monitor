@@ -30,8 +30,9 @@ PR #239's independent review found 5 issues required before merge, each filed as
 - **JAM-167 `[P2]`** — IP-reassembled TCP segments bypass TCP stream reassembly (`reassembly.rs:999-1002`). Not started.
 - **JAM-168 `[P2]`** — reassembled L7 field offsets attached to the wrong packet bytes (`main.rs:1611-1613`). Not started.
 - **JAM-170 `[P2]`** — stated memory budget omits `filled: Vec<bool>` coverage-map storage (`reassembly.rs:770-772`). Not started.
+- **JAM-172 `[P1]`** — found on a second independent review pass (2026-10-03), not part of the original 5: `IpFragmentReassembler::feed` unconditionally overwrites `group.total_len` on any fragment with `more_fragments=false` (`reassembly.rs:441-448`), with no first-seen-wins protection on that field. A single forged last-fragment packet can retroactively truncate an already-buffered datagram to an attacker-chosen length (`take_group` emits `prefix_len.min(total)`) — the same evasion class the data-byte overlap policy defends against, except this field isn't covered by it. Verified directly against the code, not just the subagent's report. Not started.
 
-A separate, already-fixed finding (TCP `rebase()` truncation, commit `1b925ab`) predates this list and is not one of the 5.
+A separate, already-fixed finding (TCP `rebase()` truncation, commit `1b925ab`) predates this list and is not one of the 5 (now 6, with JAM-172).
 
 Branch rebased onto `main` at `539f055` on 2026-10-03 to clear PR #239's merge conflict — `.ai/` state-file conflicts (resolved by keeping this branch's own entries). `capture-agent/src/main.rs` auto-merged **without a CONFLICT marker but produced broken code**: the `use capture_agent::{...}` import list silently lost its `l7` import (still needed by `packet_osi_layer`), caught by `cargo build` (`error[E0433]`), not by git. Fixed by re-adding `l7` to the import list; re-verified clean (see `TEST_STATUS.md`'s "Post-rebase re-verification" entry — 320 passed, 0 failed, clippy clean). Don't trust a rebase/merge that reports success for a file touched by multiple commits without rebuilding.
 
