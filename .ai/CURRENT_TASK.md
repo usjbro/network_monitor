@@ -29,12 +29,13 @@ JAM-16: Stream reassembly — IP fragments (RFC 791 keying) and TCP segments (ex
 
 ## Status
 
-Implementation complete, pushed, PR #239 open. Independent review found 5 issues; all filed as sub-issues of JAM-16:
+Implementation complete, pushed, PR #239 open. Independent review found 5 issues, plus a 6th (JAM-172) and two non-blocking novel findings (JAM-173, JAM-174) on later review rounds; all filed as sub-issues of JAM-16 (JAM-173/174 filed standalone/non-blocking):
 
 - JAM-166 `[P1]` reconstructed transport identity lost for flow tracking — **fixed, PR #242 merged into this branch** (commit `1dd1999`).
-- JAM-169 `[P1]` TCP overlap policy bypassed by a standalone L7 decision on an already-held stream — not started.
+- JAM-169 `[P1]` TCP overlap policy bypassed by a standalone L7 decision on an already-held stream — **fixed, PR #246 merged into this branch** (3 commits, 2 follow-up fixes found during its own review — see HANDOFF.md).
+- JAM-172 `[P1]` forged last-fragment packet can retroactively truncate an already-buffered datagram — not started.
 - JAM-167 `[P2]` fragment-reassembled TCP bypasses stream reassembly — not started.
 - JAM-168 `[P2]` reassembled L7 field offsets attached to wrong packet bytes — not started.
 - JAM-170 `[P2]` memory cap accounting omits coverage-map storage — not started.
 
-Branch rebased onto current `main` (`539f055`) on 2026-10-03 to resolve a merge conflict in PR #239 (only `.ai/` state-file conflicts; source merged cleanly). Remaining 4 findings must still be resolved before PR #239 can merge.
+Branch rebased onto current `main` (`539f055`) on 2026-10-03 to resolve a merge conflict in PR #239 (only `.ai/` state-file conflicts; source merged cleanly) — a silent, non-conflict-marked merge corruption in `main.rs`'s import list was caught by `cargo build`, not git; see HANDOFF.md. Remaining 4 findings (JAM-172, 167, 168, 170) must still be resolved before PR #239 can merge.
