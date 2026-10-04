@@ -98,12 +98,14 @@ pub struct InterfaceDescriptionBlock {
     pub interface_name: String,
     pub link_type: crate::parse::LinkType,
     pub snaplen: u32,
-    /// Honest per the platform clock's actual resolution. `9` means
-    /// nanosecond (10^-9); pcapng's `if_tsresol` encodes resolution as a
-    /// power-of-ten exponent with the high bit clear, so a plain byte value
-    /// of the exponent is correct here.
-    pub timestamp_resolution_exponent: u8,
 }
+
+/// The `if_tsresol` this agent always writes: nanoseconds (10^-9 s; a
+/// power-of-ten exponent with the high bit clear). Not configurable, because
+/// `epb_timestamp_halves` always encodes nanoseconds: since the reader
+/// honours `if_tsresol` (JAM-182), declaring any other unit would make the
+/// agent's own files replay at the wrong speed.
+const WRITER_TSRESOL: u8 = 9;
 
 impl InterfaceDescriptionBlock {
     pub fn write_to(&self, w: &mut impl Write) -> io::Result<()> {
@@ -113,7 +115,7 @@ impl InterfaceDescriptionBlock {
         body.extend_from_slice(&self.snaplen.to_le_bytes());
 
         write_option(&mut body, IF_NAME, self.interface_name.as_bytes())?;
-        write_option(&mut body, IF_TSRESOL, &[self.timestamp_resolution_exponent])?;
+        write_option(&mut body, IF_TSRESOL, &[WRITER_TSRESOL])?;
         write_end_of_opt(&mut body)?;
 
         write_block(w, BT_INTERFACE_DESCRIPTION, &body)
@@ -156,9 +158,8 @@ const INTERFACE_ID: u32 = 0;
 fn epb_timestamp_halves(timestamp: SystemTime) -> (u32, u32) {
     // pcapng's EPB timestamp is a 64-bit value split into two 32-bit
     // halves, in whatever unit the owning IDB's if_tsresol declared — this
-    // agent always declares resolution as nanoseconds where the platform
-    // clock supports it (InterfaceDescriptionBlock's own doc comment), so
-    // this encodes nanoseconds-since-epoch split high/low.
+    // agent always declares nanoseconds (`WRITER_TSRESOL`), so this encodes
+    // nanoseconds-since-epoch split high/low.
     let ts_ns = timestamp
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -563,7 +564,6 @@ mod tests {
             interface_name: "en0x".into(), // 4 bytes
             link_type: crate::parse::LinkType::Ethernet,
             snaplen: 65535,
-            timestamp_resolution_exponent: 9,
         }
         .write_to(&mut buf)
         .unwrap();
@@ -574,7 +574,6 @@ mod tests {
             interface_name: "lo".into(), // 2 bytes — odd relative to 4-byte option padding
             link_type: crate::parse::LinkType::NullLoopback,
             snaplen: 65535,
-            timestamp_resolution_exponent: 6,
         }
         .write_to(&mut buf)
         .unwrap();
@@ -626,7 +625,6 @@ mod writer_tests {
             interface_name: "lo".into(),
             link_type: crate::parse::LinkType::NullLoopback,
             snaplen: 65535,
-            timestamp_resolution_exponent: 9,
         }
     }
 
@@ -712,7 +710,6 @@ mod reader_tests {
             interface_name: "en0".into(),
             link_type: crate::parse::LinkType::Ethernet,
             snaplen: 65535,
-            timestamp_resolution_exponent: 9,
         }
     }
 

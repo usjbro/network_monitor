@@ -29,7 +29,6 @@ fn a_file_written_by_writer_reads_back_identically_through_reader() {
         interface_name: "en0".into(),
         link_type: LinkType::Ethernet,
         snaplen: 65535,
-        timestamp_resolution_exponent: 9,
     };
 
     let packets: Vec<(Direction, Vec<u8>)> = vec![
@@ -68,13 +67,40 @@ fn a_file_written_by_writer_reads_back_identically_through_reader() {
 }
 
 #[test]
+fn packet_timestamps_read_back_exactly_as_written() {
+    // JAM-182: the reader decodes timestamps in the unit the IDB declares,
+    // so the writer's declared unit and its encoded unit must agree, or the
+    // agent's own captures replay at the wrong speed.
+    let path = unique_path("timestamps");
+    let idb = InterfaceDescriptionBlock { interface_name: "lo".into(), link_type: LinkType::NullLoopback, snaplen: 65535 };
+    let written = [
+        std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_000, 123_456_789),
+        std::time::UNIX_EPOCH + std::time::Duration::new(1_700_000_001, 500),
+    ];
+    let mut writer = Writer::create(&path, &idb, "roundtrip-host", "9.9.9").unwrap();
+    for timestamp in written {
+        writer.write_packet(timestamp, Direction::Inbound, b"payload").unwrap();
+    }
+    writer.finish().unwrap();
+
+    let (mut reader, interface) = Reader::new(File::open(&path).unwrap()).unwrap();
+    assert_eq!(interface.timestamp_resolution, 9, "the writer declares nanoseconds");
+    let mut read_back = Vec::new();
+    while let Some(packet) = reader.next_packet().unwrap() {
+        read_back.push(packet.timestamp);
+    }
+    assert_eq!(read_back, written, "every timestamp reads back to the nanosecond");
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
 fn an_empty_capture_reads_back_as_a_valid_interface_with_zero_packets() {
     let path = unique_path("empty");
     let idb = InterfaceDescriptionBlock {
         interface_name: "lo".into(),
         link_type: LinkType::NullLoopback,
         snaplen: 65535,
-        timestamp_resolution_exponent: 6,
     };
 
     Writer::create(&path, &idb, "roundtrip-host", "9.9.9").unwrap().finish().unwrap();

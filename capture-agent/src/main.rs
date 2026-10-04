@@ -2400,7 +2400,6 @@ async fn main() -> std::io::Result<()> {
                                                         interface_name: current_interface.lock().unwrap().0.clone(),
                                                         link_type: *current_link_type.lock().unwrap(),
                                                         snaplen: capture_config_state.lock().unwrap().snaplen,
-                                                        timestamp_resolution_exponent: 9,
                                                     };
                                                     let _ = writer_tx.send(WriterCommand::Start {
                                                         path: resolved,
