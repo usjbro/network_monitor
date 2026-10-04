@@ -2169,7 +2169,20 @@ async fn main() -> std::io::Result<()> {
                     line = reader.next_line() => {
                         match line {
                             Ok(Some(text)) => {
-                                match wire::decode_control(&text) {
+                                let message = match wire::classify_control_line(&text) {
+                                    wire::ControlLine::Message(message) => Some(message),
+                                    wire::ControlLine::Ignored => None,
+                                    wire::ControlLine::NotJson => {
+                                        // Not this protocol — most likely a
+                                        // browser's cross-protocol POST
+                                        // (JAM-175). Close before reading
+                                        // its body, whose JSON lines would
+                                        // otherwise each run as a control.
+                                        eprintln!("capture-agent: closing control connection: non-JSON line received");
+                                        break;
+                                    }
+                                };
+                                match message {
                                     Some(wire::ControlMessage::Pause) => paused.store(true, Ordering::Relaxed),
                                     Some(wire::ControlMessage::Resume) => paused.store(false, Ordering::Relaxed),
                                     Some(wire::ControlMessage::RegisterDecryptEligible { pid, keylog_path }) => {
