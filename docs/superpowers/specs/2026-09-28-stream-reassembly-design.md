@@ -106,6 +106,11 @@ Worst case across both reassemblers is therefore **8 MiB**, regardless of how ma
 
 Eviction is time-based *and* capacity-based, matching `FlowTable::evict_stale`'s existing pattern (retain-by-threshold, then drop oldest-first over capacity). It is driven from the capture loop rather than shared with `FlowTable::evict_stale` itself: that runs on the periodic emitter task, on the other side of the flow-table mutex from the reassembler, and plumbing evicted keys across that boundary to reuse one call site would be more coupling than the duplication it saves. Same mechanism, own call site.
 
+Two later corrections (JAM-182):
+
+- **Clock.** The timeouts describe the traffic, so they run on the traffic's own time. Live capture uses the agent's clock, which already is that time. Replay uses `ReplayClock` (`reassembly.rs`), which advances by each forward step between consecutive recorded timestamps and ignores backward steps. It never runs backwards, and unlike "time since the first frame, held at its maximum", it doesn't freeze after a large backward step or a corrupt first timestamp. On wall-clock time, a fast replay compressed minutes of capture into seconds, so nothing ever timed out. The flow table still runs on the agent clock during replay; that's tracked separately.
+- **Expiry on arrival.** The periodic sweep runs at most once a second, and after the current frame is fed. Both reassemblers therefore also expire an entry in `feed` itself, when new data with the same key arrives, using the same criterion and accounting as the sweep. Without this, a fragment reusing an IP ID could join an expired group's bytes, and a new connection reusing an idle four-tuple would be judged against the old connection's buffer and lose its first L7 decision.
+
 ## Security posture
 
 Every byte here is attacker-shaped and parsed in the process holding the capture handle.

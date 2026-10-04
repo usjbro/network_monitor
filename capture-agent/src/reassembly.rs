@@ -368,6 +368,14 @@ impl FragmentGroup {
         }
     }
 
+    /// Past `FRAGMENT_TIMEOUT_MS`, measured both from the last fragment and,
+    /// as a hard ceiling, from the first: a slow drip of fragments must not
+    /// keep one group alive indefinitely.
+    fn is_expired(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.last_seen_ms) > FRAGMENT_TIMEOUT_MS
+            || now_ms.saturating_sub(self.first_seen_ms) > FRAGMENT_TIMEOUT_MS
+    }
+
     /// The status this group's current prefix deserves. Truncated-at-capture
     /// takes precedence over missing-frames: it is a definite fact about this
     /// capture's configuration that an operator can act on, where "missing"
@@ -381,6 +389,41 @@ impl FragmentGroup {
         } else {
             ReassemblyStatus::IncompleteMissingFrames
         }
+    }
+}
+
+/// JAM-182: the clock stream reassembly runs on during replay — the
+/// replayed file's own recorded time, in milliseconds.
+///
+/// The timeouts above describe the traffic, not the machine replaying it. On
+/// wall-clock time a fast replay compresses a capture spanning minutes into
+/// seconds, so nothing ever times out: a fragment group can merge with a
+/// later datagram that recycled its IP ID, and buffered TCP bytes can carry
+/// across a reused four-tuple.
+///
+/// The clock advances by each forward step between consecutive frames and
+/// ignores backward steps. Capture files can hold out-of-order timestamps (a
+/// host clock stepped back, an unsorted merge, one corrupt frame), so it must
+/// never run backwards and revive expired state. Measuring from the first
+/// frame and holding the maximum would avoid that too, but would then freeze
+/// after a large backward step until recorded time caught up, possibly for
+/// the rest of the file, which is the original bug again.
+#[derive(Debug, Default)]
+pub struct ReplayClock {
+    previous_frame: Option<std::time::SystemTime>,
+    now_ms: u64,
+}
+
+impl ReplayClock {
+    pub fn now_ms(&mut self, frame_timestamp: std::time::SystemTime) -> u64 {
+        if let Some(previous) = self.previous_frame {
+            if let Ok(step) = frame_timestamp.duration_since(previous) {
+                let step_ms = u64::try_from(step.as_millis()).unwrap_or(u64::MAX);
+                self.now_ms = self.now_ms.saturating_add(step_ms);
+            }
+        }
+        self.previous_frame = Some(frame_timestamp);
+        self.now_ms
     }
 }
 
@@ -433,6 +476,18 @@ impl IpFragmentReassembler {
             // group rather than growing past the cap, or refusing current
             // traffic in favour of stale entries.
             self.evict_oldest_until(MAX_FRAGMENT_GROUPS.saturating_sub(1), MAX_FRAGMENT_BYTES_TOTAL);
+        }
+
+        // JAM-182: a group past its timeout is finished, even if the periodic
+        // `evict_stale` sweep hasn't reached it yet. That sweep runs at most
+        // once a second and after this frame is fed, so without this check a
+        // fragment that reuses an expired group's key (a later datagram with
+        // a recycled IP ID) would join the dead group's bytes.
+        if self.groups.get(&key).is_some_and(|group| group.is_expired(now_ms)) {
+            // Dropped like `maybe_evict` drops `evict_stale`'s results: the
+            // outcome is counted, and nothing downstream consumes the
+            // rebuilt prefix.
+            let _ = self.expire(&key);
         }
 
         let offset = fragment.offset_bytes as usize;
@@ -522,27 +577,22 @@ impl IpFragmentReassembler {
         let expired: Vec<FragmentKey> = self
             .groups
             .iter()
-            .filter(|(_, group)| {
-                now_ms.saturating_sub(group.last_seen_ms) > FRAGMENT_TIMEOUT_MS
-                    // Hard ceiling from first arrival too: a slow drip of
-                    // fragments must not keep one group alive indefinitely.
-                    || now_ms.saturating_sub(group.first_seen_ms) > FRAGMENT_TIMEOUT_MS
-            })
+            .filter(|(_, group)| group.is_expired(now_ms))
             .map(|(key, _)| key.clone())
             .collect();
 
-        let mut out = Vec::new();
-        for key in expired {
-            let Some(status) = self.groups.get(&key).map(FragmentGroup::status) else {
-                continue;
-            };
-            self.counters.evicted_idle += 1;
-            if let Some(datagram) = self.take_group(&key, status) {
-                out.push(datagram);
-            }
-        }
+        let out = expired.iter().filter_map(|key| self.expire(key)).collect();
         self.evict_oldest_until(MAX_FRAGMENT_GROUPS, MAX_FRAGMENT_BYTES_TOTAL);
         out
+    }
+
+    /// Removes one group that timed out, counting it as evicted, and rebuilds
+    /// whatever prefix it held. Shared by the periodic sweep and by `feed`'s
+    /// expire-on-arrival check so their accounting can't drift apart.
+    fn expire(&mut self, key: &FragmentKey) -> Option<ReassembledDatagram> {
+        let status = self.groups.get(key).map(FragmentGroup::status)?;
+        self.counters.evicted_idle += 1;
+        self.take_group(key, status)
     }
 
     /// Removes one group, accounts for its bytes and its outcome, and rebuilds
@@ -625,6 +675,11 @@ struct TcpStream {
 }
 
 impl TcpStream {
+    /// No segment for longer than `TCP_STREAM_IDLE_MS`.
+    fn is_idle(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.last_seen_ms) > TCP_STREAM_IDLE_MS
+    }
+
     fn new(seq: u32, now_ms: u64) -> Self {
         Self {
             base_seq: seq,
@@ -754,6 +809,16 @@ impl TcpReassembler {
         }
         if !self.streams.contains_key(key) && self.streams.len() >= MAX_TCP_STREAMS {
             self.evict_oldest_until(MAX_TCP_STREAMS.saturating_sub(1), MAX_TCP_BYTES_TOTAL);
+        }
+
+        // JAM-182: an idle direction is gone, even if the periodic
+        // `evict_stale` sweep hasn't reached it yet (it runs at most once a
+        // second, after this frame is fed). Without this, a new connection
+        // reusing the four-tuple would land on the old one's stale entry:
+        // its bytes would be measured against the old decision window, and
+        // its first segments would lose their L7 decision.
+        if self.streams.get(key).is_some_and(|stream| stream.is_idle(now_ms)) {
+            self.remove_idle(key);
         }
 
         let stream = self.streams.entry(key.clone()).or_insert_with(|| TcpStream::new(seq, now_ms));
@@ -886,20 +951,26 @@ impl TcpReassembler {
         }
     }
 
+    /// Removes one idle direction, counting it as evicted. Shared by the
+    /// periodic sweep and by `feed`'s expire-on-arrival check.
+    fn remove_idle(&mut self, key: &TcpStreamKey) {
+        if let Some(stream) = self.streams.remove(key) {
+            self.bytes_held = self.bytes_held.saturating_sub(stream.data.len());
+            self.counters.evicted_idle += 1;
+        }
+    }
+
     /// Removes idle directions, then enforces the global ceilings
     /// oldest-first.
     pub fn evict_stale(&mut self, now_ms: u64) {
         let idle: Vec<TcpStreamKey> = self
             .streams
             .iter()
-            .filter(|(_, stream)| now_ms.saturating_sub(stream.last_seen_ms) > TCP_STREAM_IDLE_MS)
+            .filter(|(_, stream)| stream.is_idle(now_ms))
             .map(|(key, _)| key.clone())
             .collect();
         for key in idle {
-            if let Some(stream) = self.streams.remove(&key) {
-                self.bytes_held = self.bytes_held.saturating_sub(stream.data.len());
-                self.counters.evicted_idle += 1;
-            }
+            self.remove_idle(&key);
         }
         self.evict_oldest_until(MAX_TCP_STREAMS, MAX_TCP_BYTES_TOTAL);
     }
@@ -1442,6 +1513,102 @@ mod tests {
     }
 
     #[test]
+    fn a_fragment_arriving_after_its_group_expired_starts_a_new_group() {
+        // JAM-182: an IP ID is recycled. A first fragment whose datagram never
+        // completed is followed, past the timeout, by the last fragment of a
+        // different datagram that happens to reuse the same key. Even though
+        // no `evict_stale` sweep has run in between (it runs at most once a
+        // second, after the frame is fed), the two must not be joined.
+        let datagram = udp_dns_datagram();
+        let (head, tail) = datagram.split_at(16);
+        let mut r = IpFragmentReassembler::new();
+        assert!(r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 7, IpNumber::UDP, 0, true, head), 0).is_none());
+        assert!(
+            r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 7, IpNumber::UDP, 16, false, tail), FRAGMENT_TIMEOUT_MS + 1)
+                .is_none(),
+            "a fragment must not complete a group that expired before it arrived"
+        );
+        assert_eq!(r.counters().evicted_idle, 1, "the expired group is counted as evicted");
+        assert_eq!(r.counters().incomplete_missing_frames, 1, "and reported as incomplete");
+        assert_eq!(r.groups_held(), 1, "the late fragment starts a fresh group of its own");
+        assert_eq!(r.bytes_held(), datagram.len(), "holding only the late fragment's bytes, at its offset");
+    }
+
+    #[test]
+    fn a_fragment_inside_the_timeout_still_joins_its_group() {
+        // The boundary on the other side: exactly at the timeout is not past it.
+        let datagram = udp_dns_datagram();
+        let (head, tail) = datagram.split_at(16);
+        let mut r = IpFragmentReassembler::new();
+        assert!(r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 7, IpNumber::UDP, 0, true, head), 0).is_none());
+        let rejoined = r
+            .feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 7, IpNumber::UDP, 16, false, tail), FRAGMENT_TIMEOUT_MS)
+            .expect("a fragment at the timeout boundary still completes its group");
+        assert_eq!(rejoined.status, ReassemblyStatus::Reassembled);
+        assert_eq!(r.counters().evicted_idle, 0);
+    }
+
+    fn at_secs(secs: u64) -> std::time::SystemTime {
+        // An arbitrary capture-time origin, well after the epoch.
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + secs)
+    }
+
+    #[test]
+    fn replay_clock_advances_with_recorded_time() {
+        let mut clock = ReplayClock::default();
+        assert_eq!(clock.now_ms(at_secs(100)), 0);
+        assert_eq!(clock.now_ms(at_secs(101)), 1_000);
+        assert_eq!(clock.now_ms(at_secs(160)), 60_000);
+    }
+
+    #[test]
+    fn replay_clock_ignores_a_backward_step_without_freezing() {
+        // A host clock stepped back an hour mid-capture. The replay clock
+        // must not run backwards, and must keep advancing from there rather
+        // than wait for recorded time to catch up.
+        let mut clock = ReplayClock::default();
+        clock.now_ms(at_secs(10_000));
+        assert_eq!(clock.now_ms(at_secs(10_030)), 30_000);
+        assert_eq!(clock.now_ms(at_secs(6_430)), 30_000, "a backward step holds the clock");
+        assert_eq!(clock.now_ms(at_secs(6_450)), 50_000, "and it advances again with the next forward step");
+    }
+
+    #[test]
+    fn replay_clock_survives_a_corrupt_far_future_first_frame() {
+        let mut clock = ReplayClock::default();
+        clock.now_ms(at_secs(1_000_000_000));
+        assert_eq!(clock.now_ms(at_secs(0)), 0);
+        assert_eq!(clock.now_ms(at_secs(20)), 20_000, "later frames still advance the clock");
+    }
+
+    /// Replays a recycled IP ID: two fragments with the same key, recorded
+    /// `gap_secs` apart, through `ReplayClock` and `StreamReassembler::sniff`
+    /// as the capture loop does in replay mode, with no wall-clock time
+    /// passing between them (a fast replay). Returns whether the second
+    /// fragment completed a datagram.
+    fn fast_replay_joins_fragments(gap_secs: u64) -> bool {
+        let datagram = udp_dns_datagram();
+        let (head, tail) = datagram.split_at(16);
+        let mut r = StreamReassembler::new();
+        let mut clock = ReplayClock::default();
+        let first = ipv4_fragment("10.0.0.1", "10.0.0.2", 42, IpNumber::UDP, 0, true, head);
+        assert!(r.sniff(&first, None, clock.now_ms(at_secs(0))).reassembled_packet.is_none());
+        let last = ipv4_fragment("10.0.0.1", "10.0.0.2", 42, IpNumber::UDP, 16, false, tail);
+        r.sniff(&last, None, clock.now_ms(at_secs(gap_secs))).reassembled_packet.is_some()
+    }
+
+    #[test]
+    fn fast_replay_does_not_join_fragments_recorded_past_the_timeout() {
+        // JAM-182 acceptance criterion.
+        assert!(!fast_replay_joins_fragments(FRAGMENT_TIMEOUT_MS / 1_000 + 5));
+    }
+
+    #[test]
+    fn fast_replay_still_joins_fragments_recorded_close_together() {
+        assert!(fast_replay_joins_fragments(1));
+    }
+
+    #[test]
     fn an_incomplete_fragment_group_is_reported_as_missing_frames_at_its_timeout() {
         // Acceptance criterion: a missing frame is reported as such, never
         // presented as a complete datagram.
@@ -1729,6 +1896,29 @@ mod tests {
             L7Info::TlsClientHello { sni, .. } => assert_eq!(sni, "example.com"),
             other => panic!("expected the rejoined ClientHello to decode, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_new_connection_on_an_idle_four_tuple_is_not_judged_by_the_old_ones_buffer() {
+        // JAM-182: connection A leaves half a ClientHello buffered and goes
+        // quiet. Past the idle timeout, connection B reuses the same
+        // four-tuple and sends a complete ClientHello, before any periodic
+        // sweep has removed A's entry. B must decide on its own bytes, not
+        // be measured against A's long-expired decision window.
+        let hello = build_client_hello("example.com");
+        let (first, _) = hello.split_at(20);
+        let mut r = StreamReassembler::new();
+        let key = FlowKey { remote_port: 443, ..flow_key() };
+
+        let a = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 443, 500, first);
+        assert!(r.sniff(&a, Some((&key, true)), 0).need_more_bytes.is_some(), "A is left waiting");
+
+        let b = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 443, 9_000, &hello);
+        match r.sniff(&b, Some((&key, true)), TCP_STREAM_IDLE_MS + 1).info {
+            L7Info::TlsClientHello { sni, .. } => assert_eq!(sni, "example.com"),
+            other => panic!("expected B's own ClientHello to decode, got {other:?}"),
+        }
+        assert_eq!(r.segment_counters().evicted_idle, 1, "A's stale entry is counted as evicted");
     }
 
     #[test]

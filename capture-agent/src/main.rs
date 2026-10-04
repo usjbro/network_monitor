@@ -7,7 +7,7 @@ use capture_agent::{
     keylog::KeyLogWatcher,
     l7, parse, pcapng, process_lookup,
     rate_limit::PacketEventLimiter,
-    reassembly::{ReassemblyStatus, StreamReassembler},
+    reassembly::{ReassemblyStatus, ReplayClock, StreamReassembler},
     ring,
     ring_buffer::DecryptedRingBuffer,
     tls_decrypt::{self, DecryptOutcome},
@@ -491,6 +491,22 @@ fn parse_replay_speed(raw: Option<&str>) -> ReplaySpeed {
 
 fn replay_speed() -> ReplaySpeed {
     parse_replay_speed(std::env::var("REPLAY_SPEED").ok().as_deref())
+}
+
+/// JAM-182: the clock stream reassembly runs on for one frame. Replay uses
+/// the file's own recorded time (see `ReplayClock`); live capture keeps the
+/// agent's clock, which already is the traffic's own time.
+fn reassembly_now_ms(
+    replaying: bool,
+    replay_clock: &mut ReplayClock,
+    frame_timestamp: std::time::SystemTime,
+    agent_now_ms: u64,
+) -> u64 {
+    if replaying {
+        replay_clock.now_ms(frame_timestamp)
+    } else {
+        agent_now_ms
+    }
 }
 
 /// Everything `resolve_packet_source` resolves once at startup and never
@@ -1510,6 +1526,7 @@ async fn main() -> std::io::Result<()> {
             // `mode == "replay"`, below.
             let replay_speed = replay_speed();
             let mut previous_frame_timestamp: Option<std::time::SystemTime> = None;
+            let mut replay_clock = ReplayClock::default();
             loop {
                 // Non-blocking: applies at most whatever has queued up since
                 // the last iteration. `next_frame()`'s 1s live-mode timeout
@@ -1586,6 +1603,11 @@ async fn main() -> std::io::Result<()> {
                             previous_frame_timestamp = Some(timestamp);
                         }
                         let now_ms = start.elapsed().as_millis() as u64;
+                        // JAM-182: reassembly runs on the traffic's own time
+                        // (see `ReplayClock`). Everything else here keeps the
+                        // agent clock it already used.
+                        let reassembly_now_ms =
+                            reassembly_now_ms(mode == "replay", &mut replay_clock, timestamp, now_ms);
                         let Some(parsed) = parse::parse_packet(&data, link_type) else {
                             unparseable_frames.fetch_add(1, Ordering::Relaxed);
                             // JAM-16: pcap truncates a frame to exactly the
@@ -1601,7 +1623,7 @@ async fn main() -> std::io::Result<()> {
                             // length" and "a frame was never sent".
                             let active_snaplen = capture_config_state.lock().unwrap().snaplen;
                             if data.len() as u32 == active_snaplen {
-                                reassembly.note_frame_cut_at_snaplen(now_ms);
+                                reassembly.note_frame_cut_at_snaplen(reassembly_now_ms);
                                 if !snaplen_truncation_warned {
                                     snaplen_truncation_warned = true;
                                     eprintln!(
@@ -1655,12 +1677,12 @@ async fn main() -> std::io::Result<()> {
                         let sniff_outcome = reassembly.sniff(
                             &parsed,
                             flow_ident.as_ref().map(|(key, outbound)| (key, *outbound)),
-                            now_ms,
+                            reassembly_now_ms,
                         );
                         let flow_packet =
                             sniff_outcome.reassembled_packet.as_ref().unwrap_or(&parsed);
                         let l7_info = sniff_outcome.info;
-                        reassembly.maybe_evict(now_ms);
+                        reassembly.maybe_evict(reassembly_now_ms);
                         // A completed IP-fragment group has both physical and
                         // logical accounting: record this captured fragment
                         // once in the protocol hierarchy, then attribute the
@@ -2437,7 +2459,7 @@ mod tests {
         is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, parse_max_flows,
         parse_replay_local_addrs, parse_replay_speed, protocol_node_to_json,
         packet_osi_layer, resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
-        validate_snaplen, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
+        validate_snaplen, reassembly_now_ms, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::flow::FlowTable;
     use capture_agent::l7::L7Info;
@@ -3013,5 +3035,24 @@ mod tests {
     #[should_panic(expected = "not a valid positive integer")]
     fn parse_max_flows_rejects_a_negative_value() {
         let _ = parse_max_flows(Some("-1".to_string()));
+    }
+
+    // ---- JAM-182: replay reassembly clock ---------------------------------
+
+    #[test]
+    fn reassembly_runs_on_recorded_time_during_replay_and_agent_time_live() {
+        let origin = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let later = origin + std::time::Duration::from_secs(20);
+
+        // Replay: the frames' recorded timestamps, whatever the agent clock says.
+        let mut clock = ReplayClock::default();
+        assert_eq!(reassembly_now_ms(true, &mut clock, origin, 5), 0);
+        assert_eq!(reassembly_now_ms(true, &mut clock, later, 6), 20_000);
+
+        // Live: the agent clock, and the replay clock is left untouched.
+        let mut clock = ReplayClock::default();
+        assert_eq!(reassembly_now_ms(false, &mut clock, origin, 5), 5);
+        assert_eq!(reassembly_now_ms(false, &mut clock, later, 6), 6);
+        assert_eq!(clock.now_ms(later), 0, "live mode never advanced the replay clock");
     }
 }
