@@ -461,8 +461,8 @@ mod tests {
 
         backdate_current_file(&mut state, 61);
         assert_eq!(on_tick(&mut state, 0, 0, ample_free_space).unwrap().ring_file, Some(2));
-        // 91s since the run started, but only ~30s into file 2: autostop
-        // must fire anyway.
+        // 91s since the run started, but file 2 has only just opened (its
+        // own clock is ~0s): autostop must fire anyway.
         state.as_mut().unwrap().started_at = Instant::now() - std::time::Duration::from_secs(91);
         let status = on_tick(&mut state, 0, 0, ample_free_space).unwrap();
         assert_eq!(status.autostop_reason.as_deref(), Some("duration"));
