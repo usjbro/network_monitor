@@ -1,0 +1,73 @@
+// Host-header allowlist for every request the relay serves (JAM-176).
+//
+// Why: under DNS rebinding an attacker's domain re-resolves to 127.0.0.1,
+// so the browser treats the attacker's page as same-origin with this app.
+// That defeats lib/same-origin.ts (Sec-Fetch-Site reads `same-origin`) and
+// lets the page read /api/stream — including decrypted_payload events,
+// since a request without x-mtls-verified counts as direct loopback (see
+// lib/mtls-gate.ts). The one thing the attacker can't change is the Host
+// header: the browser always sends the attacker's own hostname. So only
+// loopback names, plus hostnames the operator explicitly lists for the
+// Caddy LAN front door (deploy/README.md step 5), are served.
+
+/** Loopback names a browser can only reach this app by on purpose. */
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+
+/** `ALLOWED_HOSTS`: comma-separated extra hostnames, ports ignored. */
+export function parseAllowedHosts(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((h) => h.trim())
+    .filter((h) => {
+      if (h.length === 0) return false;
+      // A URL or an unbracketed IPv6 address would otherwise be cut at its
+      // first ':' into a different name (`https://x` -> `https`). Skip it,
+      // loudly, instead of allowing something the operator never meant.
+      if (h.includes('/') || (!h.startsWith('[') && h.indexOf(':') !== h.lastIndexOf(':'))) {
+        console.warn(`ALLOWED_HOSTS: ignoring malformed entry ${JSON.stringify(h)} (use host, host:port or [ipv6])`);
+        return false;
+      }
+      return true;
+    })
+    .map(normalizeHostname)
+    .filter((h) => h.length > 0);
+}
+
+let cachedRaw: string | undefined;
+let cachedHosts: string[] = [];
+
+/**
+ * `ALLOWED_HOSTS` parsed once per distinct value. The middleware runs on
+ * every request, so parsing (and warning about a malformed entry) each
+ * time would flood the log; the env var is still read per request, so a
+ * changed value takes effect without a rebuild.
+ */
+export function allowedHostsFromEnv(): string[] {
+  const raw = process.env.ALLOWED_HOSTS;
+  if (raw !== cachedRaw) {
+    cachedRaw = raw;
+    cachedHosts = parseAllowedHosts(raw);
+  }
+  return cachedHosts;
+}
+
+/** Lowercases and strips any port, IPv6 brackets, and a trailing dot. */
+function normalizeHostname(host: string): string {
+  let name = host.toLowerCase();
+  if (name.startsWith('[')) {
+    const end = name.indexOf(']');
+    name = end === -1 ? '' : name.slice(1, end);
+  } else {
+    const colon = name.indexOf(':');
+    if (colon !== -1) name = name.slice(0, colon);
+  }
+  return name.endsWith('.') ? name.slice(0, -1) : name;
+}
+
+export function isAllowedHost(hostHeader: string | null, extraHosts: string[]): boolean {
+  if (!hostHeader) return false;
+  const name = normalizeHostname(hostHeader);
+  if (name.length === 0) return false;
+  return LOOPBACK_HOSTNAMES.has(name) || extraHosts.includes(name);
+}
