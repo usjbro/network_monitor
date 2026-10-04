@@ -492,6 +492,12 @@ impl IpFragmentReassembler {
         self.bytes_held
     }
 
+    /// Drops every group, keeping the lifetime counters.
+    fn clear(&mut self) {
+        self.groups.clear();
+        self.bytes_held = 0;
+    }
+
     pub fn groups_held(&self) -> usize {
         self.groups.len()
     }
@@ -797,6 +803,12 @@ impl TcpReassembler {
         self.bytes_held
     }
 
+    /// Drops every stream, keeping the lifetime counters.
+    fn clear(&mut self) {
+        self.streams.clear();
+        self.bytes_held = 0;
+    }
+
     pub fn streams_held(&self) -> usize {
         self.streams.len()
     }
@@ -1082,6 +1094,18 @@ pub struct StreamReassembler {
 impl StreamReassembler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Drops everything buffered — fragment groups, TCP streams, and the
+    /// recent snap-length cut signal — for when the traffic it was keyed on
+    /// is gone, such as after a runtime interface switch (JAM-183). Lifetime
+    /// counters are kept. The dropped partial reassemblies are not reported
+    /// or counted: nothing downstream consumes them, as with the results of
+    /// a periodic eviction sweep.
+    pub fn reset(&mut self) {
+        self.fragments.clear();
+        self.segments.clear();
+        self.last_frame_cut_at_ms = None;
     }
 
     /// Total real bytes held by reassembly right now, across both
@@ -2014,6 +2038,41 @@ mod tests {
             other => panic!("expected B's own ClientHello to decode, got {other:?}"),
         }
         assert_eq!(r.segment_counters().evicted_idle, 1, "A's stale entry is counted as evicted");
+    }
+
+    #[test]
+    fn reset_drops_buffered_fragments_and_tcp_bytes() {
+        // JAM-183: after a reset, nothing buffered before it can combine with
+        // what arrives after it.
+        let mut r = StreamReassembler::new();
+
+        let datagram = udp_dns_datagram();
+        let (head, tail) = datagram.split_at(16);
+        let first = ipv4_fragment("10.0.0.1", "10.0.0.2", 7, IpNumber::UDP, 0, true, head);
+        assert!(r.sniff(&first, None, 0).reassembled_packet.is_none());
+
+        let hello = build_client_hello("example.com");
+        let (start, rest) = hello.split_at(20);
+        let key = FlowKey { remote_port: 443, ..flow_key() };
+        let a = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 443, 500, start);
+        assert!(r.sniff(&a, Some((&key, true)), 0).need_more_bytes.is_some());
+        assert!(r.bytes_held() > 0, "fixture premise: both reassemblers hold bytes");
+
+        r.note_frame_cut_at_snaplen(0);
+        r.reset();
+        assert_eq!(r.bytes_held(), 0);
+        assert_eq!(r.frames_cut_at_snaplen(), 1, "lifetime counters survive a reset");
+
+        let last = ipv4_fragment("10.0.0.1", "10.0.0.2", 7, IpNumber::UDP, 16, false, tail);
+        assert!(
+            r.sniff(&last, None, 1).reassembled_packet.is_none(),
+            "a fragment after the reset must not complete a group from before it"
+        );
+        let b = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 443, 500 + start.len() as u32, rest);
+        assert!(
+            !matches!(r.sniff(&b, Some((&key, true)), 1).info, L7Info::TlsClientHello { .. }),
+            "a segment after the reset must not complete a ClientHello begun before it"
+        );
     }
 
     #[test]
