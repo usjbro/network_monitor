@@ -748,14 +748,46 @@ fn validate_capture_file_path(path: &str, cwd: &Path) -> Result<PathBuf, String>
         return Err(format!("capture file path rejected: {path} must not be inside .data/"));
     }
     let candidate = Path::new(path);
+    // JAM-181: a `..` component can walk back into cwd from a path whose
+    // text doesn't start with it, so refuse `..` outright rather than
+    // trying to reason about where it lands.
+    if candidate.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(format!("capture file path rejected: {path} must not contain '..' components"));
+    }
     let resolved = if candidate.is_absolute() { candidate.to_path_buf() } else { cwd.join(candidate) };
-    if resolved.starts_with(cwd) {
+    // ...and a symlinked directory can do the same. Compare with symlinks
+    // resolved on both sides: the deepest part of the target path that
+    // already exists, and cwd itself.
+    let real_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    if resolved.starts_with(cwd) || canonicalize_existing_prefix(&resolved).starts_with(&real_cwd) {
         return Err(format!(
             "capture file path rejected: {path} resolves inside this agent's working directory ({}) — choose a location outside it",
             cwd.display()
         ));
     }
     Ok(resolved)
+}
+
+/// `path` with symlinks resolved in its deepest ancestor that already
+/// exists. The file itself (and maybe some parent directories) doesn't
+/// exist yet, so `std::fs::canonicalize` can't be applied to the whole
+/// path. Falls back to `path` unchanged if nothing along it can be
+/// resolved.
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            return rest.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// Validates a `start_capture_file` request's `ring` option before it ever
@@ -2821,6 +2853,46 @@ mod tests {
         // fine").
         let cwd = Path::new("/home/user/network_monitor/capture-agent");
         assert!(validate_capture_file_path("../captures/run1.pcapng", cwd).is_err());
+    }
+
+    #[test]
+    fn validate_capture_file_path_rejects_an_absolute_dot_dot_path_that_lands_inside_cwd() {
+        // JAM-181: textually this doesn't start with cwd, but `..` walks
+        // straight back into it.
+        let cwd = Path::new("/home/user/network_monitor/capture-agent");
+        let err = validate_capture_file_path("/tmp/../home/user/network_monitor/capture-agent/run1.pcapng", cwd).unwrap_err();
+        assert!(err.contains(".."), "got: {err}");
+    }
+
+    #[test]
+    fn validate_capture_file_path_rejects_a_symlinked_parent_that_points_into_cwd() {
+        // JAM-181: a directory outside cwd that is really a symlink into it.
+        let root = std::env::temp_dir().join(format!("jam181-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = root.join("agent-cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let link = root.join("outside-link");
+        std::os::unix::fs::symlink(&cwd, &link).unwrap();
+
+        let candidate = link.join("run1.pcapng");
+        let result = validate_capture_file_path(candidate.to_str().unwrap(), &cwd);
+        std::fs::remove_dir_all(&root).ok();
+        let err = result.unwrap_err();
+        assert!(err.contains("working directory"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_capture_file_path_still_accepts_a_real_directory_outside_cwd() {
+        let root = std::env::temp_dir().join(format!("jam181-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = root.join("agent-cwd");
+        let captures = root.join("captures");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&captures).unwrap();
+
+        let result = validate_capture_file_path(captures.join("run1.pcapng").to_str().unwrap(), &cwd);
+        std::fs::remove_dir_all(&root).ok();
+        assert!(result.is_ok(), "got: {result:?}");
     }
 
     // --- MAX_FLOWS (JAM-6/GitHub #73) ---
