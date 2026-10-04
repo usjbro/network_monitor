@@ -44,4 +44,21 @@ describe('GET /api/install', () => {
     expect(body.startsWith('#!/bin/bash')).toBe(true);
     expect(body).toContain('set -e');
   });
+
+  // JAM-177: the Host header is client-controlled. Whatever it holds must
+  // land in the generated osi-mon script as exactly one JS string literal,
+  // never as code.
+  it.each([
+    'evil"; require("child_process").execSync("id"); "',
+    'evil`${process.exit(1)}`',
+    "evil'\\\"",
+  ])('keeps a hostile host header inside a single string literal: %s', async (host) => {
+    const res = await GET(req({ host }));
+    const body = await res.text();
+
+    const line = body.split('\n').find((l) => l.startsWith('const SERVER_URL = '));
+    expect(line).toBeDefined();
+    const literal = line!.slice('const SERVER_URL = '.length).replace(/;$/, '');
+    expect(JSON.parse(literal)).toBe(`https://${host}`);
+  });
 });
