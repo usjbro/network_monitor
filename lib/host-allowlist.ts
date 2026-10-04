@@ -34,6 +34,24 @@ export function parseAllowedHosts(raw: string | undefined): string[] {
     .filter((h) => h.length > 0);
 }
 
+let cachedRaw: string | undefined;
+let cachedHosts: string[] = [];
+
+/**
+ * `ALLOWED_HOSTS` parsed once per distinct value. The middleware runs on
+ * every request, so parsing (and warning about a malformed entry) each
+ * time would flood the log; the env var is still read per request, so a
+ * changed value takes effect without a rebuild.
+ */
+export function allowedHostsFromEnv(): string[] {
+  const raw = process.env.ALLOWED_HOSTS;
+  if (raw !== cachedRaw) {
+    cachedRaw = raw;
+    cachedHosts = parseAllowedHosts(raw);
+  }
+  return cachedHosts;
+}
+
 /** Lowercases and strips any port, IPv6 brackets, and a trailing dot. */
 function normalizeHostname(host: string): string {
   let name = host.toLowerCase();

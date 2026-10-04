@@ -84,6 +84,14 @@ describe('middleware Host enforcement', () => {
     expect(response.headers.get('content-security-policy')).toContain("default-src 'self'");
   });
 
+  it('warns about a malformed ALLOWED_HOSTS entry once, not on every request', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    process.env.ALLOWED_HOSTS = 'https://mymac.local';
+    for (let i = 0; i < 5; i++) middleware(request('/', '127.0.0.1:3000'));
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+  });
+
   it('honours ALLOWED_HOSTS at request time', () => {
     process.env.ALLOWED_HOSTS = 'mymac.local';
     expect(middleware(request('/', 'mymac.local')).status).toBe(200);

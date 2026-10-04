@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildCsp } from '@/lib/csp';
-import { isAllowedHost, parseAllowedHosts } from '@/lib/host-allowlist';
+import { allowedHostsFromEnv, isAllowedHost } from '@/lib/host-allowlist';
 
 export function middleware(request: NextRequest) {
   // DNS-rebinding guard (JAM-176) — before anything else, for every path.
-  if (!isAllowedHost(request.headers.get('host'), parseAllowedHosts(process.env.ALLOWED_HOSTS))) {
+  if (!isAllowedHost(request.headers.get('host'), allowedHostsFromEnv())) {
     return new NextResponse('Misdirected Request: host not allowed', { status: 421 });
   }
 
