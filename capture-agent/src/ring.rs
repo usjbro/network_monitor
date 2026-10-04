@@ -41,7 +41,13 @@ pub struct RingState {
     /// non-rotating capture always writes directly to `base_path` with no
     /// numbered suffix.
     current_index: u32,
+    /// When the whole run started — what `autostop.mode == "duration"`
+    /// measures, since a run-length limit spans every rotated file.
     started_at: Instant,
+    /// When the *current* file was opened — what `ring.mode == "duration"`
+    /// measures (JAM-180). Reset on every rotation, like
+    /// `packets_this_file`.
+    file_started_at: Instant,
     /// Packets written to the *current* file since it was opened — the
     /// counter `ring.mode == "count"` rotation checks. Reset to 0 on every
     /// rotation; NOT the same as a cumulative total.
@@ -170,6 +176,7 @@ pub fn start(
         autostop,
         current_index: 1,
         started_at: Instant::now(),
+        file_started_at: Instant::now(),
         packets_this_file: 0,
         bytes_before_current_file: 0,
     });
@@ -209,7 +216,7 @@ impl RingState {
 fn should_rotate(ring_state: &RingState) -> bool {
     match &ring_state.ring {
         Some(cfg) if cfg.mode == "size" => ring_state.writer.bytes_written() >= cfg.threshold,
-        Some(cfg) if cfg.mode == "duration" => ring_state.started_at.elapsed().as_secs() >= cfg.threshold,
+        Some(cfg) if cfg.mode == "duration" => ring_state.file_started_at.elapsed().as_secs() >= cfg.threshold,
         Some(cfg) if cfg.mode == "count" => ring_state.packets_this_file >= cfg.threshold,
         _ => false,
     }
@@ -281,6 +288,7 @@ pub fn on_tick(
                 let old_writer = std::mem::replace(&mut ring_state.writer, new_writer);
                 ring_state.bytes_before_current_file += old_writer.bytes_written();
                 ring_state.packets_this_file = 0;
+                ring_state.file_started_at = Instant::now();
                 if let Err(e) = finish_and_rename(old_writer, &old_final) {
                     eprintln!("capture-agent: error finalizing rotated capture file {}: {e}", old_final.display());
                 }
@@ -405,6 +413,63 @@ mod tests {
         stop(&mut state);
         std::fs::remove_file(&first_final).ok();
         std::fs::remove_file(&second_final).ok();
+    }
+
+    /// Moves every clock this run's duration checks read back by `secs`,
+    /// as if that much time had already passed in the current file.
+    fn backdate_current_file(state: &mut Option<RingState>, secs: u64) {
+        let ring_state = state.as_mut().unwrap();
+        let earlier = Instant::now() - std::time::Duration::from_secs(secs);
+        ring_state.started_at = earlier;
+        ring_state.file_started_at = earlier;
+    }
+
+    #[test]
+    fn a_duration_triggered_rotation_waits_a_full_period_before_rotating_again() {
+        // JAM-180: the duration threshold must be measured from when the
+        // *current* file opened. Measured from run start, it stays exceeded
+        // after the first rotation and every later ~1s tick rotates again.
+        let base = unique_base("duration-rotate");
+        let ring = || Some(RingConfigJson { mode: "duration".into(), threshold: 60 });
+        let mut state: Option<RingState> = None;
+        start(&mut state, &base, ring(), None, &test_idb(), "host", "0.1.0", ample_free_space).unwrap();
+
+        backdate_current_file(&mut state, 61);
+        let status = on_tick(&mut state, 0, 0, ample_free_space).unwrap();
+        assert_eq!(status.ring_file, Some(2), "a file older than the threshold should rotate");
+
+        // The next ticks happen well inside the new file's 60s window.
+        for _ in 0..3 {
+            let status = on_tick(&mut state, 0, 0, ample_free_space).unwrap();
+            assert_eq!(status.ring_file, Some(2), "a freshly opened file must not rotate again before its own 60s");
+        }
+
+        stop(&mut state);
+        for index in 1..=5 {
+            std::fs::remove_file(member_path(&base, &ring(), index)).ok();
+        }
+    }
+
+    #[test]
+    fn autostop_by_duration_is_still_measured_from_the_start_of_the_run() {
+        // JAM-180 must not change autostop: a run-length limit spans every
+        // rotated file, so it stays measured from run start.
+        let base = unique_base("duration-autostop-span");
+        let ring = || Some(RingConfigJson { mode: "duration".into(), threshold: 60 });
+        let mut state: Option<RingState> = None;
+        start(&mut state, &base, ring(), Some(AutostopConfigJson { mode: "duration".into(), threshold: 90 }), &test_idb(), "host", "0.1.0", ample_free_space).unwrap();
+
+        backdate_current_file(&mut state, 61);
+        assert_eq!(on_tick(&mut state, 0, 0, ample_free_space).unwrap().ring_file, Some(2));
+        // 91s since the run started, but file 2 has only just opened (its
+        // own clock is ~0s): autostop must fire anyway.
+        state.as_mut().unwrap().started_at = Instant::now() - std::time::Duration::from_secs(91);
+        let status = on_tick(&mut state, 0, 0, ample_free_space).unwrap();
+        assert_eq!(status.autostop_reason.as_deref(), Some("duration"));
+
+        for index in 1..=3 {
+            std::fs::remove_file(member_path(&base, &ring(), index)).ok();
+        }
     }
 
     #[test]
