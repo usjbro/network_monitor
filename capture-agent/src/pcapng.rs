@@ -374,6 +374,39 @@ pub struct ParsedInterface {
     pub interface_name: Option<String>,
     pub link_type: crate::parse::LinkType,
     pub snaplen: u32,
+    /// The raw `if_tsresol` byte: the unit of this interface's packet
+    /// timestamps. Defaults to microseconds when the option is absent, as
+    /// the pcapng spec says, which is what most other tools write. This
+    /// agent's own `Writer` always writes nanoseconds.
+    pub timestamp_resolution: u8,
+}
+
+/// `if_tsresol`'s default when an IDB omits it: 10^-6 s.
+const DEFAULT_TSRESOL: u8 = 6;
+
+/// Converts an EPB's raw 64-bit timestamp counter to a `SystemTime`, in the
+/// unit its IDB's `if_tsresol` declared. JAM-182: reading every counter as
+/// nanoseconds made a standard microsecond file replay 1,000x slowly, which
+/// kept reassembly timeouts from ever expiring.
+///
+/// `if_tsresol`'s high bit selects the base: clear means 10^-n seconds, set
+/// means 2^-n. A unit too fine to represent (which no real capture uses) is
+/// rejected as invalid data rather than allowed to overflow.
+fn epb_timestamp(counter: u64, tsresol: u8) -> io::Result<SystemTime> {
+    let exponent = u32::from(tsresol & 0x7f);
+    let units_per_second: Option<u128> = if tsresol & 0x80 == 0 {
+        10u128.checked_pow(exponent)
+    } else {
+        2u128.checked_pow(exponent)
+    };
+    let units_per_second = units_per_second.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("unsupported pcapng if_tsresol {tsresol:#04x}"))
+    })?;
+    let nanos = u128::from(counter) * 1_000_000_000 / units_per_second;
+    let nanos = u64::try_from(nanos).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidData, "pcapng timestamp out of range")
+    })?;
+    Ok(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos))
 }
 
 fn parse_interface_description(body: &[u8]) -> io::Result<ParsedInterface> {
@@ -386,13 +419,14 @@ fn parse_interface_description(body: &[u8]) -> io::Result<ParsedInterface> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("unsupported pcapng linktype {linktype_raw}")))?;
 
     let mut interface_name = None;
-    for_each_option(&body[8..], |code, value| {
-        if code == IF_NAME {
-            interface_name = Some(String::from_utf8_lossy(value).into_owned());
-        }
+    let mut timestamp_resolution = DEFAULT_TSRESOL;
+    for_each_option(&body[8..], |code, value| match code {
+        IF_NAME => interface_name = Some(String::from_utf8_lossy(value).into_owned()),
+        IF_TSRESOL if value.len() == 1 => timestamp_resolution = value[0],
+        _ => {}
     })?;
 
-    Ok(ParsedInterface { interface_name, link_type, snaplen })
+    Ok(ParsedInterface { interface_name, link_type, snaplen, timestamp_resolution })
 }
 
 /// A captured frame, decoded back from an Enhanced Packet Block —
@@ -407,7 +441,7 @@ pub struct ParsedPacket {
     pub data: Vec<u8>,
 }
 
-fn parse_enhanced_packet(body: &[u8]) -> io::Result<ParsedPacket> {
+fn parse_enhanced_packet(body: &[u8], tsresol: u8) -> io::Result<ParsedPacket> {
     if body.len() < 20 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "truncated enhanced packet block"));
     }
@@ -423,8 +457,7 @@ fn parse_enhanced_packet(body: &[u8]) -> io::Result<ParsedPacket> {
     }
     let data = body[20..20 + cap_len].to_vec();
 
-    let ts_ns = ((ts_high as u64) << 32) | ts_low as u64;
-    let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(ts_ns);
+    let timestamp = epb_timestamp(((ts_high as u64) << 32) | ts_low as u64, tsresol)?;
 
     let mut direction = Direction::Unknown;
     for_each_option(&body[20 + padded_len..], |code, value| {
@@ -451,6 +484,8 @@ fn parse_enhanced_packet(body: &[u8]) -> io::Result<ParsedPacket> {
 /// corruption, not a legitimate extension.
 pub struct Reader<R: Read> {
     inner: R,
+    /// The single IDB's `if_tsresol`, applied to every packet's timestamp.
+    tsresol: u8,
 }
 
 impl<R: Read> Reader<R> {
@@ -472,7 +507,7 @@ impl<R: Read> Reader<R> {
         }
         let interface = parse_interface_description(&body)?;
 
-        Ok((Self { inner }, interface))
+        Ok((Self { inner, tsresol: interface.timestamp_resolution }, interface))
     }
 
     /// Returns the next captured packet, transparently skipping any
@@ -482,7 +517,7 @@ impl<R: Read> Reader<R> {
         loop {
             match read_block(&mut self.inner)? {
                 None => return Ok(None),
-                Some((BT_ENHANCED_PACKET, body)) => return Ok(Some(parse_enhanced_packet(&body)?)),
+                Some((BT_ENHANCED_PACKET, body)) => return Ok(Some(parse_enhanced_packet(&body, self.tsresol)?)),
                 Some((BT_INTERFACE_STATISTICS, _)) => continue,
                 Some((other, _)) => {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unexpected pcapng block type {other:#x}")));
@@ -803,6 +838,44 @@ mod reader_tests {
     fn reader_errors_on_a_packet_whose_declared_capture_length_exceeds_the_block() {
         let mut body = vec![0u8; 20];
         body[12..16].copy_from_slice(&1_000_000u32.to_le_bytes()); // claims a huge capture length
-        assert!(parse_enhanced_packet(&body).is_err());
+        assert!(parse_enhanced_packet(&body, 9).is_err());
+    }
+
+    #[test]
+    fn epb_timestamps_are_decoded_in_the_idbs_declared_unit() {
+        // JAM-182: the same instant, as written by tools using each unit.
+        let one_and_a_half_s = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_500);
+        assert_eq!(epb_timestamp(1_500_000_000, 9).unwrap(), one_and_a_half_s, "nanoseconds");
+        assert_eq!(epb_timestamp(1_500_000, 6).unwrap(), one_and_a_half_s, "microseconds, the default");
+        assert_eq!(epb_timestamp(1_500, 3).unwrap(), one_and_a_half_s, "milliseconds");
+        assert_eq!(epb_timestamp(3 << 19, 0x80 | 20).unwrap(), one_and_a_half_s, "binary: 2^-20 s units");
+    }
+
+    #[test]
+    fn epb_timestamp_rejects_an_unrepresentable_unit_instead_of_overflowing() {
+        assert!(epb_timestamp(1, 0x7f).is_err(), "10^-127 s overflows");
+        assert!(epb_timestamp(u64::MAX, 3).is_err(), "u64::MAX milliseconds is past SystemTime's nanosecond range");
+    }
+
+    /// An IDB body (linktype Raw, snaplen 65535) with the given options.
+    fn idb_body(options: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&pcapng_linktype(crate::parse::LinkType::Raw).to_le_bytes());
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&65535u32.to_le_bytes());
+        for (code, value) in options {
+            body.extend_from_slice(&code.to_le_bytes());
+            body.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            body.extend_from_slice(value);
+            body.resize(pad4(body.len()), 0);
+        }
+        body.extend_from_slice(&[0, 0, 0, 0]); // opt_endofopt
+        body
+    }
+
+    #[test]
+    fn an_idb_without_if_tsresol_defaults_to_microseconds() {
+        assert_eq!(parse_interface_description(&idb_body(&[])).unwrap().timestamp_resolution, 6);
+        assert_eq!(parse_interface_description(&idb_body(&[(IF_TSRESOL, &[9])])).unwrap().timestamp_resolution, 9);
     }
 }
