@@ -7,6 +7,7 @@ use capture_agent::{
     keylog::KeyLogWatcher,
     l7, parse, pcapng, process_lookup,
     rate_limit::PacketEventLimiter,
+    reassembly::{ReassemblyStatus, StreamReassembler},
     ring,
     ring_buffer::DecryptedRingBuffer,
     tls_decrypt::{self, DecryptOutcome},
@@ -1460,6 +1461,18 @@ async fn main() -> std::io::Result<()> {
             // `None` for the life of a replay process, reporting absent
             // rather than a fabricated value.
             let mut last_stats_poll = Instant::now();
+            // JAM-16 stream reassembly. Lives on this thread only: it holds
+            // per-flow and per-fragment-group buffers that nothing else
+            // touches, so it needs no lock, and its own eviction is driven
+            // from here (see `StreamReassembler::maybe_evict` for why it
+            // isn't folded into `FlowTable::evict_stale`, which runs on the
+            // periodic emitter task instead).
+            let mut reassembly = StreamReassembler::new();
+            // Latched so a narrowed snap length is reported once to stderr
+            // rather than per frame. Reassembly cannot recover bytes pcap
+            // already cut off, and silently producing partial L7 would be
+            // exactly the confidently-wrong output this task exists to avoid.
+            let mut snaplen_truncation_warned = false;
             // Realtime replay pacing (spec Components §2) — both are no-ops
             // in Live mode: `replay_speed()` is only ever read when
             // `mode == "replay"`, below.
@@ -1543,6 +1556,29 @@ async fn main() -> std::io::Result<()> {
                         let now_ms = start.elapsed().as_millis() as u64;
                         let Some(parsed) = parse::parse_packet(&data, link_type) else {
                             unparseable_frames.fetch_add(1, Ordering::Relaxed);
+                            // JAM-16: pcap truncates a frame to exactly the
+                            // snap length, and `parse_packet` rejects any
+                            // frame shorter than its IP header's declared
+                            // length. That combination — rejected, and
+                            // captured length exactly the active snap length
+                            // — means the frame was cut at capture rather
+                            // than malformed on the wire. This call site is
+                            // the only place that knows both numbers, so it
+                            // is the only place that can tell reassembly the
+                            // difference between "bytes were lost to the snap
+                            // length" and "a frame was never sent".
+                            let active_snaplen = capture_config_state.lock().unwrap().snaplen;
+                            if data.len() as u32 == active_snaplen {
+                                reassembly.note_frame_cut_at_snaplen(now_ms);
+                                if !snaplen_truncation_warned {
+                                    snaplen_truncation_warned = true;
+                                    eprintln!(
+                                        "capture-agent: frames are being cut short by the {active_snaplen}-byte capture snap length; \
+                                         reassembled application-layer data will be reported incomplete ({})",
+                                        ReassemblyStatus::IncompleteTruncatedAtCapture.label()
+                                    );
+                                }
+                            }
                             // JAM-12 Expert Info: malformed-frame. Neither
                             // frameId nor flowId — parse_packet failing
                             // means no ParsedPacket, and therefore no
@@ -1574,8 +1610,40 @@ async fn main() -> std::io::Result<()> {
                             }
                             continue;
                         };
-                        let l7_info = l7::sniff_l7(&parsed.payload, parsed.dst_port);
-                        let observe_result = flow_table.lock().unwrap().observe(&parsed, &l7_info, now_ms);
+                        // JAM-16: sniff through reassembly, so a request line
+                        // or ClientHello split across TCP segments resolves
+                        // instead of silently disappearing, and an IPv4
+                        // fragment gets an application layer at all. The flow
+                        // identity comes from `FlowTable::key_for` — the same
+                        // function `observe` below uses — rather than a second
+                        // derivation that could drift from it. For the common
+                        // single-segment case this is the existing per-packet
+                        // `sniff_l7` with nothing buffered.
+                        let flow_ident = flow_table.lock().unwrap().key_for(&parsed);
+                        let sniff_outcome = reassembly.sniff(
+                            &parsed,
+                            flow_ident.as_ref().map(|(key, outbound)| (key, *outbound)),
+                            now_ms,
+                        );
+                        let flow_packet =
+                            sniff_outcome.reassembled_packet.as_ref().unwrap_or(&parsed);
+                        let l7_info = sniff_outcome.info;
+                        reassembly.maybe_evict(now_ms);
+                        // A completed IP-fragment group has both physical and
+                        // logical accounting: record this captured fragment
+                        // once in the protocol hierarchy, then attribute the
+                        // reconstructed datagram to its transport flow without
+                        // counting its bytes as another physical frame.
+                        // `parsed` remains the packet-event/capture-file data.
+                        let observe_result = {
+                            let mut table = flow_table.lock().unwrap();
+                            match sniff_outcome.reassembled_packet.as_ref() {
+                                Some(reassembled) => {
+                                    table.observe_reassembled(&parsed, reassembled, &l7_info, now_ms)
+                                }
+                                None => table.observe(&parsed, &l7_info, now_ms),
+                            }
+                        };
 
                         // Aggregate throughput counters (issue #64) — driven
                         // by the same direction FlowTable::observe just
@@ -1585,7 +1653,7 @@ async fn main() -> std::io::Result<()> {
                         // tracked flow (e.g. broadcast/multicast traffic
                         // captured in promiscuous mode) counts toward
                         // neither total, same as before.
-                        let len = parsed.total_len as u64;
+                        let len = flow_packet.total_len as u64;
                         let direction = match observe_result.as_ref().map(|r| r.is_outbound) {
                             Some(true) => {
                                 total_tx_bytes.fetch_add(len, Ordering::Relaxed);
@@ -2687,6 +2755,8 @@ mod tests {
             ip_version: 4,
             ip_checksum: Some(0),
             vlan_tag: None,
+            ip_declared_payload_len: 0,
+            ip_fragment: None,
         };
         table.observe(&packet, &L7Info::Dns { query_name: "example.com".to_string() }, 0);
 
