@@ -409,11 +409,15 @@ impl FragmentGroup {
 ///   behind the latest one seen. The clock holds, and keeps measuring from
 ///   that latest timestamp, so the next forward step doesn't count the
 ///   skipped gap twice.
-/// - **A reset** (the capture host's clock stepped back, one corrupt
-///   timestamp): a step back of more than `REPLAY_REORDER_TOLERANCE`. The
-///   clock holds and measures from the new timestamp. Measuring from the
-///   old high-water mark would freeze the clock until recorded time caught
-///   up, possibly for the rest of the file, which is the original bug again.
+/// - **A reset** (the capture host's clock stepped back): a step back of
+///   more than `REPLAY_REORDER_TOLERANCE`, confirmed by the next frame also
+///   being that far behind. The clock then measures from the new timeline.
+///   Measuring from the old high-water mark would freeze the clock until
+///   recorded time caught up, possibly for the rest of the file, which is
+///   the original bug again.
+/// - **One outlier** (a single corrupt timestamp): a frame that far behind
+///   whose next frame returns to the old timeline. It's ignored, so the
+///   return isn't charged as elapsed time.
 ///
 /// Steps are summed at full `Duration` precision and only the total is
 /// converted to milliseconds: frames under a millisecond apart are common on
@@ -422,6 +426,9 @@ impl FragmentGroup {
 pub struct ReplayClock {
     /// The latest timestamp the clock has measured up to.
     latest: Option<std::time::SystemTime>,
+    /// A frame more than `REPLAY_REORDER_TOLERANCE` behind `latest`, held
+    /// until the next frame shows whether it was a reset or an outlier.
+    pending_reset: Option<std::time::SystemTime>,
     elapsed: std::time::Duration,
 }
 
@@ -433,15 +440,30 @@ pub const REPLAY_REORDER_TOLERANCE: std::time::Duration = std::time::Duration::f
 
 impl ReplayClock {
     pub fn now_ms(&mut self, frame_timestamp: std::time::SystemTime) -> u64 {
-        match self.latest {
-            None => self.latest = Some(frame_timestamp),
-            Some(latest) => match frame_timestamp.duration_since(latest) {
-                Ok(step) => {
-                    self.elapsed = self.elapsed.saturating_add(step);
+        let Some(latest) = self.latest else {
+            self.latest = Some(frame_timestamp);
+            return 0;
+        };
+        match frame_timestamp.duration_since(latest) {
+            // On the current timeline: forward advances, reordering holds.
+            // Either way, any pending reset was an outlier.
+            Ok(step) => {
+                self.pending_reset = None;
+                self.elapsed = self.elapsed.saturating_add(step);
+                self.latest = Some(frame_timestamp);
+            }
+            Err(behind) if behind.duration() <= REPLAY_REORDER_TOLERANCE => self.pending_reset = None,
+            // Far behind: hold until the next frame confirms a reset.
+            Err(_) => match self.pending_reset.take() {
+                None => self.pending_reset = Some(frame_timestamp),
+                Some(pending) => {
+                    // Confirmed: move to the new timeline, counting only the
+                    // time it has advanced since it began.
+                    if let Ok(step) = frame_timestamp.duration_since(pending) {
+                        self.elapsed = self.elapsed.saturating_add(step);
+                    }
                     self.latest = Some(frame_timestamp);
                 }
-                Err(behind) if behind.duration() <= REPLAY_REORDER_TOLERANCE => {}
-                Err(_) => self.latest = Some(frame_timestamp),
             },
         }
         u64::try_from(self.elapsed.as_millis()).unwrap_or(u64::MAX)
@@ -1615,11 +1637,23 @@ mod tests {
         clock.now_ms(at_secs(1_000));
         clock.now_ms(at_secs(1_000 - tolerance));
         assert_eq!(clock.now_ms(at_secs(1_001)), 1_000);
-        // Just past it: a reset, measured from the new timestamp.
+        // Just past it, confirmed by the next frame: a reset, measured from
+        // the new timeline.
         let mut clock = ReplayClock::default();
         clock.now_ms(at_secs(1_000));
-        clock.now_ms(at_secs(1_000 - tolerance - 1));
-        assert_eq!(clock.now_ms(at_secs(1_000 - tolerance)), 1_000);
+        clock.now_ms(at_secs(1_000 - tolerance - 2));
+        assert_eq!(clock.now_ms(at_secs(1_000 - tolerance - 1)), 1_000);
+    }
+
+    #[test]
+    fn replay_clock_ignores_a_single_far_behind_outlier() {
+        // One corrupt timestamp mid-capture: 1000 s, 1010 s, 0 s, 1011 s.
+        // Only 11 s passed; the return from the outlier is not elapsed time.
+        let mut clock = ReplayClock::default();
+        clock.now_ms(at_secs(1_000));
+        assert_eq!(clock.now_ms(at_secs(1_010)), 10_000);
+        assert_eq!(clock.now_ms(at_secs(0)), 10_000, "an outlier holds the clock");
+        assert_eq!(clock.now_ms(at_secs(1_011)), 11_000);
     }
 
     #[test]
