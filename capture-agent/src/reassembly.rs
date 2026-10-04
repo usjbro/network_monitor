@@ -134,6 +134,11 @@ pub struct ReassemblyCounters {
     /// the observable signal for an overlap rewrite attempt; a plain
     /// retransmission (identical bytes) never touches it.
     pub conflicting_overlap_bytes: u64,
+    /// Last fragments (MF clear) whose declared end was ignored because the
+    /// group already had a different end, or already held bytes past it
+    /// (JAM-172). A nonzero value is the signal for an attempt to cut short
+    /// a datagram with a forged last fragment.
+    pub conflicting_terminal_fragments: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -440,13 +445,27 @@ impl IpFragmentReassembler {
             let hole_at = offset.saturating_add(fragment.payload.len());
             group.short_captured_at = Some(group.short_captured_at.map_or(hole_at, |at| at.min(hole_at)));
         }
+        let mut conflicting_terminal = false;
         if !fragment.more_fragments {
             // The last fragment fixes the datagram's total length. Its
             // *declared* length is used, so a last fragment cut short at
             // capture still reveals the true total rather than understating
             // it into a false "complete".
+            //
+            // JAM-172: the end is first-seen-wins like the data bytes. A
+            // later last fragment can't move an end that is already known,
+            // and no real last fragment can end before bytes the group
+            // already holds. Either would let one forged fragment cut short
+            // a datagram the monitor has already buffered.
             let declared = packet.ip_declared_payload_len as usize;
-            group.total_len = Some(offset.saturating_add(declared));
+            let end = offset.saturating_add(declared);
+            let held_past_end = group.filled.iter().skip(end).any(|&filled| filled);
+            match group.total_len {
+                Some(existing) if existing != end => conflicting_terminal = true,
+                Some(_) => {}
+                None if held_past_end => conflicting_terminal = true,
+                None => group.total_len = Some(end),
+            }
         }
 
         let before = group.data.len();
@@ -463,6 +482,9 @@ impl IpFragmentReassembler {
         // Disjoint field borrows: `group` borrows `self.groups` only.
         self.bytes_held = self.bytes_held.saturating_add(after).saturating_sub(before);
         self.counters.conflicting_overlap_bytes += written.conflicting as u64;
+        if conflicting_terminal {
+            self.counters.conflicting_terminal_fragments += 1;
+        }
 
         let emitted = match status {
             ReassemblyStatus::Reassembled => self.take_group(&key, status),
@@ -1346,6 +1368,57 @@ mod tests {
         assert_eq!(rejoined.status, ReassemblyStatus::Reassembled);
         let parsed = parse_packet(&rejoined.bytes, LinkType::Raw).expect("must parse");
         assert_eq!(parsed.dst_port, Some(53));
+    }
+
+    // JAM-172: the datagram's total length comes from a last fragment (MF
+    // clear), so it must follow the same first-seen-wins rule as the data
+    // bytes. Otherwise one forged last fragment can cut short a datagram
+    // the monitor already holds.
+    #[test]
+    fn a_later_last_fragment_cannot_shorten_an_already_known_total_length() {
+        let datagram = udp_dns_datagram();
+        assert!(datagram.len() > 24, "fixture must be long enough to split at 16 and forge an end at 16");
+        let (head, tail) = datagram.split_at(16);
+        let mut r = IpFragmentReassembler::new();
+
+        // The genuine last fragment fixes the total length first.
+        assert!(r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 9, IpNumber::UDP, 16, false, tail), 0).is_none());
+        // A forged last fragment claims the datagram ends at byte 16.
+        assert!(r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 9, IpNumber::UDP, 8, false, &head[8..16]), 1).is_none());
+        assert_eq!(r.counters().conflicting_terminal_fragments, 1, "the forged end must be counted, not silently ignored");
+        // The genuine head arrives: the whole datagram must come back, not
+        // the forged 16-byte prefix.
+        let rejoined = r
+            .feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 9, IpNumber::UDP, 0, true, head), 2)
+            .expect("the head must complete the group");
+        assert_eq!(rejoined.status, ReassemblyStatus::Reassembled);
+        let parsed = parse_packet(&rejoined.bytes, LinkType::Raw).expect("must parse");
+        assert_eq!(parsed.payload.len() + 8, datagram.len(), "the rejoined datagram must keep its genuine length");
+    }
+
+    #[test]
+    fn a_last_fragment_ending_before_bytes_already_held_is_rejected() {
+        let datagram = udp_dns_datagram();
+        assert!(datagram.len() > 24, "fixture must be long enough to hold 24 bytes before the tail");
+        let (head, tail) = datagram.split_at(24);
+        let mut r = IpFragmentReassembler::new();
+
+        // 24 genuine bytes are already held when a forged last fragment
+        // claims the datagram ends at byte 16. No real datagram can end
+        // before bytes it has already delivered, so this must not cut the
+        // held prefix down to 16 and emit it.
+        assert!(r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 11, IpNumber::UDP, 0, true, head), 0).is_none());
+        assert!(
+            r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 11, IpNumber::UDP, 8, false, &head[8..16]), 1).is_none(),
+            "a forged short last fragment must not complete the group"
+        );
+        assert_eq!(r.counters().conflicting_terminal_fragments, 1);
+        let rejoined = r
+            .feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 11, IpNumber::UDP, 24, false, tail), 2)
+            .expect("the genuine last fragment must complete the group");
+        assert_eq!(rejoined.status, ReassemblyStatus::Reassembled);
+        let parsed = parse_packet(&rejoined.bytes, LinkType::Raw).expect("must parse");
+        assert_eq!(parsed.payload.len() + 8, datagram.len());
     }
 
     #[test]
