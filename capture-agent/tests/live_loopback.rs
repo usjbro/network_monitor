@@ -354,3 +354,102 @@ fn a_live_capture_written_to_file_opens_cleanly_afterward() {
         "capture file's Section Header Block is missing its byte-order magic"
     );
 }
+
+/// JAM-175: a browser can reach 127.0.0.1:9990 with a cross-protocol
+/// `fetch` POST, whose HTTP request line and headers arrive before a JSON
+/// body. The agent must close the connection on that first non-JSON line,
+/// so the body's `start_capture_file` never runs.
+#[test]
+#[ignore = "requires CAP_NET_RAW/CAP_NET_ADMIN (or root) to open a live capture on `lo`; same CI step as captures_real_loopback_traffic_and_emits_matching_wire_events"]
+fn a_browser_style_http_post_is_dropped_before_its_json_body_runs() {
+    let capture_path = std::env::temp_dir().join(format!("capture-agent-cross-protocol-{}.pcapng", std::process::id()));
+    let _ = std::fs::remove_file(&capture_path);
+
+    let bin = env!("CARGO_BIN_EXE_capture-agent");
+    let mut child = Command::new(bin)
+        .env("CAPTURE_INTERFACE", "lo")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn capture-agent binary");
+
+    let stdout_rx = drain_to_string(child.stdout.take().unwrap());
+    let stderr_rx = drain_to_string(child.stderr.take().unwrap());
+    let guard = AgentGuard(child);
+
+    let mut stream = poll_until(Duration::from_secs(15), || TcpStream::connect("127.0.0.1:9990").ok())
+        .unwrap_or_else(|| panic!("{}", diagnostics("agent never opened its TCP listener", &stdout_rx, &stderr_rx)));
+    stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+
+    // What `fetch('http://127.0.0.1:9990', {method:'POST', mode:'no-cors',
+    // body})` puts on the wire.
+    let body = format!("\n{{\"type\":\"start_capture_file\",\"path\":\"{}\"}}\n", capture_path.display());
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: 127.0.0.1:9990\r\nContent-Type: text/plain;charset=UTF-8\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    // The agent may have queued some events for this connection before it
+    // read the request line; drain them until EOF (or a reset, which is
+    // also a close when unread request bytes remain).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut buf = [0u8; 4096];
+    let mut closed = false;
+    while Instant::now() < deadline {
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                closed = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                closed = true;
+                break;
+            }
+            Err(e) => panic!("error reading from agent wire socket: {e}"),
+        }
+    }
+
+    // Observe the agent from a second, well-behaved connection: its
+    // per-tick capture_file_status must never report the body's capture as
+    // running. (Checking the filesystem isn't reliable — the writer's file
+    // isn't guaranteed to be at `capture_path` mid-capture.)
+    let observer = TcpStream::connect("127.0.0.1:9990").expect("failed to open observer connection");
+    observer.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let mut observer = BufReader::new(observer);
+    let mut status_ticks = 0;
+    let mut writing_seen: Option<String> = None;
+    let observe_deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < observe_deadline && status_ticks < 3 && writing_seen.is_none() {
+        line.clear();
+        match observer.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let Ok(event) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+                if event.get("type").and_then(|t| t.as_str()) == Some("capture_file_status") {
+                    status_ticks += 1;
+                    if event["status"].get("writing").and_then(|v| v.as_bool()) == Some(true) {
+                        writing_seen = Some(line.trim().to_string());
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(e) => panic!("error reading from observer socket: {e}"),
+        }
+    }
+    drop(guard);
+    let _ = std::fs::remove_file(&capture_path);
+
+    if let Some(status) = writing_seen {
+        panic!(
+            "{}",
+            diagnostics(&format!("start_capture_file from the HTTP body ran: {status}"), &stdout_rx, &stderr_rx)
+        );
+    }
+    assert!(status_ticks > 0, "{}", diagnostics("never saw a capture_file_status tick", &stdout_rx, &stderr_rx));
+    assert!(closed, "{}", diagnostics("agent kept the HTTP connection open", &stdout_rx, &stderr_rx));
+}
