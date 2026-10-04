@@ -35,6 +35,8 @@ cd capture-agent && cargo build --release && cd ..
 
 ## Run it
 
+> **Before your first capture:** the agent records traffic from other devices on your network as well as your own. Capture only on networks you own or administer, and read [Capture sensitivity, storage and legal guidance](security.md#capture-sensitivity-storage-and-legal-guidance) first.
+
 You need **two processes running at once**, in two terminals.
 
 **Terminal 1 — the capture agent:**
