@@ -30,14 +30,38 @@ pub enum L7Info {
     None,
 }
 
+/// The first **complete** line of `payload` as text, or `None` when no line
+/// terminator has arrived yet or the line isn't valid UTF-8.
+///
+/// Two deliberate differences from the `std::str::from_utf8(payload)?.lines()
+/// .next()` this replaced (JAM-16), both of which were silent wrong-output
+/// bugs rather than style:
+///
+/// 1. **A line terminator is required.** Without one, `"GET /ind"` — the first
+///    half of `"GET /index.html HTTP/1.1\r\n"` split across two TCP segments —
+///    decoded as a complete request for the path `/ind`. That is confidently
+///    wrong output, worse than none: the caller has no way to tell it from a
+///    real request for a real path named `/ind`. Declining instead is what
+///    lets `sniff_l7_desegmenting` report `NeedMoreBytes` and a reassembling
+///    caller recover the true path.
+/// 2. **Only the first line is UTF-8-validated**, not the whole payload. An
+///    HTTP response carrying a binary body (an image, gzip, anything) failed
+///    `from_utf8` on the body and so was never recognized at all, even though
+///    its status line was perfectly readable ASCII.
+fn first_complete_line(payload: &[u8]) -> Option<&str> {
+    let newline = payload.iter().position(|b| *b == b'\n')?;
+    let line = payload.get(..newline)?;
+    // A CRLF terminator leaves a trailing CR on the line; a bare LF doesn't.
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    std::str::from_utf8(line).ok()
+}
+
 fn sniff_http(payload: &[u8]) -> Option<L7Info> {
-    let text = std::str::from_utf8(payload).ok()?;
-    let first_line = text.lines().next()?;
+    let first_line = first_complete_line(payload)?;
     let mut parts = first_line.split_whitespace();
     let method = parts.next()?;
     let path = parts.next()?;
-    let known_methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"];
-    if known_methods.contains(&method) && path.starts_with('/') {
+    if HTTP_METHODS.contains(&method) && path.starts_with('/') {
         Some(L7Info::Http {
             method: method.to_string(),
             path: path.to_string(),
@@ -55,8 +79,7 @@ fn sniff_http(payload: &[u8]) -> Option<L7Info> {
 /// request line is not — this and `sniff_http` above never both match the
 /// same payload.
 fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
-    let text = std::str::from_utf8(payload).ok()?;
-    let first_line = text.lines().next()?;
+    let first_line = first_complete_line(payload)?;
     let mut parts = first_line.split_whitespace();
     let version = parts.next()?;
     if !version.starts_with("HTTP/") {
@@ -191,7 +214,51 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
     Some(L7Info::TlsClientHello { sni, ja3, ja3_label, client_random, sni_offset, sni_len })
 }
 
-pub fn sniff_l7(payload: &[u8], dst_port: Option<u16>) -> L7Info {
+/// The known HTTP request methods `sniff_http` accepts. Shared with
+/// `unterminated_http_start_line` below so the "is this a plausible partial
+/// request line" probe can never recognize a method the real detector
+/// wouldn't, or miss one it would.
+const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"];
+
+/// The outcome of sniffing a buffer that may or may not hold a complete
+/// application-layer message — the desegmentation hand-off JAM-16 needed and
+/// `sniff_l7`'s `L7Info`-only return couldn't express.
+///
+/// `sniff_l7` silently returns `L7Info::None` both for "these bytes are not a
+/// protocol I know" and for "these bytes are the first half of an HTTP request
+/// I would have recognized". Those are completely different facts to a caller
+/// doing TCP reassembly: the first means stop, the second means buffer and try
+/// again. See `docs/superpowers/specs/2026-09-28-stream-reassembly-design.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum L7Sniff {
+    /// A detector matched the bytes available. Identical to what `sniff_l7`
+    /// returns for the same input.
+    Decided(L7Info),
+    /// No detector matched, and the buffer is a *structurally incomplete*
+    /// prefix of something one of them would recognize.
+    ///
+    /// `at_least` is a lower bound and nothing more. It is a real declared
+    /// length where the protocol has one — a TLS record header states its own
+    /// body length, so the shortfall is arithmetic on a captured field — and
+    /// `1` where the protocol has none, as for an HTTP start line with no
+    /// line terminator yet, where the true remaining length is genuinely
+    /// unknowable from the prefix. Deliberately not an estimate dressed up as
+    /// a measurement.
+    NeedMoreBytes { at_least: usize },
+    /// No detector matched and nothing about the buffer suggests more bytes
+    /// would change that. A caller must not buffer on this outcome — every
+    /// unrecognized stream on the network reaches here.
+    Undecided,
+}
+
+/// `sniff_l7`, but able to distinguish "not a protocol I know" from "the
+/// first half of one" — see `L7Sniff`.
+///
+/// The individual detectors above are deliberately untouched by this:
+/// incompleteness is a separate structural probe consulted only after every
+/// one of them has declined, so reassembly changes which *bytes* they see and
+/// never how they parse them.
+pub fn sniff_l7_desegmenting(payload: &[u8], dst_port: Option<u16>) -> L7Sniff {
     let info = match dst_port {
         Some(53) => sniff_dns(payload),
         Some(443) => sniff_tls_client_hello(payload),
@@ -200,7 +267,163 @@ pub fn sniff_l7(payload: &[u8], dst_port: Option<u16>) -> L7Info {
             .or_else(|| sniff_dns(payload))
             .or_else(|| sniff_tls_client_hello(payload)),
     };
-    info.unwrap_or(L7Info::None)
+    if let Some(info) = info {
+        return L7Sniff::Decided(info);
+    }
+    match missing_byte_count(payload) {
+        Some(at_least) => L7Sniff::NeedMoreBytes { at_least },
+        None => L7Sniff::Undecided,
+    }
+}
+
+/// Exactly `sniff_l7_desegmenting` with both non-`Decided` outcomes collapsed
+/// to `L7Info::None` — the unchanged per-packet contract every existing
+/// caller and test relies on, with one implementation behind it so the two
+/// can never drift.
+pub fn sniff_l7(payload: &[u8], dst_port: Option<u16>) -> L7Info {
+    match sniff_l7_desegmenting(payload, dst_port) {
+        L7Sniff::Decided(info) => info,
+        L7Sniff::NeedMoreBytes { .. } | L7Sniff::Undecided => L7Info::None,
+    }
+}
+
+/// How many more bytes could possibly let one of the detectors above decide,
+/// or `None` when nothing about `payload` looks like a truncated prefix of a
+/// protocol this module recognizes.
+///
+/// Never panics and never allocates: every index into `payload` is a `get`
+/// or a length-checked slice, and the one piece of arithmetic on a
+/// length field read off the wire is `checked_add`.
+fn missing_byte_count(payload: &[u8]) -> Option<usize> {
+    // A TLS handshake record (content type 0x16) declares its own body
+    // length in bytes 3..5, so the shortfall here is a measured number.
+    if payload.first() == Some(&0x16) {
+        if payload.len() < 5 {
+            // Not even the 5-byte record header is complete yet.
+            return Some(5 - payload.len());
+        }
+        let declared = u16::from_be_bytes([payload[3], payload[4]]) as usize;
+        // `checked_add` rather than `+`: `declared` is attacker-controlled.
+        // It cannot actually overflow a usize on any supported target
+        // (u16::MAX + 5), but relying on that rather than checking is the
+        // habit this file does not want.
+        let needed = declared.checked_add(5)?;
+        if let Some(shortfall) = needed.checked_sub(payload.len()) {
+            if shortfall > 0 {
+                return Some(shortfall);
+            }
+        }
+    }
+
+    // An HTTP start line with no line terminator yet. No length is declared
+    // anywhere in HTTP/1.x framing, so `1` is the only honest lower bound.
+    if unterminated_http_start_line(payload) {
+        return Some(1);
+    }
+
+    None
+}
+
+/// True when `payload` is a plausible, not-yet-terminated prefix of an HTTP
+/// request line or response status line.
+///
+/// "Plausible" is kept narrow on purpose: a caller buffers on the strength of
+/// this, so matching loosely would mean buffering arbitrary traffic. It
+/// requires the bytes to be printable ASCII, to contain no line terminator
+/// yet (once a line is complete, more bytes cannot change the verdict about
+/// it), and to agree with a known method token or `HTTP/` in one direction or
+/// the other — either the buffer is a prefix of the token, or it starts with
+/// the token.
+fn unterminated_http_start_line(payload: &[u8]) -> bool {
+    /// An unterminated buffer longer than this is not a start line anyone is
+    /// waiting on — real request lines are well under it, and the bound keeps
+    /// the printable-ASCII scan below from walking a whole reassembly buffer
+    /// on every segment of the capture hot path.
+    const MAX_START_LINE_PROBE: usize = 2_048;
+    if payload.is_empty() || payload.len() > MAX_START_LINE_PROBE || payload.contains(&b'\n') {
+        return false;
+    }
+    // Printable ASCII (plus a bare CR, which can legitimately be the last
+    // byte of a start line split across a segment boundary).
+    if !payload.iter().all(|b| (0x20..0x7f).contains(b) || *b == b'\r') {
+        return false;
+    }
+    let looks_like_request = HTTP_METHODS.iter().any(|method| {
+        let token = method.as_bytes();
+        if payload.len() <= token.len() {
+            token.starts_with(payload)
+        } else {
+            // Past the method token, the next byte must be the separating
+            // space — otherwise "GETX..." would read as a partial GET.
+            payload.starts_with(token) && payload.get(token.len()) == Some(&b' ')
+        }
+    });
+    let looks_like_response = {
+        let token: &[u8] = b"HTTP/";
+        if payload.len() <= token.len() {
+            token.starts_with(payload)
+        } else {
+            payload.starts_with(token)
+        }
+    };
+    looks_like_request || looks_like_response
+}
+
+/// A minimal, hand-built TLS ClientHello, shared by this module's own tests
+/// and `reassembly.rs`'s (which needs a real record to split across
+/// segment boundaries). Lives outside `mod tests` only so the other
+/// module can reach it.
+#[cfg(test)]
+// A minimal, hand-built ClientHello with two cipher suites, an SNI
+// extension, a supported_groups (elliptic_curves) extension, and an
+// ec_point_formats extension — enough to exercise every new field
+// without needing a byte-for-byte real capture.
+pub(crate) fn build_client_hello(sni: &str) -> Vec<u8> {
+    let mut hs = vec![0x01]; // handshake type: ClientHello
+    hs.extend_from_slice(&[0x00, 0x00, 0x00]); // length placeholder, fixed up below
+    hs.extend_from_slice(&[0x03, 0x03]); // client_version
+    hs.extend_from_slice(&[0u8; 32]); // random
+    hs.push(0x00); // session_id_len = 0
+    // cipher_suites: 2 suites = 4 bytes
+    hs.extend_from_slice(&[0x00, 0x04]);
+    hs.extend_from_slice(&[0x13, 0x01, 0xc0, 0x2f]);
+    hs.push(0x01); // compression_methods_len = 1
+    hs.push(0x00); // null compression
+
+    let mut extensions = Vec::new();
+    // server_name extension (type 0x0000)
+    let sni_bytes = sni.as_bytes();
+    let mut sni_ext = Vec::new();
+    sni_ext.extend_from_slice(&((sni_bytes.len() as u16 + 3).to_be_bytes())); // server_name_list len
+    sni_ext.push(0x00); // name_type: host_name
+    sni_ext.extend_from_slice(&(sni_bytes.len() as u16).to_be_bytes());
+    sni_ext.extend_from_slice(sni_bytes);
+    extensions.extend_from_slice(&[0x00, 0x00]); // ext type
+    extensions.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
+    extensions.extend_from_slice(&sni_ext);
+    // supported_groups extension (type 0x000a): one curve, 0x001d (x25519)
+    extensions.extend_from_slice(&[0x00, 0x0a]);
+    extensions.extend_from_slice(&[0x00, 0x04]); // ext len
+    extensions.extend_from_slice(&[0x00, 0x02]); // list len
+    extensions.extend_from_slice(&[0x00, 0x1d]);
+    // ec_point_formats extension (type 0x000b): one format, 0x00
+    extensions.extend_from_slice(&[0x00, 0x0b]);
+    extensions.extend_from_slice(&[0x00, 0x02]);
+    extensions.push(0x01); // list len
+    extensions.push(0x00);
+
+    hs.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+    hs.extend_from_slice(&extensions);
+
+    let body_len = (hs.len() - 4) as u32;
+    hs[1] = ((body_len >> 16) & 0xff) as u8;
+    hs[2] = ((body_len >> 8) & 0xff) as u8;
+    hs[3] = (body_len & 0xff) as u8;
+
+    let mut record = vec![0x16, 0x03, 0x01];
+    record.extend_from_slice(&(hs.len() as u16).to_be_bytes());
+    record.extend_from_slice(&hs);
+    record
 }
 
 #[cfg(test)]
@@ -285,58 +508,6 @@ mod tests {
         assert!(matches!(sniff_l7(payload, Some(9999)), L7Info::None));
     }
 
-    // A minimal, hand-built ClientHello with two cipher suites, an SNI
-    // extension, a supported_groups (elliptic_curves) extension, and an
-    // ec_point_formats extension — enough to exercise every new field
-    // without needing a byte-for-byte real capture.
-    fn build_client_hello(sni: &str) -> Vec<u8> {
-        let mut hs = vec![0x01]; // handshake type: ClientHello
-        hs.extend_from_slice(&[0x00, 0x00, 0x00]); // length placeholder, fixed up below
-        hs.extend_from_slice(&[0x03, 0x03]); // client_version
-        hs.extend_from_slice(&[0u8; 32]); // random
-        hs.push(0x00); // session_id_len = 0
-        // cipher_suites: 2 suites = 4 bytes
-        hs.extend_from_slice(&[0x00, 0x04]);
-        hs.extend_from_slice(&[0x13, 0x01, 0xc0, 0x2f]);
-        hs.push(0x01); // compression_methods_len = 1
-        hs.push(0x00); // null compression
-
-        let mut extensions = Vec::new();
-        // server_name extension (type 0x0000)
-        let sni_bytes = sni.as_bytes();
-        let mut sni_ext = Vec::new();
-        sni_ext.extend_from_slice(&((sni_bytes.len() as u16 + 3).to_be_bytes())); // server_name_list len
-        sni_ext.push(0x00); // name_type: host_name
-        sni_ext.extend_from_slice(&(sni_bytes.len() as u16).to_be_bytes());
-        sni_ext.extend_from_slice(sni_bytes);
-        extensions.extend_from_slice(&[0x00, 0x00]); // ext type
-        extensions.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
-        extensions.extend_from_slice(&sni_ext);
-        // supported_groups extension (type 0x000a): one curve, 0x001d (x25519)
-        extensions.extend_from_slice(&[0x00, 0x0a]);
-        extensions.extend_from_slice(&[0x00, 0x04]); // ext len
-        extensions.extend_from_slice(&[0x00, 0x02]); // list len
-        extensions.extend_from_slice(&[0x00, 0x1d]);
-        // ec_point_formats extension (type 0x000b): one format, 0x00
-        extensions.extend_from_slice(&[0x00, 0x0b]);
-        extensions.extend_from_slice(&[0x00, 0x02]);
-        extensions.push(0x01); // list len
-        extensions.push(0x00);
-
-        hs.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
-        hs.extend_from_slice(&extensions);
-
-        let body_len = (hs.len() - 4) as u32;
-        hs[1] = ((body_len >> 16) & 0xff) as u8;
-        hs[2] = ((body_len >> 8) & 0xff) as u8;
-        hs[3] = (body_len & 0xff) as u8;
-
-        let mut record = vec![0x16, 0x03, 0x01];
-        record.extend_from_slice(&(hs.len() as u16).to_be_bytes());
-        record.extend_from_slice(&hs);
-        record
-    }
-
     #[test]
     fn extracts_ja3_input_fields_alongside_sni() {
         let payload = build_client_hello("example.com");
@@ -378,6 +549,152 @@ mod tests {
                 assert_eq!(client_random.as_deref(), Some([0u8; 32].as_slice()));
             }
             other => panic!("expected TlsClientHello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_truncated_http_request_line_asks_for_more_bytes_instead_of_reporting_a_truncated_path() {
+        // JAM-16: the first of two TCP segments carrying
+        // "GET /index.html HTTP/1.1\r\n...". Before this task, this decoded
+        // as a complete request for the path "/index.h" — indistinguishable
+        // from a real request for a resource by that name, and impossible
+        // for any caller to tell was truncated. It must decline instead, and
+        // the desegmenting wrapper must say why, which is what lets a caller
+        // buffer and recover the real path.
+        let first_segment = b"GET /index.h";
+        assert!(matches!(sniff_l7(first_segment, Some(80)), L7Info::None));
+        match sniff_l7_desegmenting(first_segment, Some(80)) {
+            L7Sniff::NeedMoreBytes { at_least } => assert!(at_least >= 1),
+            other => panic!("expected NeedMoreBytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_line_split_mid_path_recovers_the_whole_path_once_rejoined() {
+        // The same two segments concatenated — the reassembled buffer must
+        // yield the real path, not the prefix the first segment ended on.
+        let rejoined = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        match sniff_l7(rejoined, Some(80)) {
+            L7Info::Http { method, path } => {
+                assert_eq!((method.as_str(), path.as_str()), ("GET", "/index.html"));
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_response_with_a_binary_body_is_still_recognized_by_its_status_line() {
+        // Only the status line is UTF-8-validated. Validating the whole
+        // payload (the old behavior) meant any response with a non-UTF-8
+        // body — a PNG, gzip, anything — silently failed to decode even
+        // though its status line was plain ASCII.
+        let mut payload = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n".to_vec();
+        payload.extend_from_slice(&[0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x80, 0x00]);
+        match sniff_l7(&payload, Some(51000)) {
+            L7Info::HttpResponse { status } => assert_eq!(status, "200"),
+            other => panic!("expected HttpResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bare_lf_terminated_start_line_is_accepted_without_a_cr() {
+        // Some minimal clients/servers send LF only. The terminator check
+        // must not require CRLF specifically.
+        match sniff_l7(b"GET /x HTTP/1.0\n\n", Some(80)) {
+            L7Info::Http { path, .. } => assert_eq!(path, "/x"),
+            other => panic!("expected Http, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_partial_method_token_alone_still_asks_for_more_bytes() {
+        // A segment boundary can land mid-method. "GE" is a prefix of "GET".
+        match sniff_l7_desegmenting(b"GE", Some(80)) {
+            L7Sniff::NeedMoreBytes { .. } => {}
+            other => panic!("expected NeedMoreBytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_truncated_http_response_status_line_asks_for_more_bytes() {
+        match sniff_l7_desegmenting(b"HTTP/1.1 20", Some(51000)) {
+            L7Sniff::NeedMoreBytes { .. } => {}
+            other => panic!("expected NeedMoreBytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_truncated_tls_record_asks_for_exactly_the_bytes_its_own_length_field_declares() {
+        // The one case where a precise number is honestly available: a TLS
+        // record header declares its own body length, so the shortfall is a
+        // real measurement, not a guess.
+        let full = build_client_hello("example.com");
+        let cut = &full[..20];
+        match sniff_l7_desegmenting(cut, Some(443)) {
+            L7Sniff::NeedMoreBytes { at_least } => {
+                assert_eq!(at_least, full.len() - cut.len());
+            }
+            other => panic!("expected NeedMoreBytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tls_record_header_shorter_than_five_bytes_asks_for_the_rest_of_the_header() {
+        match sniff_l7_desegmenting(&[0x16, 0x03], Some(443)) {
+            L7Sniff::NeedMoreBytes { at_least } => assert_eq!(at_least, 3),
+            other => panic!("expected NeedMoreBytes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrecognizable_bytes_are_undecided_not_incomplete() {
+        // Nothing about these bytes suggests more would help — saying
+        // "NeedMoreBytes" here would make a caller buffer every unknown
+        // stream on the network.
+        match sniff_l7_desegmenting(b"\x00\x01\x02 not a protocol\n", Some(9999)) {
+            L7Sniff::Undecided => {}
+            other => panic!("expected Undecided, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_terminated_but_unrecognized_first_line_is_undecided() {
+        // The line is complete and still matched nothing — more bytes
+        // cannot change that verdict about the start line.
+        match sniff_l7_desegmenting(b"NOTAMETHOD / HTTP/1.1\r\n\r\n", Some(80)) {
+            L7Sniff::Undecided => {}
+            other => panic!("expected Undecided, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_complete_request_decides_rather_than_asking_for_more() {
+        match sniff_l7_desegmenting(b"GET / HTTP/1.1\r\nHost: a\r\n\r\n", Some(80)) {
+            L7Sniff::Decided(L7Info::Http { method, path }) => {
+                assert_eq!((method.as_str(), path.as_str()), ("GET", "/"));
+            }
+            other => panic!("expected Decided(Http), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sniff_l7_stays_exactly_a_collapsed_view_of_the_desegmenting_result() {
+        // The two must never drift: every non-Decided outcome is None, and
+        // every Decided outcome is that same L7Info.
+        let cases: [(&[u8], Option<u16>); 6] = [
+            (b"GET / HTTP/1.1\r\n\r\n", Some(80)),
+            (b"HTTP/1.1 200 OK\r\n\r\n", Some(51000)),
+            (b"GE", Some(80)),
+            (b"", Some(80)),
+            (b"\x16\x03", Some(443)),
+            (b"random bytes", Some(9999)),
+        ];
+        for (payload, port) in cases {
+            let collapsed = match sniff_l7_desegmenting(payload, port) {
+                L7Sniff::Decided(info) => info,
+                _ => L7Info::None,
+            };
+            assert_eq!(sniff_l7(payload, port), collapsed, "payload {payload:?} port {port:?}");
         }
     }
 

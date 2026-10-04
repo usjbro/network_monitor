@@ -28,6 +28,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "stream_reassembly"
+path = "fuzz_targets/stream_reassembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "pcapng_reader"
 path = "fuzz_targets/pcapng_reader.rs"
 test = false
