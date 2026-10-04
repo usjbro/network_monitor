@@ -512,6 +512,40 @@ pub fn decode_control(line: &str) -> Option<ControlMessage> {
     serde_json::from_str(line.trim()).ok()
 }
 
+/// What the control-channel read loop should do with one line.
+#[derive(Debug)]
+pub enum ControlLine {
+    /// A control message to act on.
+    Message(ControlMessage),
+    /// A blank line, or a JSON object this agent doesn't understand
+    /// (unknown `type`, missing/mistyped field) — skip it, keep the
+    /// connection.
+    Ignored,
+    /// Not a JSON object at all — the peer isn't speaking this protocol.
+    /// The caller must close the connection (JAM-175).
+    NotJson,
+}
+
+/// Classifies one control-channel line. Anything that isn't a JSON object
+/// is `NotJson`: the relay only ever writes `JSON.stringify(message)`, so a
+/// non-object line means a foreign protocol — above all a browser's
+/// cross-protocol `fetch` POST to 127.0.0.1:9990, whose HTTP request line
+/// arrives first and whose JSON body lines would otherwise each run as a
+/// control message once the headers were skipped.
+pub fn classify_control_line(line: &str) -> ControlLine {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return ControlLine::Ignored;
+    }
+    match serde_json::from_str::<serde_json::Value>(trimmed) {
+        Ok(value @ serde_json::Value::Object(_)) => match ControlMessage::deserialize(value) {
+            Ok(message) => ControlLine::Message(message),
+            Err(_) => ControlLine::Ignored,
+        },
+        _ => ControlLine::NotJson,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,11 +710,59 @@ mod tests {
     }
 
     #[test]
+    fn classify_control_line_rejects_http_request_framing() {
+        // JAM-175: a browser POST to 127.0.0.1:9990 arrives as an HTTP
+        // request line and headers before its JSON body lines. Every one of
+        // those must classify as `NotJson` so main.rs closes the connection
+        // before the body is ever read.
+        let cases = [
+            "POST / HTTP/1.1",
+            "GET / HTTP/1.1\r",
+            "Host: 127.0.0.1:9990",
+            "Content-Type: text/plain;charset=UTF-8",
+            "not json",
+            "\"a json string\"",
+            "42",
+            "[]",
+            "{\"type\":\"pause\"", // truncated object
+        ];
+        for case in cases {
+            assert!(
+                matches!(classify_control_line(case), ControlLine::NotJson),
+                "expected NotJson for {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_control_line_accepts_relay_ndjson() {
+        assert!(matches!(
+            classify_control_line("{\"type\":\"pause\"}"),
+            ControlLine::Message(ControlMessage::Pause)
+        ));
+        assert!(matches!(
+            classify_control_line("{\"type\":\"set_snaplen\",\"bytes\":96}\r"),
+            ControlLine::Message(ControlMessage::SetSnaplen { bytes: 96 })
+        ));
+        // A well-formed JSON object this agent doesn't understand (unknown
+        // type, missing field) is a version-skew/validation problem, not a
+        // foreign protocol: ignored, connection kept, exactly as before.
+        for case in [r#"{"type":"nonexistent"}"#, r#"{"type":"register_decrypt_eligible","pid":4242}"#, "{}"] {
+            assert!(matches!(classify_control_line(case), ControlLine::Ignored), "expected Ignored for {case:?}");
+        }
+        // Blank lines never start an HTTP request, so tolerating them costs
+        // nothing.
+        assert!(matches!(classify_control_line(""), ControlLine::Ignored));
+        assert!(matches!(classify_control_line("  \r"), ControlLine::Ignored));
+    }
+
+    #[test]
     fn decode_control_rejects_malformed_shapes_without_panicking() {
-        // main.rs's read loop has a bare `None => {}` arm for whatever this
-        // returns and never breaks the connection on it — this test is what
-        // actually proves that's safe: a malformed-but-non-empty control
-        // line must decode to `None`, never panic.
+        // main.rs's read loop ignores a well-formed JSON object that fails
+        // to decode (classify_control_line's `Ignored`) and keeps the
+        // connection — this test is what actually proves that's safe: a
+        // malformed-but-non-empty control line must decode to `None`, never
+        // panic.
         let cases = [
             r#"{"type":"nonexistent"}"#,
             // register_decrypt_eligible missing its required keylogPath.
