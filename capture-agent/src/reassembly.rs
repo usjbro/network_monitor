@@ -401,31 +401,49 @@ impl FragmentGroup {
 /// later datagram that recycled its IP ID, and buffered TCP bytes can carry
 /// across a reused four-tuple.
 ///
-/// The clock advances by each forward step between consecutive frames and
-/// ignores backward steps. Capture files can hold out-of-order timestamps (a
-/// host clock stepped back, an unsorted merge, one corrupt frame), so it must
-/// never run backwards and revive expired state. Measuring from the first
-/// frame and holding the maximum would avoid that too, but would then freeze
-/// after a large backward step until recorded time caught up, possibly for
-/// the rest of the file, which is the original bug again.
+/// It never runs backwards, which would revive expired state, but capture
+/// files can hold out-of-order timestamps, for two different reasons that
+/// need opposite handling:
+///
+/// - **Reordering** (an unsorted merge, multi-queue capture): frames a little
+///   behind the latest one seen. The clock holds, and keeps measuring from
+///   that latest timestamp, so the next forward step doesn't count the
+///   skipped gap twice.
+/// - **A reset** (the capture host's clock stepped back, one corrupt
+///   timestamp): a step back of more than `REPLAY_REORDER_TOLERANCE`. The
+///   clock holds and measures from the new timestamp. Measuring from the
+///   old high-water mark would freeze the clock until recorded time caught
+///   up, possibly for the rest of the file, which is the original bug again.
 ///
 /// Steps are summed at full `Duration` precision and only the total is
 /// converted to milliseconds: frames under a millisecond apart are common on
 /// a busy link, and rounding each step down would add nothing per frame.
 #[derive(Debug, Default)]
 pub struct ReplayClock {
-    previous_frame: Option<std::time::SystemTime>,
+    /// The latest timestamp the clock has measured up to.
+    latest: Option<std::time::SystemTime>,
     elapsed: std::time::Duration,
 }
 
+/// How far behind the latest frame a timestamp can be and still count as
+/// reordering rather than a clock reset. Well beyond any real capture's
+/// reordering, which is milliseconds to seconds, and well short of a typical
+/// clock step.
+pub const REPLAY_REORDER_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 impl ReplayClock {
     pub fn now_ms(&mut self, frame_timestamp: std::time::SystemTime) -> u64 {
-        if let Some(previous) = self.previous_frame {
-            if let Ok(step) = frame_timestamp.duration_since(previous) {
-                self.elapsed = self.elapsed.saturating_add(step);
-            }
+        match self.latest {
+            None => self.latest = Some(frame_timestamp),
+            Some(latest) => match frame_timestamp.duration_since(latest) {
+                Ok(step) => {
+                    self.elapsed = self.elapsed.saturating_add(step);
+                    self.latest = Some(frame_timestamp);
+                }
+                Err(behind) if behind.duration() <= REPLAY_REORDER_TOLERANCE => {}
+                Err(_) => self.latest = Some(frame_timestamp),
+            },
         }
-        self.previous_frame = Some(frame_timestamp);
         u64::try_from(self.elapsed.as_millis()).unwrap_or(u64::MAX)
     }
 }
@@ -1576,6 +1594,32 @@ mod tests {
             now = clock.now_ms(origin + std::time::Duration::from_micros(500) * frame);
         }
         assert_eq!(now, 30_000, "60,000 gaps of 0.5 ms are 30 s of recorded time");
+    }
+
+    #[test]
+    fn replay_clock_does_not_double_count_reordered_frames() {
+        // An unsorted merge: 0 s, 10 s, 9 s, 15 s. Only 15 s of recorded
+        // time passed, so the clock must read 15 s, not 16.
+        let mut clock = ReplayClock::default();
+        assert_eq!(clock.now_ms(at_secs(0)), 0);
+        assert_eq!(clock.now_ms(at_secs(10)), 10_000);
+        assert_eq!(clock.now_ms(at_secs(9)), 10_000, "a reordered frame holds the clock");
+        assert_eq!(clock.now_ms(at_secs(15)), 15_000, "and the gap it skipped is not counted twice");
+    }
+
+    #[test]
+    fn replay_clock_tells_reordering_from_a_reset_at_the_tolerance() {
+        let tolerance = REPLAY_REORDER_TOLERANCE.as_secs();
+        // Exactly at the tolerance: reordering, measured from the latest frame.
+        let mut clock = ReplayClock::default();
+        clock.now_ms(at_secs(1_000));
+        clock.now_ms(at_secs(1_000 - tolerance));
+        assert_eq!(clock.now_ms(at_secs(1_001)), 1_000);
+        // Just past it: a reset, measured from the new timestamp.
+        let mut clock = ReplayClock::default();
+        clock.now_ms(at_secs(1_000));
+        clock.now_ms(at_secs(1_000 - tolerance - 1));
+        assert_eq!(clock.now_ms(at_secs(1_000 - tolerance)), 1_000);
     }
 
     #[test]
