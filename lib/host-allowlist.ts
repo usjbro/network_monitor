@@ -18,7 +18,19 @@ export function parseAllowedHosts(raw: string | undefined): string[] {
   if (!raw) return [];
   return raw
     .split(',')
-    .map((h) => normalizeHostname(h.trim()))
+    .map((h) => h.trim())
+    .filter((h) => {
+      if (h.length === 0) return false;
+      // A URL or an unbracketed IPv6 address would otherwise be cut at its
+      // first ':' into a different name (`https://x` -> `https`). Skip it,
+      // loudly, instead of allowing something the operator never meant.
+      if (h.includes('/') || (!h.startsWith('[') && h.indexOf(':') !== h.lastIndexOf(':'))) {
+        console.warn(`ALLOWED_HOSTS: ignoring malformed entry ${JSON.stringify(h)} (use host, host:port or [ipv6])`);
+        return false;
+      }
+      return true;
+    })
+    .map(normalizeHostname)
     .filter((h) => h.length > 0);
 }
 

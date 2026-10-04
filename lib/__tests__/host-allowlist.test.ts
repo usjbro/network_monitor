@@ -2,7 +2,7 @@
 // attacker's page same-origin with the relay, so the JAM-151 Sec-Fetch-Site
 // check can't stop it — only the Host header still names the attacker's
 // domain.
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { isAllowedHost, parseAllowedHosts } from '@/lib/host-allowlist';
 import { middleware } from '@/middleware';
@@ -36,6 +36,19 @@ describe('isAllowedHost', () => {
     expect(isAllowedHost('MyMac.local:443', extra)).toBe(true);
     expect(isAllowedHost('other.lan', extra)).toBe(true);
     expect(isAllowedHost('attacker.example', extra)).toBe(false);
+  });
+
+  it('drops malformed ALLOWED_HOSTS entries instead of truncating them to a different name', () => {
+    // A URL or an unbracketed IPv6 address used to be cut at its first ':'
+    // (`https://mymac.local` -> `https`, `fe80::1` -> `fe80`), silently
+    // allowing a name the operator never meant.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(parseAllowedHosts('https://mymac.local,fe80::1,mymac.local/x,good.lan,[fe80::1]:443')).toEqual([
+      'good.lan',
+      'fe80::1',
+    ]);
+    expect(warn).toHaveBeenCalledTimes(3);
+    warn.mockRestore();
   });
 
   it('parses an unset or empty ALLOWED_HOSTS to no extra hosts', () => {
