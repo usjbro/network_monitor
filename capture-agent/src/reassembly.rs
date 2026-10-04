@@ -134,6 +134,11 @@ pub struct ReassemblyCounters {
     /// the observable signal for an overlap rewrite attempt; a plain
     /// retransmission (identical bytes) never touches it.
     pub conflicting_overlap_bytes: u64,
+    /// Last fragments (MF clear) whose declared end was ignored because the
+    /// group already had a different end, or already held bytes past it
+    /// (JAM-172). A nonzero value is the signal for an attempt to cut short
+    /// a datagram with a forged last fragment.
+    pub conflicting_terminal_fragments: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +438,23 @@ impl IpFragmentReassembler {
         let offset = fragment.offset_bytes as usize;
         let group = self.groups.entry(key.clone()).or_insert_with(|| FragmentGroup::new(now_ms));
         group.last_seen_ms = now_ms;
+        // JAM-172: the datagram's end is first-seen-wins like its bytes. A
+        // last fragment (MF clear) that would move an end already known, or
+        // that ends before bytes the group already holds, is a forgery
+        // attempt: reject the whole fragment before it touches the group.
+        // Writing its bytes would let them fill a hole first and then beat
+        // the genuine bytes under first-seen-wins.
+        if !fragment.more_fragments {
+            let end = offset.saturating_add(packet.ip_declared_payload_len as usize);
+            let conflicts = match group.total_len {
+                Some(existing) => existing != end,
+                None => group.filled.iter().skip(end).any(|&filled| filled),
+            };
+            if conflicts {
+                self.counters.conflicting_terminal_fragments += 1;
+                return None;
+            }
+        }
         if offset == 0 && group.header.is_none() {
             group.header = Some(fragment.header.clone());
         }
@@ -441,10 +463,10 @@ impl IpFragmentReassembler {
             group.short_captured_at = Some(group.short_captured_at.map_or(hole_at, |at| at.min(hole_at)));
         }
         if !fragment.more_fragments {
-            // The last fragment fixes the datagram's total length. Its
-            // *declared* length is used, so a last fragment cut short at
-            // capture still reveals the true total rather than understating
-            // it into a false "complete".
+            // The last fragment fixes the datagram's total length (checked
+            // for conflicts above). Its *declared* length is used, so a last
+            // fragment cut short at capture still reveals the true total
+            // rather than understating it into a false "complete".
             let declared = packet.ip_declared_payload_len as usize;
             group.total_len = Some(offset.saturating_add(declared));
         }
@@ -1346,6 +1368,61 @@ mod tests {
         assert_eq!(rejoined.status, ReassemblyStatus::Reassembled);
         let parsed = parse_packet(&rejoined.bytes, LinkType::Raw).expect("must parse");
         assert_eq!(parsed.dst_port, Some(53));
+    }
+
+    // JAM-172: the datagram's total length comes from a last fragment (MF
+    // clear), so it must follow the same first-seen-wins rule as the data
+    // bytes. Otherwise one forged last fragment can cut short a datagram
+    // the monitor already holds.
+    #[test]
+    fn a_later_last_fragment_cannot_shorten_an_already_known_total_length() {
+        let datagram = udp_dns_datagram();
+        assert!(datagram.len() > 24, "fixture must be long enough to split at 16 and forge an end at 16");
+        let (head, tail) = datagram.split_at(16);
+        let mut r = IpFragmentReassembler::new();
+
+        // The genuine last fragment fixes the total length first.
+        assert!(r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 9, IpNumber::UDP, 16, false, tail), 0).is_none());
+        // A forged last fragment claims the datagram ends at byte 16, and
+        // carries its own bytes for the still-empty range 8..16.
+        assert!(r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 9, IpNumber::UDP, 8, false, &[0xEE; 8]), 1).is_none());
+        assert_eq!(r.counters().conflicting_terminal_fragments, 1, "the forged end must be counted, not silently ignored");
+        // The genuine head arrives: the whole datagram must come back, not
+        // the forged 16-byte prefix.
+        let rejoined = r
+            .feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 9, IpNumber::UDP, 0, true, head), 2)
+            .expect("the head must complete the group");
+        assert_eq!(rejoined.status, ReassemblyStatus::Reassembled);
+        let parsed = parse_packet(&rejoined.bytes, LinkType::Raw).expect("must parse");
+        assert_eq!(parsed.payload.len() + 8, datagram.len(), "the rejoined datagram must keep its genuine length");
+        // ...and its genuine bytes: a rejected fragment must not get to
+        // fill a hole first and then win under first-seen-wins.
+        assert_eq!(&rejoined.bytes[rejoined.bytes.len() - datagram.len()..], &datagram[..]);
+    }
+
+    #[test]
+    fn a_last_fragment_ending_before_bytes_already_held_is_rejected() {
+        let datagram = udp_dns_datagram();
+        assert!(datagram.len() > 24, "fixture must be long enough to hold 24 bytes before the tail");
+        let (head, tail) = datagram.split_at(24);
+        let mut r = IpFragmentReassembler::new();
+
+        // 24 genuine bytes are already held when a forged last fragment
+        // claims the datagram ends at byte 16. No real datagram can end
+        // before bytes it has already delivered, so this must not cut the
+        // held prefix down to 16 and emit it.
+        assert!(r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 11, IpNumber::UDP, 0, true, head), 0).is_none());
+        assert!(
+            r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 11, IpNumber::UDP, 8, false, &head[8..16]), 1).is_none(),
+            "a forged short last fragment must not complete the group"
+        );
+        assert_eq!(r.counters().conflicting_terminal_fragments, 1);
+        let rejoined = r
+            .feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 11, IpNumber::UDP, 24, false, tail), 2)
+            .expect("the genuine last fragment must complete the group");
+        assert_eq!(rejoined.status, ReassemblyStatus::Reassembled);
+        let parsed = parse_packet(&rejoined.bytes, LinkType::Raw).expect("must parse");
+        assert_eq!(parsed.payload.len() + 8, datagram.len());
     }
 
     #[test]
