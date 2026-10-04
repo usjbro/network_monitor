@@ -1,10 +1,39 @@
 # Session Handoff
 
-## Security review fixes (JAM-175 to JAM-179) — 2026-10-04
+## JAM-130 remaining issues (JAM-8, JAM-163, JAM-180, JAM-181) — 2026-10-04, merged
 
-A repo-wide review found two High and three Low issues, filed under JAM-130 and fixed one PR each: #247 (JAM-175, agent control socket closes on non-JSON lines, blocking browser cross-protocol POSTs), #248 (JAM-176, Host allowlist + `ALLOWED_HOSTS` against DNS rebinding), #249 (JAM-177, JSON-encoded origin in `/api/install`), #250 (JAM-178, cross-site guard on `/api/enrichment/lookup`), and this PR (JAM-179, CSV formula neutralisation). Dependency audits were clean apart from the allowlisted lint-only `braces` advisory.
+Worked JAM-130's open children under James's `/loop` in chat. Each PR had an independent review against source, and the review findings were fixed before merge. All four Linear issues are Done, and every JAM-130 child is now Done.
 
-Open follow-ups, not filed: a per-launch token on the agent socket (wire change, would also stop other local processes), and the fake metrics `/api/install`'s `osi-mon` prints. James merges each PR; mark the Linear issue Done when its PR merges.
+| PR | Merge | Issue | Change |
+|---|---|---|---|
+| #253 | `76ec774` | JAM-8 | `docs/security.md`: operator guidance on capture sensitivity, storage and the law (promiscuous mode, snap length, deletion, legal note), linked from `getting-started.md`. Corrected the old claim that ring rotation overwrites the oldest file: it never deletes any file. |
+| #254 | `7650794` | JAM-163 | `CONTRIBUTING.md` names Linear as the task source of truth. `docs/wire-protocol.md` describes the real packet-event limiter (100/s, no burst), separately from aggregate accounting, and the per-code finding budgets. |
+| #255 | `3afc68e` | JAM-180 | `ring duration` rotation measures from the current file's start. Before, it measured from run start, so it rotated every ~1 s after the first rotation. Found by the #253 review. |
+| #256 | `6ac15a7` | JAM-181 | `validate_capture_file_path` rejects `..` and compares symlink-resolved paths, so a capture can't be placed inside the agent's working directory. Found by the #253 review. |
+
+Open, for James to decide:
+- Whether to close the JAM-130 epic. It's described as continuous, and its text still lists GitHub #67 (the `github-advanced-security` check), which isn't a Linear child.
+- Unfiled: `docs/usage.md`'s `capture ~/captures/…` example doesn't work, because nothing expands `~`.
+
+## Security review fixes (JAM-175 to JAM-179) — 2026-10-04, merged
+
+A repo-wide review found two High and three Low issues. They were filed under JAM-130, fixed one PR each, and squash-merged in severity order. All five Linear issues are Done:
+
+| PR | Merge | Issue | Fix |
+|---|---|---|---|
+| #247 | `fed1e1e` | JAM-175 | The agent's control socket closes a connection on its first non-JSON line, which blocks browser cross-protocol POSTs to `127.0.0.1:9990`. |
+| #248 | `664472c` | JAM-176 | `middleware.ts` returns 421 unless `Host` is a loopback name or listed in `ALLOWED_HOSTS` (blocks DNS rebinding). Malformed entries are skipped with one warning. |
+| #249 | `bbd7ed4` | JAM-177 | `/api/install` JSON-encodes the Host-derived origin in the generated script. |
+| #250 | `8b444fc` | JAM-178 | `/api/enrichment/lookup` rejects cross-site requests. |
+| #251 | `b0a866a` | JAM-179 | CSV export prefixes formula-like string cells with `'` and quotes them, and quotes fields that contain `;` or tab. |
+
+Dependency audits were clean apart from the allowlisted lint-only `braces` advisory.
+
+Operator impact: a step-5 LAN deployment that uses a real hostname must start the relay with `ALLOWED_HOSTS=<mac-hostname>.local`. Otherwise those requests get 421.
+
+Follow-ups, not filed:
+- A per-launch token on the agent socket. It's a wire change, and it would also stop other local processes from using the socket.
+- The fake throughput and uptime figures that `/api/install`'s `osi-mon` prints.
 
 ## JAM-27 — 2026-09-28
 
