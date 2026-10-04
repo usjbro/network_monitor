@@ -7,6 +7,7 @@ The contract between `capture-agent` (Rust, producer) and the Next.js relay (Typ
 - Newline-delimited JSON (NDJSON) over a plain TCP socket, `127.0.0.1:9990`.
 - **Agent → relay**: one JSON object per line, each tagged with a `"type"` field.
 - **Relay → agent**: control messages, same NDJSON framing, on the same connection.
+- **Strict framing (JAM-175)**: the agent closes the connection on the first relay → agent line that is not a JSON object. Blank lines and JSON objects it can't decode (unknown `type`, missing or mistyped field) are skipped, and the connection stays open. The strict rule blocks cross-protocol requests: a browser `fetch` POST to `127.0.0.1:9990` sends an HTTP request line first, so the agent hangs up before reading the JSON body lines that would otherwise run as control messages. See `wire::classify_control_line`.
 - All field names are `camelCase` on the wire (Rust uses `#[serde(rename_all = "camelCase")]`), matching the TypeScript field names exactly — no translation layer.
 
 ## Agent → relay events
