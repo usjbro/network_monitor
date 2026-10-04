@@ -1,5 +1,19 @@
 # Test Status
 
+# Security review fixes JAM-175 to JAM-179 — verified 2026-10-04
+
+Each fix ran in its own `.worktrees/<slug>` worktree; changed tests failed before the fix and pass after.
+
+| Issue / PR | Command | Result |
+|---|---|---|
+| JAM-175 / #247 | `cargo test --locked --test live_loopback -- --ignored --test-threads=1` (as root) | 3/3 passed; the new cross-protocol test failed against the unpatched loop (`start_capture_file` from an HTTP body ran). |
+| JAM-175 / #247 | `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo build --release --locked` | Passed (204 lib tests). |
+| JAM-176 / #248 | `npx vitest run` + manual `next start` Host probes | 522 tests passed; a foreign Host got 421 on `/`, `/api/control`, `/api/stream`. |
+| JAM-177 / #249 | `npx vitest run` | 504 tests passed. |
+| JAM-178 / #250 | `npx vitest run` | 504 tests passed. |
+| JAM-179 | `npx vitest run` | 509 tests passed. |
+| all web PRs | `npm run lint`, `npx tsc --noEmit` | Passed. |
+
 # JAM-27 — verified 2026-09-28
 
 All local commands ran in `.worktrees/offline-name-resolution-mac-vendor-oui-lookup-and-port-service-names`.

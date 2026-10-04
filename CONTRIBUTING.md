@@ -21,7 +21,7 @@ cargo fuzz run pcapng_reader -- -max_total_time=30     # if touching pcapng.rs
 cargo audit                                            # checks Cargo.lock against RustSec advisory-db
 
 # TypeScript
-npm audit --audit-level=high  # checks package-lock.json against the npm advisory database
+npm audit --json | node .github/scripts/check-npm-audit.mjs /dev/stdin  # checks package-lock.json against the npm advisory database, minus a small documented allowlist (see the script) for advisories with no patch available upstream
 npx vitest run        # or: npm test
 npx tsc --noEmit
 npm run lint
@@ -29,7 +29,7 @@ npm run build
 npx playwright test   # real-browser smoke test — see e2e/smoke.spec.ts
 ```
 
-All checks above should pass before opening a PR. CI enforces the three `cargo fuzz` commands, `cargo audit`, and `npm audit` above itself now (issues #66, #111, #112) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, `pcapng.rs`, or `capture-agent/fuzz/**` will fail CI if any fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock`/`package-lock.json` carries a dependency with a known advisory (RustSec for Rust, `high` severity or above for npm), same as running these locally would show.
+All checks above should pass before opening a PR. CI enforces the three `cargo fuzz` commands, `cargo audit`, and `npm audit` above itself now (issues #66, #111, #112) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, `pcapng.rs`, or `capture-agent/fuzz/**` will fail CI if any fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock`/`package-lock.json` carries a dependency with a known advisory (RustSec for Rust, `high` severity or above for npm) not already in `.github/scripts/check-npm-audit.mjs`'s allowlist (reserved for advisories with no patched version published upstream — see JAM-171), same as running these locally would show.
 
 ### Live-loopback packet-capture integration test (issue #114)
 
@@ -48,7 +48,9 @@ CI runs the same three steps (`.github/workflows/ci.yml`'s `rust` job) — grant
 
 ## Project roadmap
 
-Full roadmap, epics, and individual tasks are tracked as GitHub issues in this repo, not in a separate project-management tool:
+**Linear is the source of truth for tasks and workflow status.** Use the James team, Network Monitor project. `AGENTS.md` ("Sources of Truth", "Continuous Work Queue") and the `epic-task-cycle` skill describe how work is picked, gated and closed there. GitHub holds the implementation evidence: branches, pull requests, CI runs and review. A Linear status alone doesn't prove anything shipped. Check the merged PR and its CI.
+
+Historical: before the move to Linear, the roadmap was tracked as GitHub issues in this repo. Those issues were migrated to Linear (each migrated issue's description links its original, e.g. "Migrated from GitHub #75"). The list below is the pre-migration record and isn't kept up to date:
 
 - Issue #26 — top-level roadmap, links every epic
 - Epic #13 — Live Capture Core (done)

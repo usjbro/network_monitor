@@ -4,6 +4,9 @@ export async function GET(req: NextRequest) {
   const host = req.headers.get('host') || 'localhost:3000';
   const protocol = host.includes('localhost') ? 'http' : 'https';
   const origin = `${protocol}://${host}`;
+  // `host` is client-controlled (JAM-177). It reaches the generated script
+  // only via JSON.stringify below, so it can never be more than one JS
+  // string literal inside the single-quoted (non-expanding) heredoc.
 
   const script = `#!/bin/bash
 # ==============================================================================
@@ -31,7 +34,7 @@ cat << 'EOF' > "$CLI_FILE"
 const http = require('http');
 const https = require('https');
 
-const SERVER_URL = "${origin}";
+const SERVER_URL = ${JSON.stringify(origin)};
 
 console.clear();
 console.log("\\x1b[32m\\x1b[1m=== OSI NetStriker v3.8 macOS Terminal Engine ===\\x1b[0m");

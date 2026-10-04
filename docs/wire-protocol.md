@@ -7,6 +7,7 @@ The contract between `capture-agent` (Rust, producer) and the Next.js relay (Typ
 - Newline-delimited JSON (NDJSON) over a plain TCP socket, `127.0.0.1:9990`.
 - **Agent → relay**: one JSON object per line, each tagged with a `"type"` field.
 - **Relay → agent**: control messages, same NDJSON framing, on the same connection.
+- **Strict framing (JAM-175)**: the agent closes the connection on the first relay → agent line that is not a JSON object. Blank lines and JSON objects it can't decode (unknown `type`, missing or mistyped field) are skipped, and the connection stays open. The strict rule blocks cross-protocol requests: a browser `fetch` POST to `127.0.0.1:9990` sends an HTTP request line first, so the agent hangs up before reading the JSON body lines that would otherwise run as control messages. See `wire::classify_control_line`.
 - All field names are `camelCase` on the wire (Rust uses `#[serde(rename_all = "camelCase")]`), matching the TypeScript field names exactly — no translation layer.
 
 ## Agent → relay events
@@ -110,7 +111,18 @@ Maps to `PacketFrame` via `mapPacketEvent`, which requires `fields` to be presen
 
 Top-level groups describe only protocols actually decoded: `eth` appears for Ethernet framing, `ip` or `ip6` for the network layer, `tcp` or `udp` for decoded transport, and `http`, `dns`, or `tls` when application decoding succeeds. Loopback and raw-IP framing have no `eth` group. An 802.1Q tag appears as `eth.vlan` with child `eth.vlan.id`. ICMP and unrecognized transports have no transport group because no fields are decoded for them today.
 
-**No rate limiting yet** — every captured packet gets its own event ([issue #27](https://github.com/usjbro/network_monitor/issues/27)). On a busy interface this can mean thousands of these per second.
+**Rate-limited event sampling, not every packet.** `packet` events are throttled by `PacketEventLimiter::new(100, 1000)` (`capture-agent/src/rate_limit.rs`, applied in the capture loop in `capture-agent/src/main.rs`). It is a minimum-interval throttle: at most one `packet` event every 10 ms (100 per second), spaced evenly across each second. There is no burst allowance, so a busy second doesn't front-load 100 events and then go quiet. A packet that arrives before the next slot gets no `packet` event, and nothing records that it was skipped. This samples the *event stream* only. What the limiter does **not** affect:
+
+- **Flow accounting.** `FlowTable::observe` runs on every successfully parsed frame before the limiter, so each `connection_update`'s byte and packet totals are complete for that flow. Frames that match no tracked flow (e.g. broadcast or multicast seen in promiscuous mode) aren't attributed to any connection, and frames that fail to parse never reach `observe`. They are counted in `capture_stats.unparseableFrames`. `layer_update` carries no packet counts.
+- **Capture files.** Every successfully parsed frame is handed to the pcapng writer before the limiter, subject only to the writer's own backpressure (`capture_file_status.backpressureDrops`). Frames that fail to parse are not written.
+- **Kernel totals.** In a live capture, `capture_stats.received` (repeated as `system_stats.totalPacketsCaptured`) is the OS capture driver's count of every frame it delivered. It is not polled during a file replay, so it reads 0 there.
+
+`finding` events are throttled per code, not as one stream:
+- **`malformed-frame`** has its own limiter at 20 per second.
+- **`connection-reset`** isn't throttled.
+- **`retransmission`** is only evaluated for packets that pass the `packet` limiter, so it shares that budget (see the note under `finding`).
+
+`decrypted_payload` has its own 100-per-second limiter. The browser keeps only the most recent `buffer packets <n>` events (default 100; see `docs/usage.md`). Use them for inspection, not for counting. Historical note: before issue #27 (fixed in PR #34), every captured packet produced its own event.
 
 ### `finding`
 
