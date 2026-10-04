@@ -32,7 +32,9 @@ import {
   mapCaptureFileStatusEvent,
   mapCaptureStatsEvent,
   mapConnectionEvent,
+  mapFindingEvent,
   mapPacketEvent,
+  mapServiceTimeUpdateEvent,
   mapSystemStatsEvent,
   mergeLayerStats,
 } from '../agent-mapping';
@@ -62,8 +64,10 @@ describe('agent wire contract: real captured agent output maps without throwing'
         'capture_file_status',
         'capture_stats',
         'connection_update',
+        'finding',
         'layer_update',
         'packet',
+        'service_time_update',
         'system_stats',
       ].sort()
     );
@@ -117,6 +121,23 @@ describe('agent wire contract: real captured agent output maps without throwing'
       path: 'http.response.code', type: 'uint', region: 'payload', value: 200,
     }));
     expect(evt.packet).not.toHaveProperty('headerBreakdown');
+  });
+
+  // JAM-15. Captured from a replay of a DNS query left unanswered for
+  // longer than the 5 s DNS timeout.
+  it('finding maps an unanswered-request finding with both of its links', () => {
+    const mapped = mapFindingEvent(sample('finding'));
+    expect(mapped.code).toBe('unanswered-request');
+    expect(mapped.summary).toBe('no DNS response to "slow.example" A within 5 s');
+    expect(mapped.frameId).toMatch(/^pkt-/);
+    expect(mapped.flowId).toBe('Udp-10.0.0.2:40001-10.0.0.1:53');
+  });
+
+  it('service_time_update maps both protocols', () => {
+    const mapped = mapServiceTimeUpdateEvent(sample('service_time_update'));
+    expect(mapped.map((s) => s.protocol)).toEqual(['DNS', 'HTTP']);
+    expect(mapped[0]).toMatchObject({ answered: 2, unanswered: 1, minUs: 4000, maxUs: 12000 });
+    expect(mapped[1]).toMatchObject({ answered: 1, medianUs: 80000 });
   });
 
   it('layer_update merges', () => {

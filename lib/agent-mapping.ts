@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, Endpoint, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, Endpoint, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -97,6 +97,29 @@ export function mapFindingEvent(json: unknown): Finding {
     frameId: w.frameId as string | undefined,
     flowId: w.flowId as string | undefined,
   };
+}
+
+// JAM-15. Accepts the full `service_time_update` envelope, like the other
+// tick-event mappers.
+export function mapServiceTimeUpdateEvent(json: unknown): ServiceTimeSummary[] {
+  const w = json as { summaries?: unknown[] };
+  if (!w.summaries) {
+    throw new Error('malformed service_time_update event: missing "summaries" field');
+  }
+  return w.summaries.map((entry) => {
+    const e = entry as Record<string, unknown>;
+    return {
+      protocol: requireField<string>(e, 'protocol'),
+      answered: requireField<number>(e, 'answered'),
+      unanswered: requireField<number>(e, 'unanswered'),
+      untracked: requireField<number>(e, 'untracked'),
+      minUs: e.minUs as number | undefined,
+      maxUs: e.maxUs as number | undefined,
+      sampleCount: requireField<number>(e, 'sampleCount'),
+      medianUs: e.medianUs as number | undefined,
+      p95Us: e.p95Us as number | undefined,
+    };
+  });
 }
 
 export function mapConnectionClosedEvent(json: unknown): string {

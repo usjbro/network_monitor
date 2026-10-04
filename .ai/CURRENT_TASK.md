@@ -2,12 +2,9 @@
 
 ## Objective
 
-None active. JAM-16 (stream reassembly, #239) merged to `main` as `886d4b4` on 2026-10-04, after JAM-172 was fixed in #257. Epic JAM-130 stays open for two owner actions: JAM-187 and JAM-188.
+JAM-15 (epic JAM-127): DNS and HTTP/1.x request/response matching, service response time, `unanswered-request` findings and a per-protocol latency summary. Taken over from Codex at James's direct instruction on 2026-10-04. Codex's 2026-09-28 claim was never pushed. Branch `jamesmbrownjr/jam-15-dns-http-service-time`. Spec: `docs/superpowers/specs/2026-10-04-service-response-time-design.md`.
 
-## Queue (approved by James in chat, 2026-10-04)
-
-1. JAM-182 `[P1]`: during replay, drive reassembly timers from the frames' capture timestamps, not wall-clock time. Gate `jam-182__replay-reassembly-clock` is awaiting approval.
-2. JAM-183 `[P2]`: reset stream reassembly after a successful runtime interface switch. Gate `jam-183__reassembly-interface-reset` is awaiting approval.
+The previous queue (JAM-182, JAM-183) and JAM-187/JAM-188 have merged (#260, #261, #259).
 
 ## Other open follow-ups (not queued)
 
@@ -16,6 +13,6 @@ None active. JAM-16 (stream reassembly, #239) merged to `main` as `886d4b4` on 2
 - JAM-184: per-launch token on the agent control socket (a wire change).
 - JAM-185: `osi-mon` prints made-up metrics.
 - JAM-186: the `~` path example in `docs/usage.md` doesn't work.
-- JAM-187 and JAM-188 (JAM-130): owner checks in Settings → Code security, then a note in `CONTRIBUTING.md`.
+- JAM-127 children still Todo: JAM-17, JAM-18, JAM-19, JAM-20, JAM-162, JAM-165.
 
 See `HANDOFF.md` for details.

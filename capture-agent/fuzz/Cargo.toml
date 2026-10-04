@@ -41,6 +41,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "l7_transactions"
+path = "fuzz_targets/l7_transactions.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 # Mirrors capture-agent/Cargo.toml's patch (this fuzz crate is its own
 # Cargo workspace, with its own lockfile, so the parent's [patch] section

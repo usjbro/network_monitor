@@ -8,6 +8,7 @@ use capture_agent::{
     l7, parse, pcapng, process_lookup,
     rate_limit::PacketEventLimiter,
     reassembly::{ReassemblyStatus, ReplayClock, StreamReassembler},
+    transaction::{ServiceTimeStats, TransactionTracker, TxnEvent, Unanswered},
     ring,
     ring_buffer::DecryptedRingBuffer,
     tls_decrypt::{self, DecryptOutcome},
@@ -491,6 +492,49 @@ fn parse_replay_speed(raw: Option<&str>) -> ReplaySpeed {
 
 fn replay_speed() -> ReplaySpeed {
     parse_replay_speed(std::env::var("REPLAY_SPEED").ok().as_deref())
+}
+
+/// Microseconds since the Unix epoch for a capture timestamp. A timestamp
+/// before the epoch (a corrupt capture file) reads as zero.
+fn system_time_us(timestamp: std::time::SystemTime) -> u64 {
+    timestamp
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+/// JAM-15: one `unanswered-request` finding per timed-out request, through
+/// the same `finding_event_limiter` as every other finding so a burst can't
+/// flood the broadcast channel. A finding the limiter drops is still counted
+/// in `service_time_update`'s `unanswered` total.
+fn emit_unanswered_findings(
+    expired: Vec<Unanswered>,
+    now_ms: u64,
+    finding_event_limiter: &mut PacketEventLimiter,
+    finding_seq_counter: &AtomicU64,
+    tx: &broadcast::Sender<String>,
+) {
+    for unanswered in expired {
+        if !finding_event_limiter.allow(now_ms) {
+            continue;
+        }
+        let finding_epoch_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
+        let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
+            finding: Box::new(wire::FindingJson {
+                id: format!("finding-{finding_epoch_ms}-{finding_seq}"),
+                timestamp: finding_epoch_ms.to_string(),
+                severity: wire::Severity::Warning,
+                code: wire::FindingCode::UnansweredRequest,
+                summary: unanswered.summary(),
+                frame_id: unanswered.request_frame_id,
+                flow_id: Some(unanswered.flow_id),
+            }),
+        }));
+    }
 }
 
 /// JAM-182: the clock stream reassembly runs on for one frame. Replay uses
@@ -1014,6 +1058,7 @@ fn apply_interface_switch_request(
     capture_config_state: &Mutex<wire::CaptureConfigJson>,
     flow_table: &Mutex<FlowTable>,
     reassembly: &mut StreamReassembler,
+    transactions: &mut TransactionTracker,
     tx: &broadcast::Sender<String>,
 ) {
     if let Err(message) = validate_interface_name_len(name) {
@@ -1087,6 +1132,9 @@ fn apply_interface_switch_request(
     // the new one (two interfaces can share an address, or capture
     // overlapping traffic), so it starts fresh too.
     reassembly.reset();
+    // JAM-15: a request sent on the old interface can't be answered on the
+    // new one, so it must not later be reported as unanswered.
+    transactions.reset();
 
     *cap = new_cap;
     *device_for_reopen = new_device;
@@ -1262,6 +1310,9 @@ async fn main() -> std::io::Result<()> {
         local_addrs,
         resolve_max_flows(),
     )));
+    // JAM-15: written by the capture thread's `TransactionTracker`, read by
+    // the periodic emitter for `service_time_update`.
+    let service_time_stats = Arc::new(Mutex::new(ServiceTimeStats::default()));
     // Replay mode: `process_lookup::refresh()` walks *this* machine's live
     // socket table, which is meaningless for a replayed capture — the
     // processes that owned those flows may never have run on this machine
@@ -1479,6 +1530,7 @@ async fn main() -> std::io::Result<()> {
         let writer_tx = writer_tx.clone();
         let writer_active = writer_active.clone();
         let writer_backpressure_drops = writer_backpressure_drops.clone();
+        let service_time_stats = service_time_stats.clone();
         std::thread::spawn(move || {
             let mut packet_source = packet_source;
             // Mutable locals, not Arc<Mutex<_>>: only this thread ever
@@ -1523,6 +1575,9 @@ async fn main() -> std::io::Result<()> {
             // isn't folded into `FlowTable::evict_stale`, which runs on the
             // periodic emitter task instead).
             let mut reassembly = StreamReassembler::new();
+            // JAM-15 request/response matching. Same ownership reasoning as
+            // `reassembly` above: per-flow state only this thread touches.
+            let mut transactions = TransactionTracker::new(service_time_stats);
             // Latched so a narrowed snap length is reported once to stderr
             // rather than per frame. Reassembly cannot recover bytes pcap
             // already cut off, and silently producing partial L7 would be
@@ -1556,6 +1611,7 @@ async fn main() -> std::io::Result<()> {
                                     &capture_config_state,
                                     &flow_table,
                                     &mut reassembly,
+                                    &mut transactions,
                                     &tx,
                                 );
                             }
@@ -1697,15 +1753,37 @@ async fn main() -> std::io::Result<()> {
                         // reconstructed datagram to its transport flow without
                         // counting its bytes as another physical frame.
                         // `parsed` remains the packet-event/capture-file data.
-                        let observe_result = {
+                        let (observe_result, txn_flow) = {
                             let mut table = flow_table.lock().unwrap();
                             match sniff_outcome.reassembled_packet.as_ref() {
-                                Some(reassembled) => {
-                                    table.observe_reassembled(&parsed, reassembled, &l7_info, now_ms)
-                                }
-                                None => table.observe(&parsed, &l7_info, now_ms),
+                                Some(reassembled) => (
+                                    table.observe_reassembled(&parsed, reassembled, &l7_info, now_ms),
+                                    // A completed fragment group's ports are
+                                    // only in the reassembled datagram.
+                                    table.key_for(reassembled),
+                                ),
+                                None => (table.observe(&parsed, &l7_info, now_ms), flow_ident.clone()),
                             }
                         };
+
+                        // JAM-15: match requests to responses on the frame's
+                        // own capture timestamp, so service time is the
+                        // traffic's, in replay as well as live, and not
+                        // whenever this thread got to the frame.
+                        let capture_ts_us = system_time_us(timestamp);
+                        let txn_event = transactions.observe_frame(
+                            txn_flow.as_ref().map(|(key, outbound)| (key, *outbound)),
+                            &l7_info,
+                            capture_ts_us,
+                            observe_result.as_ref().is_some_and(|r| r.is_retransmit),
+                        );
+                        emit_unanswered_findings(
+                            transactions.expire(capture_ts_us),
+                            now_ms,
+                            &mut finding_event_limiter,
+                            &finding_seq_counter,
+                            &tx,
+                        );
 
                         // Aggregate throughput counters (issue #64) — driven
                         // by the same direction FlowTable::observe just
@@ -1804,7 +1882,14 @@ async fn main() -> std::io::Result<()> {
                             .unwrap_or(0);
                         let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
                         let frame_id = format!("pkt-{epoch_ms}-{seq}");
-                        let packet_fields = fields::build_fields(&parsed, &l7_info, link_type);
+                        let mut packet_fields = fields::build_fields(&parsed, &l7_info, link_type);
+                        packet_fields.extend(fields::transaction_fields(&txn_event));
+                        // JAM-15: only now does the request have an id the UI
+                        // will actually receive, so only now can its response
+                        // (and an unanswered finding) point back at it.
+                        if let TxnEvent::Request(request) = &txn_event {
+                            transactions.attach_frame_id(request, frame_id.clone());
+                        }
                         let packet_json = wire::PacketJson {
                             id: frame_id.clone(),
                             timestamp: epoch_ms.to_string(),
@@ -1861,7 +1946,23 @@ async fn main() -> std::io::Result<()> {
                             }));
                         }
                     }
-                    SourceFrame::Timeout => continue,
+                    SourceFrame::Timeout => {
+                        // A quiet live capture still has to time requests
+                        // out. Live capture timestamps are wall-clock, so the
+                        // wall clock continues the same timeline. (Replay
+                        // never times out: it reads until EOF.)
+                        if mode != "replay" {
+                            let now_ms = start.elapsed().as_millis() as u64;
+                            emit_unanswered_findings(
+                                transactions.expire(system_time_us(std::time::SystemTime::now())),
+                                now_ms,
+                                &mut finding_event_limiter,
+                                &finding_seq_counter,
+                                &tx,
+                            );
+                        }
+                        continue;
+                    }
                     SourceFrame::Eof => {
                         // Replay fully consumed, or a live device errored
                         // out for good (spec Components §2: both mean "no
@@ -1883,6 +1984,7 @@ async fn main() -> std::io::Result<()> {
     // Periodic emitter: every 1s, snapshot the flow table and broadcast connection_update events.
     {
         let flow_table = flow_table.clone();
+        let service_time_stats = service_time_stats.clone();
         let process_map = process_map.clone();
         let decrypt_state = decrypt_state.clone();
         let tx = tx.clone();
@@ -2023,6 +2125,8 @@ async fn main() -> std::io::Result<()> {
                     })
                     .collect();
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::EndpointUpdate { endpoints }));
+                let summaries = service_time_stats.lock().unwrap().snapshot();
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ServiceTimeUpdate { summaries }));
 
                 let conversations: Vec<wire::ConversationJson> = conversation_snapshots
                     .into_iter()
@@ -2501,7 +2605,7 @@ mod tests {
             packet_osi_layer(TransportProtocol::Tcp, &L7Info::HttpResponse { status: "200".into() }),
             7
         );
-        assert_eq!(packet_osi_layer(TransportProtocol::Udp, &L7Info::Dns { query_name: "example.com".into() }), 7);
+        assert_eq!(packet_osi_layer(TransportProtocol::Udp, &L7Info::Dns { query_name: "example.com".into(), id: 1, qtype: 1 }), 7);
         assert_eq!(
             packet_osi_layer(
                 TransportProtocol::Tcp,
@@ -2832,7 +2936,7 @@ mod tests {
             ip_declared_payload_len: 0,
             ip_fragment: None,
         };
-        table.observe(&packet, &L7Info::Dns { query_name: "example.com".to_string() }, 0);
+        table.observe(&packet, &L7Info::Dns { query_name: "example.com".to_string(), id: 1, qtype: 1 }, 0);
 
         let json = protocol_node_to_json("Capture", table.protocol_hierarchy());
         assert_eq!(json.name, "Capture");

@@ -19,6 +19,7 @@ import { lookupMacVendor } from '@/lib/mac-vendor';
 // lib/__tests__/decrypted-export-exclusion.test.ts.
 import { downloadBlob, packetsToJson } from '@/lib/export';
 import type { CompiledDisplayFilter } from '@/lib/display-filter';
+import { answeredBy, formatServiceTime, responseLinkOf } from '@/lib/service-time';
 
 interface PacketStreamViewProps {
   packets: PacketFrame[];
@@ -104,6 +105,40 @@ function HexPane({ hexDump, fields, activePath, selectedPath, hoveredByte, onHov
   );
 }
 
+// The export's filename, stamped when the button is clicked. A module-level
+// function rather than an inline `Date.now()` in the onClick: the React
+// compiler's purity lint misreads that inline call as happening during
+// render once this component holds the JAM-15 link bars below.
+function packetsExportFilename(): string {
+  return `packets-${Date.now()}.json`;
+}
+
+// JAM-15: one line linking a selected request or response to its
+// counterpart, with a button to select it when it's listed, or a note saying
+// why it can't be.
+function TransactionLinkBar({ text, target, buttonLabel, onSelect }: {
+  text: string;
+  target: { packet?: PacketFrame; note?: string };
+  buttonLabel: string;
+  onSelect: (packet: PacketFrame) => void;
+}) {
+  const { packet, note } = target;
+  return (
+    <div data-testid="transaction-link" className="text-[11px] text-sky-300 flex items-center justify-between gap-2">
+      <span>
+        {text}
+        {note && <span className="text-slate-500"> ({note})</span>}
+      </span>
+      {packet && (
+        <button type="button" onClick={() => onSelect(packet)}
+          className="px-1.5 py-0.5 rounded border border-sky-800/60 hover:bg-sky-950 whitespace-nowrap">
+          {buttonLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   packets,
   theme,
@@ -167,6 +202,29 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
     .filter((field) => (field.path === 'eth.src' || field.path === 'eth.dst') && typeof field.value === 'string')
     .map((field) => [field.path, lookupMacVendor(String(field.value)) ?? 'Unknown vendor']));
   const payloadFields = visibleSelectedPacket?.fields.filter((field) => field.region === 'payload') ?? [];
+  // JAM-15: request/response link for the selected packet, either way round.
+  const selectedResponseLink = visibleSelectedPacket ? responseLinkOf(visibleSelectedPacket) : null;
+  const selectedAnswer = visibleSelectedPacket && !selectedResponseLink ? answeredBy(visibleSelectedPacket.id, packets) : undefined;
+  const selectedAnswerLink = selectedAnswer ? responseLinkOf(selectedAnswer) : null;
+  const selectPacket = (pkt: PacketFrame) => {
+    if (selectedPacket?.id !== pkt.id) {
+      setSelectedHeaderFieldPath(null);
+      setSelectedPayloadFieldPath(null);
+      setHoveredHeaderFieldPath(null);
+      setHoveredPayloadFieldPath(null);
+      setHoveredHeaderByte(null);
+      setHoveredPayloadByte(null);
+    }
+    setSelectedPacket(pkt);
+  };
+  // A linked packet can be buffered yet filtered out of the list, and
+  // selecting a hidden packet would silently fall back to the first shown.
+  const linkTarget = (id: string): { packet?: PacketFrame; note?: string } => {
+    const packet = packets.find((p) => p.id === id);
+    if (!packet) return { note: "no longer in this tab's buffer" };
+    if (!displayedPackets.some((p) => p.id === id)) return { note: 'hidden by the current filter' };
+    return { packet };
+  };
   const highlightedHeaderPaths = new Set(headerFields.filter((field) => hoveredHeaderByte !== null && hoveredHeaderByte >= field.offset && hoveredHeaderByte < field.offset + field.len).map((field) => field.path));
   const highlightedPayloadPaths = new Set(payloadFields.filter((field) => hoveredPayloadByte !== null && hoveredPayloadByte >= field.offset && hoveredPayloadByte < field.offset + field.len).map((field) => field.path));
 
@@ -229,7 +287,7 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
           {/* Export (JAM-7/GitHub #74) — the displayed packets only, and
               never decryptedSegments, which packetsToJson cannot accept. */}
           <button
-            onClick={() => downloadBlob(packetsToJson(displayedPackets), `packets-${Date.now()}.json`, 'application/json')}
+            onClick={() => downloadBlob(packetsToJson(displayedPackets), packetsExportFilename(), 'application/json')}
             disabled={displayedPackets.length === 0}
             title="Download the frames currently shown as JSON"
             className="flex items-center space-x-1 px-2 py-1 rounded text-[10px] font-bold border bg-slate-800 border-slate-700 text-slate-300 hover:text-emerald-300 disabled:opacity-40 disabled:hover:text-slate-300 transition"
@@ -288,22 +346,13 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
             {displayedPackets.map((pkt) => {
               const isSelected = visibleSelectedPacket?.id === pkt.id;
               const finding = findingByFrameId.get(pkt.id);
+              const responseLink = responseLinkOf(pkt);
 
               return (
                 <div
                   key={pkt.id}
                   data-packet-row
-                  onClick={() => {
-                    if (selectedPacket?.id !== pkt.id) {
-                      setSelectedHeaderFieldPath(null);
-                      setSelectedPayloadFieldPath(null);
-                      setHoveredHeaderFieldPath(null);
-                      setHoveredPayloadFieldPath(null);
-                      setHoveredHeaderByte(null);
-                      setHoveredPayloadByte(null);
-                    }
-                    setSelectedPacket(pkt);
-                  }}
+                  onClick={() => selectPacket(pkt)}
                   className={`p-2 hover:bg-slate-900/90 transition cursor-pointer flex items-start space-x-2 text-[11px] ${
                     isSelected ? 'bg-slate-900 border-l-2 border-emerald-400 font-semibold' : ''
                   }`}
@@ -329,6 +378,17 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                       className={`px-1.5 py-0.2 rounded text-[10px] font-bold border whitespace-nowrap ${SEVERITY_CLASS[finding.severity]}`}
                     >
                       {finding.code}
+                    </span>
+                  )}
+
+                  {/* Service time on a matched response (JAM-15) */}
+                  {responseLink && (
+                    <span
+                      data-testid="service-time-badge"
+                      title={`${responseLink.protocol} response${responseLink.requestId ? ` to ${responseLink.requestId}` : ''}`}
+                      className="px-1.5 py-0.2 rounded text-[10px] font-bold border whitespace-nowrap bg-sky-950 text-sky-300 border-sky-800/60"
+                    >
+                      ↩ {formatServiceTime(responseLink.serviceTimeUs)}
                     </span>
                   )}
 
@@ -364,6 +424,27 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                   Protocol: {visibleSelectedPacket.protocol} | Length: {visibleSelectedPacket.length} Bytes
                 </div>
               </div>
+
+              {/* JAM-15: the request this response answers, or the response
+                  that answered this request. */}
+              {selectedResponseLink && (
+                <TransactionLinkBar
+                  text={selectedResponseLink.requestId
+                    ? `${selectedResponseLink.protocol} response to ${selectedResponseLink.requestId} in ${formatServiceTime(selectedResponseLink.serviceTimeUs)}`
+                    : `${selectedResponseLink.protocol} response in ${formatServiceTime(selectedResponseLink.serviceTimeUs)}`}
+                  target={selectedResponseLink.requestId ? linkTarget(selectedResponseLink.requestId) : { note: 'its request was not sent to this view' }}
+                  buttonLabel="Show request"
+                  onSelect={selectPacket}
+                />
+              )}
+              {selectedAnswer && selectedAnswerLink && (
+                <TransactionLinkBar
+                  text={`${selectedAnswerLink.protocol} request answered by ${selectedAnswer.id} in ${formatServiceTime(selectedAnswerLink.serviceTimeUs)}`}
+                  target={linkTarget(selectedAnswer.id)}
+                  buttonLabel="Show response"
+                  onSelect={selectPacket}
+                />
+              )}
 
               <div className="space-y-1 text-[11px]">
                 <div className="text-[10px] font-bold text-slate-400">HEADER FIELDS</div>

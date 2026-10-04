@@ -111,6 +111,16 @@ Maps to `PacketFrame` via `mapPacketEvent`, which requires `fields` to be presen
 
 Top-level groups describe only protocols actually decoded: `eth` appears for Ethernet framing, `ip` or `ip6` for the network layer, `tcp` or `udp` for decoded transport, and `http`, `dns`, or `tls` when application decoding succeeds. Loopback and raw-IP framing have no `eth` group. An 802.1Q tag appears as `eth.vlan` with child `eth.vlan.id`. ICMP and unrecognized transports have no transport group because no fields are decoded for them today.
 
+**DNS fields (JAM-15).** A DNS message over UDP decodes as a query (`dns.flags.response` false) or a response (true); before JAM-15 a response's echoed question was reported as though it were a query. Both carry `dns.id` (transaction ID), `dns.qry.name` and `dns.qry.type` (a mnemonic such as `"A"`/`"AAAA"`, or `"TYPE<n>"` for an unknown type). A response adds `dns.flags.rcode` (`"NOERROR"`, `"NXDOMAIN"`, ... or `"RCODE<n>"`), `dns.count.answers` (the header's ANCOUNT as sent), and an `dns.answers` group holding one `dns.answer.<i>` group per decoded record, each with `.name`, `.type`, `.ttl` (seconds) and, for A/AAAA (type `addr`) and CNAME/NS/PTR (type `str`), `.data`. At most 16 records are decoded (`l7::MAX_DNS_ANSWERS`), so `dns.count.answers` can exceed the number of `dns.answer.<i>` groups; a truncated message keeps the records decoded before the cut. Answer paths are indexed rather than repeated because a path is unique within a packet.
+
+**Service-time fields (JAM-15).** A response matched to its request (`capture-agent/src/transaction.rs`) gets derived fields with `offset` 0 and `len` 0 (they come from the match, not from this packet's bytes):
+
+- `dns.time_us` / `http.time_us` (`uint`): microseconds from the request's capture timestamp to the response's. Microseconds because display filters compare integers only, and milliseconds would round a cached sub-millisecond DNS answer to 0. Measured on the frames' own capture timestamps, in replay as well as live.
+- `dns.response_to` / `http.response_to` (`str`): the request's `packet` event `id`. Present only when the request was itself sent as a `packet` event; a request the packet-event limiter skipped gets a matched response with a time but no link, so the UI is never pointed at a frame it never received.
+- `dns.response.duplicate` (`bool`, always `true`): a second response to a DNS transaction answered within the last 5 s. It carries no time.
+
+Matching rules: DNS matches on flow, transaction ID and the echoed question name (case-insensitive), and only for unicast DNS over UDP port 53. mDNS/LLMNR are answered on other flows, and DNS over TCP isn't decoded. HTTP/1.x matches a final response to the oldest outstanding request on the connection. A `1xx` other than `101` is interim and doesn't consume it. A response must travel the opposite way to its request, or nothing is consumed. A TCP-retransmitted request segment is not queued twice. Repeating a DNS query while the first is pending keeps the first send time.
+
 **Rate-limited event sampling, not every packet.** `packet` events are throttled by `PacketEventLimiter::new(100, 1000)` (`capture-agent/src/rate_limit.rs`, applied in the capture loop in `capture-agent/src/main.rs`). It is a minimum-interval throttle: at most one `packet` event every 10 ms (100 per second), spaced evenly across each second. There is no burst allowance, so a busy second doesn't front-load 100 events and then go quiet. A packet that arrives before the next slot gets no `packet` event, and nothing records that it was skipped. This samples the *event stream* only. What the limiter does **not** affect:
 
 - **Flow accounting.** `FlowTable::observe` runs on every successfully parsed frame before the limiter, so each `connection_update`'s byte and packet totals are complete for that flow. Frames that match no tracked flow (e.g. broadcast or multicast seen in promiscuous mode) aren't attributed to any connection, and frames that fail to parse never reach `observe`. They are counted in `capture_stats.unparseableFrames`. `layer_update` carries no packet counts.
@@ -121,6 +131,7 @@ Top-level groups describe only protocols actually decoded: `eth` appears for Eth
 - **`malformed-frame`** has its own limiter at 20 per second.
 - **`connection-reset`** isn't throttled.
 - **`retransmission`** is only evaluated for packets that pass the `packet` limiter, so it shares that budget (see the note under `finding`).
+- **`unanswered-request`** shares the `malformed-frame` limiter's 20 per second. A finding it drops is still counted in `service_time_update`'s `unanswered`.
 
 `decrypted_payload` has its own 100-per-second limiter. The browser keeps only the most recent `buffer packets <n>` events (default 100; see `docs/usage.md`). Use them for inspection, not for counting. Historical note: before issue #27 (fixed in PR #34), every captured packet produced its own event.
 
@@ -146,9 +157,10 @@ Maps to `Finding` via `mapFindingEvent` (`lib/agent-mapping.ts`), which owns the
 
 Field notes:
 - `severity` is advisory display metadata (`error` / `warning` / `note` / `chat`, mirroring Wireshark's own Expert Info severity vocabulary), not a verdict derived from "how bad is this" — a `connection-reset` finding is `note`, not `error`, because a reset is a normal TCP closing mechanism as often as an abnormal one.
-- `code` is a small, closed, stable set, additive-only once shipped, like a field registry `path`. Three codes ship in JAM-12: `retransmission`, `connection-reset`, `malformed-frame`.
+- `code` is a small, closed, stable set, additive-only once shipped, like a field registry `path`. Three codes ship in JAM-12: `retransmission`, `connection-reset`, `malformed-frame`. JAM-15 adds `unanswered-request`.
 - `frameId`/`flowId` are each independently optional, and a finding may carry neither. `retransmission` carries `frameId` only; `connection-reset` carries `flowId` only; `malformed-frame` carries **neither** — `parse::parse_packet` failing means no `ParsedPacket`, and therefore no `packet` event or flow, was ever produced for that frame, so there is nothing to navigate to. This is by design, not a gap to fix later (see `docs/superpowers/specs/2026-09-26-expert-info-findings-design.md`).
 - `retransmission`'s `frameId` always corresponds to a `packet` event the UI actually received: both are gated by the same capture-loop rate limiter and generated from the same `pkt-<epoch_ms>-<seq>` id, so a rate-limited-out retransmission simply produces no finding, consistent with producing no `packet` event either.
+- `unanswered-request` (severity `warning`) fires once per DNS query or HTTP/1.x request with no response within 5 s (DNS) or 30 s (HTTP) of capture time, e.g. `no DNS response to "example.com" A within 5 s`. It always carries `flowId`, and carries `frameId` when the request was sent as a `packet` event. The request text in `summary` is display-safe: anything other than printable ASCII is escaped as `\u{..}`, and it is cut at 120 characters. HTTP's 30 s is exceeded by long-poll requests, which is why the summary says no response was *seen*, not that the request failed. Pending requests are bounded (4,096 overall, 32 per HTTP connection). A request past those bounds is counted as `untracked`, not matched. A runtime interface switch discards pending requests without reporting them.
 - `connection-reset` fires once per flow, on the transition into `rst_seen`, not on every subsequent RST-flagged packet on an already-reset flow (e.g. a retransmitted RST).
 - `malformed-frame`'s `summary` names the active link type and the frame's byte length (e.g. "58-byte frame did not decode as Ethernet framing") — not a per-parse-stage failure reason. Threading a granular reason out of `parse_packet` (this agent's most heavily fuzzed, most-tested public function) is a larger, separately-scoped change; each occurrence is still individually visible here, not just the running `unparseableFrames` total `capture_stats` already reports.
 
@@ -293,6 +305,29 @@ Field notes:
 - `ja3Label` is the most recently observed non-empty label across every flow contributing to that host/pair — deliberately not "first ClientHello wins" the way a single connection's own `ja3Label` is, since a host with many short-lived TLS flows should show its current fingerprint. Omitted (not `null`) when no flow contributing to that host/pair has ever completed a TLS handshake.
 - `durationMs` (conversation only) is `lastSeenMs - firstSeenMs`.
 - Reverse-DNS/ownership and geoIP enrichment are not part of this wire event at all — they're looked up client-side, opt-in, exactly as `connection_update`'s own `enrichment` already is, just triggered once per `host` row instead of once per flow.
+
+### `service_time_update`
+
+Sent once per tick (~1 second), right after `endpoint_update`. Service response time per protocol (JAM-15), from `transaction::ServiceTimeStats`. Always one entry per protocol (`DNS`, then `HTTP`), so a client can show "0 answered" rather than guess why one is missing.
+
+```json
+{
+  "type": "service_time_update",
+  "summaries": [
+    {"protocol": "DNS", "answered": 42, "unanswered": 1, "untracked": 0,
+     "minUs": 310, "maxUs": 240000, "sampleCount": 42, "medianUs": 11200, "p95Us": 95000},
+    {"protocol": "HTTP", "answered": 0, "unanswered": 0, "untracked": 0, "sampleCount": 0}
+  ]
+}
+```
+
+Maps to `ServiceTimeSummary[]` via `mapServiceTimeUpdateEvent` (`lib/agent-mapping.ts`).
+
+Field notes:
+- `answered`, `unanswered`, `untracked`, `minUs` and `maxUs` cover the whole run of the agent process. They are not reset by an interface switch, like `protocol_hierarchy_update`.
+- `medianUs`/`p95Us` are nearest-rank percentiles (always an observed value, never interpolated) over the most recent `sampleCount` answered requests, at most 1,024 (`transaction::RECENT_SAMPLES`).
+- `minUs`, `maxUs`, `medianUs` and `p95Us` are omitted, not zero, until a response has been matched.
+- Times are measured at the capture point: server processing plus one network round trip from where the capture runs.
 
 ### `capture_stats`
 

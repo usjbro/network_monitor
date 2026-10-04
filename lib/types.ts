@@ -187,10 +187,28 @@ export interface Finding {
   id: string;
   timestamp: string;
   severity: 'error' | 'warning' | 'note' | 'chat';
-  code: 'retransmission' | 'connection-reset' | 'malformed-frame';
+  code: 'retransmission' | 'connection-reset' | 'malformed-frame' | 'unanswered-request';
   summary: string;
   frameId?: string;
   flowId?: string;
+}
+
+// Service response time for one protocol (JAM-15), from the agent's
+// `service_time_update` wire event (docs/wire-protocol.md). `answered`,
+// `unanswered`, `untracked`, `minUs` and `maxUs` cover the whole capture;
+// `medianUs`/`p95Us` are nearest-rank percentiles over the most recent
+// `sampleCount` answered requests only. Timing values are absent, never
+// zero, until a response has been matched.
+export interface ServiceTimeSummary {
+  protocol: string;
+  answered: number;
+  unanswered: number;
+  untracked: number;
+  minUs?: number;
+  maxUs?: number;
+  sampleCount: number;
+  medianUs?: number;
+  p95Us?: number;
 }
 
 // Whether this agent process is capturing live traffic or replaying a

@@ -153,6 +153,33 @@ pub enum FindingCode {
     Retransmission,
     ConnectionReset,
     MalformedFrame,
+    /// JAM-15: a DNS query or HTTP/1.x request with no response within its
+    /// protocol's timeout (`transaction.rs`).
+    UnansweredRequest,
+}
+
+/// JAM-15: one protocol's service response time summary, from
+/// `transaction::ServiceTimeStats`. `answered`, `unanswered`, `untracked`,
+/// `minUs` and `maxUs` cover the whole capture; `medianUs`/`p95Us` are
+/// nearest-rank percentiles over the most recent `sampleCount` answered
+/// requests only. The timing fields are absent, not zero, until the first
+/// response is matched.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceTimeSummaryJson {
+    pub protocol: &'static str,
+    pub answered: u64,
+    pub unanswered: u64,
+    pub untracked: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_us: Option<u64>,
+    pub sample_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub median_us: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95_us: Option<u64>,
 }
 
 /// See docs/superpowers/specs/2026-09-26-expert-info-findings-design.md.
@@ -222,6 +249,9 @@ pub enum AgentEvent {
     /// Per-(local,remote)-pair traffic rollups (JAM-14) — see
     /// `flow::ConversationSnapshot`.
     ConversationUpdate { conversations: Vec<ConversationJson> },
+    /// Service response time per protocol (JAM-15), sent every tick — see
+    /// `ServiceTimeSummaryJson`.
+    ServiceTimeUpdate { summaries: Vec<ServiceTimeSummaryJson> },
 }
 
 /// One capturable network interface, as reported in response to a
@@ -679,6 +709,7 @@ mod tests {
             (FindingCode::Retransmission, "retransmission"),
             (FindingCode::ConnectionReset, "connection-reset"),
             (FindingCode::MalformedFrame, "malformed-frame"),
+            (FindingCode::UnansweredRequest, "unanswered-request"),
         ];
         for (code, expected) in codes {
             let s = serde_json::to_string(&code).unwrap();
@@ -1250,5 +1281,47 @@ mod tests {
         assert!(line.contains("\"remoteAddr\":\"93.184.216.34\""));
         assert!(line.contains("\"durationMs\":300"));
         assert!(line.contains("\"ja3Label\":\"matches Chrome 12x\""));
+    }
+
+    #[test]
+    fn encodes_service_time_update_with_timing_fields_only_once_measured() {
+        let line = encode_event(&AgentEvent::ServiceTimeUpdate {
+            summaries: vec![
+                ServiceTimeSummaryJson {
+                    protocol: "DNS",
+                    answered: 2,
+                    unanswered: 1,
+                    untracked: 0,
+                    min_us: Some(800),
+                    max_us: Some(12_000),
+                    sample_count: 2,
+                    median_us: Some(800),
+                    p95_us: Some(12_000),
+                },
+                ServiceTimeSummaryJson {
+                    protocol: "HTTP",
+                    answered: 0,
+                    unanswered: 0,
+                    untracked: 0,
+                    min_us: None,
+                    max_us: None,
+                    sample_count: 0,
+                    median_us: None,
+                    p95_us: None,
+                },
+            ],
+        });
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "service_time_update",
+                "summaries": [
+                    {"protocol": "DNS", "answered": 2, "unanswered": 1, "untracked": 0, "minUs": 800,
+                     "maxUs": 12000, "sampleCount": 2, "medianUs": 800, "p95Us": 12000},
+                    {"protocol": "HTTP", "answered": 0, "unanswered": 0, "untracked": 0, "sampleCount": 0}
+                ]
+            })
+        );
     }
 }
