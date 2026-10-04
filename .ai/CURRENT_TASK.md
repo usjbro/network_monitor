@@ -2,7 +2,7 @@
 
 ## Objective
 
-None active. JAM-16 (stream reassembly, #239) merged to `main` as `886d4b4` on 2026-10-04, after JAM-172 was fixed in #257. Epic JAM-130 is closed.
+None active. JAM-16 (stream reassembly, #239) merged to `main` as `886d4b4` on 2026-10-04, after JAM-172 was fixed in #257. Epic JAM-130 stays open for two owner actions: JAM-187 and JAM-188.
 
 ## Queue (approved by James in chat, 2026-10-04)
 
@@ -16,5 +16,6 @@ None active. JAM-16 (stream reassembly, #239) merged to `main` as `886d4b4` on 2
 - JAM-184: per-launch token on the agent control socket (a wire change).
 - JAM-185: `osi-mon` prints made-up metrics.
 - JAM-186: the `~` path example in `docs/usage.md` doesn't work.
+- JAM-187 and JAM-188 (JAM-130): owner checks in Settings → Code security, then a note in `CONTRIBUTING.md`.
 
 See `HANDOFF.md` for details.

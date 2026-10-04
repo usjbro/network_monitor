@@ -12,7 +12,7 @@ Worked JAM-130's open children under James's `/loop` in chat. Each PR had an ind
 | #256 | `6ac15a7` | JAM-181 | `validate_capture_file_path` rejects `..` and compares symlink-resolved paths, so a capture can't be placed inside the agent's working directory. Found by the #253 review. |
 
 Decided by James on 2026-10-04:
-- JAM-130 epic closed. Its text still lists GitHub #67 (the `github-advanced-security` check), which was never a Linear child, so the close does not cover it.
+- JAM-130 epic stays open. Two of its "Done when" items are unmet, and both are owner actions in repo Settings → Code security: JAM-187 (record the decision on the `github-advanced-security` check from GitHub #67, whose decision PR #106 was never merged) and JAM-188 (confirm and record the secret scanning and push protection state).
 - Filed as JAM-186: `docs/usage.md`'s `capture ~/captures/…` example doesn't work, because nothing expands `~`.
 
 ## Security review fixes (JAM-175 to JAM-179) — 2026-10-04, merged
@@ -35,7 +35,7 @@ Follow-ups, now filed: JAM-184 (a per-launch token on the agent socket) and JAM-
 
 ## JAM-172 fix and JAM-16 merge — 2026-10-04, merged
 
-JAM-16 (#239) merged to `main` as `886d4b4`. CI passed on the PR head `cfc8c19` and on `main`. Two more Codex findings on #239 were confirmed in the merged code and filed under JAM-16: JAM-182 `[P1]` (replay reassembly uses wall-clock time) and JAM-183 `[P2]` (an interface switch doesn't reset reassembly). JAM-130 is closed. GitHub #67, listed in its text, was never a Linear child. New issues: JAM-184 (agent socket token), JAM-185 (`osi-mon` made-up metrics) and JAM-186 (`~` in `docs/usage.md`).
+JAM-16 (#239) merged to `main` as `886d4b4`. CI passed on the PR head `cfc8c19` and on `main`. Two more Codex findings on #239 were confirmed in the merged code and filed under JAM-16: JAM-182 `[P1]` (replay reassembly uses wall-clock time) and JAM-183 `[P2]` (an interface switch doesn't reset reassembly). JAM-130 stays open for JAM-187 and JAM-188. New issues: JAM-184 (agent socket token), JAM-185 (`osi-mon` made-up metrics) and JAM-186 (`~` in `docs/usage.md`).
 
 
 JAM-172 is fixed in #257 (squash `276ec80`, merged into this branch). A last fragment whose declared end conflicts with the group's known end, or ends before bytes already held, is dropped before any of it is written, and counted in `conflicting_terminal_fragments`. James approved merging #239 with JAM-167, JAM-168 and JAM-170 left as follow-ups. `main` was merged into this branch; only the `.ai/` notes conflicted.
