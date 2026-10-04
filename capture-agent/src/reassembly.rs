@@ -737,13 +737,22 @@ impl TcpReassembler {
         let stream = self.streams.entry(key.clone()).or_insert_with(|| TcpStream::new(seq, now_ms));
         stream.last_seen_ms = now_ms;
         if stream.finished {
-            // Release lazily, on the first segment after giving up, so the
-            // buffer is freed promptly without the caller having to know.
+            // Giving up is terminal: remove the entry outright rather than
+            // releasing its buffer in place and leaving a `finished` marker
+            // behind. A busy, long-lived connection direction has its
+            // `last_seen_ms` refreshed by every segment, so an in-place
+            // release here (found on review of the standalone-decision fix
+            // above, JAM-169) would leave this direction permanently unable
+            // to decide anything -- not just the one segment that triggers
+            // the release, but every later, unrelated segment too, since
+            // `has_buffer` would keep reporting true for the lingering
+            // entry and `feed` would keep taking this same early return
+            // forever. This segment's own decision is still not trusted
+            // (the same as before: one segment pays the cost of clearing
+            // stale state), but the next one gets a clean slate.
             let freed = stream.data.len();
-            if freed > 0 {
-                stream.release();
-                self.bytes_held = self.bytes_held.saturating_sub(freed);
-            }
+            self.streams.remove(key);
+            self.bytes_held = self.bytes_held.saturating_sub(freed);
             return None;
         }
         if now_ms.saturating_sub(stream.first_seen_ms) > TCP_DECISION_WINDOW_MS {
@@ -1726,6 +1735,41 @@ mod tests {
             "a forged segment at a capped-but-not-yet-released stream's sequence range must not decide standalone, got {:?}",
             outcome.info
         );
+    }
+
+    #[test]
+    fn a_direction_recovers_after_one_cleanup_segment_once_finished() {
+        // Regression (found on review of the hit-cap fix above): giving up
+        // on a direction must not blind it to every later, unrelated
+        // segment forever. A busy, long-lived connection has its
+        // `last_seen_ms` refreshed by every segment, so if the `finished`
+        // entry were only released in place (data cleared, entry kept),
+        // `has_buffer` would keep reporting true and every future segment on
+        // this direction -- not just the one right after giving up -- would
+        // be silently discarded, with idle eviction never reachable because
+        // the connection never goes idle. Exactly one segment pays the cost
+        // of clearing stale state; the one after that must decide normally.
+        let mut r = StreamReassembler::new();
+        let key = flow_key();
+
+        let garbage = vec![0u8; MAX_TCP_STREAM_BYTES + 1];
+        let capped = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, &garbage);
+        r.sniff(&capped, Some((&key, true)), 0);
+
+        // First segment after giving up: pays the cleanup cost, decides
+        // nothing (covered by the test above too).
+        let cleanup = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 50_000, b"GET /first HTTP/1.1\r\n\r\n");
+        let outcome = r.sniff(&cleanup, Some((&key, true)), 1);
+        assert!(matches!(outcome.info, L7Info::None), "the cleanup segment itself must not decide");
+
+        // A fresh, unrelated, genuinely standalone request on the same
+        // direction must decide normally -- the lockout must not persist.
+        let next = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 60_000, b"GET /second HTTP/1.1\r\n\r\n");
+        let outcome = r.sniff(&next, Some((&key, true)), 2);
+        match outcome.info {
+            L7Info::Http { path, .. } => assert_eq!(path, "/second", "a fresh request must decide, not stay locked out"),
+            other => panic!("expected the fresh request to decide standalone, got {other:?}"),
+        }
     }
 
     // =====================================================================
