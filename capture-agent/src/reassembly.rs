@@ -692,13 +692,20 @@ impl TcpReassembler {
         self.streams.get(key).and_then(|stream| stream.data.get(..stream.prefix_len)).unwrap_or(&[])
     }
 
-    /// Whether this direction already has a live buffer — i.e. an earlier
-    /// segment left something held that a later, standalone-decidable
-    /// segment could conflict with (JAM-169). A finished-and-not-yet-fed
-    /// stream (see `feed`'s `stream.finished` handling) is release-pending,
-    /// not actually held, so it does not count here either.
+    /// Whether this direction has an entry at all — i.e. an earlier segment
+    /// left something a later, standalone-decidable segment could conflict
+    /// with (JAM-169). Deliberately keyed on entry *existence*, not
+    /// `!stream.finished`: a stream that hit its byte cap is marked
+    /// `finished` without its `data` being cleared (`feed`'s lazy-release
+    /// comment — release happens "on the first segment after giving up",
+    /// not at the moment it gives up), so checking `finished` alone would
+    /// wrongly report no buffer while real first-seen bytes still sit in
+    /// `stream.data`, reopening the standalone-decision bypass this exists
+    /// to close. Falling through to `feed` for *any* existing entry (empty
+    /// or not, finished or not) costs nothing extra: `feed` already handles
+    /// a finished entry by lazily releasing it and reporting no change.
     pub fn has_buffer(&self, key: &TcpStreamKey) -> bool {
-        self.streams.get(key).is_some_and(|stream| !stream.finished)
+        self.streams.contains_key(key)
     }
 
     /// Feeds one segment's payload. Returns the direction's status whenever
@@ -1680,6 +1687,45 @@ mod tests {
             }
             other => panic!("expected the first-seen path to decide, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_standalone_decision_does_not_bypass_a_stream_that_hit_its_byte_cap() {
+        // Security regression (JAM-169, found on review of the first fix): a
+        // stream that hits MAX_TCP_STREAM_BYTES without deciding is marked
+        // `finished` so no further segment is buffered against it, but its
+        // `data` is not cleared until the next `feed` call lazily releases
+        // it (see `feed`'s own comment on that). Checking `!stream.finished`
+        // alone therefore still reported "no buffer" while real first-seen
+        // bytes sat in `stream.data` -- reopening the exact bypass the first
+        // fix closed, just for the hit-cap case instead of the
+        // still-active-buffer case.
+        let mut r = StreamReassembler::new();
+        let key = flow_key();
+
+        // Oversized, never-decodable payload: triggers `hit_cap` in a single
+        // `feed`, leaving `stream.finished = true` with `stream.data` full
+        // (not released).
+        let garbage = vec![0u8; MAX_TCP_STREAM_BYTES + 1];
+        let capped = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, &garbage);
+        let outcome = r.sniff(&capped, Some((&key, true)), 0);
+        assert!(
+            matches!(outcome.info, L7Info::None),
+            "undecodable garbage must not itself decide"
+        );
+
+        // A later segment at the same sequence number whose own payload is a
+        // complete, independently decodable request must not be trusted
+        // directly just because the capped stream's `finished` flag made it
+        // look buffer-free.
+        let forged =
+            tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, b"GET /evil HTTP/1.1\r\n\r\n");
+        let outcome = r.sniff(&forged, Some((&key, true)), 1);
+        assert!(
+            !matches!(outcome.info, L7Info::Http { ref path, .. } if path == "/evil"),
+            "a forged segment at a capped-but-not-yet-released stream's sequence range must not decide standalone, got {:?}",
+            outcome.info
+        );
     }
 
     // =====================================================================
