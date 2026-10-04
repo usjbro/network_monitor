@@ -408,22 +408,25 @@ impl FragmentGroup {
 /// frame and holding the maximum would avoid that too, but would then freeze
 /// after a large backward step until recorded time caught up, possibly for
 /// the rest of the file, which is the original bug again.
+///
+/// Steps are summed at full `Duration` precision and only the total is
+/// converted to milliseconds: frames under a millisecond apart are common on
+/// a busy link, and rounding each step down would add nothing per frame.
 #[derive(Debug, Default)]
 pub struct ReplayClock {
     previous_frame: Option<std::time::SystemTime>,
-    now_ms: u64,
+    elapsed: std::time::Duration,
 }
 
 impl ReplayClock {
     pub fn now_ms(&mut self, frame_timestamp: std::time::SystemTime) -> u64 {
         if let Some(previous) = self.previous_frame {
             if let Ok(step) = frame_timestamp.duration_since(previous) {
-                let step_ms = u64::try_from(step.as_millis()).unwrap_or(u64::MAX);
-                self.now_ms = self.now_ms.saturating_add(step_ms);
+                self.elapsed = self.elapsed.saturating_add(step);
             }
         }
         self.previous_frame = Some(frame_timestamp);
-        self.now_ms
+        u64::try_from(self.elapsed.as_millis()).unwrap_or(u64::MAX)
     }
 }
 
@@ -1559,6 +1562,20 @@ mod tests {
         assert_eq!(clock.now_ms(at_secs(100)), 0);
         assert_eq!(clock.now_ms(at_secs(101)), 1_000);
         assert_eq!(clock.now_ms(at_secs(160)), 60_000);
+    }
+
+    #[test]
+    fn replay_clock_keeps_sub_millisecond_gaps() {
+        // A busy capture: frames 0.5 ms apart. Rounding each gap down to
+        // whole milliseconds would add nothing per frame and freeze the
+        // clock however much recorded time passed.
+        let mut clock = ReplayClock::default();
+        let origin = at_secs(0);
+        let mut now = 0;
+        for frame in 0..=60_000u32 {
+            now = clock.now_ms(origin + std::time::Duration::from_micros(500) * frame);
+        }
+        assert_eq!(now, 30_000, "60,000 gaps of 0.5 ms are 30 s of recorded time");
     }
 
     #[test]
