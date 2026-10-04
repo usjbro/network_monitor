@@ -60,10 +60,17 @@ for the full design and threat model.
    repo. Binding `:443` also needs elevated privileges, since it's a
    privileged port.
 
+   Then start the relay with that hostname allowed, for example
+   `ALLOWED_HOSTS=<mac-hostname>.local npm run start` (comma-separate
+   several names). Without it, the relay answers `421 Misdirected Request`
+   to every LAN request: it only serves `Host` values it recognises, which
+   is its defence against DNS rebinding (JAM-176, see `docs/security.md`).
+   The loopback-only default (`localhost:8443`) needs no setting.
+
 ## Running (each session, once set up)
 
     ./capture-agent/target/release/capture-agent &   # or: cd capture-agent && cargo run --release
-    npm run start &                                    # or npm run dev
+    npm run start &                                    # or npm run dev; after step 5: ALLOWED_HOSTS=<mac-hostname>.local npm run start &
     caddy run --config deploy/Caddyfile &
 
 From a device with an installed, trusted client certificate, browse to:
