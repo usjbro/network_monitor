@@ -138,7 +138,7 @@ fn protocol_classification_regression_corpus() {
         (
             "dns_query",
             Box::new(|| match sniff_l7(&fixtures::dns_query(), Some(53)) {
-                L7Info::Dns { query_name } => require(query_name == "a.com", "wrong query_name"),
+                L7Info::Dns { query_name, .. } => require(query_name == "a.com", "wrong query_name"),
                 other => Err(format!("expected Dns, got {other:?}")),
             }),
         ),

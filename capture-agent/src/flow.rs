@@ -586,7 +586,7 @@ impl FlowTable {
 
         match l7 {
             L7Info::Http { .. } | L7Info::HttpResponse { .. } => state.app_layer_protocol = "HTTP".to_string(),
-            L7Info::Dns { .. } => state.app_layer_protocol = "DNS".to_string(),
+            L7Info::Dns { .. } | L7Info::DnsResponse { .. } => state.app_layer_protocol = "DNS".to_string(),
             L7Info::TlsClientHello { ja3, ja3_label, client_random, .. } => {
                 state.app_layer_protocol = "HTTPS/TLS".to_string();
                 state.encryption = "TLS".to_string();
@@ -1671,7 +1671,7 @@ mod tests {
         let udp_pkt = udp_packet_to(true, 53, 40);
 
         table.observe(&tcp_pkt, &L7Info::None, 0);
-        table.observe(&udp_pkt, &L7Info::Dns { query_name: "example.com".to_string() }, 0);
+        table.observe(&udp_pkt, &L7Info::Dns { query_name: "example.com".to_string(), id: 1, qtype: 1 }, 0);
 
         let root = table.protocol_hierarchy();
         let ip = root

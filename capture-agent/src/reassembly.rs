@@ -1432,7 +1432,7 @@ mod tests {
         assert_eq!(parsed.dst_port, Some(53));
         assert!(parsed.ip_fragment.is_none(), "the rebuilt header must have its fragment fields cleared");
         match sniff_l7(&parsed.payload, parsed.dst_port) {
-            L7Info::Dns { query_name } => assert_eq!(query_name, "a.com"),
+            L7Info::Dns { query_name, .. } => assert_eq!(query_name, "a.com"),
             other => panic!("expected the rejoined datagram to decode as DNS, got {other:?}"),
         }
         assert_eq!(r.bytes_held(), 0, "a completed group must not stay held");

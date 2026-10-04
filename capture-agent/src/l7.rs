@@ -13,7 +13,29 @@ pub enum L7Info {
     /// answers, service-time timing) is explicitly out of scope here; that
     /// is epic #57's #82.
     HttpResponse { status: String },
-    Dns { query_name: String },
+    /// A DNS query (QR bit clear). `id` is the transaction ID and `qtype` the
+    /// first question's type (`0` when the question is truncated before its
+    /// type field). Both exist for JAM-15's request/response matching
+    /// (`transaction.rs`).
+    Dns { query_name: String, id: u16, qtype: u16 },
+    /// A DNS response (QR bit set), JAM-15. Kept apart from `Dns` for the
+    /// same reason `HttpResponse` is kept apart from `Http`: the two carry
+    /// different facts, and before this variant existed a response's echoed
+    /// question was reported as though it were a query.
+    ///
+    /// `answer_count` is the header's ANCOUNT as sent. `answers` holds the
+    /// records actually decoded, at most `MAX_DNS_ANSWERS`, so it can be
+    /// shorter than `answer_count` when the message is truncated or the
+    /// record cap is reached. Both are reported so a consumer never mistakes
+    /// one for the other.
+    DnsResponse {
+        query_name: String,
+        id: u16,
+        qtype: u16,
+        rcode: u8,
+        answer_count: u16,
+        answers: Vec<DnsAnswer>,
+    },
     TlsClientHello {
         sni: String,
         ja3: Option<String>,
@@ -93,35 +115,238 @@ fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
     }
 }
 
+/// One decoded resource record from a DNS response's answer section.
+///
+/// `data` is the record's value in text form: dotted IPv4 for A, standard
+/// IPv6 notation for AAAA, the target name for CNAME/NS/PTR, and empty for
+/// any other type, whose RDATA is not decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnsAnswer {
+    pub name: String,
+    pub rtype: u16,
+    pub ttl: u32,
+    pub data: String,
+}
+
+/// Upper bound on the answer records decoded from one response. A response
+/// can declare up to 65,535 answers in ANCOUNT. Decoding is linear in the
+/// message length either way, but each decoded record is a heap-allocated
+/// `String` pair that goes onto the wire as fields, so the count is capped.
+pub const MAX_DNS_ANSWERS: usize = 16;
+
+/// RFC 1035 §2.3.4: a domain name is at most 255 octets on the wire.
+const MAX_DNS_NAME_LEN: usize = 255;
+
+/// Compression pointers followed while reading one name. A legitimate name
+/// needs one or two. The cap is what turns a pointer loop (a pointer back to
+/// itself, or two pointing at each other) into a decode failure instead of
+/// an infinite loop.
+const MAX_DNS_POINTER_HOPS: usize = 16;
+
+/// Reads the (possibly compressed) domain name starting at `offset` in
+/// `msg`. Returns the dotted name and the offset just past the name *in
+/// place*: for a compressed name that is just past its first pointer, not
+/// past wherever the pointer led.
+///
+/// Labels must be UTF-8, matching the query parser's long-standing rule.
+/// Never panics: every index is a `get`.
+fn read_dns_name(msg: &[u8], offset: usize) -> Option<(String, usize)> {
+    let mut labels: Vec<&str> = Vec::new();
+    let mut wire_len = 0usize;
+    let mut pos = offset;
+    let mut end_in_place: Option<usize> = None;
+    let mut hops = 0usize;
+    loop {
+        let len_byte = *msg.get(pos)?;
+        match len_byte & 0xc0 {
+            0x00 => {
+                let len = len_byte as usize;
+                if len == 0 {
+                    let end = end_in_place.unwrap_or(pos + 1);
+                    return Some((labels.join("."), end));
+                }
+                wire_len += len + 1;
+                if wire_len > MAX_DNS_NAME_LEN {
+                    return None;
+                }
+                let label = msg.get(pos + 1..pos + 1 + len)?;
+                labels.push(std::str::from_utf8(label).ok()?);
+                pos += 1 + len;
+            }
+            0xc0 => {
+                hops += 1;
+                if hops > MAX_DNS_POINTER_HOPS {
+                    return None;
+                }
+                let lo = *msg.get(pos + 1)?;
+                if end_in_place.is_none() {
+                    end_in_place = Some(pos + 2);
+                }
+                pos = (((len_byte & 0x3f) as usize) << 8) | lo as usize;
+            }
+            // 0x40 and 0x80 are the obsolete/reserved label types (RFC 6891
+            // §5): not something a real resolver sends.
+            _ => return None,
+        }
+    }
+}
+
+fn dns_rdata_text(msg: &[u8], rtype: u16, rdata_offset: usize, rdata: &[u8]) -> String {
+    match (rtype, rdata.len()) {
+        (1, 4) => std::net::Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]).to_string(),
+        (28, 16) => {
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(rdata);
+            std::net::Ipv6Addr::from(octets).to_string()
+        }
+        // CNAME, NS and PTR RDATA is a name, which may itself be compressed,
+        // so it is read against the whole message, not the RDATA slice.
+        (5 | 2 | 12, _) => read_dns_name(msg, rdata_offset).map(|(name, _)| name).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Decodes a DNS message over UDP: a query (QR clear) or a response (QR set,
+/// with its answer section). Only the first question is read. The message
+/// must declare at least one question, as before.
 fn sniff_dns(payload: &[u8]) -> Option<L7Info> {
     if payload.len() < 12 {
         return None;
     }
+    let id = u16::from_be_bytes([payload[0], payload[1]]);
+    let is_response = payload[2] & 0x80 != 0;
+    let rcode = payload[3] & 0x0f;
     let qdcount = u16::from_be_bytes([payload[4], payload[5]]);
+    let answer_count = u16::from_be_bytes([payload[6], payload[7]]);
     if qdcount == 0 {
         return None;
     }
-    let mut idx = 12;
-    let mut labels = Vec::new();
-    loop {
-        let len = *payload.get(idx)? as usize;
-        if len == 0 {
-            break;
-        }
-        idx += 1;
-        let label = payload.get(idx..idx + len)?;
-        labels.push(std::str::from_utf8(label).ok()?.to_string());
-        idx += len;
-        if idx > payload.len() {
-            return None;
-        }
-    }
-    if labels.is_empty() {
+    // The question name. It is read with the compression-aware reader, but a
+    // first question has nothing earlier in the message to point at, so in
+    // practice it is a plain label sequence, exactly as before this change.
+    let (query_name, after_name) = read_dns_name(payload, 12)?;
+    if query_name.is_empty() {
         return None;
     }
-    Some(L7Info::Dns {
-        query_name: labels.join("."),
-    })
+    let qtype_bytes = payload.get(after_name..after_name + 2);
+    if !is_response {
+        let qtype = qtype_bytes.map(|b| u16::from_be_bytes([b[0], b[1]])).unwrap_or(0);
+        return Some(L7Info::Dns { query_name, id, qtype });
+    }
+
+    // A response must carry its whole question (type and class) for its
+    // answer section to be locatable at all.
+    let qtype_bytes = qtype_bytes?;
+    let qtype = u16::from_be_bytes([qtype_bytes[0], qtype_bytes[1]]);
+    let mut pos = after_name + 4;
+    if pos > payload.len() {
+        return None;
+    }
+    // Further questions (qdcount > 1 is legal, if rare) sit between the
+    // first question and the answers. Skip them; give up on the answers
+    // rather than misread them if a question can't be skipped.
+    let mut answers = Vec::new();
+    let mut questions_skipped = true;
+    for _ in 1..qdcount.min(16) {
+        match read_dns_name(payload, pos) {
+            Some((_, after)) if after + 4 <= payload.len() => pos = after + 4,
+            _ => {
+                questions_skipped = false;
+                break;
+            }
+        }
+    }
+    if questions_skipped && qdcount <= 16 {
+        for _ in 0..(answer_count as usize).min(MAX_DNS_ANSWERS) {
+            let Some((name, after)) = read_dns_name(payload, pos) else { break };
+            let Some(fixed) = payload.get(after..after + 10) else { break };
+            let rtype = u16::from_be_bytes([fixed[0], fixed[1]]);
+            let ttl = u32::from_be_bytes([fixed[4], fixed[5], fixed[6], fixed[7]]);
+            let rdlength = u16::from_be_bytes([fixed[8], fixed[9]]) as usize;
+            let rdata_offset = after + 10;
+            let Some(rdata) = payload.get(rdata_offset..rdata_offset + rdlength) else { break };
+            let data = dns_rdata_text(payload, rtype, rdata_offset, rdata);
+            answers.push(DnsAnswer { name, rtype, ttl, data });
+            pos = rdata_offset + rdlength;
+        }
+    }
+    Some(L7Info::DnsResponse { query_name, id, qtype, rcode, answer_count, answers })
+}
+
+/// The conventional mnemonic for a DNS record type, for display. Unknown
+/// types fall back to RFC 3597's `TYPE<n>` form.
+pub fn dns_type_name(rtype: u16) -> String {
+    match rtype {
+        1 => "A".into(),
+        2 => "NS".into(),
+        5 => "CNAME".into(),
+        6 => "SOA".into(),
+        12 => "PTR".into(),
+        15 => "MX".into(),
+        16 => "TXT".into(),
+        28 => "AAAA".into(),
+        33 => "SRV".into(),
+        64 => "SVCB".into(),
+        65 => "HTTPS".into(),
+        255 => "ANY".into(),
+        other => format!("TYPE{other}"),
+    }
+}
+
+/// The RFC 1035/2136 mnemonic for a DNS response code, for display.
+pub fn dns_rcode_name(rcode: u8) -> String {
+    match rcode {
+        0 => "NOERROR".into(),
+        1 => "FORMERR".into(),
+        2 => "SERVFAIL".into(),
+        3 => "NXDOMAIN".into(),
+        4 => "NOTIMP".into(),
+        5 => "REFUSED".into(),
+        other => format!("RCODE{other}"),
+    }
+}
+
+/// Test-only DNS message builders, shared with `transaction.rs`'s and
+/// `fields.rs`'s tests (as `build_client_hello` is with `reassembly.rs`).
+#[cfg(test)]
+pub(crate) mod dns_test_support {
+    fn push_name(buf: &mut Vec<u8>, name: &str) {
+        for label in name.split('.') {
+            buf.push(label.len() as u8);
+            buf.extend_from_slice(label.as_bytes());
+        }
+        buf.push(0);
+    }
+
+    pub(crate) fn query(id: u16, name: &str, qtype: u16) -> Vec<u8> {
+        let mut buf = id.to_be_bytes().to_vec();
+        buf.extend_from_slice(&[0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+        push_name(&mut buf, name);
+        buf.extend_from_slice(&qtype.to_be_bytes());
+        buf.extend_from_slice(&[0x00, 0x01]);
+        buf
+    }
+
+    /// Each answer is `(rtype, ttl, rdata)` and is named with a compression
+    /// pointer to the question name at offset 12, as real resolvers do.
+    pub(crate) fn response(id: u16, name: &str, qtype: u16, rcode: u8, answers: &[(u16, u32, Vec<u8>)]) -> Vec<u8> {
+        let mut buf = id.to_be_bytes().to_vec();
+        buf.extend_from_slice(&[0x81, 0x80 | rcode, 0x00, 0x01]);
+        buf.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&[0, 0, 0, 0]);
+        push_name(&mut buf, name);
+        buf.extend_from_slice(&qtype.to_be_bytes());
+        buf.extend_from_slice(&[0x00, 0x01]);
+        for (rtype, ttl, rdata) in answers {
+            buf.extend_from_slice(&[0xc0, 0x0c]);
+            buf.extend_from_slice(&rtype.to_be_bytes());
+            buf.extend_from_slice(&[0x00, 0x01]);
+            buf.extend_from_slice(&ttl.to_be_bytes());
+            buf.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+            buf.extend_from_slice(rdata);
+        }
+        buf
+    }
 }
 
 fn parse_u16_list(bytes: &[u8]) -> Vec<u16> {
@@ -497,9 +722,121 @@ mod tests {
         payload.extend_from_slice(&[0x00, 0x01]); // QCLASS IN
 
         match sniff_l7(&payload, Some(53)) {
-            L7Info::Dns { query_name } => assert_eq!(query_name, "a.com"),
+            L7Info::Dns { query_name, id, qtype } => {
+                assert_eq!(query_name, "a.com");
+                assert_eq!(id, 0x1234);
+                assert_eq!(qtype, 1);
+            }
             other => panic!("expected Dns, got {other:?}"),
         }
+    }
+
+    // ---- JAM-15: DNS responses -------------------------------------------
+
+    use super::dns_test_support::{query, response};
+
+    #[test]
+    fn a_dns_response_is_a_response_not_a_query_with_its_rcode_and_answers() {
+        let msg = response(
+            0xbeef,
+            "example.com",
+            1,
+            0,
+            &[(1, 300, vec![93, 184, 216, 34]), (1, 60, vec![93, 184, 216, 35])],
+        );
+        match sniff_l7(&msg, Some(51000)) {
+            L7Info::DnsResponse { query_name, id, qtype, rcode, answer_count, answers } => {
+                assert_eq!(query_name, "example.com");
+                assert_eq!(id, 0xbeef);
+                assert_eq!(qtype, 1);
+                assert_eq!(rcode, 0);
+                assert_eq!(answer_count, 2);
+                assert_eq!(
+                    answers,
+                    vec![
+                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 300, data: "93.184.216.34".into() },
+                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 60, data: "93.184.216.35".into() },
+                    ]
+                );
+            }
+            other => panic!("expected DnsResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_dns_query_is_still_a_query() {
+        assert!(matches!(sniff_l7(&query(7, "a.com", 28), Some(53)), L7Info::Dns { id: 7, qtype: 28, .. }));
+    }
+
+    #[test]
+    fn dns_answers_decode_aaaa_and_a_compressed_cname_target() {
+        let mut aaaa = [0u8; 16];
+        aaaa[0] = 0x20;
+        aaaa[1] = 0x01;
+        aaaa[2] = 0x0d;
+        aaaa[3] = 0xb8;
+        aaaa[15] = 1;
+        // CNAME RDATA "www" + pointer to "example.com" at offset 12.
+        let cname = vec![3, b'w', b'w', b'w', 0xc0, 0x0c];
+        let msg = response(1, "example.com", 28, 0, &[(5, 10, cname), (28, 20, aaaa.to_vec())]);
+        let L7Info::DnsResponse { answers, .. } = sniff_l7(&msg, None) else { panic!("expected DnsResponse") };
+        assert_eq!(answers[0].data, "www.example.com");
+        assert_eq!(answers[1].data, "2001:db8::1");
+    }
+
+    #[test]
+    fn an_nxdomain_response_carries_its_rcode_and_no_answers() {
+        let msg = response(9, "nope.invalid", 1, 3, &[]);
+        assert!(matches!(
+            sniff_l7(&msg, None),
+            L7Info::DnsResponse { rcode: 3, answer_count: 0, ref answers, .. } if answers.is_empty()
+        ));
+    }
+
+    #[test]
+    fn a_compression_pointer_loop_ends_the_answers_instead_of_hanging() {
+        let mut msg = response(1, "a.com", 1, 0, &[(5, 1, vec![0xc0, 0x00])]);
+        // Point the answer's own name at itself.
+        let answer_name_at = 12 + 7 + 4;
+        msg[answer_name_at] = 0xc0;
+        msg[answer_name_at + 1] = answer_name_at as u8;
+        let L7Info::DnsResponse { answer_count, answers, .. } = sniff_l7(&msg, None) else { panic!("expected DnsResponse") };
+        assert_eq!(answer_count, 1);
+        assert!(answers.is_empty());
+    }
+
+    #[test]
+    fn a_truncated_answer_section_keeps_the_answers_decoded_before_the_cut() {
+        let msg = response(1, "a.com", 1, 0, &[(1, 1, vec![1, 2, 3, 4]), (1, 1, vec![5, 6, 7, 8])]);
+        let cut = &msg[..msg.len() - 2];
+        let L7Info::DnsResponse { answer_count, answers, .. } = sniff_l7(cut, None) else { panic!("expected DnsResponse") };
+        assert_eq!(answer_count, 2);
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].data, "1.2.3.4");
+    }
+
+    #[test]
+    fn answer_decoding_stops_at_the_cap_while_answer_count_reports_the_header() {
+        let many: Vec<_> = (0..40u8).map(|i| (1u16, 1u32, vec![10, 0, 0, i])).collect();
+        let msg = response(1, "a.com", 1, 0, &many);
+        let L7Info::DnsResponse { answer_count, answers, .. } = sniff_l7(&msg, None) else { panic!("expected DnsResponse") };
+        assert_eq!(answer_count, 40);
+        assert_eq!(answers.len(), MAX_DNS_ANSWERS);
+    }
+
+    #[test]
+    fn a_response_without_its_question_type_is_not_decoded_as_dns() {
+        let msg = response(1, "a.com", 1, 0, &[]);
+        let cut = &msg[..12 + 7 + 1];
+        assert!(matches!(sniff_l7(cut, Some(53)), L7Info::None));
+    }
+
+    #[test]
+    fn dns_display_names_fall_back_to_their_numeric_forms() {
+        assert_eq!(dns_type_name(28), "AAAA");
+        assert_eq!(dns_type_name(9999), "TYPE9999");
+        assert_eq!(dns_rcode_name(3), "NXDOMAIN");
+        assert_eq!(dns_rcode_name(11), "RCODE11");
     }
 
     #[test]

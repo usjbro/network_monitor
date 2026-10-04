@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::l7::L7Info;
+use crate::l7::{dns_rcode_name, dns_type_name, L7Info};
 use crate::parse::{ParsedPacket, TransportProtocol};
 
 const ETH_HEADER_LEN: u32 = 14;
@@ -333,10 +333,43 @@ fn app_fields(l7: &L7Info, payload_len: u32) -> Vec<Field> {
             Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
             Field::leaf("http.response.code", "Status Code", "http", FieldType::Uint, FieldValue::Uint(status.parse().unwrap_or(0)), ByteRegion::Payload, 0, payload_len),
         ],
-        L7Info::Dns { query_name } => vec![
+        L7Info::Dns { query_name, id, qtype } => vec![
             Field::group("dns", "Domain Name System", None, ByteRegion::Payload, 0, payload_len),
+            Field::leaf("dns.id", "Transaction ID", "dns", FieldType::Uint, FieldValue::Uint((*id).into()), ByteRegion::Payload, 0, 2),
+            Field::leaf("dns.flags.response", "Response", "dns", FieldType::Bool, FieldValue::Bool(false), ByteRegion::Payload, 2, 1),
             Field::leaf("dns.qry.name", "Query Name", "dns", FieldType::Str, FieldValue::Str(query_name.clone()), ByteRegion::Payload, 0, payload_len),
+            Field::leaf("dns.qry.type", "Query Type", "dns", FieldType::Str, FieldValue::Str(dns_type_name(*qtype)), ByteRegion::Payload, 0, payload_len),
         ],
+        L7Info::DnsResponse { query_name, id, qtype, rcode, answer_count, answers } => {
+            let mut fields = vec![
+                Field::group("dns", "Domain Name System", None, ByteRegion::Payload, 0, payload_len),
+                Field::leaf("dns.id", "Transaction ID", "dns", FieldType::Uint, FieldValue::Uint((*id).into()), ByteRegion::Payload, 0, 2),
+                Field::leaf("dns.flags.response", "Response", "dns", FieldType::Bool, FieldValue::Bool(true), ByteRegion::Payload, 2, 1),
+                Field::leaf("dns.flags.rcode", "Response Code", "dns", FieldType::Str, FieldValue::Str(dns_rcode_name(*rcode)), ByteRegion::Payload, 3, 1),
+                Field::leaf("dns.qry.name", "Query Name", "dns", FieldType::Str, FieldValue::Str(query_name.clone()), ByteRegion::Payload, 0, payload_len),
+                Field::leaf("dns.qry.type", "Query Type", "dns", FieldType::Str, FieldValue::Str(dns_type_name(*qtype)), ByteRegion::Payload, 0, payload_len),
+                Field::leaf("dns.count.answers", "Answer RRs", "dns", FieldType::Uint, FieldValue::Uint((*answer_count).into()), ByteRegion::Payload, 6, 2),
+            ];
+            // Each answer gets an indexed path: field paths are unique per
+            // packet (the UI's field tree keys on them), so a repeated
+            // `dns.a` per record, as some analyzers emit, isn't available.
+            if !answers.is_empty() {
+                fields.push(Field::group("dns.answers", "Answers", Some("dns"), ByteRegion::Payload, 0, payload_len));
+            }
+            for (i, answer) in answers.iter().enumerate() {
+                let base = format!("dns.answer.{i}");
+                let type_name = dns_type_name(answer.rtype);
+                fields.push(Field::group(&base, &format!("{} {}", answer.name, type_name), Some("dns.answers"), ByteRegion::Payload, 0, payload_len));
+                fields.push(Field::leaf(&format!("{base}.name"), "Name", &base, FieldType::Str, FieldValue::Str(answer.name.clone()), ByteRegion::Payload, 0, payload_len));
+                fields.push(Field::leaf(&format!("{base}.type"), "Type", &base, FieldType::Str, FieldValue::Str(type_name), ByteRegion::Payload, 0, payload_len));
+                fields.push(Field::leaf(&format!("{base}.ttl"), "Time to Live (s)", &base, FieldType::Uint, FieldValue::Uint(answer.ttl.into()), ByteRegion::Payload, 0, payload_len));
+                if !answer.data.is_empty() {
+                    let data_type = if matches!(answer.rtype, 1 | 28) { FieldType::Addr } else { FieldType::Str };
+                    fields.push(Field::leaf(&format!("{base}.data"), "Data", &base, data_type, FieldValue::Str(answer.data.clone()), ByteRegion::Payload, 0, payload_len));
+                }
+            }
+            fields
+        }
         L7Info::TlsClientHello { sni, ja3, ja3_label, sni_offset, sni_len, .. } => {
             let mut fields = vec![
                 Field::group("tls", "Transport Layer Security", None, ByteRegion::Payload, 0, payload_len),
@@ -351,6 +384,60 @@ fn app_fields(l7: &L7Info, payload_len: u32) -> Vec<Field> {
             fields
         }
         L7Info::None => Vec::new(),
+    }
+}
+
+/// JAM-15: fields derived from request/response matching rather than from
+/// this packet's own bytes, so they cover no bytes (`len` 0). Appended after
+/// `build_fields`' output by the capture loop, which is the only place that
+/// knows both the match and, for the request, its packet-event id.
+///
+/// `time_us` is microseconds because the display filter language compares
+/// integers only, and milliseconds would round a sub-millisecond cached DNS
+/// answer down to zero.
+pub fn transaction_fields(event: &crate::transaction::TxnEvent) -> Vec<Field> {
+    use crate::transaction::{TxnEvent, TxnProtocol};
+    match event {
+        TxnEvent::Answered { protocol, service_time_us, request_frame_id } => {
+            let group = match protocol {
+                TxnProtocol::Dns => "dns",
+                TxnProtocol::Http => "http",
+            };
+            let mut fields = vec![Field::leaf(
+                &format!("{group}.time_us"),
+                "Service Time (µs)",
+                group,
+                FieldType::Uint,
+                FieldValue::Uint(*service_time_us),
+                ByteRegion::Payload,
+                0,
+                0,
+            )];
+            if let Some(frame_id) = request_frame_id {
+                fields.push(Field::leaf(
+                    &format!("{group}.response_to"),
+                    "Response To",
+                    group,
+                    FieldType::Str,
+                    FieldValue::Str(frame_id.clone()),
+                    ByteRegion::Payload,
+                    0,
+                    0,
+                ));
+            }
+            fields
+        }
+        TxnEvent::DuplicateResponse => vec![Field::leaf(
+            "dns.response.duplicate",
+            "Duplicate Response",
+            "dns",
+            FieldType::Bool,
+            FieldValue::Bool(true),
+            ByteRegion::Payload,
+            0,
+            0,
+        )],
+        _ => Vec::new(),
     }
 }
 
@@ -602,7 +689,7 @@ mod tests {
         let cases = [
             (L7Info::Http { method: "GET".into(), path: "/index.html".into() }, "http.request.uri", FieldValue::Str("/index.html".into())),
             (L7Info::HttpResponse { status: "404".into() }, "http.response.code", FieldValue::Uint(404)),
-            (L7Info::Dns { query_name: "example.com".into() }, "dns.qry.name", FieldValue::Str("example.com".into())),
+            (L7Info::Dns { query_name: "example.com".into(), id: 1, qtype: 1 }, "dns.qry.name", FieldValue::Str("example.com".into())),
         ];
         for (l7, path, value) in cases {
             let fields = app_fields(&l7, 50);
@@ -659,5 +746,50 @@ mod tests {
             assert!(fields.iter().all(|f| !f.path.starts_with("eth")));
             assert_eq!(fields.iter().find(|f| f.path == "ip").unwrap().offset, 0);
         }
+    }
+
+    #[test]
+    fn a_matched_response_gets_its_service_time_and_request_link_under_its_protocol_group() {
+        use crate::transaction::{TxnEvent, TxnProtocol};
+        let fields = transaction_fields(&TxnEvent::Answered {
+            protocol: TxnProtocol::Dns,
+            service_time_us: 1_250,
+            request_frame_id: Some("pkt-1-2".into()),
+        });
+        let summary: Vec<_> = fields.iter().map(|f| (f.path.as_str(), f.group.as_deref(), f.value.clone(), f.len)).collect();
+        assert_eq!(
+            summary,
+            vec![
+                ("dns.time_us", Some("dns"), Some(FieldValue::Uint(1_250)), 0),
+                ("dns.response_to", Some("dns"), Some(FieldValue::Str("pkt-1-2".into())), 0),
+            ]
+        );
+        let http = transaction_fields(&TxnEvent::Answered { protocol: TxnProtocol::Http, service_time_us: 9, request_frame_id: None });
+        assert_eq!(http.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["http.time_us"]);
+        assert_eq!(transaction_fields(&TxnEvent::DuplicateResponse)[0].path, "dns.response.duplicate");
+        assert!(transaction_fields(&TxnEvent::Unmatched).is_empty());
+    }
+
+    #[test]
+    fn a_dns_response_reports_its_header_question_and_indexed_answers() {
+        use crate::l7::{dns_test_support::response, sniff_l7};
+        let msg = response(0x42, "example.com", 1, 0, &[(1, 300, vec![93, 184, 216, 34]), (5, 30, vec![1, b'x', 0xc0, 0x0c])]);
+        let l7 = sniff_l7(&msg, Some(50_000));
+        let fields = app_fields(&l7, msg.len() as u32);
+        let value = |path: &str| fields.iter().find(|f| f.path == path).and_then(|f| f.value.clone());
+        assert_eq!(value("dns.id"), Some(FieldValue::Uint(0x42)));
+        assert_eq!(value("dns.flags.response"), Some(FieldValue::Bool(true)));
+        assert_eq!(value("dns.flags.rcode"), Some(FieldValue::Str("NOERROR".into())));
+        assert_eq!(value("dns.qry.type"), Some(FieldValue::Str("A".into())));
+        assert_eq!(value("dns.count.answers"), Some(FieldValue::Uint(2)));
+        assert_eq!(value("dns.answer.0.data"), Some(FieldValue::Str("93.184.216.34".into())));
+        assert_eq!(value("dns.answer.0.ttl"), Some(FieldValue::Uint(300)));
+        assert_eq!(value("dns.answer.1.type"), Some(FieldValue::Str("CNAME".into())));
+        assert_eq!(value("dns.answer.1.data"), Some(FieldValue::Str("x.example.com".into())));
+        // Every path is unique within the packet, and every grouped field's
+        // group exists, so the UI's field tree can place all of them.
+        let paths: std::collections::HashSet<_> = fields.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths.len(), fields.len());
+        assert!(fields.iter().all(|f| f.group.as_deref().is_none_or(|g| paths.contains(g))));
     }
 }

@@ -114,6 +114,8 @@ jobs:
           # exist to catch. src/l7.rs is included with it because the
           # desegmentation hand-off it owns is part of that target's
           # reachable surface.
+          # src/transaction.rs joined with JAM-15: its pending-request
+          # bound is what the l7_transactions target asserts.
           # Every push to main always fuzzes regardless of paths, so a
           # regression can never land unobserved via an unrelated path
           # (e.g. a dependency bump, like this same issue's own fix).
@@ -125,7 +127,7 @@ jobs:
           changed="$(git diff --name-only "$merge_base" ${{ github.sha }})"
           echo "Changed files vs merge-base:"
           echo "$changed"
-          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|src/pcapng\.rs|src/reassembly\.rs|src/l7\.rs|fuzz/)'; then
+          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|src/pcapng\.rs|src/reassembly\.rs|src/l7\.rs|src/transaction\.rs|fuzz/)'; then
             echo "run_fuzz=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_fuzz=false" >> "$GITHUB_OUTPUT"
@@ -174,6 +176,12 @@ jobs:
       - name: Fuzz stream_reassembly
         if: steps.filter.outputs.run_fuzz == 'true'
         run: cargo +nightly fuzz run stream_reassembly -- -max_total_time=30
+
+      # JAM-15. The DNS response parser and the request/response matcher,
+      # reached directly; asserts the matcher's pending bound holds.
+      - name: Fuzz l7_transactions
+        if: steps.filter.outputs.run_fuzz == 'true'
+        run: cargo +nightly fuzz run l7_transactions -- -max_total_time=30
 
       - name: Upload crash artifacts
         if: failure() && steps.filter.outputs.run_fuzz == 'true'

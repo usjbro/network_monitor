@@ -24,6 +24,7 @@ import {
   NetworkInterface,
   PacketFrame,
   ProtocolNode,
+  ServiceTimeSummary,
   SystemStats,
   TerminalTheme,
   ThemeConfig,
@@ -46,6 +47,7 @@ import {
   mapInterfaceListEvent,
   mapPacketEvent,
   mapProtocolHierarchyEvent,
+  mapServiceTimeUpdateEvent,
   mapSystemStatsEvent,
   mapTracerouteHopEvent,
   mergeLayerStats,
@@ -66,6 +68,7 @@ import { ConnectionsView } from '@/components/ConnectionsView';
 import { PacketStreamView } from '@/components/PacketStreamView';
 import { FindingsPanel, type FindingNavigateTarget } from '@/components/FindingsPanel';
 import { ProtocolMatrixView } from '@/components/ProtocolMatrixView';
+import { ServiceTimeView } from '@/components/ServiceTimeView';
 import { EndpointsView } from '@/components/EndpointsView';
 import { InstallModal } from '@/components/InstallModal';
 import { CommandLineBar } from '@/components/CommandLineBar';
@@ -103,6 +106,9 @@ export default function TerminalApp() {
   // just overwritten wholesale rather than upserted like `connections`.
   const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  // JAM-15: per-protocol service response time, replaced wholesale each
+  // tick. null until the first service_time_update arrives.
+  const [serviceTimes, setServiceTimes] = useState<ServiceTimeSummary[] | null>(null);
   // Capture health (issue #61) — null until the agent's first capture_stats
   // tick arrives, distinct from "zero drops so far" (a real, healthy state).
   const [captureStats, setCaptureStats] = useState<CaptureStats | null>(null);
@@ -270,6 +276,9 @@ export default function TerminalApp() {
         if (data.type === 'conversation_update') {
           const incoming = mapConversationUpdateEvent(data);
           setConversations((prev) => mergeConversationSnapshot(prev, incoming));
+        }
+        if (data.type === 'service_time_update') {
+          setServiceTimes(mapServiceTimeUpdateEvent(data));
         }
         if (data.type === 'capture_stats') {
           setCaptureStats(mapCaptureStatsEvent(data));
@@ -1012,15 +1021,20 @@ export default function TerminalApp() {
           )}
 
           {activeTab === 'topology' && (
-            <ProtocolMatrixView
-              layers={layers}
-              theme={themeConfig}
-              hierarchy={protocolHierarchy}
-              onSelectLayer={(num) => {
-                setSelectedLayerNum(num);
-                setActiveTab('layer');
-              }}
-            />
+            <div className="space-y-3">
+              <ProtocolMatrixView
+                layers={layers}
+                theme={themeConfig}
+                hierarchy={protocolHierarchy}
+                onSelectLayer={(num) => {
+                  setSelectedLayerNum(num);
+                  setActiveTab('layer');
+                }}
+              />
+              <div className="px-3 pb-3">
+                <ServiceTimeView summaries={serviceTimes} theme={themeConfig} />
+              </div>
+            </div>
           )}
 
           {activeTab === 'findings' && (
