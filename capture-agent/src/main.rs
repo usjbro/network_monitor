@@ -982,7 +982,8 @@ fn validate_interface_name_len(name: &str) -> Result<(), String> {
 /// just stopped being captured — an old flow lingering with a
 /// now-wrong local-address frame of reference is exactly the
 /// direction-flips-silently bug this issue calls out as "the one
-/// genuinely error-prone part of the change"), and the active capture
+/// genuinely error-prone part of the change"), stream reassembly drops
+/// everything it buffered for the old interface (JAM-183), and the active capture
 /// filter/snap length reset to their defaults, since a filter tuned for
 /// one interface may not even be meaningful on another.
 #[allow(clippy::too_many_arguments)]
@@ -996,6 +997,7 @@ fn apply_interface_switch_request(
     current_link_type: &Mutex<parse::LinkType>,
     capture_config_state: &Mutex<wire::CaptureConfigJson>,
     flow_table: &Mutex<FlowTable>,
+    reassembly: &mut StreamReassembler,
     tx: &broadcast::Sender<String>,
 ) {
     if let Err(message) = validate_interface_name_len(name) {
@@ -1064,6 +1066,11 @@ fn apply_interface_switch_request(
     for id in closed_ids {
         let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed { id }));
     }
+    // JAM-183: stream reassembly is keyed on the same addresses and ports.
+    // Bytes buffered from the old interface must not combine with traffic on
+    // the new one (two interfaces can share an address, or capture
+    // overlapping traffic), so it starts fresh too.
+    reassembly.reset();
 
     *cap = new_cap;
     *device_for_reopen = new_device;
@@ -1531,6 +1538,7 @@ async fn main() -> std::io::Result<()> {
                                     &current_link_type,
                                     &capture_config_state,
                                     &flow_table,
+                                    &mut reassembly,
                                     &tx,
                                 );
                             }
