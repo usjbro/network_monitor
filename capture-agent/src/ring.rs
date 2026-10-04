@@ -323,7 +323,6 @@ mod tests {
             interface_name: "lo".into(),
             link_type: LinkType::NullLoopback,
             snaplen: 65535,
-            timestamp_resolution_exponent: 9,
         }
     }
 

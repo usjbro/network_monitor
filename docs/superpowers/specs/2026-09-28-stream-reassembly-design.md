@@ -106,6 +106,11 @@ Worst case across both reassemblers is therefore **8 MiB**, regardless of how ma
 
 Eviction is time-based *and* capacity-based, matching `FlowTable::evict_stale`'s existing pattern (retain-by-threshold, then drop oldest-first over capacity). It is driven from the capture loop rather than shared with `FlowTable::evict_stale` itself: that runs on the periodic emitter task, on the other side of the flow-table mutex from the reassembler, and plumbing evicted keys across that boundary to reuse one call site would be more coupling than the duplication it saves. Same mechanism, own call site.
 
+Two later corrections (JAM-182):
+
+- **Clock.** The timeouts describe the traffic, so they run on the traffic's own time. Live capture uses the agent's clock, which already is that time. Replay uses `ReplayClock` (`reassembly.rs`), which advances by the recorded time between frames, summed at full precision. It never runs backwards. A frame up to a minute behind the latest one is treated as reordering: the clock holds, and the skipped gap isn't counted twice. A larger step back holds the clock until the next frame: if that frame is also far behind, it was a clock reset and the clock measures from the new timeline, so it doesn't freeze until recorded time catches up; if it returns to the old timeline, it was a single outlier and is ignored. The pcapng reader decodes timestamps in each file's declared `if_tsresol` unit, so files from other tools replay at their real speed. On wall-clock time, a fast replay compressed minutes of capture into seconds, so nothing ever timed out. The flow table still runs on the agent clock during replay; that's tracked separately.
+- **Expiry on arrival.** The periodic sweep runs at most once a second, and after the current frame is fed. Both reassemblers therefore also expire an entry in `feed` itself, when new data with the same key arrives, using the same criterion and accounting as the sweep. Without this, a fragment reusing an IP ID could join an expired group's bytes, and a new connection reusing an idle four-tuple would be judged against the old connection's buffer and lose its first L7 decision.
+
 ## Security posture
 
 Every byte here is attacker-shaped and parsed in the process holding the capture handle.
