@@ -692,6 +692,22 @@ impl TcpReassembler {
         self.streams.get(key).and_then(|stream| stream.data.get(..stream.prefix_len)).unwrap_or(&[])
     }
 
+    /// Whether this direction has an entry at all — i.e. an earlier segment
+    /// left something a later, standalone-decidable segment could conflict
+    /// with (JAM-169). Deliberately keyed on entry *existence*, not
+    /// `!stream.finished`: a stream that hit its byte cap is marked
+    /// `finished` without its `data` being cleared (`feed`'s lazy-release
+    /// comment — release happens "on the first segment after giving up",
+    /// not at the moment it gives up), so checking `finished` alone would
+    /// wrongly report no buffer while real first-seen bytes still sit in
+    /// `stream.data`, reopening the standalone-decision bypass this exists
+    /// to close. Falling through to `feed` for *any* existing entry (empty
+    /// or not, finished or not) costs nothing extra: `feed` already handles
+    /// a finished entry by lazily releasing it and reporting no change.
+    pub fn has_buffer(&self, key: &TcpStreamKey) -> bool {
+        self.streams.contains_key(key)
+    }
+
     /// Feeds one segment's payload. Returns the direction's status whenever
     /// this segment actually changed the buffer, and `None` when it did not —
     /// which is precisely what a retransmission of already-held bytes does
@@ -721,13 +737,22 @@ impl TcpReassembler {
         let stream = self.streams.entry(key.clone()).or_insert_with(|| TcpStream::new(seq, now_ms));
         stream.last_seen_ms = now_ms;
         if stream.finished {
-            // Release lazily, on the first segment after giving up, so the
-            // buffer is freed promptly without the caller having to know.
+            // Giving up is terminal: remove the entry outright rather than
+            // releasing its buffer in place and leaving a `finished` marker
+            // behind. A busy, long-lived connection direction has its
+            // `last_seen_ms` refreshed by every segment, so an in-place
+            // release here (found on review of the standalone-decision fix
+            // above, JAM-169) would leave this direction permanently unable
+            // to decide anything -- not just the one segment that triggers
+            // the release, but every later, unrelated segment too, since
+            // `has_buffer` would keep reporting true for the lingering
+            // entry and `feed` would keep taking this same early return
+            // forever. This segment's own decision is still not trusted
+            // (the same as before: one segment pays the cost of clearing
+            // stale state), but the next one gets a clean slate.
             let freed = stream.data.len();
-            if freed > 0 {
-                stream.release();
-                self.bytes_held = self.bytes_held.saturating_sub(freed);
-            }
+            self.streams.remove(key);
+            self.bytes_held = self.bytes_held.saturating_sub(freed);
             return None;
         }
         if now_ms.saturating_sub(stream.first_seen_ms) > TCP_DECISION_WINDOW_MS {
@@ -1031,8 +1056,11 @@ impl StreamReassembler {
         }
 
         // This frame's own payload first. For the overwhelmingly common case
-        // — a request or ClientHello that fits in one segment — this decides
-        // immediately and nothing is buffered at all.
+        // — a request or ClientHello that fits in one segment, with no
+        // earlier segment already buffered for this direction — this decides
+        // immediately and nothing is buffered at all. See the
+        // `has_buffer` check below (JAM-169) for why that standalone
+        // decision is not trusted once something is already held.
         let own = sniff_l7_desegmenting(&packet.payload, packet.dst_port);
 
         // Only TCP with a known flow identity and a sequence number can be
@@ -1070,10 +1098,22 @@ impl StreamReassembler {
             };
         };
         if let L7Sniff::Decided(info) = own {
-            // Decided on one segment. Release any buffer this direction had —
-            // there is nothing left to wait for.
-            self.segments.finish(&key, ReassemblyStatus::Reassembled);
-            return SniffOutcome { info, status: None, need_more_bytes: None, reassembled_packet: None };
+            if !self.segments.has_buffer(&key) {
+                // Nothing else could conflict: this is the first segment
+                // seen for this direction, so `own`'s standalone view and an
+                // overlap-protected buffer's view are the same bytes. Decide
+                // directly rather than allocating a buffer just to release it
+                // again immediately.
+                return SniffOutcome { info, status: None, need_more_bytes: None, reassembled_packet: None };
+            }
+            // An earlier, incomplete segment already holds first-seen bytes
+            // at this direction. Trusting `own` standalone here would let a
+            // later, forged/conflicting segment retroactively override
+            // those bytes (JAM-169) -- the exact segmentation evasion the
+            // first-seen-wins policy exists to prevent. Fall through to the
+            // overlap-protected write below instead of returning `info`
+            // directly; the decision comes from the resulting, merged
+            // prefix, never from this segment's bytes alone.
         }
 
         let declared = packet.ip_declared_payload_len.saturating_sub(packet.transport_header_len);
@@ -1624,6 +1664,112 @@ mod tests {
         assert!(matches!(outcome.info, L7Info::Http { .. }));
         assert_eq!(outcome.status, None, "no reassembly happened, so there is no completeness claim to make");
         assert_eq!(r.bytes_held(), 0);
+    }
+
+    #[test]
+    fn a_standalone_decision_does_not_bypass_an_already_buffered_first_seen_prefix() {
+        // Security regression (JAM-169): StreamReassembler::sniff must not
+        // let a segment's own, in-isolation L7 decision skip the
+        // overlap-protected buffer when an earlier, incomplete segment
+        // already holds first-seen bytes at the same sequence range.
+        // Otherwise a single forged packet at the original sequence number
+        // -- itself a complete, independently decodable request -- silently
+        // overrides what the monitor already held, exactly the
+        // segmentation evasion the first-seen-wins policy exists to
+        // prevent.
+        let mut r = StreamReassembler::new();
+        let key = flow_key();
+
+        // "GET /safe" alone has no line terminator -- undecided, buffered.
+        let first = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, b"GET /safe");
+        let outcome = r.sniff(&first, Some((&key, true)), 0);
+        assert!(outcome.need_more_bytes.is_some(), "an unterminated start line must not decide yet");
+
+        // Same sequence number, different bytes that -- on their own, in
+        // isolation -- are a complete, independently decodable request.
+        let forged =
+            tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, b"GET /evil HTTP/1.1\r\n\r\n");
+        let outcome = r.sniff(&forged, Some((&key, true)), 1);
+        match outcome.info {
+            L7Info::Http { path, .. } => {
+                assert_eq!(path, "/safe", "first-seen bytes must win, not the later forged segment")
+            }
+            other => panic!("expected the first-seen path to decide, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_standalone_decision_does_not_bypass_a_stream_that_hit_its_byte_cap() {
+        // Security regression (JAM-169, found on review of the first fix): a
+        // stream that hits MAX_TCP_STREAM_BYTES without deciding is marked
+        // `finished` so no further segment is buffered against it, but its
+        // `data` is not cleared until the next `feed` call lazily releases
+        // it (see `feed`'s own comment on that). Checking `!stream.finished`
+        // alone therefore still reported "no buffer" while real first-seen
+        // bytes sat in `stream.data` -- reopening the exact bypass the first
+        // fix closed, just for the hit-cap case instead of the
+        // still-active-buffer case.
+        let mut r = StreamReassembler::new();
+        let key = flow_key();
+
+        // Oversized, never-decodable payload: triggers `hit_cap` in a single
+        // `feed`, leaving `stream.finished = true` with `stream.data` full
+        // (not released).
+        let garbage = vec![0u8; MAX_TCP_STREAM_BYTES + 1];
+        let capped = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, &garbage);
+        let outcome = r.sniff(&capped, Some((&key, true)), 0);
+        assert!(
+            matches!(outcome.info, L7Info::None),
+            "undecodable garbage must not itself decide"
+        );
+
+        // A later segment at the same sequence number whose own payload is a
+        // complete, independently decodable request must not be trusted
+        // directly just because the capped stream's `finished` flag made it
+        // look buffer-free.
+        let forged =
+            tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, b"GET /evil HTTP/1.1\r\n\r\n");
+        let outcome = r.sniff(&forged, Some((&key, true)), 1);
+        assert!(
+            !matches!(outcome.info, L7Info::Http { ref path, .. } if path == "/evil"),
+            "a forged segment at a capped-but-not-yet-released stream's sequence range must not decide standalone, got {:?}",
+            outcome.info
+        );
+    }
+
+    #[test]
+    fn a_direction_recovers_after_one_cleanup_segment_once_finished() {
+        // Regression (found on review of the hit-cap fix above): giving up
+        // on a direction must not blind it to every later, unrelated
+        // segment forever. A busy, long-lived connection has its
+        // `last_seen_ms` refreshed by every segment, so if the `finished`
+        // entry were only released in place (data cleared, entry kept),
+        // `has_buffer` would keep reporting true and every future segment on
+        // this direction -- not just the one right after giving up -- would
+        // be silently discarded, with idle eviction never reachable because
+        // the connection never goes idle. Exactly one segment pays the cost
+        // of clearing stale state; the one after that must decide normally.
+        let mut r = StreamReassembler::new();
+        let key = flow_key();
+
+        let garbage = vec![0u8; MAX_TCP_STREAM_BYTES + 1];
+        let capped = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, &garbage);
+        r.sniff(&capped, Some((&key, true)), 0);
+
+        // First segment after giving up: pays the cleanup cost, decides
+        // nothing (covered by the test above too).
+        let cleanup = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 50_000, b"GET /first HTTP/1.1\r\n\r\n");
+        let outcome = r.sniff(&cleanup, Some((&key, true)), 1);
+        assert!(matches!(outcome.info, L7Info::None), "the cleanup segment itself must not decide");
+
+        // A fresh, unrelated, genuinely standalone request on the same
+        // direction must decide normally -- the lockout must not persist.
+        let next = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 60_000, b"GET /second HTTP/1.1\r\n\r\n");
+        let outcome = r.sniff(&next, Some((&key, true)), 2);
+        match outcome.info {
+            L7Info::Http { path, .. } => assert_eq!(path, "/second", "a fresh request must decide, not stay locked out"),
+            other => panic!("expected the fresh request to decide standalone, got {other:?}"),
+        }
     }
 
     // =====================================================================
