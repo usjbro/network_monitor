@@ -84,6 +84,35 @@ describe('connectionsToCsv', () => {
     expect(connectionsToCsv([connection({ processName: 'two\rlines' })], 1)).toContain('"two\rlines"');
   });
 
+  // JAM-179: a string cell starting with =, +, -, @, tab, CR or LF (or the
+  // full-width ＝ ＋ － ＠) is run as a formula by Excel/Sheets (CSV
+  // injection). processName comes from the local process table, so any
+  // local program can choose it.
+  it.each([
+    ['=HYPERLINK("http://x","y")', `"'=HYPERLINK(""http://x"",""y"")"`],
+    ['+1+1', "'+1+1"],
+    ['-2+3', "'-2+3"],
+    ['@SUM(A1)', "'@SUM(A1)"],
+    ['\tcmd', "'\tcmd"],
+    ['\r=1', `"'\r=1"`],
+    ['\n=1', `"'\n=1"`],
+    ['＝HYPERLINK("http://x")', `"'＝HYPERLINK(""http://x"")"`],
+    ['＋1', "'＋1"],
+    ['－1', "'－1"],
+    ['＠SUM(A1)', "'＠SUM(A1)"],
+  ])('neutralises a formula-like string cell: %j', (processName, expectedCell) => {
+    const csv = connectionsToCsv([connection({ processName })], 1);
+    expect(csv).toContain(`,93.184.216.34:443,${expectedCell},4242,`);
+  });
+
+  it('neutralises before quoting, so the quote wraps the whole cell', () => {
+    expect(connectionsToCsv([connection({ processName: '=a,b' })], 1)).toContain(`,"'=a,b",`);
+  });
+
+  it('leaves numeric cells and ordinary strings unprefixed', () => {
+    expect(connectionsToCsv([connection({ processName: 'a=b' })], 1)).toContain(',a=b,4242,1024,2048,');
+  });
+
   it('leaves an ordinary field unquoted', () => {
     expect(connectionsToCsv([connection()], 1)).toContain(',chrome,');
   });
