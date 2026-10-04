@@ -84,6 +84,50 @@ describe('connectionsToCsv', () => {
     expect(connectionsToCsv([connection({ processName: 'two\rlines' })], 1)).toContain('"two\rlines"');
   });
 
+  // JAM-179: a string cell starting with =, +, -, @, tab, CR or LF (or the
+  // full-width ＝ ＋ － ＠) is run as a formula by Excel/Sheets (CSV
+  // injection). processName comes from the local process table, so any
+  // local program can choose it.
+  // A neutralised cell is also always double-quoted: OWASP's recommended
+  // form, which Excel keeps as text across a save/reopen where a bare
+  // leading ' can be dropped.
+  it.each([
+    ['=HYPERLINK("http://x","y")', `"'=HYPERLINK(""http://x"",""y"")"`],
+    ['+1+1', `"'+1+1"`],
+    ['-2+3', `"'-2+3"`],
+    ['@SUM(A1)', `"'@SUM(A1)"`],
+    ['\tcmd', `"'\tcmd"`],
+    ['\r=1', `"'\r=1"`],
+    ['\n=1', `"'\n=1"`],
+    ['＝HYPERLINK("http://x")', `"'＝HYPERLINK(""http://x"")"`],
+    ['＋1', `"'＋1"`],
+    ['－1', `"'－1"`],
+    ['＠SUM(A1)', `"'＠SUM(A1)"`],
+  ])('neutralises a formula-like string cell: %j', (processName, expectedCell) => {
+    const csv = connectionsToCsv([connection({ processName })], 1);
+    expect(csv).toContain(`,93.184.216.34:443,${expectedCell},4242,`);
+  });
+
+  // Spreadsheets in some locales split CSV on ';' (or tab), so an unquoted
+  // `safe;=HYPERLINK(...)` would start a new formula cell mid-field. Any
+  // field containing an alternate separator is quoted, which keeps it one
+  // cell under every separator.
+  it.each([
+    ['safe;=1+1', `"safe;=1+1"`],
+    ['safe\t=1+1', `"safe\t=1+1"`],
+  ])('quotes a field containing an alternate separator: %j', (processName, expectedCell) => {
+    const csv = connectionsToCsv([connection({ processName })], 1);
+    expect(csv).toContain(`,93.184.216.34:443,${expectedCell},4242,`);
+  });
+
+  it('neutralises before quoting, so the quote wraps the whole cell', () => {
+    expect(connectionsToCsv([connection({ processName: '=a,b' })], 1)).toContain(`,"'=a,b",`);
+  });
+
+  it('leaves numeric cells and ordinary strings unprefixed', () => {
+    expect(connectionsToCsv([connection({ processName: 'a=b' })], 1)).toContain(',a=b,4242,1024,2048,');
+  });
+
   it('leaves an ordinary field unquoted', () => {
     expect(connectionsToCsv([connection()], 1)).toContain(',chrome,');
   });

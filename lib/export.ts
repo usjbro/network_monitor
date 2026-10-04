@@ -49,8 +49,16 @@ const CSV_COLUMNS: Array<{ header: string; get: (c: NetworkConnection) => string
  * checked only for \n.
  */
 function csvEscape(value: string | number): string {
-  const s = String(value);
-  if (/[",\r\n]/.test(s)) {
+  // CSV/formula injection (JAM-179): Excel and Sheets can run a string cell
+  // starting with =, +, -, @, tab, CR or LF — or the full-width ＝ ＋ － ＠
+  // that some locales normalise — as a formula. Such a cell gets a leading
+  // `'` and is always double-quoted (OWASP's recommended form, which Excel
+  // keeps as text across a save/reopen). Numbers stay as-is.
+  const neutralise = typeof value === 'string' && /^[=+\-@\t\r\n＝＋－＠]/.test(value);
+  const s = neutralise ? `'${value}` : String(value);
+  // Quote on ';' and tab as well as ',': spreadsheets in some locales split
+  // CSV on those, which would otherwise start a new (formula) cell mid-field.
+  if (neutralise || /[",;\t\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }
   return s;
