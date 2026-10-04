@@ -1,5 +1,20 @@
 # Session Handoff
 
+## JAM-130 remaining issues (JAM-8, JAM-163, JAM-180, JAM-181) — 2026-10-04, merged
+
+Worked JAM-130's open children under James's `/loop` in chat. Each PR had an independent review against source, and the review findings were fixed before merge. All four Linear issues are Done, and every JAM-130 child is now Done.
+
+| PR | Merge | Issue | Change |
+|---|---|---|---|
+| #253 | `76ec774` | JAM-8 | `docs/security.md`: operator guidance on capture sensitivity, storage and the law (promiscuous mode, snap length, deletion, legal note), linked from `getting-started.md`. Corrected the old claim that ring rotation overwrites the oldest file: it never deletes any file. |
+| #254 | `7650794` | JAM-163 | `CONTRIBUTING.md` names Linear as the task source of truth. `docs/wire-protocol.md` describes the real packet-event limiter (100/s, no burst), separately from aggregate accounting, and the per-code finding budgets. |
+| #255 | `3afc68e` | JAM-180 | `ring duration` rotation measures from the current file's start. Before, it measured from run start, so it rotated every ~1 s after the first rotation. Found by the #253 review. |
+| #256 | `6ac15a7` | JAM-181 | `validate_capture_file_path` rejects `..` and compares symlink-resolved paths, so a capture can't be placed inside the agent's working directory. Found by the #253 review. |
+
+Open, for James to decide:
+- Whether to close the JAM-130 epic. It's described as continuous, and its text still lists GitHub #67 (the `github-advanced-security` check), which isn't a Linear child.
+- Unfiled: `docs/usage.md`'s `capture ~/captures/…` example doesn't work, because nothing expands `~`.
+
 ## Security review fixes (JAM-175 to JAM-179) — 2026-10-04, merged
 
 A repo-wide review found two High and three Low issues. They were filed under JAM-130, fixed one PR each, and squash-merged in severity order. All five Linear issues are Done:
