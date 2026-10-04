@@ -62,7 +62,7 @@ npx osi-inspect <command> [args...]
 - **[Enrichment Protocol](docs/enrichment-protocol.md)** — the ownership-enrichment (WHOIS/RDAP) wire/control contract
 - **[GeoIP Protocol](docs/geoip-protocol.md)** — the traceroute/geoIP wire/control contract
 - **[Troubleshooting](docs/troubleshooting.md)** — agent not connecting, wrong interface detected, what "Retransmit Anomaly" actually means
-- **[Security](docs/security.md)** — current posture, what's explicitly not done yet, dependency hygiene
+- **[Security](docs/security.md)** — current posture, capture sensitivity and legal guidance, what's explicitly not done yet, dependency hygiene
 - **[Contributing](CONTRIBUTING.md)** — project structure, tests, the design-spec-then-plan workflow, roadmap
 
 ## Other Commands
