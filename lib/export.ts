@@ -49,7 +49,10 @@ const CSV_COLUMNS: Array<{ header: string; get: (c: NetworkConnection) => string
  * checked only for \n.
  */
 function csvEscape(value: string | number): string {
-  const s = String(value);
+  // CSV/formula injection (JAM-179): Excel and Sheets run a string cell
+  // starting with =, +, -, @, tab or CR as a formula. A leading `'` makes
+  // the spreadsheet show it as text (OWASP guidance). Numbers stay as-is.
+  const s = typeof value === 'string' && /^[=+\-@\t\r]/.test(value) ? `'${value}` : String(value);
   if (/[",\r\n]/.test(s)) {
     return `"${s.replace(/"/g, '""')}"`;
   }

@@ -1,5 +1,11 @@
 # Session Handoff
 
+## Security review fixes (JAM-175 to JAM-179) — 2026-10-04
+
+A repo-wide review found two High and three Low issues, filed under JAM-130 and fixed one PR each: #247 (JAM-175, agent control socket closes on non-JSON lines, blocking browser cross-protocol POSTs), #248 (JAM-176, Host allowlist + `ALLOWED_HOSTS` against DNS rebinding), #249 (JAM-177, JSON-encoded origin in `/api/install`), #250 (JAM-178, cross-site guard on `/api/enrichment/lookup`), and this PR (JAM-179, CSV formula neutralisation). Dependency audits were clean apart from the allowlisted lint-only `braces` advisory.
+
+Open follow-ups, not filed: a per-launch token on the agent socket (wire change, would also stop other local processes), and the fake metrics `/api/install`'s `osi-mon` prints. James merges each PR; mark the Linear issue Done when its PR merges.
+
 ## JAM-27 — 2026-09-28
 
 Implemented an offline exact-prefix lookup using the checked-in IEEE MA-L snapshot (`lib/data/ieee-ma-l.json`) and annotated Ethernet source/destination fields in the packet inspector. Unknown, malformed, multicast, locally administered, and synthetic all-zero addresses do not receive a vendor attribution. Expanded the capture agent's offline common port/service table without changing L7 parser precedence. Added source, refresh, and interpretation notes in `docs/mac-vendor-and-services.md`; no wire schema or opt-in enrichment behavior changed.
