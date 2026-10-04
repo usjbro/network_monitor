@@ -1,10 +1,24 @@
 # Session Handoff
 
-## Security review fixes (JAM-175 to JAM-179) — 2026-10-04
+## Security review fixes (JAM-175 to JAM-179) — 2026-10-04, merged
 
-A repo-wide review found two High and three Low issues, filed under JAM-130 and fixed one PR each: #247 (JAM-175, agent control socket closes on non-JSON lines, blocking browser cross-protocol POSTs), #248 (JAM-176, Host allowlist + `ALLOWED_HOSTS` against DNS rebinding), #249 (JAM-177, JSON-encoded origin in `/api/install`), #250 (JAM-178, cross-site guard on `/api/enrichment/lookup`), and this PR (JAM-179, CSV formula neutralisation). Dependency audits were clean apart from the allowlisted lint-only `braces` advisory.
+A repo-wide review found two High and three Low issues. They were filed under JAM-130, fixed one PR each, and squash-merged in severity order. All five Linear issues are Done:
 
-Open follow-ups, not filed: a per-launch token on the agent socket (wire change, would also stop other local processes), and the fake metrics `/api/install`'s `osi-mon` prints. James merges each PR; mark the Linear issue Done when its PR merges.
+| PR | Merge | Issue | Fix |
+|---|---|---|---|
+| #247 | `fed1e1e` | JAM-175 | The agent's control socket closes a connection on its first non-JSON line, which blocks browser cross-protocol POSTs to `127.0.0.1:9990`. |
+| #248 | `664472c` | JAM-176 | `middleware.ts` returns 421 unless `Host` is a loopback name or listed in `ALLOWED_HOSTS` (blocks DNS rebinding). Malformed entries are skipped with one warning. |
+| #249 | `bbd7ed4` | JAM-177 | `/api/install` JSON-encodes the Host-derived origin in the generated script. |
+| #250 | `8b444fc` | JAM-178 | `/api/enrichment/lookup` rejects cross-site requests. |
+| #251 | `b0a866a` | JAM-179 | CSV export prefixes formula-like string cells with `'` and quotes them, and quotes fields that contain `;` or tab. |
+
+Dependency audits were clean apart from the allowlisted lint-only `braces` advisory.
+
+Operator impact: a step-5 LAN deployment that uses a real hostname must start the relay with `ALLOWED_HOSTS=<mac-hostname>.local`. Otherwise those requests get 421.
+
+Follow-ups, not filed:
+- A per-launch token on the agent socket. It's a wire change, and it would also stop other local processes from using the socket.
+- The fake throughput and uptime figures that `/api/install`'s `osi-mon` prints.
 
 ## JAM-27 — 2026-09-28
 
