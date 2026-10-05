@@ -2,9 +2,9 @@
 
 A terminal-style app that visualizes **real, live-captured** network traffic on your machine across all 7 layers of the OSI model — throughput, active connections, a live packet stream with per-layer header breakdowns, a protocol matrix, network path traces, and (opt-in) ownership and decrypted-content detail.
 
-Traffic is captured by a small Rust agent (`capture-agent/`) using `pcap`, streamed to a Next.js relay over a loopback-only TCP socket, and pushed to the browser over Server-Sent Events. No numbers are fabricated: layers the agent can't independently measure (L1/L2/L5/L6) are shown at zero rather than a made-up value.
+Traffic is captured by a small Rust agent (`capture-agent/`) using `pcap`, streamed to a Next.js relay over a loopback-only TCP socket that requires a per-launch token, and pushed to the browser over Server-Sent Events. No numbers are fabricated: layers the agent can't independently measure (L1/L2/L5/L6) are shown at zero rather than a made-up value.
 
-Built with Next.js 16 (App Router), React 19, and Tailwind v4 on the frontend, and Rust (tokio + pcap) for the capture agent. Originally scaffolded via [Google AI Studio](https://ai.studio/apps/9315112a-9298-4e9c-82e9-59ed03d07fcc) as a client-side simulation, then converted to a real live-capture pipeline, and since extended with three opt-in sub-projects: ownership enrichment (WHOIS/RDAP), network path visualization (traceroute + geoIP), and TLS visibility (JA3 fingerprinting + per-process decrypted-content inspection).
+Built with Next.js 16 (App Router), React 19, and Tailwind v4 on the frontend, and Rust (tokio + pcap) for the capture agent. Originally scaffolded via [Google AI Studio](https://ai.studio/apps/9315112a-9298-4e9c-82e9-59ed03d07fcc) as a client-side simulation, then converted to a real live-capture pipeline, and since extended with capture files and offline analysis (pcapng writing, pcap/pcapng replay, ring-buffer rotation), a display-filter language over decoded fields, stream reassembly, request/response timing for DNS and HTTP, and three opt-in sub-projects: ownership enrichment (WHOIS/RDAP), network path visualization (traceroute + geoIP), and TLS visibility (JA3 fingerprinting + per-process decrypted-content inspection).
 
 ## Features
 
