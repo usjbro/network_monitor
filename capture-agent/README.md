@@ -70,6 +70,20 @@ captured file through the same pipeline live traffic uses — same wire
 events, same UI, no special cases. Accepts this agent's own pcapng output,
 another tool's pcapng, or classic pcap/`tcpdump`:
 
+The pcapng reader supports Enhanced Packet Blocks on Ethernet, loopback and
+raw-IP interfaces, including multiple interfaces and concatenated sections
+with either byte order. Unknown non-packet blocks are skipped after framing
+validation; embedded decryption secrets are never imported. Simple Packet
+and obsolete Packet blocks report an explicit unsupported-format error.
+Malformed replay data reports `replay failed` on stderr rather than a clean
+`replay finished` message. Each block is limited to 16 MiB; each section to
+4096 interfaces and 16 MiB of retained interface names.
+
+Timestamp offsets, recorded FCS lengths and interface-address options are
+not yet applied. The session's interface label comes from the first
+supported interface description; packet decoding uses each packet's own
+interface.
+
     REPLAY_FILE=~/captures/incident.pcapng cargo run --release
 
 `REPLAY_FILE` is mutually exclusive with `CAPTURE_INTERFACE`; setting both
@@ -78,8 +92,7 @@ is a startup error naming both values rather than a silent precedence rule.
 Two companions, both optional:
 
 - `REPLAY_LOCAL_ADDRS` — a comma-separated list of addresses to treat as
-  local, so rx/tx direction can be attributed. Without it (and without an
-  address option in the file's own Interface Description Block) the agent
+  local, so rx/tx direction can be attributed. Without it the agent
   falls back to positional attribution and says so: `agent_status` carries
   `directionAttributionUnavailable: true` for the whole session, and the UI
   captions the replay banner accordingly.

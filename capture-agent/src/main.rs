@@ -364,6 +364,8 @@ fn datalink_to_link_type(datalink: pcap::Linktype) -> Option<parse::LinkType> {
         pcap::Linktype::ETHERNET => Some(parse::LinkType::Ethernet),
         pcap::Linktype::NULL | pcap::Linktype::LOOP => Some(parse::LinkType::NullLoopback),
         pcap::Linktype::RAW => Some(parse::LinkType::Raw),
+        // File LINKTYPE_RAW (101) and platform-native DLT_RAW differ.
+        native if native.get_name().as_deref() == Ok("RAW") => Some(parse::LinkType::Raw),
         _ => None,
     }
 }
@@ -416,11 +418,12 @@ enum PacketSource {
 /// read-timeout case (already relied on today to poll `capture_config_rx`/
 /// `pause` between packets on a quiet interface); `Eof` covers both a
 /// replay file being fully consumed and a live device erroring out for any
-/// other reason — the same "no more frames coming" outcome either way.
+/// other reason. ReplayError preserves file read failures separately from EOF.
 enum SourceFrame {
-    Bytes { data: Vec<u8>, timestamp: std::time::SystemTime, original_len: u32 },
+    Bytes { data: Vec<u8>, timestamp: std::time::SystemTime, original_len: u32, link_type: Option<parse::LinkType> },
     Timeout,
     Eof,
+    ReplayError(String),
 }
 
 impl PacketSource {
@@ -430,6 +433,7 @@ impl PacketSource {
                 Ok(packet) => SourceFrame::Bytes {
                     data: packet.data.to_vec(),
                     original_len: packet.header.len,
+                    link_type: None,
                     timestamp: std::time::SystemTime::now(), // live mode's existing behavior — unchanged
                 },
                 Err(pcap::Error::TimeoutExpired) => SourceFrame::Timeout,
@@ -437,19 +441,21 @@ impl PacketSource {
             },
             PacketSource::ReplayPcapng(reader) => match reader.next_packet() {
                 Ok(Some(packet)) => SourceFrame::Bytes {
-                    data: packet.data, timestamp: packet.timestamp, original_len: packet.original_len,
+                    data: packet.data, timestamp: packet.timestamp, original_len: packet.original_len, link_type: Some(packet.link_type),
                 },
                 Ok(None) => SourceFrame::Eof,
-                Err(_) => SourceFrame::Eof, // a malformed trailing block ends replay early rather than looping forever on the same error
+                Err(error) => SourceFrame::ReplayError(error.to_string()),
             },
             PacketSource::ReplayClassic(cap) => match cap.next_packet() {
                 Ok(packet) => SourceFrame::Bytes {
                     data: packet.data.to_vec(),
                     original_len: packet.header.len,
+                    link_type: None,
                     timestamp: std::time::UNIX_EPOCH
                         + std::time::Duration::new(packet.header.ts.tv_sec as u64, (packet.header.ts.tv_usec as u32) * 1000),
                 },
-                Err(_) => SourceFrame::Eof,
+                Err(pcap::Error::NoMorePackets) => SourceFrame::Eof,
+                Err(error) => SourceFrame::ReplayError(error.to_string()),
             },
         }
     }
@@ -656,7 +662,7 @@ fn resolve_packet_source() -> ResolvedPacketSource {
                     device_for_reopen: None,
                 }
             }
-            Err(_) => {
+            Err(reader_error) => {
                 // Security-review finding: libpcap (>=1.10) auto-detects
                 // and natively parses pcapng too, not just classic pcap —
                 // so without this check, a file that merely *fails* our
@@ -677,7 +683,7 @@ fn resolve_packet_source() -> ResolvedPacketSource {
                         "REPLAY_FILE={path} looks like a pcapng file (starts with the pcapng \
                          Section Header Block signature) but failed to parse with this agent's \
                          own reader — refusing to fall back to libpcap's own pcapng parser for a \
-                         file already known to be malformed or unsupported"
+                         file already known to be malformed or unsupported: {reader_error}"
                     );
                 }
                 let cap = pcap::Capture::from_file(&path)
@@ -1672,7 +1678,8 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
                 match packet_source.next_frame() {
-                    SourceFrame::Bytes { data, timestamp, original_len } => {
+                    SourceFrame::Bytes { data, timestamp, original_len, link_type: frame_link_type } => {
+                        let link_type = frame_link_type.unwrap_or(link_type);
                         if mode == "replay" {
                             if let (ReplaySpeed::Realtime, Some(prev_ts)) = (replay_speed, previous_frame_timestamp) {
                                 if let Ok(delta) = timestamp.duration_since(prev_ts) {
@@ -1967,6 +1974,10 @@ async fn main() -> std::io::Result<()> {
                             );
                         }
                         continue;
+                    }
+                    SourceFrame::ReplayError(error) => {
+                        eprintln!("capture-agent: replay failed: {error}");
+                        break;
                     }
                     SourceFrame::Eof => {
                         // Replay fully consumed, or a live device errored
@@ -2571,6 +2582,9 @@ async fn main() -> std::io::Result<()> {
 #[cfg(test)]
 #[path = "../tests/fixtures/replay_capture.rs"]
 mod replay_capture;
+#[cfg(test)]
+#[path = "../tests/fixtures/third_party_capture.rs"]
+mod third_party_capture;
 
 #[cfg(test)]
 mod tests {
@@ -2586,6 +2600,54 @@ mod tests {
     use capture_agent::parse::{LinkType, TransportProtocol};
     use std::path::Path;
     use tokio::sync::broadcast;
+
+    #[test]
+    fn mixed_sections_replay_with_each_packets_link_type_and_timestamp() {
+        use super::{PacketSource, SourceFrame};
+        let file = super::third_party_capture::mixed_sections("source");
+        let (reader, _) = capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap()).unwrap();
+        let mut source = PacketSource::ReplayPcapng(reader);
+        for (index, expected_link) in [LinkType::Ethernet, LinkType::Raw, LinkType::NullLoopback].into_iter().enumerate() {
+            let SourceFrame::Bytes { data, timestamp, original_len, link_type } = source.next_frame() else {
+                panic!("missing packet {index}");
+            };
+            assert_eq!(link_type, Some(expected_link));
+            assert_eq!(timestamp.duration_since(std::time::UNIX_EPOCH).unwrap(), std::time::Duration::from_secs(index as u64 + 1));
+            assert_eq!(data.len(), original_len as usize);
+            let parsed = capture_agent::parse::parse_packet(&data, link_type.unwrap()).unwrap();
+            assert_eq!(parsed.src_ip, format!("192.0.2.{}", index + 1));
+        }
+        assert!(matches!(source.next_frame(), SourceFrame::Eof));
+    }
+
+    #[test]
+    fn classic_raw_file_uses_native_datalink_and_decodes() {
+        use super::{PacketSource, SourceFrame};
+        let file = super::third_party_capture::raw_classic("source-raw");
+        let cap = pcap::Capture::from_file(&file.0).unwrap();
+        let link = resolve_link_type(cap.get_datalink(), "raw fixture");
+        let mut source = PacketSource::ReplayClassic(cap);
+        let SourceFrame::Bytes { data, .. } = source.next_frame() else { panic!("missing raw frame"); };
+        assert_eq!(capture_agent::parse::parse_packet(&data, link).unwrap().src_ip, "192.0.2.4");
+        assert!(matches!(source.next_frame(), SourceFrame::Eof));
+    }
+
+    #[test]
+    fn malformed_replay_is_not_clean_eof() {
+        use super::{PacketSource, SourceFrame};
+        let file = super::replay_capture::fixture("pcapng", "malformed-tail", &[0x41; 96], 96);
+        let mut bytes = std::fs::read(&file.0).unwrap();
+        bytes.extend([6, 0, 0]); // partial next block header
+        std::fs::write(&file.0, bytes).unwrap();
+        let (reader, _) = capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap()).unwrap();
+        let mut source = PacketSource::ReplayPcapng(reader);
+        assert!(matches!(source.next_frame(), SourceFrame::Bytes { .. }));
+        assert!(matches!(source.next_frame(), SourceFrame::Bytes { .. }));
+        let SourceFrame::ReplayError(error) = source.next_frame() else {
+            panic!("a malformed tail must surface an error");
+        };
+        assert!(error.contains("truncated pcapng block header"), "{error}");
+    }
 
     #[test]
     fn both_replay_sources_preserve_lengths_and_signal_capture_truncation() {
@@ -2745,6 +2807,13 @@ mod tests {
     fn resolve_link_type_maps_null_and_loop_to_null_loopback() {
         assert_eq!(resolve_link_type(pcap::Linktype::NULL, "lo0"), LinkType::NullLoopback);
         assert_eq!(resolve_link_type(pcap::Linktype::LOOP, "lo0"), LinkType::NullLoopback);
+    }
+
+    #[test]
+    fn datalink_to_link_type_uses_libpcap_raw_dlt_identity() {
+        // LINKTYPE_RAW in a file is 101, but libpcap exposes native DLT_RAW.
+        let native = pcap::Linktype::from_name("RAW").unwrap();
+        assert_eq!(datalink_to_link_type(native), Some(LinkType::Raw));
     }
 
     #[test]
