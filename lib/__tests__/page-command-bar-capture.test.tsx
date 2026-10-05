@@ -143,8 +143,19 @@ describe('command bar: capture / buffer verbs', () => {
     });
 
     expect(screen.getByText('capture file rejected — permission denied')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Dismiss capture file error' }));
+
+    runCommand('capture /tmp/denied.pcapng');
     expect(screen.queryByText('capture file rejected — permission denied')).not.toBeInTheDocument();
+
+    act(() => {
+      FakeEventSource.instances[0].onmessage!({
+        data: JSON.stringify({ type: 'capture_file_error', message: 'permission denied again' }),
+      } as MessageEvent);
+    });
+    expect(screen.getByText('capture file rejected — permission denied again')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss capture file error' }));
+    expect(screen.queryByText('capture file rejected — permission denied again')).not.toBeInTheDocument();
   });
 
   it('normalizes the `totalSize` autostop mode back to the wire contract spelling', () => {

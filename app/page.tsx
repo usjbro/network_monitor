@@ -519,6 +519,9 @@ export default function TerminalApp() {
     ring?: { mode: string; threshold: number },
     autostop?: { mode: string; threshold: number },
   ) => {
+    // A new explicit attempt supersedes the previous rejection. If this
+    // attempt is also rejected, the agent will send a fresh error event.
+    setCaptureFileError(null);
     fetch('/api/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
