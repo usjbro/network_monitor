@@ -2398,7 +2398,7 @@ async fn main() -> std::io::Result<()> {
         "agent credential publication failed at {}: check ownership, permissions and symlinks",
         credential_location.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "unresolved HOME/AGENT_TOKEN_FILE".into())
     ));
-    let credential_path = CredentialPath::from_env().map_err(&credential_error)?;
+    let credential_path = CredentialPath::from_env().map_err(credential_error)?;
     let credential = Arc::new(PublishedCredential::publish(&credential_path, AgentToken::generate()?).map_err(credential_error)?);
     let admission = Arc::new(Admission::new());
     println!("capture-agent: listening on 127.0.0.1:9990");

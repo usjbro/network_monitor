@@ -1,3 +1,5 @@
+CI follow-up: Rust1.99 clippy rejected `map_err(&credential_error)` as an unnecessary borrow; changed to `map_err(credential_error)`. Local warnings-denied clippy and full Rust suite passed again; CI must verify its newer toolchain. No behavior change or new test required for this lint correction.
+
 Published review follow-up: corrected the wire-fixture regeneration recipe to authenticate; `npx vitest run lib/__tests__/agent-wire-contract.test.ts` passed all 10 tests. Signal cleanup documentation clarified; no production behavior changed.
 
 # Test Status
