@@ -4,7 +4,8 @@
 
 1. Is the agent actually running? Check Terminal 1 for `capture-agent: listening on 127.0.0.1:9990`. If it crashed or was never started, `cd capture-agent && cargo run --release`.
 2. Is anything else listening on port 9990? `lsof -i :9990` should show exactly one `capture-agent` process. If something else is bound to that port, the agent will fail to start.
-3. Restart the web app (`npm run dev`) if you started the agent *after* the web app and the banner doesn't clear within a few seconds on its own — this shouldn't normally be necessary (the relay reconnects automatically), but is a reasonable first thing to try if something seems stuck.
+3. Check the Next.js server log for `credential unavailable or unsafe` versus `authentication failed or timed out`. The credential defaults to `$HOME/.network-monitor/agent-control-token`; different HOME directories or different `AGENT_TOKEN_FILE` values make the processes use different files. Run both as the same Unix UID. A custom override must be absolute and identical in both processes, with an existing real 0700 immediate parent owned by that UID. The final file must be a 0600 regular file owned by it, without symlinks or multiple hard links. Inspect ownership/permissions with `ls -ld` and `ls -l`, without displaying the file contents. An agent publication error names its path and exits before accepting clients; fix the unsafe location, then restart the agent. A stale-token handshake failure immediately after restart can be expected; the relay reloads on reconnect. The UI continues to show disconnected rather than the server diagnostic.
+4. Restart the web app (`npm run dev`) if you started the agent *after* the web app and the banner doesn't clear within a few seconds on its own — this shouldn't normally be necessary (the relay reconnects automatically), but is a reasonable first thing to try if something seems stuck.
 
 ## Wrong interface detected
 

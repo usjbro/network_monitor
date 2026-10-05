@@ -358,3 +358,7 @@ export interface Conversation {
   ja3Label?: string;
   enrichment?: NetworkConnection['enrichment'];
 }
+
+/** Socket handshake only; never forwarded to browser consumers. */
+export interface AgentAuthenticateMessage { type: 'authenticate'; token: string }
+export interface AgentAuthenticatedMessage { type: 'authenticated' }

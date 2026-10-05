@@ -1,3 +1,21 @@
+# JAM-184 — review fix verified, publication next, 2026-10-05
+
+James invoked epic-task-cycle JAM-184 and approved BOTH feed/controls, the revised spec, implementation plan and Native execution directly in this session. Existing gate is approved/delegated; Linear In Progress. All edits remain in `.worktrees/capture-agent-control-token` on `jamesmbrownjr/jam-184-authenticate-the-capture-agent-control-socket-with-a-per`.
+
+Implemented private random per-launch credentials, directory-FD publication after bind, bounded authentication/ACK before subscription/control dispatch, separate 16-pending/64-authenticated caps, relay auth-first/reconnect rotation and safe lifecycle reset. Test doubles and actual live/replay observers authenticate using isolated private token files. Updated protocol/security/setup/troubleshooting/architecture docs. No dependencies, binds, deployment or TLS opt-in changes. Relay HTTP auth remains JAM-196.
+
+Validation: default Rust 419 passed/8 ignored; all five live-loopback tests passed; binary replay compatibility (3 scenarios) and truncation (8 scenarios) passed. Release build/clippy passed. Vitest 600 passed; typecheck/lint/build passed; authenticated Playwright smoke passed. Rust dependency audit clean (isolated cargo-audit CLI installed in /private/tmp); npm audit only the existing allowlisted lint-only braces advisory. See TEST_STATUS.md for commands, red evidence and limitations.
+
+James approved temporarily stopping the main-checkout release agent PID73161. Original process used en0, capturing:true, no file recording, filter:null, snaplen65535. It was restored using the same original binary/cwd and saved launch settings as PID18299; startup/port verified. Temporary stop/restart authorization was exercised only for the live/replay tests; the original agent is running again. Test-only live interface selection fixed to macOS lo0/Linux lo after actual macOS failures; production interface behavior unchanged.
+
+Plan/ledger: `docs/superpowers/plans/2026-10-05-agent-control-authentication.md`; `.superpowers/sdd/2026-10-05-agent-control-authentication/progress.md`. Task 1 e9b746f, Task 2 a1e1ec1, Task 3 4410450. Task 4 fixture/docs and verification ready; independent whole-branch review completed; an Important raw loopback capture leak was fixed before publication. Unit full/split-auth and fragment exclusions plus actual raw-recording regression were observed RED→GREEN; full Rust/live/replay/TS suites and release/clippy passed afterward. Conservative omission applies only to live IPv4 loopback control traffic and unclassifiable TCP fragments involving 127.0.0.1; replay is preserved. Publication/CI/published review and merge remain. No PR yet. Keep unrelated worktrees and operator token files untouched.
+
+Claude Code branch review reported five low observations. Deferred separate connect-error diagnostics and bounded agent-side rejection telemetry; retained the approved 5-second admission deadline. Node documentation already states its narrower file-FD validation; E2E intentionally fails on occupied port3100 rather than reuse an operator server. Published Claude Code code/security review and cloud Codex review covered the final privacy fix: no blockers. Corrected the low regeneration-recipe finding and clarified signal-termination stale-file cleanup; diagnostic enhancements remain deferred. PR #266 is open; consult GitHub/Linear for final publication state. Consult GitHub/Linear for publication state.
+
+Previous handoff follows.
+
+---
+
 # JAM-194 — 2026-10-05
 
 Approved scope implemented in `.worktrees/third-party-pcapng-replay`, branch `jamesmbrownjr/jam-194-p2-pcapng-replay-rejects-valid-third-party-blocks-sections`, based on JAM-174 merge5399704.

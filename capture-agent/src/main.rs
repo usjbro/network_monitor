@@ -1,5 +1,6 @@
 use base64::Engine;
 use capture_agent::{
+    control_auth::{self, Admission, AgentToken, CredentialPath, PublishedCredential},
     fields,
     flow::{self, FlowKey, FlowTable},
     host_stats,
@@ -1740,6 +1741,9 @@ async fn main() -> std::io::Result<()> {
                             }
                             continue;
                         };
+                        // Authentication is plaintext on this private loopback channel.
+                        // Exclude before reassembly, flow/payload events and raw recording.
+                        if exclude_live_control_capture(&parsed, mode == "live") { continue; }
                         // JAM-16: sniff through reassembly, so a request line
                         // or ClientHello split across TCP segments resolves
                         // instead of silently disappearing, and an IPv4
@@ -2388,6 +2392,15 @@ async fn main() -> std::io::Result<()> {
     }
 
     let listener = TcpListener::bind("127.0.0.1:9990").await?;
+    let credential_location = std::env::var_os("AGENT_TOKEN_FILE").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".network-monitor/agent-control-token")));
+    let credential_error = |e: std::io::Error| std::io::Error::new(e.kind(), format!(
+        "agent credential publication failed at {}: check ownership, permissions and symlinks",
+        credential_location.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "unresolved HOME/AGENT_TOKEN_FILE".into())
+    ));
+    let credential_path = CredentialPath::from_env().map_err(credential_error)?;
+    let credential = Arc::new(PublishedCredential::publish(&credential_path, AgentToken::generate()?).map_err(credential_error)?);
+    let admission = Arc::new(Admission::new());
     println!("capture-agent: listening on 127.0.0.1:9990");
 
     loop {
@@ -2398,7 +2411,9 @@ async fn main() -> std::io::Result<()> {
                 continue;
             }
         };
-        let mut rx = tx.subscribe();
+        let pending = match admission.try_pending() { Ok(permit) => permit, Err(_) => continue };
+        let admission = admission.clone();
+        let credential = credential.clone();
         let paused = paused.clone();
         let keylog_watcher = keylog_watcher.clone();
         let trace_tx = tx.clone();
@@ -2412,7 +2427,13 @@ async fn main() -> std::io::Result<()> {
         let hostname = hostname.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
-            let mut reader = BufReader::new(read_half).lines();
+            let mut reader = BufReader::new(read_half);
+            if control_auth::verify_peer(&mut reader, credential.token()).await.is_err() { return; }
+            let _authenticated = match admission.try_authenticated() { Ok(permit) => permit, Err(_) => return };
+            if control_auth::write_ack(&mut write_half).await.is_err() { return; }
+            drop(pending);
+            let mut rx = trace_tx.subscribe();
+            let mut reader = reader.lines();
 
             loop {
                 tokio::select! {
@@ -3299,4 +3320,59 @@ mod tests {
         assert_eq!(reassembly_now_ms(false, &mut clock, later, 6), 6);
         assert_eq!(clock.now_ms(later), 0, "live mode never advanced the replay clock");
     }
+}
+
+#[cfg(test)]
+mod control_capture_privacy_tests {
+    use super::*;
+    fn frame(src: [u8;4], dst: [u8;4], src_port: u16, dst_port: u16, payload: &[u8]) -> parse::ParsedPacket {
+        let mut data=Vec::new();
+        etherparse::PacketBuilder::ethernet2([0;6],[1;6]).ipv4(src,dst,64).tcp(src_port,dst_port,1,65535).write(&mut data,payload).unwrap();
+        parse::parse_packet(&data,parse::LinkType::Ethernet).unwrap()
+    }
+    #[test]
+    fn live_control_frames_are_excluded_before_raw_outputs() {
+        let token=b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut auth=b"{\"type\":\"authenticate\",\"token\":\"".to_vec();auth.extend(token);auth.extend(b"\"}\n");
+        // Full, split-token and reverse-direction ACK frames all belong to the private transport.
+        for payload in [&auth[..],&token[..],b"{\"type\":\"authenticated\"}\n"] {
+            let p=frame([127,0,0,2],[127,0,0,1],42000,9990,payload);
+            assert!(exclude_live_control_capture(&p,true));
+            assert!(!exclude_live_control_capture(&p,false),"replay data must remain intact");
+        }
+        let reply=frame([127,0,0,1],[127,0,0,2],9990,42000,b"reply");
+        assert!(exclude_live_control_capture(&reply,true));
+        for p in [frame([127,0,0,1],[127,0,0,1],42000,8080,b"ordinary"),frame([192,0,2,1],[192,0,2,2],42000,9990,b"remote"),frame([127,0,0,2],[127,0,0,3],42000,9990,b"different loopback service")] {
+            assert!(!exclude_live_control_capture(&p,true));
+        }
+    }
+    #[test]
+    fn live_loopback_tcp_fragments_are_excluded_without_ports() {
+        for (offset,more) in [(0,true),(8,false)] {
+            let mut ip=etherparse::Ipv4Header::new(64,64,etherparse::IpNumber::TCP,[127,0,0,2],[127,0,0,1]).unwrap();
+            ip.more_fragments=more;ip.fragment_offset=etherparse::IpFragOffset::try_new(offset).unwrap();
+            let mut data=ip.to_bytes().to_vec();data.extend([b'a';64]);
+            let mut p=parse::parse_packet(&data,parse::LinkType::Raw).unwrap();
+            assert!(exclude_live_control_capture(&p,true));assert!(!exclude_live_control_capture(&p,false));
+            p.ip_fragment.as_mut().unwrap().protocol=17;
+            assert!(!exclude_live_control_capture(&p,true),"non-TCP fragments are unaffected");
+            p.ip_fragment.as_mut().unwrap().protocol=6;p.src_ip="192.0.2.1".into();
+            assert!(!exclude_live_control_capture(&p,true),"non-loopback fragments are unaffected");
+        }
+    }
+}
+/// Never expose the live agent's private transport as captured user traffic.
+/// A non-first IPv4 TCP fragment has no ports; conservatively omit loopback
+/// TCP fragments involving our listening address rather than persist credentials.
+/// Replay remains byte-faithful, and unrelated unfragmented traffic is retained.
+fn exclude_live_control_capture(packet: &parse::ParsedPacket, live: bool) -> bool {
+    if !live { return false; }
+    let loopback = |ip: &str| ip.parse::<std::net::IpAddr>().is_ok_and(|addr| addr.is_loopback());
+    if !loopback(&packet.src_ip) || !loopback(&packet.dst_ip) { return false; }
+    if packet.ip_fragment.as_ref().is_some_and(|fragment| fragment.protocol == 6) {
+        return packet.src_ip == "127.0.0.1" || packet.dst_ip == "127.0.0.1";
+    }
+    matches!(packet.protocol, parse::TransportProtocol::Tcp)
+        && ((packet.src_ip == "127.0.0.1" && packet.src_port == Some(9990))
+            || (packet.dst_ip == "127.0.0.1" && packet.dst_port == Some(9990)))
 }

@@ -1,5 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 import fs from 'node:fs';
+import { ensureE2EAgentCredential } from './e2e/agent-auth-fixture';
+const agentTokenFile = ensureE2EAgentCredential();
 
 const PORT = 3100;
 
@@ -51,7 +53,8 @@ export default defineConfig({
     // says not to drop.
     command: `npx next dev -H 127.0.0.1 --webpack -p ${PORT}`,
     url: `http://127.0.0.1:${PORT}`,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
+    env: { AGENT_TOKEN_FILE: agentTokenFile },
     timeout: 120_000,
   },
 });

@@ -1325,3 +1325,17 @@ mod tests {
         );
     }
 }
+
+/// First-line handshake, separate from normal controls. Never log this message.
+#[derive(serde::Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+pub enum AuthenticateMessage {
+    #[serde(rename = "authenticate")]
+    Authenticate { token: String },
+}
+#[derive(serde::Serialize)]
+#[serde(tag = "type")]
+pub enum AuthenticatedMessage {
+    #[serde(rename = "authenticated")]
+    Authenticated,
+}

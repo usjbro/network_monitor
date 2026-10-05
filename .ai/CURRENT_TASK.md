@@ -1,9 +1,9 @@
 # Current Task
 
-JAM-194: third-party pcapng replay compatibility. Approved directly in chat on 2026-10-05.
+JAM-184: authenticate the capture-agent control socket with a per-launch token. James invoked epic-task-cycle JAM-184 directly in chat on 2026-10-05, authorizing the queued scope and publication cycle.
 
-Worktree: `.worktrees/third-party-pcapng-replay`; branch `jamesmbrownjr/jam-194-p2-pcapng-replay-rejects-valid-third-party-blocks-sections`.
+Worktree: `.worktrees/capture-agent-control-token`; branch `jamesmbrownjr/jam-184-authenticate-the-capture-agent-control-socket-with-a-per`.
 
-Scope: section byte order/version, concatenated sections, section-local interfaces, per-packet framing/timestamp metadata, validated unknown-block skipping, explicit replay errors and unsupported packet-block diagnostics, classic-pcap RAW mapping. Preserve JAM-174 length attribution and existing resource limits. Offset/FCS/address metadata, writer and TLS ingestion remain follow-ups.
+Stage: James approved the revised design and implementation plan for Native execution directly in chat on 2026-10-05. Credential lifecycle, Rust/relay handshake and authenticated live/replay/browser fixtures implemented and validated. Independent whole-branch code/security review completed; its Important loopback credential leak was reproduced and fixed with passing full/live/replay suites. Ready for publication/CI and published PR review. Existing gate remains approved/delegated.
 
-Validation: reader/unit regressions, independent multi-interface/mixed-endian fixtures, actual binary replay, malformed inputs, Rust tests/release/clippy, reader fuzz, independent code/security review and CI before merge.
+Scope: generated token, secure local handoff, bounded handshake before feed/control access, coordinated Rust/TypeScript contract and documentation, relay reconnect behavior and live rejection tests. Keep loopback bind, TLS opt-in and dependencies unchanged. JAM-194 is merged as7cfc09d; its replay-recording review finding is separate, not part of this task.

@@ -20,8 +20,21 @@
 //   cd capture-agent && cargo build --release
 //   REPLAY_FILE=<some.pcap> REPLAY_LOCAL_ADDRS=10.0.0.1 \
 //     REPLAY_SPEED=realtime ./target/release/capture-agent &
-//   python3 -c "import socket;s=socket.create_connection(('127.0.0.1',9990));\
-//     import sys;[sys.stdout.write(s.recv(65536).decode()) for _ in range(20)]"
+//   python3 - <<'PYTHON'
+//   import json, os, pathlib, socket, sys
+//   path = pathlib.Path(os.environ.get('AGENT_TOKEN_FILE',
+//       str(pathlib.Path.home() / '.network-monitor/agent-control-token')))
+//   token = path.read_text().removesuffix('\n')
+//   with socket.create_connection(('127.0.0.1', 9990), timeout=10) as sock:
+//       sock.sendall((json.dumps({'type': 'authenticate', 'token': token}) + '\n').encode())
+//       token = ''
+//       feed = sock.makefile('r')
+//       assert json.loads(feed.readline()) == {'type': 'authenticated'}
+//       for _ in range(20):
+//           line = feed.readline()
+//           if not line: break
+//           sys.stdout.write(line)
+//   PYTHON
 //
 // then keep one line per type and scrub any machine-specific path.
 import { describe, expect, it } from 'vitest';

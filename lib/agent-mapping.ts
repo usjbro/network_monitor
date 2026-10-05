@@ -394,3 +394,9 @@ export function mergeLayerStats(
     })
     .sort((a, b) => b.layer - a.layer);
 }
+
+export function isAgentAuthenticatedMessage(value: unknown): value is import('./types').AgentAuthenticatedMessage {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.keys(value).length === 1 && Object.prototype.hasOwnProperty.call(value, 'type')
+    && (value as Record<string, unknown>).type === 'authenticated';
+}

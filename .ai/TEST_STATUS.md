@@ -1,4 +1,29 @@
+CI follow-up: Rust1.99 clippy rejected `map_err(&credential_error)` as an unnecessary borrow; changed to `map_err(credential_error)`. Local warnings-denied clippy and full Rust suite passed again; CI must verify its newer toolchain. No behavior change or new test required for this lint correction.
+
+Published review follow-up: corrected the wire-fixture regeneration recipe to authenticate; `npx vitest run lib/__tests__/agent-wire-contract.test.ts` passed all 10 tests. Signal cleanup documentation clarified; no production behavior changed.
+
 # Test Status
+
+## JAM-184 — verified 2026-10-05, independent review fix verified
+
+Commands run in `.worktrees/capture-agent-control-token` (Rust in its capture-agent subdirectory or with --manifest-path).
+
+- Initial credential tests failed on missing modules/contracts; high-bit credential regression then failed because Node ASCII decoding masked non-ASCII bytes. Switched to byte-preserving latin1 validation; 14 credential/ACK-shape tests pass.
+- Relay pre-ACK regression failed with isConnected:true, expected false. Auth-first/no controls until ACK, rejection/rotation/buffer reset/old callbacks and every ACK split boundary now pass. TCP tests required sandbox escalation.
+- Actual unsafe-file startup regression failed because its diagnostic lacked the configured path; now exits non-zero before accepting, preserves the unsafe file and names its path without contents.
+- Playwright smoke failed on the visible disconnected banner before fake-server authentication; passed after the fixture handshake migration.
+- `cargo test --locked`: 419 passed, 8 ignored, including 12 credential/admission/framing/deadline tests.
+- `cargo test --locked --test live_loopback -- --ignored --test-threads=1`: all 5 passed, including actual rejection without feed/file side effects, 16 pending/64 authenticated bounds, existing-session service under pending saturation, failed-second-bind preservation, strict post-auth HTTP rejection and unsafe publication. Existing fixtures first failed on Linux lo naming on macOS; tests now select lo0 on macOS and lo on Linux.
+- `cargo test --locked --test replay_compatibility -- --ignored --test-threads=1`: passed, 3 scenarios with authenticated observers.
+- `cargo test --locked --test replay_truncation -- --ignored --test-threads=1`: passed, 8 scenarios with isolated credential paths.
+- `cargo build --release --locked` and `cargo clippy --locked --all-targets -- -D warnings`: passed.
+- `npx vitest run`: 82 files, 600 tests passed.
+- `npx tsc --noEmit`, `npm run lint`, `npm run build`: passed. Build retains existing Next middleware/Edge-runtime warnings; no new dependency/config changes.
+- `npx playwright test`: 1 actual Chromium smoke passed through authenticated fake TCP agent → real relay/SSE → browser and control return path.
+- `/private/tmp/jam184-audit-tools/bin/cargo-audit audit --file capture-agent/Cargo.lock`: clean, 70 dependencies scanned. `npm audit --json` plus `.github/scripts/check-npm-audit.mjs`: only existing allowlisted GHSA-vfj7-8cjw-p6xm.
+- Independent whole-branch code/security review found one Important leak through live loopback packet/capture output. Two new full/split-auth and fragment exclusion tests failed; actual recording test failed on raw credential persistence. Fixed by early live endpoint/fragment exclusion, documented narrow omission, preserving replay and unrelated traffic. Two exclusion tests and actual raw-recording regression now pass; final default Rust suite (419), all 5 live tests, both replay suites, release/clippy and full Vitest (600) rerun green. No Critical or Minor findings; reviewed Important finding fixed in one RED→GREEN pass.
+
+James approved temporary agent stop/restart; original main-checkout agent restored again after final verification as PID32578 on en0/default filter/snaplen, no recording active. No token contents printed. No privileged foreign-UID file fixture was available; actual current-UID/mode/type/link/symlink cases were exercised, while foreign-UID rejection remains implemented and subject to review. No new fuzz target/parser files requiring existing fuzz commands changed.
 
 ## JAM-194 — verified 2026-10-05
 
