@@ -1,4 +1,4 @@
-# JAM-184 — design review, 2026-10-05
+# JAM-184 — implementation plan review, 2026-10-05
 
 James invoked epic-task-cycle JAM-184 directly in this chat. Existing gate approved/unclaimed was claimed and marked delegated in-session; task worktree created and branch renamed to Linear's name. Linear is In Progress. Main stays unchanged.
 
@@ -6,7 +6,11 @@ Current worktree: `.worktrees/capture-agent-control-token`; branch: `jamesmbrown
 
 Written design: `docs/superpowers/specs/2026-10-05-agent-control-authentication-design.md`. Independent security design review advised bounded first-line authentication, ack before subscribing, secure atomic per-launch token publication after successful bind, fresh relay credential reads on reconnect and honest same-UID/HTTP boundary limits. Incorporated in the proposal.
 
-No product code or tests edited yet. Brainstorming's architectural path requires James to review this written spec before writing the implementation plan, then review the plan before product implementation. Existing task-scope authorization covers the cycle; these are artifact review gates. Pending approval of this spec in chat. Keep existing credentials and other tasks untouched.
+James approved the revised written spec directly in this chat, including authentication for BOTH feed and controls, directory-FD-anchored Rust credential publication and the separately tracked JAM-196 relay HTTP boundary. Approval recorded in the task Slack thread.
+
+Implementation plan: `docs/superpowers/plans/2026-10-05-agent-control-authentication.md`. Four deliverables cover credential lifecycle/contracts, Rust admission/real binary tests, relay authentication/reconnects, and browser fixtures/docs/release verification. Self-reviewed against the approved spec. Recommend Native execution with fresh independent whole-branch code/security review; Subagent-driven remains available.
+
+No product code or tests edited yet. Await James's plan review and execution-method selection before implementation, as required by writing-plans. Existing task-scope authorization covers the publication cycle; this is an artifact review gate. Keep existing credentials and other tasks untouched. No verification runs claimed for this documentation-only stage.
 
 Previous handoff follows.
 
