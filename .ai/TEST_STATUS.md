@@ -5,7 +5,7 @@
 Commands ran in `.worktrees/third-party-pcapng-replay`, with `--manifest-path capture-agent/Cargo.toml` where applicable.
 
 - Pre-fix native RAW DLT mapping test failed (None versus Raw); malformed-tail test failed because source returned EOF. Reader mixed-endian regression failed on bogus little-endian length 469762048.
-- `cargo test --locked`: 405 passed, 6 ignored. Includes per-source link type, timestamp and decoded-IP checks across mixed sections, native classic RAW and malformed replay errors; reader suite has 34 tests.
+- `cargo test --locked`: 405 passed, 6 ignored. Includes per-source link type, timestamp and decoded-IP checks across mixed sections, native classic RAW and malformed replay errors; pcapng suite has 34 tests.
 - `cargo build --release --locked`: passed.
 - `cargo clippy --all-targets --locked -- -D warnings`: passed, rerun after final reader tests.
 - `cargo test --locked --test replay_compatibility --test replay_truncation -- --ignored --test-threads=1`: passed both tests, three JAM-194 binary scenarios plus eight JAM-174 cases. Loopback bind needed sandbox escalation; no existing agent was stopped.
