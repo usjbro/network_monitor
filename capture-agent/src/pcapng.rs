@@ -439,6 +439,8 @@ fn parse_interface_description(body: &[u8]) -> io::Result<ParsedInterface> {
 pub struct ParsedPacket {
     pub timestamp: SystemTime,
     pub direction: Direction,
+    /// Packet length before capture truncation, distinct from `data.len()`.
+    pub original_len: u32,
     pub data: Vec<u8>,
 }
 
@@ -449,6 +451,7 @@ fn parse_enhanced_packet(body: &[u8], tsresol: u8) -> io::Result<ParsedPacket> {
     let ts_high = u32::from_le_bytes(body[4..8].try_into().unwrap());
     let ts_low = u32::from_le_bytes(body[8..12].try_into().unwrap());
     let cap_len = u32::from_le_bytes(body[12..16].try_into().unwrap()) as usize;
+    let original_len = u32::from_le_bytes(body[16..20].try_into().unwrap());
     let padded_len = pad4(cap_len);
     if body.len() < 20 + padded_len {
         return Err(io::Error::new(
@@ -472,7 +475,7 @@ fn parse_enhanced_packet(body: &[u8], tsresol: u8) -> io::Result<ParsedPacket> {
         }
     })?;
 
-    Ok(ParsedPacket { timestamp, direction, data })
+    Ok(ParsedPacket { timestamp, direction, original_len, data })
 }
 
 /// Reads back a pcapng file/stream written by `Writer` above. Deliberately
@@ -836,6 +839,21 @@ mod reader_tests {
         let mut body = vec![0u8; 20];
         body[12..16].copy_from_slice(&1_000_000u32.to_le_bytes()); // claims a huge capture length
         assert!(parse_enhanced_packet(&body, 9).is_err());
+    }
+
+    #[test]
+    fn epb_original_length_survives_independently_of_captured_bytes() {
+        // The original length is metadata, never an allocation size. The
+        // draft permits inherited original < captured records as well.
+        for original in [0u32, 4, 128, u32::MAX] {
+            let mut body = vec![0u8; 24];
+            body[12..16].copy_from_slice(&4u32.to_le_bytes());
+            body[16..20].copy_from_slice(&original.to_le_bytes());
+            body[20..24].copy_from_slice(b"data");
+            let packet = parse_enhanced_packet(&body, 6).unwrap();
+            assert_eq!(packet.original_len, original);
+            assert_eq!(packet.data, b"data");
+        }
     }
 
     #[test]

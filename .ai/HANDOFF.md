@@ -1,3 +1,22 @@
+# JAM-174 — 2026-10-05
+
+Worktree: `.worktrees/replay-capture-truncation`; branch: `jamesmbrownjr/jam-174-snap-length-truncation-detector-is-dead-during-pcappcapng`. Implementation is verified. James approved this scope directly in chat; the local gate is approved/delegated.
+
+- `pcapng::ParsedPacket` preserves EPB original length; live/classic libpcap sources preserve `packet.header.len` in `SourceFrame`.
+- `note_capture_truncation` checks actual captured bytes < original length before parsing, counts each cut, and preserves reassembly gap attribution. Complete packets at snaplen do not trigger.
+- New real-file source tests and gap-attribution tests run by default; opt-in binary replay regression covers both formats, unparseable/decodable cuts, complete frames and warning latching. Fixtures live in `tests/fixtures/replay_capture.rs`.
+- `cargo test --locked`: 392 passed, 5 ignored. Release build, warnings-denied clippy, and 40s + seeded 30s reader fuzz checks passed. Independent review's only finding (fixed-port dependency in default tests) was fixed by making the binary test opt-in and adding socket-free source coverage.
+- Final verification on 2026-10-05: `cargo test --locked --test replay_truncation -- --ignored` passed across eight classic-pcap/pcapng scenarios; default suite rerun: 392 passed, 5 ignored; clippy rerun clean. The default suite ignores the binary test because it needs exclusive port9990.
+- James approved a temporary agent stop in chat; PID94514 had already exited, so no process was stopped or restarted. Binary tests clean up their own child agents.
+- The initial raw-IP classic-pcap fixture exposed a separate macOS startup bug: system libpcap returns DLT_RAW12, but the crate's RAW constant is101. Recorded on JAM-194. JAM-174 now uses Ethernet fixtures for portable truncation tests; the test-only change passed independent review.
+- Implementation and verification complete. James invoked `epic-task-cycle JAM-174` to authorize publication through commit, PR, CI and merge. Check Linear/GitHub for publication state.
+- Independent security review before publication: no introduced findings; original length is scalar metadata, no new allocations/exposure/secrets behavior. Three focused tests rerun by reviewer passed.
+- Reader compatibility remains JAM-194; no wire, writer, TLS or deployment changes.
+
+The previous handoff below is historical and is not the current task.
+
+---
+
 # Session Handoff
 
 ## JAM-130 remaining issues (JAM-8, JAM-163, JAM-180, JAM-181) — 2026-10-04, merged
