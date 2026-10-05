@@ -1,6 +1,8 @@
 # Capture-agent Socket Authentication — JAM-184
 
-Status: proposed for James's review. No product implementation yet.
+Status: proposed for James's review, revised after Claude Code feedback. No product implementation yet.
+
+Scope decision awaiting James: gate both the feed and controls, or restrict authentication to controls. This draft recommends both because they share one connection and capture data is sensitive; JAM-184's acceptance criteria explicitly require control authentication.
 
 ## Purpose and scope
 
@@ -14,11 +16,11 @@ Existing direct socket tools must implement the handshake. There is no unauthent
 
 The agent generates 32 cryptographically random bytes with the existing ring SystemRandom primitive on every launch. Encode as 64 lowercase hexadecimal characters. Do not accept a caller-supplied reusable token.
 
-Publish the credential through an owner-only file. Both processes resolve AGENT_TOKEN_FILE when set (absolute path required); otherwise use $HOME/.network-monitor/agent-control-token. An override must be configured identically in both processes. A dedicated default directory is created with 0700 permissions. A configured parent must already exist and be owned by the runningUID with 0700 permissions; reject symlink traversal, foreign ownership, nonregular files, hard-linked credentials and insecure permissions. Agent and relay run under the same UID; privilege-separated deployments need a future design.
+Publish the credential through an owner-only file. Both processes resolve AGENT_TOKEN_FILE when set (absolute path required); otherwise use $HOME/.network-monitor/agent-control-token. An override must be configured identically in both processes. A dedicated default directory is created with 0700 permissions. A configured parent must already exist and be owned by the running UID with 0700 permissions; resolve platform-level ancestor aliases such as macOS /var to their canonical location, then validate the immediate credential directory and final file. The immediate directory must not itself be a symlink; the final file is opened without following symlinks. Reject foreign ownership, nonregular files, hard-linked credentials and insecure permissions. Anchor operations to the validated canonical directory. Do not reject the platform's /var alias merely because it is a symlink. Agent and relay run under the same UID; privilege-separated deployments need a future design.
 
 Bind the listener before publishing, so an instance that loses the bind race cannot replace the running instance's token. Write to a uniquely named create-new 0600 file in the validated directory, then atomically rename it into place. Validate any existing credential's ownership/type/mode before replacing it; stale valid credentials are replaced. Temporary filenames must not contain the credential. Anchor Rust file operations to a validated parent directory descriptor where practical; the relay validates the opened file with fstat rather than checking a path and then reading it. Never print token bytes or put them in command arguments, wire events, browser state, errors or logs.
 
-Hold the agent credential in zeroizing memory using the existing zeroize dependency. On ordinary teardown remove only the credential file still belonging to this process; compare saved file identity to avoid unlinking a replacement. A crash can leave a stale 0600 file; the next successful launch rotates it. SIGKILL cannot guarantee cleanup. The relay reads the file fresh for each connection attempt using no-follow open, regular-file/UID/0600 checks and a 65-byte content bound (64 hex characters plusLF). Never cache across reconnects. Missing or invalid credentials yield disconnected state and normal reconnect scheduling.
+Hold the agent credential in zeroizing memory using the existing zeroize dependency. On ordinary teardown remove only the credential file still belonging to this process; compare saved file identity to avoid unlinking a replacement. A crash can leave a stale 0600 file; the next successful launch rotates it. SIGKILL cannot guarantee cleanup. The relay reads the file fresh for each connection attempt using no-follow open, regular-file/UID/0600 checks and a 65-byte content bound (64 hex characters plus LF). Never cache across reconnects. Missing or invalid credentials yield disconnected state and normal reconnect scheduling.
 
 ## Wire handshake
 
@@ -28,7 +30,7 @@ The client's first line must be exactly the supported authentication message sha
 {"type":"authenticate","token":"<64 lowercase hexadecimal characters>"}
 ```
 
-The agent reads at most 256 bytes, including the newline, within 5 seconds. Missing newline, EOF, timeout, invalidJSON/type/token, unknown fields, oversized input, a control as the first line or a wrong token closes the connection. Compare fixed-length token bytes with a constant-time primitive from existing dependencies. Never route this line through the normal control dispatcher. Never include supplied credentials in rejection diagnostics.
+The agent reads an authentication line of at most 256 bytes, including the newline, within 5 seconds. This limit applies only through the first newline, not to an entire TCP read containing authentication followed by a larger control message. Missing newline, EOF, timeout, invalid JSON/type/token, unknown fields, oversized input, a control as the first line or a wrong token closes the connection. Compare fixed-length token bytes with a constant-time primitive from existing dependencies. Never route this line through the normal control dispatcher. Never include supplied credentials in rejection diagnostics.
 
 On success, write the acknowledgement successfully within a further 5-second deadline:
 
@@ -36,21 +38,21 @@ On success, write the acknowledgement successfully within a further 5-second dea
 {"type":"authenticated"}
 ```
 
-Only then subscribe/forward capture events and accept normal controls. Buffered bytes after the first newline must remain available to the normal parser; valid authentication followed by a control in the sameTCP write is supported. Authentication followed by an HTTP request still triggers JAM-175's strict framing rejection. The credential itself is never emitted back.
+Only then subscribe/forward capture events and accept normal controls. Buffered bytes after the first newline must remain available to the normal parser; valid authentication followed by a control in the same TCP write is supported. Authentication followed by an HTTP request still triggers JAM-175's strict framing rejection. The credential itself is never emitted back.
 
-Bound socket tasks with at most 64 concurrent connections (including authenticated clients); excess accepted sockets close. This bounds idle unauthenticated tasks while the 5-second deadline bounds their lifetime. The listener remains responsive.
+Use separate limits of 16 pending authentication tasks and 64 authenticated connections. Acquire a pending permit without waiting before spawning; release it after successful authentication or closure. Acquire an authenticated permit before acknowledging success and hold it for that connection's lifetime. Excess peers close. Pending peers cannot consume authenticated-client slots or interfere with existing authenticated connections. The absolute 5-second handshake deadline also covers slow-drip input. These are resource bounds, not a guarantee against local connection flooding: an attacker can still saturate pending admission and delay a new legitimate client; reserving authenticated slots cannot identify that client before authentication.
 
 ## Relay lifecycle and contract
 
 AgentClient reads the credential, opens TCP, sends authentication first, and starts a 5-second acknowledgement deadline. It reports connected and allows sendControl only after the expected acknowledgement. Before it arrives, any other event closes the attempt without emission. Authentication acknowledgements are consumed inside AgentClient and never become SSE events. Controls requested before authentication are dropped rather than queued for a later connection.
 
-On disconnect, reset authentication, partial-line buffering and timers before the existing single reconnect schedule. Delayed credential reads and callbacks from old sockets must be ignored after stop() or a newer attempt. Every reconnect reloads the credential, allowing an agent restart to rotate it without restarting Next.js. The relay's pre-ack receive buffer is bounded to 256 bytes; the acknowledgement must have the exact supported shape.
+On disconnect, reset authentication, partial-line buffering and timers before the existing single reconnect schedule. Delayed credential reads and callbacks from old sockets must be ignored after stop() or a newer attempt. Every reconnect reloads the credential, allowing an agent restart to rotate it without restarting Next.js. The relay's acknowledgement line is bounded to 256 bytes through its first newline; coalesced authenticated events after that newline retain their normal larger limits. The acknowledgement must have the exact supported shape. Missing/unsafe credentials and handshake closure or timeout produce a bounded, deduplicated server-side diagnostic reason without credential contents or raw authentication input; connected status remains false. Distinguish credential lookup/validation failure from handshake failure without promising the peer will disclose why it refused authentication.
 
 Update capture-agent/src/wire.rs, lib/types.ts and lib/agent-mapping.ts together with explicit handshake types/contracts, plus lib/agent-client.ts and docs/wire-protocol.md. Mapping must never expose handshake credentials or acknowledgements to browser consumers. No TLS key or decrypt-opt-in changes.
 
 ## Security boundary
 
-A 0600 file protects against other OS users and callers without the credential. Code already running as the same UID can read that file; this does not isolate hostile programs under the operator's own account. The relay HTTP boundary is unchanged: this task does not introduce HTTP session authentication, and local processes able to call an allowed relay route can still use its controls. Avoid claiming that the token blocks all local processes.
+A 0600 file prevents other OS users from reading this credential, and the handshake rejects direct socket callers without it. It does not provide application-wide isolation from other OS users: the relay's unauthenticated HTTP routes can still expose the feed and forward controls for local non-browser callers. Code already running as the same UID can read that file; this does not isolate hostile programs under the operator's own account. The relay HTTP boundary is unchanged: this task does not introduce HTTP session authentication, and local processes able to call an allowed relay route can still use its controls. Avoid claiming that the token blocks all local processes.
 
 The authenticated acknowledgement proves acceptance of the client credential; it is not cryptographic server authentication. Preventing agent impersonation or port squatting is outside this direct-socket control-authentication scope.
 
@@ -60,8 +62,8 @@ An environment token alone would require a shared launcher and lifecycle changes
 
 ## Verification and publication
 
-Rust unit tests cover random-token format/rotation, strict handshake schema, constant-length comparison, bounded reads/timeouts and safe file creation/validation/replacement/cleanup. Live socket tests prove missing/wrong/control-first/HTTP/oversized/idle peers receive no feed and cause no control side effects, while a correct credential receives the acknowledgement, feed and controls. Validate the cap and ensure buffered post-auth commands survive.
+Rust unit tests cover random-token format/rotation, strict handshake schema, constant-length comparison, bounded reads/timeouts and safe file creation/validation/replacement/cleanup. Live socket tests prove missing/wrong/control-first/HTTP/oversized/idle peers receive no feed and cause no control side effects, while a correct credential receives the acknowledgement, feed and controls. Validate both caps, continued service to existing authenticated clients while pending admission is saturated, and buffered post-auth commands longer than 256 bytes coalesced with authentication.
 
-TypeScript tests cover auth-first ordering, no premature events/connected/controls, bad/missing credentials, wrong/unexpected acknowledgement, split/coalesced lines, reconnect-token rotation and state/timer reset. Update existing stub servers and stream-integration tests to perform authentication; do not add a test-only bypass in production.
+TypeScript tests cover auth-first ordering, no premature events/connected/controls, bad/missing credentials, wrong/unexpected acknowledgement, split/coalesced lines, reconnect-token rotation and state/timer reset. Update existing stub servers, stream-integration tests and e2e/fake-agent.ts to perform authentication; do not add a test-only bypass in production.
 
 Existing Rust live-loopback and replay binary tests must authenticate observers and use isolated private token directories. Run their ignored tests, including the actual live rejection case, in addition to default Rust tests/release/clippy and TypeScript tests/typecheck/lint/build. Use independent security/code review before publication and again on the published PR, wait for green CI and clean merge state, then squash merge and update Linear/Slack. No new dependencies or network binds.
