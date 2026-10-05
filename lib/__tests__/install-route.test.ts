@@ -23,6 +23,22 @@ describe('GET /api/install', () => {
     expect(body).toContain('SERVER_URL = "http://localhost:3000"');
   });
 
+  // JAM-185: osi-mon now connects to this origin, and the dev server binds
+  // 127.0.0.1, so every loopback form must stay plain http.
+  it.each(['127.0.0.1:3000', '[::1]:3000', 'localhost'])('embeds an http origin for the loopback host %s', async (host) => {
+    const res = await GET(req({ host }));
+    const body = await res.text();
+
+    expect(body).toContain(`SERVER_URL = "http://${host}"`);
+  });
+
+  it('does not treat a host that merely contains "localhost" as loopback', async () => {
+    const res = await GET(req({ host: 'localhost.example.com' }));
+    const body = await res.text();
+
+    expect(body).toContain('SERVER_URL = "https://localhost.example.com"');
+  });
+
   it('embeds an https origin for a non-localhost host header', async () => {
     const res = await GET(req({ host: 'example.com' }));
     const body = await res.text();
