@@ -1,23 +1,27 @@
-import { describe, expect, it, vi, afterEach } from 'vitest';
+import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest';
 import net from 'node:net';
 import { AgentClient } from '../agent-client';
+import { createAuthFixture } from './fixtures/agent-auth';
 
 describe('AgentClient', () => {
+  let auth: ReturnType<typeof createAuthFixture>;
+  beforeEach(() => { auth = createAuthFixture(); });
   let server: net.Server;
   let port: number;
 
   afterEach(() => {
     server?.close();
+    auth.close();
   });
 
   it('parses newline-delimited JSON lines into "event" emissions', async () => {
-    server = net.createServer((socket) => {
+    server = auth.createServer((socket) => {
       socket.write('{"type":"agent_status","interface":"en0","capturing":true}\n');
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     const received = await new Promise((resolve) => {
       client.on('event', resolve);
       client.start();
@@ -28,7 +32,7 @@ describe('AgentClient', () => {
   });
 
   it('emits a disconnected status when the agent is unreachable', async () => {
-    const client = new AgentClient('127.0.0.1', 1); // port 1 refuses connections
+    const client = new AgentClient('127.0.0.1', 1, auth.file); // port 1 refuses connections
     const status = await new Promise((resolve) => {
       client.on('status', resolve);
       client.start();
@@ -42,7 +46,7 @@ describe('AgentClient', () => {
     // BOTH 'error' and 'close' on the socket. If handleDisconnect isn't
     // guarded against running twice, each failed attempt schedules two
     // reconnect timers instead of one, doubling the attempt rate every cycle.
-    const client = new AgentClient('127.0.0.1', 1); // port 1 refuses connections
+    const client = new AgentClient('127.0.0.1', 1, auth.file); // port 1 refuses connections
     const statuses: unknown[] = [];
     client.on('status', (s) => statuses.push(s));
 
@@ -68,14 +72,14 @@ describe('AgentClient', () => {
     // JSON line arrives in a single `data` chunk.
     const line = '{"type":"agent_status","interface":"en0","capturing":true}\n';
     const splitAt = 20; // lands mid-object, well before the trailing newline
-    server = net.createServer((socket) => {
+    server = auth.createServer((socket) => {
       socket.write(line.slice(0, splitAt));
       setTimeout(() => socket.write(line.slice(splitAt)), 20);
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     const received = await new Promise((resolve) => {
       client.on('event', resolve);
       client.start();
@@ -86,14 +90,14 @@ describe('AgentClient', () => {
   });
 
   it('emits a connected status on a successful connection', async () => {
-    server = net.createServer(() => {
+    server = auth.createServer(() => {
       // Accept the connection and go idle — this test only cares about the
       // 'connect' handler's status emission, not any subsequent data.
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     const status = await new Promise((resolve) => {
       client.on('status', resolve);
       client.start();
@@ -104,7 +108,7 @@ describe('AgentClient', () => {
   });
 
   it('parses multiple newline-delimited JSON events delivered in a single chunk', async () => {
-    server = net.createServer((socket) => {
+    server = auth.createServer((socket) => {
       socket.write(
         '{"type":"agent_status","interface":"en0","capturing":true}\n' +
           '{"type":"agent_status","interface":"en0","capturing":false}\n'
@@ -113,7 +117,7 @@ describe('AgentClient', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     const received: unknown[] = [];
     await new Promise<void>((resolve) => {
       client.on('event', (event) => {
@@ -131,13 +135,13 @@ describe('AgentClient', () => {
   });
 
   it('skips a malformed JSON line and still parses the valid line that follows', async () => {
-    server = net.createServer((socket) => {
+    server = auth.createServer((socket) => {
       socket.write('not valid json\n{"type":"agent_status","interface":"en0","capturing":true}\n');
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     const received: unknown[] = [];
     await new Promise<void>((resolve) => {
       client.on('event', (event) => {
@@ -154,13 +158,13 @@ describe('AgentClient', () => {
   });
 
   it('skips blank lines without emitting an event for them', async () => {
-    server = net.createServer((socket) => {
+    server = auth.createServer((socket) => {
       socket.write('\n\n{"type":"agent_status","interface":"en0","capturing":true}\n');
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     const received: unknown[] = [];
     await new Promise<void>((resolve) => {
       client.on('event', (event) => {
@@ -176,14 +180,14 @@ describe('AgentClient', () => {
 
   it('writes control messages as newline-delimited JSON', async () => {
     const receivedRaw = new Promise<string>((resolve) => {
-      server = net.createServer((socket) => {
+      server = auth.createServer((socket) => {
         socket.on('data', (chunk) => resolve(chunk.toString('utf8')));
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     await new Promise<void>((resolve) => {
       client.on('status', (s) => {
         if ((s as { connected: boolean }).connected) resolve();
@@ -201,16 +205,16 @@ describe('AgentClient', () => {
   it('silently no-ops sendControl when there is no active connection', () => {
     // Constructed but never start()ed — this.socket stays null, exercising
     // the `this.socket?.write(...)` optional chain rather than throwing.
-    const client = new AgentClient('127.0.0.1', 1);
+    const client = new AgentClient('127.0.0.1', 1, auth.file);
     expect(() => client.sendControl({ type: 'pause' })).not.toThrow();
   });
 
   it('tracks isConnected() across the connect/disconnect lifecycle', async () => {
-    server = net.createServer(() => {});
+    server = auth.createServer(() => {});
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     expect(client.isConnected()).toBe(false);
 
     await new Promise<void>((resolve) => {
@@ -227,14 +231,14 @@ describe('AgentClient', () => {
 
   it('destroys the underlying socket on stop()', async () => {
     const serverSawClose = new Promise<void>((resolve) => {
-      server = net.createServer((socket) => {
+      server = auth.createServer((socket) => {
         socket.on('close', resolve);
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     await new Promise<void>((resolve) => {
       client.on('status', (s) => {
         if ((s as { connected: boolean }).connected) resolve();
@@ -253,13 +257,13 @@ describe('AgentClient', () => {
     // the reconnect timer set up in handleDisconnect actually fires and
     // succeeds, not just that it's scheduled (covered separately by the
     // double-schedule regression test above).
-    server = net.createServer((socket) => {
+    server = auth.createServer((socket) => {
       socket.end();
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as net.AddressInfo).port;
 
-    const client = new AgentClient('127.0.0.1', port);
+    const client = new AgentClient('127.0.0.1', port, auth.file);
     const statuses: Array<{ connected: boolean }> = [];
     const sawSecondConnect = new Promise<void>((resolve) => {
       client.on('status', (s) => {

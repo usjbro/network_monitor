@@ -1,7 +1,8 @@
-import { describe, expect, it, afterEach } from 'vitest';
+import { describe, expect, it, afterEach, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
 import { AgentClient } from '../agent-client';
+import { createAuthFixture } from './fixtures/agent-auth';
 import { buildStreamResponse, StreamEnrichmentClient, StreamGeoIpClient } from '../stream-response';
 
 // Every other buildStreamResponse test (enrichment-stream.test.ts,
@@ -12,7 +13,7 @@ import { buildStreamResponse, StreamEnrichmentClient, StreamGeoIpClient } from '
 // lifecycle. This file plugs that one gap — issue #116 / JAM-54's
 // "companion test driving /api/stream's actual route handler against an
 // AgentClient pointed at the fake server" requirement — by running a real
-// AgentClient against a plain net.createServer() fake agent double and
+// AgentClient against a plain auth.createServer() fake agent double and
 // reading the actual SSE bytes buildStreamResponse produces.
 
 class NoopEnrichmentClient extends EventEmitter implements StreamEnrichmentClient {
@@ -48,22 +49,25 @@ async function readUntil(
 }
 
 describe('/api/stream driven by a real AgentClient against a fake TCP agent', () => {
+  let auth: ReturnType<typeof createAuthFixture>;
+  beforeEach(() => { auth = createAuthFixture(); });
   let server: net.Server;
   let agent: AgentClient;
 
   afterEach(() => {
     agent?.stop();
     server?.close();
+    auth.close();
   });
 
   it('forwards an event that arrived over a real socket as a matching SSE data: line', async () => {
-    server = net.createServer((socket) => {
+    server = auth.createServer((socket) => {
       socket.write('{"type":"capture_stats","packetsReceived":1,"packetsDropped":0}\n');
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as net.AddressInfo).port;
 
-    agent = new AgentClient('127.0.0.1', port);
+    agent = new AgentClient('127.0.0.1', port, auth.file);
     // Listeners are attached inside buildStreamResponse's ReadableStream
     // `start()`, which the Streams spec runs synchronously during
     // construction — calling it before agent.start() guarantees those

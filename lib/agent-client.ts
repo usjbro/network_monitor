@@ -1,5 +1,9 @@
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
+import { readAgentToken, resolveAgentTokenPath } from './agent-auth';
+import { isAgentAuthenticatedMessage } from './agent-mapping';
+import type { AgentAuthenticateMessage } from './types';
 
 const RECONNECT_DELAY_MS = 2000;
 
@@ -11,7 +15,11 @@ export class AgentClient extends EventEmitter {
   private stopped = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
 
-  constructor(host: string, port: number) {
+  private authenticated = false;
+  private authTimer: NodeJS.Timeout | null = null;
+  private lastDiagnostic: 'credential' | 'handshake' | null = null;
+
+  constructor(host: string, port: number, private tokenPath?: string) {
     super();
     this.host = host;
     this.port = port;
@@ -22,51 +30,97 @@ export class AgentClient extends EventEmitter {
     this.connect();
   }
 
+  private diagnostic(reason: 'credential' | 'handshake'): void {
+    if (this.lastDiagnostic === reason) return;
+    this.lastDiagnostic = reason;
+    console.warn(`capture-agent: ${reason === 'credential' ? 'credential unavailable or unsafe' : 'authentication failed or timed out'}`);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, RECONNECT_DELAY_MS);
+  }
+
   private connect(): void {
-    if (this.stopped) return;
+    if (this.stopped || this.socket) return;
+    let token: string;
+    try { token = readAgentToken(this.tokenPath ?? resolveAgentTokenPath()); }
+    catch {
+      this.diagnostic('credential');
+      this.emit('status', { connected: false });
+      this.scheduleReconnect();
+      return;
+    }
     const socket = net.createConnection({ host: this.host, port: this.port });
     this.socket = socket;
-
-    socket.on('connect', () => {
-      this.emit('status', { connected: true });
+    let handled = false;
+    let ackBuffer = Buffer.alloc(0);
+    const decoder = new StringDecoder('utf8');
+    const active = () => !this.stopped && this.socket === socket && !handled;
+    const disconnect = () => {
+      if (!active()) return;
+      handled = true;
+      if (!this.authenticated) this.diagnostic('handshake');
+      this.authenticated = false;
+      this.buffer = '';
+      ackBuffer.fill(0);
+      if (this.authTimer) clearTimeout(this.authTimer);
+      this.authTimer = null;
+      this.socket = null;
+      socket.destroy();
+      this.emit('status', { connected: false });
+      this.scheduleReconnect();
+    };
+    socket.once('connect', () => {
+      if (!active()) return;
+      const message: AgentAuthenticateMessage = { type: 'authenticate', token };
+      socket.write(JSON.stringify(message) + '\n');
+      token = '';
+      this.authTimer = setTimeout(disconnect, 5000);
     });
-
-    socket.on('data', (chunk) => {
-      this.buffer += chunk.toString('utf8');
+    socket.on('data', (chunk: Buffer) => {
+      if (!active()) return;
+      if (!this.authenticated) {
+        const newline = chunk.indexOf(10);
+        const count = newline < 0 ? chunk.length : newline + 1;
+        if (ackBuffer.length + count > 256) { disconnect(); return; }
+        ackBuffer = Buffer.concat([ackBuffer, chunk.subarray(0, count)]);
+        if (newline < 0) return;
+        let ack: unknown;
+        try { ack = JSON.parse(ackBuffer.toString('utf8')); }
+        catch { disconnect(); return; }
+        if (!isAgentAuthenticatedMessage(ack)) { disconnect(); return; }
+        ackBuffer.fill(0);
+        ackBuffer = Buffer.alloc(0);
+        this.authenticated = true;
+        if (this.authTimer) clearTimeout(this.authTimer);
+        this.authTimer = null;
+        this.lastDiagnostic = null;
+        this.emit('status', { connected: true });
+        if (!active()) return;
+        chunk = chunk.subarray(newline + 1);
+      }
+      this.buffer += decoder.write(chunk);
       let newlineIndex: number;
       while ((newlineIndex = this.buffer.indexOf('\n')) !== -1) {
         const line = this.buffer.slice(0, newlineIndex);
         this.buffer = this.buffer.slice(newlineIndex + 1);
         if (line.trim().length === 0) continue;
         try {
-          this.emit('event', JSON.parse(line));
+          const event = JSON.parse(line);
+          if (event?.type === 'authenticate' || event?.type === 'authenticated') continue;
+          this.emit('event', event);
+          if (!active()) return;
         } catch {
-          // Malformed line from the agent — skip it, don't crash the relay.
+          // Preserve normal post-authentication tolerance of malformed event lines.
         }
       }
     });
-
-    // A failed connection attempt emits BOTH 'error' and 'close'. Without this
-    // guard, handleDisconnect runs twice per failed attempt and schedules two
-    // reconnect timers (the second overwrites `this.reconnectTimer` without
-    // clearing the first), doubling connection attempts every tick — an
-    // exponential reconnect storm. `handled` is local to this connect() call
-    // (closed over by both listeners on this specific socket), so it can't be
-    // confused with state from a later connection attempt.
-    let handled = false;
-    const handleDisconnect = () => {
-      if (handled) return;
-      handled = true;
-      this.emit('status', { connected: false });
-      this.socket = null;
-      if (!this.stopped) {
-        if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = setTimeout(() => this.connect(), RECONNECT_DELAY_MS);
-      }
-    };
-
-    socket.on('error', handleDisconnect);
-    socket.on('close', handleDisconnect);
+    socket.on('error', disconnect);
+    socket.on('close', disconnect);
   }
 
   sendControl(
@@ -80,16 +134,21 @@ export class AgentClient extends EventEmitter {
       | { type: 'list_interfaces' }
       | { type: 'set_interface'; name: string }
   ): void {
-    this.socket?.write(JSON.stringify(message) + '\n');
+    if (this.authenticated) this.socket?.write(JSON.stringify(message) + '\n');
   }
 
   isConnected(): boolean {
-    return this.socket !== null;
+    return this.authenticated && this.socket !== null;
   }
 
   stop(): void {
     this.stopped = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    if (this.authTimer) clearTimeout(this.authTimer);
+    this.authTimer = null;
+    this.authenticated = false;
+    this.buffer = '';
     this.socket?.destroy();
     this.socket = null;
   }
