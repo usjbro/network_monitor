@@ -2,16 +2,14 @@
 
 ## Objective
 
-JAM-185: `osi-mon` (written by `/api/install`) printed hardcoded per-layer "Gbps" figures, `Math.random()` throughput and a constant uptime. It now reads `/api/stream` and prints only what the agent reports. Branch `jamesmbrownjr/jam-185-osi-mon-no-made-up-metrics`.
+JAM-174: detect capture truncation from captured < original packet length for live capture, classic-pcap replay, and pcapng replay. Approved directly by James in this chat on 2026-10-04. Gate `jam-174__replay-capture-truncation` is approved and delegated in-session.
 
-JAM-15 merged as `e04403e` (PR #262). The 2026-10-04 Linear triage set the order: JAM-185, JAM-184, then the JAM-16 follow-ups (JAM-170, JAM-167, JAM-189, JAM-168, JAM-173), JAM-193, then the JAM-17 spec.
+## State
 
-## Other open follow-ups
+Verified implementation is on `jamesmbrownjr/jam-174-snap-length-truncation-detector-is-dead-during-pcappcapng` in `.worktrees/replay-capture-truncation`. Source lengths propagate through `SourceFrame`; detection runs before parsing and retains the existing once-per-session warning and recent-cut reassembly attribution. Writer/wire behavior is unchanged.
 
-- Under JAM-16: JAM-167, JAM-168, JAM-170, JAM-173 (reassembly correctness and memory accounting).
-- JAM-174: the replay snap-length truncation detector never fires.
-- JAM-184: per-launch token on the agent control socket (a wire change).
-- JAM-186: the `~` path example in `docs/usage.md` doesn't work.
-- JAM-127 children still Todo: JAM-17, JAM-18, JAM-19, JAM-20, JAM-162, JAM-165.
+Default Rust suite: 392 passed, 5 ignored; the opt-in binary replay test also passes across eight scenarios. Release build and clippy pass. Two reader fuzz smoke checks pass, including valid EPB seeds with boundary original lengths. Independent review has no remaining findings.
 
-See `HANDOFF.md` for details.
+James approved the temporary agent stop on 2026-10-05; the prior agent had already exited, so no process was stopped or restarted. All requested validation is now complete. James invoked `epic-task-cycle JAM-174`, authorizing commit, PR, CI and merge. Linear/GitHub are authoritative for publication state.
+
+Reader compatibility is separately tracked as JAM-194 under JAM-125. See HANDOFF and TEST_STATUS for evidence and continuation.

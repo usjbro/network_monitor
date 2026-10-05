@@ -404,7 +404,7 @@ fn malformed_frame_summary(link_type: parse::LinkType, frame_len: usize) -> Stri
 /// docs/superpowers/specs/2026-09-19-capture-files-design.md Components §2
 /// for why these three variants, and why the capture loop below never
 /// needs to know which one is active: `parse::parse_packet` and everything
-/// downstream of it only ever sees the `(data, timestamp)` shape
+/// downstream of it sees the captured data, timestamp and original length
 /// `next_frame` yields.
 enum PacketSource {
     Live(pcap::Capture<pcap::Active>),
@@ -418,7 +418,7 @@ enum PacketSource {
 /// replay file being fully consumed and a live device erroring out for any
 /// other reason — the same "no more frames coming" outcome either way.
 enum SourceFrame {
-    Bytes { data: Vec<u8>, timestamp: std::time::SystemTime },
+    Bytes { data: Vec<u8>, timestamp: std::time::SystemTime, original_len: u32 },
     Timeout,
     Eof,
 }
@@ -429,25 +429,40 @@ impl PacketSource {
             PacketSource::Live(cap) => match cap.next_packet() {
                 Ok(packet) => SourceFrame::Bytes {
                     data: packet.data.to_vec(),
+                    original_len: packet.header.len,
                     timestamp: std::time::SystemTime::now(), // live mode's existing behavior — unchanged
                 },
                 Err(pcap::Error::TimeoutExpired) => SourceFrame::Timeout,
                 Err(_) => SourceFrame::Eof, // a live device closing is treated the same as replay EOF — both mean "no more frames"
             },
             PacketSource::ReplayPcapng(reader) => match reader.next_packet() {
-                Ok(Some(packet)) => SourceFrame::Bytes { data: packet.data, timestamp: packet.timestamp },
+                Ok(Some(packet)) => SourceFrame::Bytes {
+                    data: packet.data, timestamp: packet.timestamp, original_len: packet.original_len,
+                },
                 Ok(None) => SourceFrame::Eof,
                 Err(_) => SourceFrame::Eof, // a malformed trailing block ends replay early rather than looping forever on the same error
             },
             PacketSource::ReplayClassic(cap) => match cap.next_packet() {
                 Ok(packet) => SourceFrame::Bytes {
                     data: packet.data.to_vec(),
+                    original_len: packet.header.len,
                     timestamp: std::time::UNIX_EPOCH
                         + std::time::Duration::new(packet.header.ts.tv_sec as u64, (packet.header.ts.tv_usec as u32) * 1000),
                 },
                 Err(_) => SourceFrame::Eof,
             },
         }
+    }
+}
+
+/// Capture metadata proves bytes were lost, independently of live snaplen
+/// configuration and whether the retained bytes still form a valid packet.
+fn note_capture_truncation(captured_len: usize, original_len: u32, now_ms: u64, reassembly: &mut StreamReassembler) -> bool {
+    if (captured_len as u64) < u64::from(original_len) {
+        reassembly.note_frame_cut_at_snaplen(now_ms);
+        true
+    } else {
+        false
     }
 }
 
@@ -1657,7 +1672,7 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
                 match packet_source.next_frame() {
-                    SourceFrame::Bytes { data, timestamp } => {
+                    SourceFrame::Bytes { data, timestamp, original_len } => {
                         if mode == "replay" {
                             if let (ReplaySpeed::Realtime, Some(prev_ts)) = (replay_speed, previous_frame_timestamp) {
                                 if let Ok(delta) = timestamp.duration_since(prev_ts) {
@@ -1672,31 +1687,21 @@ async fn main() -> std::io::Result<()> {
                         // agent clock it already used.
                         let reassembly_now_ms =
                             reassembly_now_ms(mode == "replay", &mut replay_clock, timestamp, now_ms);
+                        // JAM-174: libpcap and EPBs both retain the length
+                        // before capture. Check before parsing: a cut frame
+                        // can still contain a complete, decodable IP packet.
+                        if note_capture_truncation(data.len(), original_len, reassembly_now_ms, &mut reassembly)
+                            && !snaplen_truncation_warned
+                        {
+                            snaplen_truncation_warned = true;
+                            eprintln!(
+                                "capture-agent: frames are being cut short at capture ({} captured bytes, {original_len} original bytes); \
+                                 reassembled application-layer data may be incomplete ({})",
+                                data.len(), ReassemblyStatus::IncompleteTruncatedAtCapture.label()
+                            );
+                        }
                         let Some(parsed) = parse::parse_packet(&data, link_type) else {
                             unparseable_frames.fetch_add(1, Ordering::Relaxed);
-                            // JAM-16: pcap truncates a frame to exactly the
-                            // snap length, and `parse_packet` rejects any
-                            // frame shorter than its IP header's declared
-                            // length. That combination — rejected, and
-                            // captured length exactly the active snap length
-                            // — means the frame was cut at capture rather
-                            // than malformed on the wire. This call site is
-                            // the only place that knows both numbers, so it
-                            // is the only place that can tell reassembly the
-                            // difference between "bytes were lost to the snap
-                            // length" and "a frame was never sent".
-                            let active_snaplen = capture_config_state.lock().unwrap().snaplen;
-                            if data.len() as u32 == active_snaplen {
-                                reassembly.note_frame_cut_at_snaplen(reassembly_now_ms);
-                                if !snaplen_truncation_warned {
-                                    snaplen_truncation_warned = true;
-                                    eprintln!(
-                                        "capture-agent: frames are being cut short by the {active_snaplen}-byte capture snap length; \
-                                         reassembled application-layer data will be reported incomplete ({})",
-                                        ReassemblyStatus::IncompleteTruncatedAtCapture.label()
-                                    );
-                                }
-                            }
                             // JAM-12 Expert Info: malformed-frame. Neither
                             // frameId nor flowId — parse_packet failing
                             // means no ParsedPacket, and therefore no
@@ -2564,10 +2569,14 @@ async fn main() -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[path = "../tests/fixtures/replay_capture.rs"]
+mod replay_capture;
+
+#[cfg(test)]
 mod tests {
     use super::{
         build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
-        is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, parse_max_flows,
+        is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, note_capture_truncation, parse_max_flows,
         parse_replay_local_addrs, parse_replay_speed, protocol_node_to_json,
         packet_osi_layer, resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, reassembly_now_ms, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
@@ -2577,6 +2586,61 @@ mod tests {
     use capture_agent::parse::{LinkType, TransportProtocol};
     use std::path::Path;
     use tokio::sync::broadcast;
+
+    #[test]
+    fn both_replay_sources_preserve_lengths_and_signal_capture_truncation() {
+        use super::{PacketSource, SourceFrame};
+        use capture_agent::reassembly::StreamReassembler;
+        for format in ["pcapng", "pcap"] {
+            let file = super::replay_capture::fixture(format, "source-lengths", &[0x41; 96], 128);
+            let mut source = if format == "pcapng" {
+                let (reader, interface) = capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap()).unwrap();
+                assert_eq!(interface.snaplen, 96);
+                PacketSource::ReplayPcapng(reader)
+            } else {
+                PacketSource::ReplayClassic(pcap::Capture::from_file(&file.0).unwrap())
+            };
+            let mut reassembly = StreamReassembler::new();
+            for _ in 0..2 {
+                let SourceFrame::Bytes { data, original_len, .. } = source.next_frame() else {
+                    panic!("{format} did not yield the fixture frame");
+                };
+                assert_eq!(data, vec![0x41; 96]);
+                assert_eq!(original_len, 128);
+                assert!(note_capture_truncation(data.len(), original_len, 0, &mut reassembly));
+            }
+            assert_eq!(reassembly.frames_cut_at_snaplen(), 2, "{format}: count each cut even after the warning latch");
+            assert!(matches!(source.next_frame(), SourceFrame::Eof));
+        }
+    }
+
+    #[test]
+    fn capture_length_metadata_reattributes_a_tcp_gap_without_snaplen_guessing() {
+        use capture_agent::reassembly::{ReassemblyStatus, StreamReassembler};
+        // These pairs cover a true cut, a complete packet exactly at the
+        // default snaplen, and inconsistent metadata (not proof of a cut).
+        for (captured, original, expected_cuts, expected_status) in [
+            (96, 128, 1, ReassemblyStatus::IncompleteTruncatedAtCapture),
+            (65535, 65535, 0, ReassemblyStatus::IncompleteMissingFrames),
+            (96, 64, 0, ReassemblyStatus::IncompleteMissingFrames),
+            (0, 128, 1, ReassemblyStatus::IncompleteTruncatedAtCapture),
+        ] {
+            let mut reassembly = StreamReassembler::new();
+            assert_eq!(note_capture_truncation(captured, original, 0, &mut reassembly), expected_cuts != 0);
+            assert_eq!(reassembly.frames_cut_at_snaplen(), expected_cuts);
+            let mut raw = Vec::new();
+            etherparse::PacketBuilder::ipv4([192, 0, 2, 1], [192, 0, 2, 2], 64)
+                .tcp(51000, 80, 100, 65535).write(&mut raw, b"GET ").unwrap();
+            let first = capture_agent::parse::parse_packet(&raw, LinkType::Raw).unwrap();
+            let key = super::build_flow_key(&first, &["192.0.2.1".to_string()]).unwrap();
+            reassembly.sniff(&first, Some((&key, true)), 0);
+            raw.clear();
+            etherparse::PacketBuilder::ipv4([192, 0, 2, 1], [192, 0, 2, 2], 64)
+                .tcp(51000, 80, 400, 65535).write(&mut raw, b"HTTP/1.1\r\n").unwrap();
+            let far = capture_agent::parse::parse_packet(&raw, LinkType::Raw).unwrap();
+            assert_eq!(reassembly.sniff(&far, Some((&key, true)), 1).status, Some(expected_status));
+        }
+    }
 
     fn fake_device(name: &str) -> pcap::Device {
         pcap::Device {

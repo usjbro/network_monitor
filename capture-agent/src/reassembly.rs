@@ -70,8 +70,8 @@ use std::collections::HashMap;
 ///    working the moment lax parsing lands (see the design spec's deferred
 ///    list), not because it is currently firing.
 /// 2. `StreamReassembler::note_frame_cut_at_snaplen` — the capture loop is
-///    the one place that knows both a frame's captured length and the active
-///    snap length, so it can recognize a frame pcap cut short. While that has
+///    the one place that knows both a frame's captured and original lengths,
+///    so it can recognize a frame cut short in live capture or replay. While that has
 ///    happened recently, a gap is attributed to truncation rather than to a
 ///    missing frame. **This is the path that actually fires today.**
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1130,11 +1130,9 @@ impl StreamReassembler {
         self.frames_cut_at_snaplen
     }
 
-    /// Called by the capture loop for a frame that `parse_packet` rejected and
-    /// whose captured length equals the active snap length — pcap truncates to
-    /// exactly the snap length, so that combination means the frame was cut at
-    /// capture rather than malformed on the wire. The capture loop is the only
-    /// place that knows both numbers.
+    /// Called by the capture loop when captured length is less than original
+    /// length in libpcap/pcapng metadata. This proves capture truncation even
+    /// if `parse_packet` succeeds, and does not depend on live snaplen state.
     ///
     /// While this has happened recently (`CUT_ATTRIBUTION_WINDOW_MS`), a gap
     /// in the sequence or fragment space is attributed to that truncation

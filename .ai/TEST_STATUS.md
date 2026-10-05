@@ -1,5 +1,34 @@
 # Test Status
 
+## JAM-174 — verified 2026-10-05
+
+Commands ran in `.worktrees/replay-capture-truncation/capture-agent`.
+
+| Command | Result |
+|---|---|
+| Baseline `cargo test --locked` | Passed before edits. |
+| Pre-fix `cargo test --locked --test replay_truncation` | Failed as expected: small-snaplen pcapng replay emitted 0 warnings, expected 1. |
+| `cargo test --locked` | 392 passed, 5 ignored (existing 1 reassembly + 3 live-loopback, and new opt-in binary replay). Includes real-file pcap/pcapng source metadata and truncation count tests, boundary original lengths, and TCP gap attribution. |
+| `cargo build --release --locked` | Passed. |
+| `cargo clippy --all-targets --locked -- -D warnings` | Passed after all test additions. |
+| `cargo +nightly fuzz run pcapng_reader -- -max_total_time=40` | Passed: 1,403,207 executions in 41s. |
+| `cargo +nightly fuzz run pcapng_reader /private/tmp/jam174-pcapng-corpus -- -max_total_time=30` | Passed: 1,094,427 executions in 31s, seeded with valid EPBs and original lengths 0/4/128/u32::MAX. |
+| `git diff --check` | Passed. |
+| Earlier post-fix binary replay attempts | NOT a pass: sandbox denied loopback bind; unsandboxed retry found port 9990 occupied by PID 94514. Truncation warning appeared, but replay did not finish. |
+
+Final verification after James approved resuming on 2026-10-05:
+
+- `cargo test --locked --test replay_truncation -- --ignored`: passed (one test, eight scenarios across pcapng/classic-pcap; actual binary startup, once-only warning, decodable/unparseable cuts, and no warning for complete frames).
+- `cargo test --locked` rerun: 392 passed, 5 ignored.
+- `cargo clippy --all-targets --locked -- -D warnings` rerun: passed.
+- The old agent had already exited; no process needed to be stopped or restarted. Test child agents were cleaned up.
+- A classic raw-IP fixture first reproduced a separate macOS DLT12/101 startup mapping failure, recorded on JAM-194. The final truncation fixtures declare Ethernet1 and use Ethernet frames; this test-only change passed independent review.
+
+Publication checks rerun on 2026-10-05: release build, default suite (392 passed, 5 ignored), clippy and opt-in binary replay (eight scenarios) all passed. Independent security review found no introduced issues and reran three focused tests successfully.
+
+Independent review: no remaining findings. No live capture exercised for this change.
+
+
 # Security review fixes JAM-175 to JAM-179 — verified 2026-10-04
 
 Each fix ran in its own `.worktrees/<slug>` worktree; changed tests failed before the fix and pass after.
