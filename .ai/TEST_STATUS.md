@@ -168,3 +168,14 @@ Rebased the JAM-16 branch onto `main` at `539f055` to clear PR #239's merge conf
 | `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings |
 
 Remaining PR #239 review findings (JAM-169 `[P1]`, JAM-167/168/170 `[P2]`) are not yet fixed — see `HANDOFF.md`.
+
+## JAM-193 — verified 2026-10-05
+
+Commands run in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected`.
+
+- New rejected `start_capture_file` UI test failed before implementation because `capture_file_error` had no handler; passed after adding the SSE state and dismissible banner.
+- `npx vitest run lib/__tests__/page-command-bar-capture.test.tsx`: 12 passed.
+- `npx vitest run`: 82 files, 601 tests passed.
+- `npm run lint`: passed with warnings denied.
+- `npm run build`: passed. Existing Next.js middleware deprecation and Edge Runtime `process.cwd` warnings remain.
+- `git diff --check`: passed.

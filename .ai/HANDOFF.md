@@ -141,3 +141,9 @@ PR #239 is open. Do not merge until JAM-169/167/168/170 are resolved (JAM-169 is
 ## JAM-166 Follow-on — Reconstructed Flow Attribution
 
 JAM-166 adds the parsed transport packet to `SniffOutcome` when an IP fragment group completes. The capture loop now calls `FlowTable::observe_reassembled`: each physical fragment contributes once to the protocol hierarchy, while the completed TCP/UDP datagram contributes once to its correctly keyed flow and L7 classification. The packet event and capture-file writer continue to use the original captured frame. Regression coverage verifies two physical fragments are counted as two frames while the flow and endpoint rollup count one reconstructed datagram. Full verification on the child branch based on PR #239 head `1b925abd`: `cargo test --locked` (318 passed, 2 live-loopback ignored), clippy clean, release build clean; independent Codex review found no actionable regressions. The child PR targets the PR #239 branch, and JAM-166 remains a blocker until that fix is integrated.
+
+## JAM-193 — Capture-file rejection UI
+
+Implemented in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected` on `jamesmbrownjr/jam-193-p2-capture_file_error-sse-event-has-no-ui-handler-rejected`. The page now consumes the existing `capture_file_error` SSE event and displays its rejection message in a dismissible banner. Added a regression covering submitted `capture <path>`, received rejection, visible message, and dismissal. No wire/agent changes.
+
+Verified: focused Vitest 12/12; full Vitest 82 files / 601 tests; `npm run lint`; `npm run build`; `git diff --check`. Build has pre-existing middleware deprecation and Edge Runtime warnings. Still needs independent review, PR/CI and epic-cycle closeout.
