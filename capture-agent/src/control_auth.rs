@@ -214,3 +214,85 @@ impl Drop for PublishedCredential {
         }
     }
 }
+
+use std::{sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
+pub const AUTH_LINE_LIMIT: usize = 256;
+pub const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Independent budgets: unauthenticated peers never occupy established slots.
+pub struct Admission {
+    pending: Arc<Semaphore>,
+    authenticated: Arc<Semaphore>,
+}
+impl Default for Admission {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl Admission {
+    pub fn new() -> Self {
+        Self {
+            pending: Arc::new(Semaphore::new(16)),
+            authenticated: Arc::new(Semaphore::new(64)),
+        }
+    }
+    pub fn try_pending(&self) -> io::Result<OwnedSemaphorePermit> {
+        self.pending
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| invalid())
+    }
+    pub fn try_authenticated(&self) -> io::Result<OwnedSemaphorePermit> {
+        self.authenticated
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| invalid())
+    }
+}
+/// Deadline and byte limit apply ONLY to the first line, preserving trailing buffered data.
+pub async fn verify_peer<R: AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    token: &AgentToken,
+) -> io::Result<()> {
+    tokio::time::timeout(AUTH_TIMEOUT, async {
+        let mut line = Zeroizing::new(Vec::with_capacity(AUTH_LINE_LIMIT));
+        loop {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                return Err(invalid());
+            }
+            let newline = available.iter().position(|b| *b == b'\n');
+            let take = newline.map_or(available.len(), |n| n + 1);
+            if line.len() + take > AUTH_LINE_LIMIT {
+                return Err(invalid());
+            }
+            line.extend_from_slice(&available[..take]);
+            reader.consume(take);
+            if newline.is_some() {
+                break;
+            }
+        }
+        let message = serde_json::from_slice::<crate::wire::AuthenticateMessage>(&line)
+            .map_err(|_| invalid())?;
+        let crate::wire::AuthenticateMessage::Authenticate { token: candidate } = message;
+        let candidate = Zeroizing::new(candidate);
+        if token.matches_hex(&candidate) {
+            Ok(())
+        } else {
+            Err(invalid())
+        }
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "agent authentication timed out"))?
+}
+pub async fn write_ack<W: AsyncWrite + Unpin>(writer: &mut W) -> io::Result<()> {
+    tokio::time::timeout(AUTH_TIMEOUT, async {
+        writer.write_all(b"{\"type\":\"authenticated\"}\n").await?;
+        writer.flush().await
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "agent authentication timed out"))?
+}

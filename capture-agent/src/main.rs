@@ -1,5 +1,6 @@
 use base64::Engine;
 use capture_agent::{
+    control_auth::{self, Admission, AgentToken, CredentialPath, PublishedCredential},
     fields,
     flow::{self, FlowKey, FlowTable},
     host_stats,
@@ -2388,6 +2389,15 @@ async fn main() -> std::io::Result<()> {
     }
 
     let listener = TcpListener::bind("127.0.0.1:9990").await?;
+    let credential_location = std::env::var_os("AGENT_TOKEN_FILE").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".network-monitor/agent-control-token")));
+    let credential_error = |e: std::io::Error| std::io::Error::new(e.kind(), format!(
+        "agent credential publication failed at {}: check ownership, permissions and symlinks",
+        credential_location.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "unresolved HOME/AGENT_TOKEN_FILE".into())
+    ));
+    let credential_path = CredentialPath::from_env().map_err(&credential_error)?;
+    let credential = Arc::new(PublishedCredential::publish(&credential_path, AgentToken::generate()?).map_err(credential_error)?);
+    let admission = Arc::new(Admission::new());
     println!("capture-agent: listening on 127.0.0.1:9990");
 
     loop {
@@ -2398,7 +2408,9 @@ async fn main() -> std::io::Result<()> {
                 continue;
             }
         };
-        let mut rx = tx.subscribe();
+        let pending = match admission.try_pending() { Ok(permit) => permit, Err(_) => continue };
+        let admission = admission.clone();
+        let credential = credential.clone();
         let paused = paused.clone();
         let keylog_watcher = keylog_watcher.clone();
         let trace_tx = tx.clone();
@@ -2412,7 +2424,13 @@ async fn main() -> std::io::Result<()> {
         let hostname = hostname.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
-            let mut reader = BufReader::new(read_half).lines();
+            let mut reader = BufReader::new(read_half);
+            if control_auth::verify_peer(&mut reader, credential.token()).await.is_err() { return; }
+            let _authenticated = match admission.try_authenticated() { Ok(permit) => permit, Err(_) => return };
+            if control_auth::write_ack(&mut write_half).await.is_err() { return; }
+            drop(pending);
+            let mut rx = trace_tx.subscribe();
+            let mut reader = reader.lines();
 
             loop {
                 tokio::select! {

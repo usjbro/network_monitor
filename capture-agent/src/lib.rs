@@ -19,3 +19,6 @@ pub mod fields;
 pub mod reassembly;
 pub mod transaction;
 pub mod control_auth;
+
+#[cfg(not(unix))]
+compile_error!("agent credential validation requires Unix ownership and no-follow file APIs");

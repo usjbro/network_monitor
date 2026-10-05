@@ -1,3 +1,5 @@
+#[path = "fixtures/agent_auth.rs"]
+mod agent_auth;
 // Issue #114 / JAM-52: every other test in this crate exercises
 // parse_packet/sniff_l7/FlowTable against fixture bytes passed directly to
 // those functions (see protocol_regression.rs) — none of them ever open a
@@ -11,7 +13,7 @@
 // contributor's local run) never needs elevated privilege. CI runs this
 // explicitly via a dedicated step in .github/workflows/ci.yml; see
 // CONTRIBUTING.md for how to run it locally.
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -60,9 +62,11 @@ fn poll_until<T>(timeout: Duration, mut attempt: impl FnMut() -> Option<T>) -> O
 #[test]
 #[ignore = "requires CAP_NET_RAW/CAP_NET_ADMIN (or root) to open a live capture on `lo`; run via `cargo test --test live_loopback -- --ignored` after granting the built binary that capability (see CONTRIBUTING.md) — CI does this in a dedicated step"]
 fn captures_real_loopback_traffic_and_emits_matching_wire_events() {
+    let auth = agent_auth::AuthFixture::new();
     let bin = env!("CARGO_BIN_EXE_capture-agent");
     let mut child = Command::new(bin)
-        .env("CAPTURE_INTERFACE", "lo")
+        .env("AGENT_TOKEN_FILE", auth.token_path())
+        .env("CAPTURE_INTERFACE", if cfg!(target_os = "macos") { "lo0" } else { "lo" })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -79,7 +83,7 @@ fn captures_real_loopback_traffic_and_emits_matching_wire_events() {
     let wire_stream = poll_until(Duration::from_secs(15), || TcpStream::connect("127.0.0.1:9990").ok())
         .unwrap_or_else(|| panic!("{}", diagnostics("agent never opened its TCP listener", &stdout_rx, &stderr_rx)));
     wire_stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-    let mut wire_reader = BufReader::new(wire_stream);
+    let mut wire_reader = auth.authenticate(wire_stream);
 
     // Real, known traffic on `lo`: a plain TCP listener + one client
     // connection, both loopback-local, entirely within this test process —
@@ -193,9 +197,11 @@ fn a_live_capture_written_to_file_opens_cleanly_afterward() {
     let capture_path = std::env::temp_dir().join(format!("capture-agent-live-loopback-{}.pcapng", std::process::id()));
     let _ = std::fs::remove_file(&capture_path); // a previous failed run may have left one
 
+    let auth = agent_auth::AuthFixture::new();
     let bin = env!("CARGO_BIN_EXE_capture-agent");
     let mut child = Command::new(bin)
-        .env("CAPTURE_INTERFACE", "lo")
+        .env("AGENT_TOKEN_FILE", auth.token_path())
+        .env("CAPTURE_INTERFACE", if cfg!(target_os = "macos") { "lo0" } else { "lo" })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -211,7 +217,7 @@ fn a_live_capture_written_to_file_opens_cleanly_afterward() {
     // Control messages go back over the same connection, so this needs a
     // second handle: the reader below owns the stream inside a BufReader.
     let mut control = wire_stream.try_clone().expect("failed to clone wire socket for control writes");
-    let mut wire_reader = BufReader::new(wire_stream);
+    let mut wire_reader = auth.authenticate(wire_stream);
 
     writeln!(
         control,
@@ -365,9 +371,11 @@ fn a_browser_style_http_post_is_dropped_before_its_json_body_runs() {
     let capture_path = std::env::temp_dir().join(format!("capture-agent-cross-protocol-{}.pcapng", std::process::id()));
     let _ = std::fs::remove_file(&capture_path);
 
+    let auth = agent_auth::AuthFixture::new();
     let bin = env!("CARGO_BIN_EXE_capture-agent");
     let mut child = Command::new(bin)
-        .env("CAPTURE_INTERFACE", "lo")
+        .env("AGENT_TOKEN_FILE", auth.token_path())
+        .env("CAPTURE_INTERFACE", if cfg!(target_os = "macos") { "lo0" } else { "lo" })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -419,7 +427,7 @@ fn a_browser_style_http_post_is_dropped_before_its_json_body_runs() {
     // isn't guaranteed to be at `capture_path` mid-capture.)
     let observer = TcpStream::connect("127.0.0.1:9990").expect("failed to open observer connection");
     observer.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-    let mut observer = BufReader::new(observer);
+    let mut observer = auth.authenticate(observer);
     let mut status_ticks = 0;
     let mut writing_seen: Option<String> = None;
     let observe_deadline = Instant::now() + Duration::from_secs(10);
@@ -452,4 +460,159 @@ fn a_browser_style_http_post_is_dropped_before_its_json_body_runs() {
     }
     assert!(status_ticks > 0, "{}", diagnostics("never saw a capture_file_status tick", &stdout_rx, &stderr_rx));
     assert!(closed, "{}", diagnostics("agent kept the HTTP connection open", &stdout_rx, &stderr_rx));
+}
+
+#[test]
+#[ignore = "requires live loopback capture and exclusive port9990"]
+fn authentication_rejects_without_feed_or_control_side_effects() {
+    let auth = agent_auth::AuthFixture::new();
+    let guard = AgentGuard(
+        Command::new(env!("CARGO_BIN_EXE_capture-agent"))
+            .env(
+                "CAPTURE_INTERFACE",
+                if cfg!(target_os = "macos") {
+                    "lo0"
+                } else {
+                    "lo"
+                },
+            )
+            .env("AGENT_TOKEN_FILE", auth.token_path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let token = agent_auth::read_token(&auth.token_path());
+    let capture_path =
+        std::env::temp_dir().join(format!("unauthenticated-{}.pcapng", std::process::id()));
+    let control =
+        serde_json::json!({"type":"start_capture_file","path":capture_path}).to_string() + "\n";
+    let bad = [
+        String::new(),
+        format!(
+            "{{\"type\":\"authenticate\",\"token\":\"{}\"}}\n{control}",
+            "0".repeat(64)
+        ),
+        control.clone(),
+        format!("GET / HTTP/1.1\r\n\r\n{control}"),
+        format!("{}\n{control}", "x".repeat(256)),
+    ];
+    for input in bad {
+        let mut peer = TcpStream::connect("127.0.0.1:9990").unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(7))).unwrap();
+        peer.write_all(input.as_bytes()).unwrap();
+        let mut byte = [0];
+        match peer.read(&mut byte) {
+            Ok(0) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("unauthenticated peer received data or did not close: {other:?}"),
+        };
+    }
+    assert!(
+        !capture_path.exists(),
+        "unauthenticated control created a capture"
+    );
+    // An authenticated session remains served while pending admission is full.
+    let mut observer = auth.authenticate(TcpStream::connect("127.0.0.1:9990").unwrap());
+    observer
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut pending = Vec::new();
+    for _ in 0..16 {
+        pending.push(TcpStream::connect("127.0.0.1:9990").unwrap());
+    }
+    let mut event = String::new();
+    observer.read_line(&mut event).unwrap();
+    assert!(serde_json::from_str::<serde_json::Value>(&event).unwrap()["type"] != "authenticated");
+    let mut excess = TcpStream::connect("127.0.0.1:9990").unwrap();
+    excess
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut byte = [0];
+    assert!(matches!(excess.read(&mut byte), Ok(0)));
+    drop(pending);
+    std::thread::sleep(Duration::from_millis(50));
+    let mut authenticated = Vec::new();
+    for _ in 0..63 {
+        authenticated.push(auth.authenticate(TcpStream::connect("127.0.0.1:9990").unwrap()));
+    }
+    let mut excess_auth = TcpStream::connect("127.0.0.1:9990").unwrap();
+    excess_auth
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    excess_auth
+        .write_all(
+            format!(
+                "{{\"type\":\"authenticate\",\"token\":\"{}\"}}\n",
+                token.trim()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    assert!(
+        matches!(excess_auth.read(&mut byte), Ok(0)),
+        "65th authenticated session must not receive an ACK"
+    );
+    drop(authenticated);
+    // Failed bind cannot replace the existing launch credential.
+    let mut second = AgentGuard(
+        Command::new(env!("CARGO_BIN_EXE_capture-agent"))
+            .env(
+                "CAPTURE_INTERFACE",
+                if cfg!(target_os = "macos") {
+                    "lo0"
+                } else {
+                    "lo"
+                },
+            )
+            .env("AGENT_TOKEN_FILE", auth.token_path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(!second.0.wait().unwrap().success());
+    assert_eq!(std::fs::read_to_string(auth.token_path()).unwrap(), token);
+    // Authenticate then send HTTP: preserve the strict post-auth control rejection.
+    let mut http = auth.authenticate(TcpStream::connect("127.0.0.1:9990").unwrap());
+    http.get_mut()
+        .write_all(format!("GET / HTTP/1.1\r\n{control}").as_bytes())
+        .unwrap();
+    http.get_ref()
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut text = String::new();
+    assert!(matches!(http.read_line(&mut text), Ok(0) | Err(_)));
+    assert!(!capture_path.exists());
+    drop(guard);
+}
+
+#[test]
+#[ignore = "requires loopback capture and exclusive port9990"]
+fn unsafe_credential_publication_exits_before_accepting() {
+    use std::os::unix::fs::PermissionsExt;
+    let auth = agent_auth::AuthFixture::new();
+    let file = auth.token_path();
+    std::fs::write(&file, b"unsafe-existing-file").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_capture-agent"))
+        .env(
+            "CAPTURE_INTERFACE",
+            if cfg!(target_os = "macos") {
+                "lo0"
+            } else {
+                "lo"
+            },
+        )
+        .env("AGENT_TOKEN_FILE", &file)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&file).unwrap(), b"unsafe-existing-file");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(file.to_str().unwrap()),
+        "startup failure must identify the credential path"
+    );
+    assert!(TcpStream::connect("127.0.0.1:9990").is_err());
 }

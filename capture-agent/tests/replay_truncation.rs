@@ -1,5 +1,7 @@
 //! JAM-174: exercise the actual replay loop, including its warning latch and
 //! detection before parsing. Fixtures encode independent caplen/original len.
+#[path = "fixtures/agent_auth.rs"]
+mod agent_auth;
 use capture_agent::parse::{parse_packet, LinkType};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -19,8 +21,10 @@ impl Drop for Agent {
 }
 
 fn replay_stderr(path: &Path) -> String {
+    let auth = agent_auth::AuthFixture::new();
     let mut agent = Agent(
         Command::new(env!("CARGO_BIN_EXE_capture-agent"))
+            .env("AGENT_TOKEN_FILE", auth.token_path())
             .env("REPLAY_FILE", path)
             .env("REPLAY_SPEED", "fast")
             .env_remove("CAPTURE_INTERFACE")

@@ -122,3 +122,140 @@ fn strict_auth_schema() {
         r#"{"type":"authenticated"}"#
     );
 }
+
+use capture_agent::control_auth::{verify_peer, write_ack, Admission};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+#[tokio::test]
+async fn auth_preserves_coalesced_control() {
+    let token = AgentToken::generate().unwrap();
+    let (mut client, server) = tokio::io::duplex(4096);
+    let command = format!(
+        "{{\"type\":\"set_capture_filter\",\"filter\":\"{}\"}}\n",
+        "x".repeat(512)
+    );
+    client
+        .write_all(
+            format!(
+                "{{\"type\":\"authenticate\",\"token\":\"{}\"}}\n{command}",
+                token.to_hex().as_str()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(server);
+    verify_peer(&mut reader, &token).await.unwrap();
+    let mut rest = String::new();
+    reader.read_line(&mut rest).await.unwrap();
+    assert_eq!(rest, command);
+    assert!(matches!(
+        capture_agent::wire::classify_control_line(&rest),
+        capture_agent::wire::ControlLine::Message(_)
+    ));
+}
+#[tokio::test]
+async fn auth_rejects_before_feed_or_controls() {
+    let token = AgentToken::generate().unwrap();
+    for line in [
+        "\n".to_string(),
+        "GET / HTTP/1.1\r\n".to_string(),
+        "{\"type\":\"pause\"}\n".to_string(),
+        format!(
+            "{{\"type\":\"authenticate\",\"token\":\"{}\"}}\n",
+            "0".repeat(64)
+        ),
+        format!("{}\n", "x".repeat(256)),
+        "{bad}\n".into(),
+        format!(
+            "{{\"type\":\"authenticate\",\"token\":\"{}\",\"extra\":true}}\n",
+            token.to_hex().as_str()
+        ),
+    ] {
+        let (mut client, server) = tokio::io::duplex(4096);
+        client.write_all(line.as_bytes()).await.unwrap();
+        client.shutdown().await.unwrap();
+        assert!(verify_peer(&mut BufReader::new(server), &token)
+            .await
+            .is_err());
+    }
+    let (_, server) = tokio::io::duplex(32);
+    drop(server);
+}
+#[tokio::test]
+async fn auth_absolute_deadline() {
+    let token = AgentToken::generate().unwrap();
+    let (mut client, server) = tokio::io::duplex(4096);
+    let drip = tokio::spawn(async move {
+        for _ in 0..20 {
+            if client.write_all(b" ").await.is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+    });
+    let start = std::time::Instant::now();
+    assert!(verify_peer(&mut BufReader::new(server), &token)
+        .await
+        .is_err());
+    assert!(start.elapsed() < std::time::Duration::from_secs(6));
+    drip.abort();
+}
+#[tokio::test]
+async fn auth_split_line_and_eof() {
+    let token = AgentToken::generate().unwrap();
+    let line = format!(
+        "{{\"type\":\"authenticate\",\"token\":\"{}\"}}\n",
+        token.to_hex().as_str()
+    );
+    let (mut client, server) = tokio::io::duplex(32);
+    let task = tokio::spawn(async move {
+        for byte in line.bytes() {
+            client.write_all(&[byte]).await.unwrap();
+        }
+    });
+    verify_peer(&mut BufReader::new(server), &token)
+        .await
+        .unwrap();
+    task.await.unwrap();
+    let (client, server) = tokio::io::duplex(32);
+    drop(client);
+    assert!(verify_peer(&mut BufReader::new(server), &token)
+        .await
+        .is_err());
+}
+#[tokio::test]
+async fn auth_admission_is_bounded() {
+    let admission = Admission::new();
+    let mut pending = Vec::new();
+    for _ in 0..16 {
+        pending.push(admission.try_pending().unwrap());
+    }
+    assert!(admission.try_pending().is_err());
+    pending.pop();
+    assert!(admission.try_pending().is_ok());
+    drop(pending);
+    let mut authenticated = Vec::new();
+    for _ in 0..64 {
+        authenticated.push(admission.try_authenticated().unwrap());
+    }
+    assert!(admission.try_authenticated().is_err());
+    let pending = (0..16)
+        .map(|_| admission.try_pending().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(authenticated.len(), 64);
+    drop(pending);
+    authenticated.pop();
+    assert!(admission.try_authenticated().is_ok());
+    let (mut client, mut server) = tokio::io::duplex(128);
+    write_ack(&mut server).await.unwrap();
+    let mut text = vec![0; 25];
+    client.read_exact(&mut text).await.unwrap();
+    assert_eq!(&text, b"{\"type\":\"authenticated\"}\n");
+}
+#[tokio::test]
+async fn ack_write_is_bounded() {
+    let (_client, mut server) = tokio::io::duplex(1);
+    let start = std::time::Instant::now();
+    assert!(write_ack(&mut server).await.is_err());
+    assert!(start.elapsed() < std::time::Duration::from_secs(6));
+}

@@ -1,4 +1,6 @@
 //! Actual binary replay coverage for JAM-194. Serialized fixed-port child processes.
+#[path = "fixtures/agent_auth.rs"]
+mod agent_auth;
 #[path = "fixtures/third_party_capture.rs"]
 mod third_party_capture;
 use std::collections::HashSet;
@@ -15,7 +17,9 @@ impl Drop for Agent {
 }
 
 fn exercise(path: &Path, expected_ports: &[u64], expect_failure: bool) {
+    let auth = agent_auth::AuthFixture::new();
     let mut agent = Agent(Command::new(env!("CARGO_BIN_EXE_capture-agent"))
+        .env("AGENT_TOKEN_FILE", auth.token_path())
         .env("REPLAY_FILE", path).env("REPLAY_SPEED", "fast")
         .env("REPLAY_LOCAL_ADDRS", "192.0.2.1,192.0.2.2,192.0.2.3,192.0.2.4")
         .env_remove("CAPTURE_INTERFACE").stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap());
@@ -52,7 +56,7 @@ fn exercise(path: &Path, expected_ports: &[u64], expect_failure: bool) {
         };
         if let Some(stream) = stream {
             stream.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
-            let mut reader = BufReader::new(stream);
+            let mut reader = auth.authenticate(stream);
             while Instant::now() < deadline && seen_ports.len() < expected_ports.len() {
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
