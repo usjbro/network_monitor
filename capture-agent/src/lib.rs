@@ -18,3 +18,4 @@ pub mod ring;
 pub mod fields;
 pub mod reassembly;
 pub mod transaction;
+pub mod control_auth;
