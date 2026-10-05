@@ -1,6 +1,6 @@
 # Capture-agent Socket Authentication — JAM-184
 
-Status: approved by James directly in chat on 2026-10-05 after Claude Code feedback. No product implementation yet; implementation plan awaits review.
+Status: approved by James directly in chat on 2026-10-05 after Claude Code feedback. Implementation plan approved for Native execution; implementation locally verified, independent review/publication pending.
 
 Approved scope: gate both the feed and controls because they share one connection and capture data is sensitive. JAM-184's acceptance criteria explicitly require control authentication; James approved the revised scope directly in this session.
 

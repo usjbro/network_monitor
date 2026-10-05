@@ -1,16 +1,14 @@
-# JAM-184 — implementation plan review, 2026-10-05
+# JAM-184 — implementation verified, review pending, 2026-10-05
 
-James invoked epic-task-cycle JAM-184 directly in this chat. Existing gate approved/unclaimed was claimed and marked delegated in-session; task worktree created and branch renamed to Linear's name. Linear is In Progress. Main stays unchanged.
+James invoked epic-task-cycle JAM-184 and approved BOTH feed/controls, the revised spec, implementation plan and Native execution directly in this session. Existing gate is approved/delegated; Linear In Progress. All edits remain in `.worktrees/capture-agent-control-token` on `jamesmbrownjr/jam-184-authenticate-the-capture-agent-control-socket-with-a-per`.
 
-Current worktree: `.worktrees/capture-agent-control-token`; branch: `jamesmbrownjr/jam-184-authenticate-the-capture-agent-control-socket-with-a-per`.
+Implemented private random per-launch credentials, directory-FD publication after bind, bounded authentication/ACK before subscription/control dispatch, separate 16-pending/64-authenticated caps, relay auth-first/reconnect rotation and safe lifecycle reset. Test doubles and actual live/replay observers authenticate using isolated private token files. Updated protocol/security/setup/troubleshooting/architecture docs. No dependencies, binds, deployment or TLS opt-in changes. Relay HTTP auth remains JAM-196.
 
-Written design: `docs/superpowers/specs/2026-10-05-agent-control-authentication-design.md`. Independent security design review advised bounded first-line authentication, ack before subscribing, secure atomic per-launch token publication after successful bind, fresh relay credential reads on reconnect and honest same-UID/HTTP boundary limits. Incorporated in the proposal.
+Validation: default Rust 417 passed/8 ignored; all five live-loopback tests passed; binary replay compatibility (3 scenarios) and truncation (8 scenarios) passed. Release build/clippy passed. Vitest 600 passed; typecheck/lint/build passed; authenticated Playwright smoke passed. Rust dependency audit clean (isolated cargo-audit CLI installed in /private/tmp); npm audit only the existing allowlisted lint-only braces advisory. See TEST_STATUS.md for commands, red evidence and limitations.
 
-James approved the revised written spec directly in this chat, including authentication for BOTH feed and controls, directory-FD-anchored Rust credential publication and the separately tracked JAM-196 relay HTTP boundary. Approval recorded in the task Slack thread.
+James approved temporarily stopping the main-checkout release agent PID73161. Original process used en0, capturing:true, no file recording, filter:null, snaplen65535. It was restored using the same original binary/cwd and saved launch settings as PID18299; startup/port verified. Do not stop it again without authorization. Test-only live interface selection fixed to macOS lo0/Linux lo after actual macOS failures; production interface behavior unchanged.
 
-Implementation plan: `docs/superpowers/plans/2026-10-05-agent-control-authentication.md`. Four deliverables cover credential lifecycle/contracts, Rust admission/real binary tests, relay authentication/reconnects, and browser fixtures/docs/release verification. Self-reviewed against the approved spec. Recommend Native execution with fresh independent whole-branch code/security review; Subagent-driven remains available.
-
-No product code or tests edited yet. Await James's plan review and execution-method selection before implementation, as required by writing-plans. Existing task-scope authorization covers the publication cycle; this is an artifact review gate. Keep existing credentials and other tasks untouched. No verification runs claimed for this documentation-only stage.
+Plan/ledger: `docs/superpowers/plans/2026-10-05-agent-control-authentication.md`; `.superpowers/sdd/2026-10-05-agent-control-authentication/progress.md`. Task 1 e9b746f, Task 2 a1e1ec1, Task 3 4410450. Task 4 fixture/docs and verification ready; independent whole-branch review, publication/CI/review and merge remain. No PR yet. Keep unrelated worktrees and operator token files untouched.
 
 Previous handoff follows.
 

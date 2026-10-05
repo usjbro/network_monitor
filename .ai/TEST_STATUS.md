@@ -1,5 +1,26 @@
 # Test Status
 
+## JAM-184 — verified 2026-10-05, independent review pending
+
+Commands run in `.worktrees/capture-agent-control-token` (Rust in its capture-agent subdirectory or with --manifest-path).
+
+- Initial credential tests failed on missing modules/contracts; high-bit credential regression then failed because Node ASCII decoding masked non-ASCII bytes. Switched to byte-preserving latin1 validation; 14 credential/ACK-shape tests pass.
+- Relay pre-ACK regression failed with isConnected:true, expected false. Auth-first/no controls until ACK, rejection/rotation/buffer reset/old callbacks and every ACK split boundary now pass. TCP tests required sandbox escalation.
+- Actual unsafe-file startup regression failed because its diagnostic lacked the configured path; now exits non-zero before accepting, preserves the unsafe file and names its path without contents.
+- Playwright smoke failed on the visible disconnected banner before fake-server authentication; passed after the fixture handshake migration.
+- `cargo test --locked`: 417 passed, 8 ignored, including 12 credential/admission/framing/deadline tests.
+- `cargo test --locked --test live_loopback -- --ignored --test-threads=1`: all 5 passed, including actual rejection without feed/file side effects, 16 pending/64 authenticated bounds, existing-session service under pending saturation, failed-second-bind preservation, strict post-auth HTTP rejection and unsafe publication. Existing fixtures first failed on Linux lo naming on macOS; tests now select lo0 on macOS and lo on Linux.
+- `cargo test --locked --test replay_compatibility -- --ignored --test-threads=1`: passed, 3 scenarios with authenticated observers.
+- `cargo test --locked --test replay_truncation -- --ignored --test-threads=1`: passed, 8 scenarios with isolated credential paths.
+- `cargo build --release --locked` and `cargo clippy --locked --all-targets -- -D warnings`: passed.
+- `npx vitest run`: 82 files, 600 tests passed.
+- `npx tsc --noEmit`, `npm run lint`, `npm run build`: passed. Build retains existing Next middleware/Edge-runtime warnings; no new dependency/config changes.
+- `npx playwright test`: 1 actual Chromium smoke passed through authenticated fake TCP agent → real relay/SSE → browser and control return path.
+- `/private/tmp/jam184-audit-tools/bin/cargo-audit audit --file capture-agent/Cargo.lock`: clean, 70 dependencies scanned. `npm audit --json` plus `.github/scripts/check-npm-audit.mjs`: only existing allowlisted GHSA-vfj7-8cjw-p6xm.
+- `git diff --check`: passed. Independent review still pending; no claim it is clean yet.
+
+James approved temporary agent stop/restart; original main-checkout agent restored as PID18299 on en0/default filter/snaplen, no recording active. No token contents printed. No privileged foreign-UID file fixture was available; actual current-UID/mode/type/link/symlink cases were exercised, while foreign-UID rejection remains implemented and subject to review. No new fuzz target/parser files requiring existing fuzz commands changed.
+
 ## JAM-194 — verified 2026-10-05
 
 Commands ran in `.worktrees/third-party-pcapng-replay`, with `--manifest-path capture-agent/Cargo.toml` where applicable.

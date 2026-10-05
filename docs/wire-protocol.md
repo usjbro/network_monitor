@@ -6,9 +6,21 @@ The contract between `capture-agent` (Rust, producer) and the Next.js relay (Typ
 
 - Newline-delimited JSON (NDJSON) over a plain TCP socket, `127.0.0.1:9990`.
 - **Agent → relay**: one JSON object per line, each tagged with a `"type"` field.
-- **Relay → agent**: control messages, same NDJSON framing, on the same connection.
-- **Strict framing (JAM-175)**: the agent closes the connection on the first relay → agent line that is not a JSON object. Blank lines and JSON objects it can't decode (unknown `type`, missing or mistyped field) are skipped, and the connection stays open. The strict rule blocks cross-protocol requests: a browser `fetch` POST to `127.0.0.1:9990` sends an HTTP request line first, so the agent hangs up before reading the JSON body lines that would otherwise run as control messages. See `wire::classify_control_line`.
+- **Relay → agent**: authentication followed by control messages, same NDJSON framing, on the same connection.
+- **Strict framing after authentication (JAM-175)**: the agent closes the connection on the first relay → agent line that is not a JSON object. Blank lines and JSON objects it can't decode (unknown `type`, missing or mistyped field) are skipped, and the connection stays open. The strict rule blocks cross-protocol requests: a browser `fetch` POST to `127.0.0.1:9990` sends an HTTP request line first, so the agent hangs up before reading the JSON body lines that would otherwise run as control messages. See `wire::classify_control_line`.
 - All field names are `camelCase` on the wire (Rust uses `#[serde(rename_all = "camelCase")]`), matching the TypeScript field names exactly — no translation layer.
+
+## Socket authentication (JAM-184)
+
+Both the feed and controls require possession of a fresh per-launch credential. This Unix-only handoff uses `$HOME/.network-monitor/agent-control-token` by default; set the same absolute `AGENT_TOKEN_FILE` path in both processes to override it. The agent generates 32 random bytes each launch and atomically publishes 64 lowercase hex characters plus LF only after binding successfully. Its immediate parent must be a real, current-UID directory with mode 0700; the credential must be a current-UID regular file with mode 0600 and exactly one hard link. Immediate-parent/final-file symlinks are rejected; platform ancestor aliases such as macOS `/var` are resolved. Agent publication is directory-FD anchored; relay validation and reading use one no-follow file FD.
+
+The first client line is `{"type":"authenticate","token":"<64 lowercase hex characters>"}`. No extra fields are accepted. The first line, including LF, is bounded to 256 bytes and an absolute 5-second deadline. Missing/wrong credentials, a control-first message, non-JSON input, EOF or timeout close the connection before any feed subscription or control processing. Successful authentication produces `{"type":"authenticated"}` plus LF, written within a further 5 seconds before feed/control access. Coalesced bytes after the first LF remain available to normal parsing; the 256-byte cap does not apply to the larger following command/event. Strict framing below applies to controls after authentication.
+
+There are separate budgets of 16 pending and 64 authenticated connections. Excess peers close; existing authenticated sessions remain served when pending admission fills. These limits do not guarantee admission of a new relay during a local flood. The relay reads the credential afresh on every attempt, sends authentication first, and reports connected/allows controls only after the exact acknowledgement. Pre-auth controls are dropped. Handshake messages never enter browser/SSE events. A rotated/stale credential may briefly cause a generic handshake failure during restart; normal reconnect loads the replacement.
+
+Publication failure exits non-zero before entering the accept loop, with a credential-path diagnostic. Missing/unsafe relay credentials or handshake failure produce deduplicated server-side reasons and disconnected UI state. Ordinary guard teardown removes only its own file identity; a crash may leave a stale private file, replaced on the next successful launch. Do not print or copy tokens into command arguments. Direct socket consumers must implement this handshake; `bin/osi-inspect.js` continues to use relay HTTP routes.
+
+This protects the direct agent socket. Same-UID programs can read the credential, the ACK is not cryptographic server authentication, and the relay HTTP routes still lack caller authentication (JAM-196). See [security.md](security.md).
 
 ## Agent → relay events
 

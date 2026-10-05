@@ -1,4 +1,6 @@
 import net from 'node:net';
+import { readAgentToken } from '../lib/agent-auth';
+import { ensureE2EAgentCredential } from './agent-auth-fixture';
 
 // The E2E smoke test's "capture agent" double. Unlike the vitest-level fake
 // agents in lib/__tests__ (each spun up fresh per test against an ephemeral
@@ -14,16 +16,29 @@ export class FakeAgentDouble {
   private sockets = new Set<net.Socket>();
   private buffers = new WeakMap<net.Socket, string>();
   private controlMessages: unknown[] = [];
+  private authenticated = new Set<net.Socket>();
 
   async start(): Promise<void> {
+    const token = readAgentToken(ensureE2EAgentCredential());
     this.server = net.createServer((socket) => {
       this.sockets.add(socket);
       this.buffers.set(socket, '');
       socket.on('data', (chunk) => {
         const buffered = (this.buffers.get(socket) ?? '') + chunk.toString('utf8');
         const lines = buffered.split('\n');
-        this.buffers.set(socket, lines.pop() ?? '');
+        const partial = lines.pop() ?? '';
+        this.buffers.set(socket, partial);
+        if (!this.authenticated.has(socket) && Buffer.byteLength(lines[0] ?? partial) + (lines.length ? 1 : 0) > 256) { socket.destroy(); return; }
         for (const line of lines) {
+          if (!this.authenticated.has(socket)) {
+            try {
+              const message = JSON.parse(line);
+              if (message.type !== 'authenticate' || message.token !== token || Object.keys(message).length !== 2) { socket.destroy(); return; }
+            } catch { socket.destroy(); return; }
+            this.authenticated.add(socket);
+            socket.write('{"type":"authenticated"}\n');
+            continue;
+          }
           if (line.trim().length === 0) continue;
           try {
             this.controlMessages.push(JSON.parse(line));
@@ -33,8 +48,9 @@ export class FakeAgentDouble {
           }
         }
       });
-      socket.on('close', () => this.sockets.delete(socket));
-      socket.on('error', () => this.sockets.delete(socket));
+      const remove = () => { this.sockets.delete(socket); this.authenticated.delete(socket); };
+      socket.on('close', remove);
+      socket.on('error', remove);
     });
     await new Promise<void>((resolve, reject) => {
       this.server!.once('error', reject);
@@ -53,7 +69,7 @@ export class FakeAgentDouble {
   // double correct across a reconnect mid-run.
   send(event: Record<string, unknown>): void {
     const line = JSON.stringify(event) + '\n';
-    for (const socket of this.sockets) socket.write(line);
+    for (const socket of this.authenticated) socket.write(line);
   }
 
   hasReceivedControlMessage(predicate: (msg: unknown) => boolean): boolean {

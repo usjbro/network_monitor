@@ -13,6 +13,10 @@ Add your user to macOS's `access_bpf` group so this binary can open
 
 Log out and back in (or reboot) for the group membership to take effect.
 
+## Agent credential handoff
+
+Run the agent and Next.js relay under the same Unix user. The agent publishes a fresh private credential at `$HOME/.network-monitor/agent-control-token` each launch; the relay reads it automatically on each reconnect. No manual token copying is needed. For a custom location, configure the same absolute `AGENT_TOKEN_FILE` in both processes and create its immediate parent with mode 0700 under that user's ownership. The final credential is a regular, owner-only 0600 file, with no symlink or hard-link handoff. macOS ancestor aliases such as `/var` are supported. Unsafe credential locations prevent startup; missing/unsafe credentials leave the relay disconnected. Do not print the token or pass its contents in command arguments.
+
 ## Running
 
     cargo run --release
