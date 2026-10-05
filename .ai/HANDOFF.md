@@ -1,3 +1,17 @@
+# JAM-184 — design review, 2026-10-05
+
+James invoked epic-task-cycle JAM-184 directly in this chat. Existing gate approved/unclaimed was claimed and marked delegated in-session; task worktree created and branch renamed to Linear's name. Linear is In Progress. Main stays unchanged.
+
+Current worktree: `.worktrees/capture-agent-control-token`; branch: `jamesmbrownjr/jam-184-authenticate-the-capture-agent-control-socket-with-a-per`.
+
+Written design: `docs/superpowers/specs/2026-10-05-agent-control-authentication-design.md`. Independent security design review advised bounded first-line authentication, ack before subscribing, secure atomic per-launch token publication after successful bind, fresh relay credential reads on reconnect and honest same-UID/HTTP boundary limits. Incorporated in the proposal.
+
+No product code or tests edited yet. Brainstorming's architectural path requires James to review this written spec before writing the implementation plan, then review the plan before product implementation. Existing task-scope authorization covers the cycle; these are artifact review gates. Pending approval of this spec in chat. Keep existing credentials and other tasks untouched.
+
+Previous handoff follows.
+
+---
+
 # JAM-194 — 2026-10-05
 
 Approved scope implemented in `.worktrees/third-party-pcapng-replay`, branch `jamesmbrownjr/jam-194-p2-pcapng-replay-rejects-valid-third-party-blocks-sections`, based on JAM-174 merge5399704.
