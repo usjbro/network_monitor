@@ -282,6 +282,19 @@ fn a_live_capture_written_to_file_opens_cleanly_afterward() {
                         if writing && bytes > 0 {
                             wrote_bytes = true;
                             if !stop_sent {
+                                // Authenticate while recording, deliberately split so a packet
+                                // can expose the complete token if the capture path is not gated.
+                                let token = agent_auth::read_token(&auth.token_path());
+                                let mut peer = TcpStream::connect("127.0.0.1:9990").unwrap();
+                                peer.set_nodelay(true).unwrap();
+                                peer.write_all(b"{\"type\":\"authenticate\",\"token\":\"").unwrap();
+                                std::thread::sleep(Duration::from_millis(40));
+                                peer.write_all(format!("{}\"}}\n", token.trim()).as_bytes()).unwrap();
+                                peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                                let mut peer = std::io::BufReader::new(peer);
+                                let mut ack = String::new();peer.read_line(&mut ack).unwrap();
+                                assert_eq!(ack, "{\"type\":\"authenticated\"}\n");
+                                std::thread::sleep(Duration::from_millis(1200));
                                 writeln!(control, r#"{{"type":"stop_capture_file"}}"#)
                                     .expect("failed to send stop_capture_file");
                                 control.flush().unwrap();
@@ -345,6 +358,12 @@ fn a_live_capture_written_to_file_opens_cleanly_afterward() {
         "capture file is too small to contain even a Section Header Block ({} bytes)",
         bytes.len()
     );
+    let token = agent_auth::read_token(&auth.token_path());
+    assert!(!bytes.windows(64).any(|window| window == token.trim().as_bytes()), "private auth token reached raw capture file");
+    let token_hex = token.trim().bytes().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    assert!(!seen_lines.iter().any(|line| line.contains(&token_hex)), "private auth token reached packet events");
+    let ordinary = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    assert!(bytes.windows(ordinary.len()).any(|window| window == ordinary), "ordinary loopback payload must still be recorded");
     // A pcapng file opens with the Section Header Block: block type
     // 0x0A0D0D0A first, then the 4-byte block length, then the byte-order
     // magic 0x1A2B3C4D at offset 8. (The plan's sketch said the byte-order
