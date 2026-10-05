@@ -1,3 +1,17 @@
+# JAM-194 — 2026-10-05
+
+Approved scope implemented in `.worktrees/third-party-pcapng-replay`, branch `jamesmbrownjr/jam-194-p2-pcapng-replay-rejects-valid-third-party-blocks-sections`, based on JAM-174 merge5399704.
+
+Reader now honors section byte order/version, section-local interfaces and per-packet link type/timestamp units; skips validated unknown/nonpacket blocks; rejects unsupported packet blocks explicitly. Replay read failures have distinct diagnostics; native RAW datalink identity maps correctly. Writer, wire, dependencies and TLS ingestion unchanged. Embedded DSB secrets are ignored.
+
+Validation: 405 default Rust tests passed,6ignored; release/clippy clean; opt-in binary tests passed all3compatibility+8truncation scenarios; seeded reader fuzz1,150,653runs/41s clean; independent code/security review clean. Negative binary control caught wrong interface decoding before restoration. See TEST_STATUS.md and approved implementation plan for commands and limitations.
+
+James invoked epic-task-cycle and approved the scope directly in chat, authorizing publication through PR/CI/merge. Consult GitHub/Linear for the publication state. Offset/FCS/interface-address fallback remain follow-ups; no next issue is claimed.
+
+Historical handoff follows.
+
+---
+
 # JAM-174 — 2026-10-05
 
 Worktree: `.worktrees/replay-capture-truncation`; branch: `jamesmbrownjr/jam-174-snap-length-truncation-detector-is-dead-during-pcappcapng`. Implementation is verified. James approved this scope directly in chat; the local gate is approved/delegated.

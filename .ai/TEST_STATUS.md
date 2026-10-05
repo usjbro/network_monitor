@@ -1,5 +1,21 @@
 # Test Status
 
+## JAM-194 — verified 2026-10-05
+
+Commands ran in `.worktrees/third-party-pcapng-replay`, with `--manifest-path capture-agent/Cargo.toml` where applicable.
+
+- Pre-fix native RAW DLT mapping test failed (None versus Raw); malformed-tail test failed because source returned EOF. Reader mixed-endian regression failed on bogus little-endian length 469762048.
+- `cargo test --locked`: 405 passed, 6 ignored. Includes per-source link type, timestamp and decoded-IP checks across mixed sections, native classic RAW and malformed replay errors; pcapng suite has 34 tests.
+- `cargo build --release --locked`: passed.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed, rerun after final reader tests.
+- `cargo test --locked --test replay_compatibility --test replay_truncation -- --ignored --test-threads=1`: passed both tests, three JAM-194 binary scenarios plus eight JAM-174 cases. Loopback bind needed sandbox escalation; no existing agent was stopped.
+- Negative control: temporarily forcing every frame through the startup link type failed binary compatibility exactly on missing raw/loopback flows (only port3001 observed, expected3001/3002/3003). Restored code and reran both binary tests green.
+- `cargo +nightly fuzz run pcapng_reader -- -max_total_time=40 -rss_limit_mb=512`: seeded mixed-section reader fuzz passed 1,150,653 executions in41s; no crashes. Existing target unchanged.
+- `git diff --check`: passed.
+- Independent correctness and security reviews found no introduced issues. Reviewers reran reader/source tests; binary validation was run by implementer.
+
+No live capture exercised. Timestamp offsets, FCS stripping and interface-address fallback remain excluded follow-ups; Simple Packet and obsolete Packet blocks fail explicitly.
+
 ## JAM-174 — verified 2026-10-05
 
 Commands ran in `.worktrees/replay-capture-truncation/capture-agent`.

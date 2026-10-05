@@ -1,15 +1,9 @@
 # Current Task
 
-## Objective
+JAM-194: third-party pcapng replay compatibility. Approved directly in chat on 2026-10-05.
 
-JAM-174: detect capture truncation from captured < original packet length for live capture, classic-pcap replay, and pcapng replay. Approved directly by James in this chat on 2026-10-04. Gate `jam-174__replay-capture-truncation` is approved and delegated in-session.
+Worktree: `.worktrees/third-party-pcapng-replay`; branch `jamesmbrownjr/jam-194-p2-pcapng-replay-rejects-valid-third-party-blocks-sections`.
 
-## State
+Scope: section byte order/version, concatenated sections, section-local interfaces, per-packet framing/timestamp metadata, validated unknown-block skipping, explicit replay errors and unsupported packet-block diagnostics, classic-pcap RAW mapping. Preserve JAM-174 length attribution and existing resource limits. Offset/FCS/address metadata, writer and TLS ingestion remain follow-ups.
 
-Verified implementation is on `jamesmbrownjr/jam-174-snap-length-truncation-detector-is-dead-during-pcappcapng` in `.worktrees/replay-capture-truncation`. Source lengths propagate through `SourceFrame`; detection runs before parsing and retains the existing once-per-session warning and recent-cut reassembly attribution. Writer/wire behavior is unchanged.
-
-Default Rust suite: 392 passed, 5 ignored; the opt-in binary replay test also passes across eight scenarios. Release build and clippy pass. Two reader fuzz smoke checks pass, including valid EPB seeds with boundary original lengths. Independent review has no remaining findings.
-
-James approved the temporary agent stop on 2026-10-05; the prior agent had already exited, so no process was stopped or restarted. All requested validation is now complete. James invoked `epic-task-cycle JAM-174`, authorizing commit, PR, CI and merge. Linear/GitHub are authoritative for publication state.
-
-Reader compatibility is separately tracked as JAM-194 under JAM-125. See HANDOFF and TEST_STATUS for evidence and continuation.
+Validation: reader/unit regressions, independent multi-interface/mixed-endian fixtures, actual binary replay, malformed inputs, Rust tests/release/clippy, reader fuzz, independent code/security review and CI before merge.
