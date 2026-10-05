@@ -128,6 +128,13 @@ describe('command bar: capture / buffer verbs', () => {
 
     act(() => {
       FakeEventSource.instances[0].onmessage!({
+        data: JSON.stringify({ type: 'capture_file_error', message: { unexpected: true } }),
+      } as MessageEvent);
+    });
+    expect(screen.queryByText(/capture file rejected/)).not.toBeInTheDocument();
+
+    act(() => {
+      FakeEventSource.instances[0].onmessage!({
         data: JSON.stringify({
           type: 'capture_file_error',
           message: 'permission denied',
