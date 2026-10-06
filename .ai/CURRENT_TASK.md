@@ -1,9 +1,9 @@
 # Current Task
 
-JAM-170: account for the IPv4-fragment and TCP-stream coverage buffers and allocated vector capacities in the reassembly memory budgets.
+JAM-199: fix the new sharp advisory that makes the npm audit gate fail and restore CI for open PRs.
 
-Worktree: `.worktrees/reassembly-coverage-memory-accounting`; branch: `jamesmbrownjr/jam-170-p2-account-for-reassembly-coverage-storage-in-memory-limits`.
+Worktree: `.worktrees/npm-audit-sharp`; branch: `jamesmbrownjr/jam-199-p1-ci-npm-audit-gate-fails-on-sharp-ghsa-wq5f-xc86-pv6w-new`.
 
-Scope: `capture-agent/src/reassembly.rs` and `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs`; update the stream-reassembly design spec and `.ai/` verification state. Count `data` and byte-backed `filled` vector capacities against the existing 4 MiB total fragment and TCP ceilings. Add tests that fill each budget and verify accounting/eviction, and ensure fuzz checks use the full accounting. No wire/API or unrelated reassembly behavior changes.
+Scope: update the vulnerable lockfile resolution for Next's optional `sharp` dependency to a patched version. Verify dependency ownership, npm audit and the repository's audit gate, lint, build, and Vitest. Record a decision on whether new advisories should receive a short grace period. Keep app/runtime code and unrelated dependencies unchanged.
 
-Gate approved by James directly in chat on 2026-10-06. The gate is claimed and delegated in-session; Linear JAM-170 is In Review. JAM-198 merged as PR #270 at `13695b5`, clearing the npm-audit blocker on `main`; PR #269 is being updated to that base before its final CI/merge cycle.
+Gate approved and delegated in-session on 2026-10-06. JAM-199 is a P1 blocker for JAM-167 PR #271's Web check.
