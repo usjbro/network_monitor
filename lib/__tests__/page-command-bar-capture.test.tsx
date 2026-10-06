@@ -117,6 +117,47 @@ describe('command bar: capture / buffer verbs', () => {
     expect(body!.autostop).toBeUndefined();
   });
 
+  it('shows and dismisses an agent rejection for a capture-to-file request', () => {
+    render(<TerminalApp />);
+    runCommand('capture /tmp/denied.pcapng');
+
+    expect(controlBodies()).toContainEqual({
+      type: 'start_capture_file',
+      path: '/tmp/denied.pcapng',
+    });
+
+    act(() => {
+      FakeEventSource.instances[0].onmessage!({
+        data: JSON.stringify({ type: 'capture_file_error', message: { unexpected: true } }),
+      } as MessageEvent);
+    });
+    expect(screen.queryByText(/capture file rejected/)).not.toBeInTheDocument();
+
+    act(() => {
+      FakeEventSource.instances[0].onmessage!({
+        data: JSON.stringify({
+          type: 'capture_file_error',
+          message: 'permission denied',
+        }),
+      } as MessageEvent);
+    });
+
+    expect(screen.getByText('capture file rejected — permission denied')).toBeInTheDocument();
+
+    runCommand('capture /tmp/denied.pcapng');
+    expect(screen.queryByText('capture file rejected — permission denied')).not.toBeInTheDocument();
+
+    act(() => {
+      FakeEventSource.instances[0].onmessage!({
+        data: JSON.stringify({ type: 'capture_file_error', message: 'permission denied again' }),
+      } as MessageEvent);
+    });
+    expect(screen.getByText('capture file rejected — permission denied again')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss capture file error' }));
+    expect(screen.queryByText('capture file rejected — permission denied again')).not.toBeInTheDocument();
+  });
+
   it('normalizes the `totalSize` autostop mode back to the wire contract spelling', () => {
     render(<TerminalApp />);
 

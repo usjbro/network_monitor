@@ -1,9 +1,9 @@
 # Current Task
 
-JAM-184: authenticate the capture-agent control socket with a per-launch token. James invoked epic-task-cycle JAM-184 directly in chat on 2026-10-05, authorizing the queued scope and publication cycle.
+JAM-193: render the existing `capture_file_error` SSE event when the capture agent rejects a `start_capture_file` request.
 
-Worktree: `.worktrees/capture-agent-control-token`; branch `jamesmbrownjr/jam-184-authenticate-the-capture-agent-control-socket-with-a-per`.
+Worktree: `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected`; branch: `jamesmbrownjr/jam-193-p2-capture_file_error-sse-event-has-no-ui-handler-rejected`.
 
-Stage: James approved the revised design and implementation plan for Native execution directly in chat on 2026-10-05. Credential lifecycle, Rust/relay handshake and authenticated live/replay/browser fixtures implemented and validated. Independent whole-branch code/security review completed; its Important loopback credential leak was reproduced and fixed with passing full/live/replay suites. Ready for publication/CI and published PR review. Existing gate remains approved/delegated.
+Scope: add UI state and a dismissible rejection banner in `app/page.tsx`; clear the previous rejection when a new capture-file start is sent. Add integration regressions for rejected start/display/dismiss/retry and malformed event messages. No agent, wire, mapping, or control-route changes.
 
-Scope: generated token, secure local handoff, bounded handshake before feed/control access, coordinated Rust/TypeScript contract and documentation, relay reconnect behavior and live rejection tests. Keep loopback bind, TLS opt-in and dependencies unchanged. JAM-194 is merged as7cfc09d; its replay-recording review finding is separate, not part of this task.
+Gate approved by James in chat on 2026-10-05. PR #268 is open, rebased onto current main, all CI checks and independent code/security reviews pass. Waiting for James's real-browser check of the rejection banner before merge; the computer-use gate blocked Chrome access for this session.

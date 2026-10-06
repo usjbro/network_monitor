@@ -145,6 +145,9 @@ export default function TerminalApp() {
   // auto-clear discipline as `captureConfigError` above.
   const [availableInterfaces, setAvailableInterfaces] = useState<NetworkInterface[]>([]);
   const [interfaceError, setInterfaceError] = useState<string | null>(null);
+  // A rejected capture-to-file request is an explicit one-off agent signal;
+  // keep it visible until the user dismisses it.
+  const [captureFileError, setCaptureFileError] = useState<string | null>(null);
 
   // Connections & Packets State (populated from the live capture stream)
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
@@ -291,6 +294,9 @@ export default function TerminalApp() {
         }
         if (data.type === 'capture_file_status') {
           setCaptureFileStatus(mapCaptureFileStatusEvent(data));
+        }
+        if (data.type === 'capture_file_error' && typeof data.message === 'string') {
+          setCaptureFileError(data.message);
         }
         if (data.type === 'capture_config') {
           // Sent once per tick regardless of whether anything changed (so a
@@ -513,6 +519,9 @@ export default function TerminalApp() {
     ring?: { mode: string; threshold: number },
     autostop?: { mode: string; threshold: number },
   ) => {
+    // A new explicit attempt supersedes the previous rejection. If this
+    // attempt is also rejected, the agent will send a fresh error event.
+    setCaptureFileError(null);
     fetch('/api/control', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -806,6 +815,19 @@ export default function TerminalApp() {
             onClick={() => setInterfaceError(null)}
             className="shrink-0 text-red-200 hover:text-white font-bold"
             aria-label="Dismiss interface error"
+          >
+            [CLOSE]
+          </button>
+        </div>
+      )}
+
+      {captureFileError && (
+        <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2 flex items-start justify-between gap-3">
+          <span>capture file rejected — {captureFileError}</span>
+          <button
+            onClick={() => setCaptureFileError(null)}
+            className="shrink-0 text-red-200 hover:text-white font-bold"
+            aria-label="Dismiss capture file error"
           >
             [CLOSE]
           </button>

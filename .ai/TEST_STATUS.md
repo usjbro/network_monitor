@@ -37,6 +37,7 @@ Commands ran in `.worktrees/third-party-pcapng-replay`, with `--manifest-path ca
 - Negative control: temporarily forcing every frame through the startup link type failed binary compatibility exactly on missing raw/loopback flows (only port3001 observed, expected3001/3002/3003). Restored code and reran both binary tests green.
 - `cargo +nightly fuzz run pcapng_reader -- -max_total_time=40 -rss_limit_mb=512`: seeded mixed-section reader fuzz passed 1,150,653 executions in41s; no crashes. Existing target unchanged.
 - `git diff --check`: passed.
+- Review follow-up: retry now clears a stale rejection; the test verifies a fresh rejection renders again. Focused suite: 12 passed; standard full suite rerun: 82 files / 601 passed. An intermediate concurrent full run had an `ENOTEMPTY` cleanup error in an unrelated enrichment test; a single-worker run exposed existing `ECONNRESET` from the unrelated WHOIS timeout test server. The subsequent standard full run was clean.
 - Independent correctness and security reviews found no introduced issues. Reviewers reran reader/source tests; binary validation was run by implementer.
 
 No live capture exercised. Timestamp offsets, FCS stripping and interface-address fallback remain excluded follow-ups; Simple Packet and obsolete Packet blocks fail explicitly.
@@ -168,3 +169,14 @@ Rebased the JAM-16 branch onto `main` at `539f055` to clear PR #239's merge conf
 | `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings |
 
 Remaining PR #239 review findings (JAM-169 `[P1]`, JAM-167/168/170 `[P2]`) are not yet fixed — see `HANDOFF.md`.
+
+## JAM-193 — verified 2026-10-05
+
+Commands run in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected`.
+
+- New rejected `start_capture_file` UI test failed before implementation because `capture_file_error` had no handler; passed after adding the SSE state and dismissible banner.
+- `npx vitest run lib/__tests__/page-command-bar-capture.test.tsx`: 12 passed.
+- `npx vitest run`: 82 files, 601 tests passed.
+- `npm run lint`: passed with warnings denied.
+- `npm run build`: passed. Existing Next.js middleware deprecation and Edge Runtime `process.cwd` warnings remain.
+- `git diff --check`: passed.
