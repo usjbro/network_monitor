@@ -187,9 +187,10 @@ Worktree: `.worktrees/reassembly-coverage-memory-accounting`.
 
 - RED: `cargo test --locked memory_budget_counts_data_and_coverage_capacities -- --nocapture` failed both new tests as expected: fragment accounting was 65,535 vs 131,070 allocated capacity bytes; TCP was 16,384 vs 32,768.
 - GREEN: same focused command passed after accounting both vectors' retained capacities.
-- `cargo test --locked`: passed 337 library, 65 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, and 1 protocol-regression tests; 8 tests ignored (one library, five privileged live-loopback, and two exclusive-port replay).
+- `cargo test --locked`: passed 338 library, 65 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, and 1 protocol-regression tests; 8 tests ignored (one library, five privileged live-loopback, and two exclusive-port replay). Re-run after restoring the fuzz target's per-direction logical-length assertion.
 - Final focused rerun: `cargo test --locked reassembly::tests` passed all 60 reassembly tests.
 - `cargo build --release --locked`: passed.
 - `cargo clippy --all-targets --locked -- -D warnings`: passed.
 - `cargo +nightly fuzz run stream_reassembly -- -max_total_time=40`: passed, 243,992 runs in 41 seconds.
+- After review feedback, `cargo test --locked reassembly::tests::tcp_memory_budget_counts_data_and_coverage_capacities` passed; the full `cargo test --locked` passed with 338 library tests; and `cargo +nightly fuzz run stream_reassembly -- -max_total_time=20` passed, 106,628 runs in 21 seconds. The fuzz target now checks both aggregate allocated capacity and maximum per-direction logical buffer length.
 - `git diff --check`: passed. No wire fields, dependencies, or packet-decoding behavior changed.
