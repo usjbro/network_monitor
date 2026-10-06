@@ -1,9 +1,9 @@
 # Current Task
 
-JAM-193: render the existing `capture_file_error` SSE event when the capture agent rejects a `start_capture_file` request.
+JAM-170: account for the IPv4-fragment and TCP-stream coverage buffers and allocated vector capacities in the reassembly memory budgets.
 
-Worktree: `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected`; branch: `jamesmbrownjr/jam-193-p2-capture_file_error-sse-event-has-no-ui-handler-rejected`.
+Worktree: `.worktrees/reassembly-coverage-memory-accounting`; branch: `jamesmbrownjr/jam-170-p2-account-for-reassembly-coverage-storage-in-memory-limits`.
 
-Scope: add UI state and a dismissible rejection banner in `app/page.tsx`; clear the previous rejection when a new capture-file start is sent. Add integration regressions for rejected start/display/dismiss/retry and malformed event messages. No agent, wire, mapping, or control-route changes.
+Scope: `capture-agent/src/reassembly.rs` and `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs`; update the stream-reassembly design spec and `.ai/` verification state. Count `data` and byte-backed `filled` vector capacities against the existing 4 MiB total fragment and TCP ceilings. Add tests that fill each budget and verify accounting/eviction, and ensure fuzz checks use the full accounting. No wire/API or unrelated reassembly behavior changes.
 
-Gate approved by James in chat on 2026-10-05. PR #268 is open, rebased onto current main, all CI checks and independent code/security reviews pass. Waiting for James's real-browser check of the rejection banner before merge; the computer-use gate blocked Chrome access for this session.
+Gate approved by James directly in chat on 2026-10-06. The gate is claimed and delegated in-session; Linear JAM-170 is In Progress. Full local validation and review remain.

@@ -147,3 +147,16 @@ JAM-166 adds the parsed transport packet to `SniffOutcome` when an IP fragment g
 Implemented in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected` on `jamesmbrownjr/jam-193-p2-capture_file_error-sse-event-has-no-ui-handler-rejected`. The page now consumes the existing `capture_file_error` SSE event and displays its rejection message in a dismissible banner. A new `start_capture_file` request clears a previous rejection so a retry does not leave stale error UI; a fresh error event displays again. Tests cover rejected start, malformed non-string message, display, retry, repeat rejection and dismissal. No wire/agent changes.
 
 Verified: focused Vitest 12/12; full Vitest 82 files / 601 tests; `npm run lint`; `npm run build`; `git diff --check`. One intermediate full Vitest run hit existing timing-related teardown errors in unrelated enrichment tests; rerunning the standard suite passed all 601 tests. PR #268 CI passed before this final retry refinement; a refreshed CI run is required after the next push. Independent code/security reviews found no blocking issue. James declined Chrome automation and said he can perform the required real-browser check; merge is waiting for that result. The final build after rebase showed the existing middleware deprecation warning.
+# JAM-170 — in progress, 2026-10-06
+
+Worktree: `.worktrees/reassembly-coverage-memory-accounting`; branch follows Linear's `gitBranchName`: `jamesmbrownjr/jam-170-p2-account-for-reassembly-coverage-storage-in-memory-limits`. James approved the task directly in chat. Linear is In Progress; gate is approved/delegated.
+
+Root cause confirmed by RED tests: `bytes_held()` counted `data.len()` while each byte also had a byte-backed `Vec<bool>` coverage entry, and vector growth capacity could exceed logical length. New fragment/TCP tests fill each 4 MiB budget, compare the counter against both vectors' capacities after every feed, and require capacity eviction. Both tests failed before the fix (65,535 vs 131,070 fragment bytes; 16,384 vs 32,768 TCP bytes) and pass after it.
+
+Implementation updates all growth/removal accounting paths to use `data.capacity() + filled.capacity()`. The existing per-key logical buffer limits and 4 MiB per-reassembler ceilings remain. The fuzz target checks those same total ceilings through `bytes_held()`. The design spec now clarifies that the 8 MiB maximum covers the data and coverage vectors; count-bounded key/map metadata is outside this byte counter.
+
+Validation: after restoring unrelated workspace-wide rustfmt changes, focused accounting tests passed; `cargo test --locked` passed (337 library, 65 binary, 12 auth integration, 2 disk-invariant, 4 pcapng, 1 protocol regression; 8 tests ignored); release build and warnings-denied clippy passed; the `stream_reassembly` fuzz target passed 243,992 runs in 41 seconds. An independent `codex review --uncommitted` found no actionable regressions. See `TEST_STATUS.md` for exact commands and RED evidence.
+
+No wire changes. Risk to assess in review: account updates occur after each bounded vector growth, then oldest-first eviction restores the total ceiling before `feed` returns; allocation metadata and map keys are separately count-bounded as documented.
+
+# JAM-184 — review fix verified, publication next, 2026-10-05

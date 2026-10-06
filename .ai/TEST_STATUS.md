@@ -180,3 +180,16 @@ Commands run in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-re
 - `npm run lint`: passed with warnings denied.
 - `npm run build`: passed. Existing Next.js middleware deprecation and Edge Runtime `process.cwd` warnings remain.
 - `git diff --check`: passed.
+
+## JAM-170 — verified 2026-10-06
+
+Worktree: `.worktrees/reassembly-coverage-memory-accounting`.
+
+- RED: `cargo test --locked memory_budget_counts_data_and_coverage_capacities -- --nocapture` failed both new tests as expected: fragment accounting was 65,535 vs 131,070 allocated capacity bytes; TCP was 16,384 vs 32,768.
+- GREEN: same focused command passed after accounting both vectors' retained capacities.
+- `cargo test --locked`: passed 337 library, 65 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, and 1 protocol-regression tests; 8 tests ignored (one library, five privileged live-loopback, and two exclusive-port replay).
+- Final focused rerun: `cargo test --locked reassembly::tests` passed all 60 reassembly tests.
+- `cargo build --release --locked`: passed.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed.
+- `cargo +nightly fuzz run stream_reassembly -- -max_total_time=40`: passed, 243,992 runs in 41 seconds.
+- `git diff --check`: passed. No wire fields, dependencies, or packet-decoding behavior changed.
