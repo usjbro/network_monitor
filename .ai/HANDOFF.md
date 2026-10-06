@@ -148,6 +148,10 @@ Implemented in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rej
 
 Verified: focused Vitest 12/12; full Vitest 82 files / 601 tests; `npm run lint`; `npm run build`; `git diff --check`. One intermediate full Vitest run hit existing timing-related teardown errors in unrelated enrichment tests; rerunning the standard suite passed all 601 tests. PR #268 CI passed before this final retry refinement; a refreshed CI run is required after the next push. Independent code/security reviews found no blocking issue. James declined Chrome automation and said he can perform the required real-browser check; merge is waiting for that result. The final build after rebase showed the existing middleware deprecation warning.
 
+## JAM-170 — reassembly coverage accounting
+
+Implemented in `.worktrees/reassembly-coverage-memory-accounting` on `jamesmbrownjr/jam-170-p2-account-for-reassembly-coverage-storage-in-memory-limits`. The memory counter includes retained capacities of the data and coverage vectors; regression tests and fuzz checks verify aggregate and per-direction bounds. PR #269 is open. JAM-198 merged as PR #270 at `13695b5`, and the post-merge `main` CI run 37410349067 passed, resolving the npm-audit blocker. PR #269 is being updated to the new main base; its checks must pass again before merge.
+
 ## JAM-198 — npm audit source-map-js fix
 
 Updated `.worktrees/npm-audit-source-map-js` on `jamesmbrownjr/jam-198-p1-ci-npm-audit-gate-fails-on-source-map-js-ghsa-68fv-2mgg`. `package-lock.json` now resolves `source-map-js` 1.2.2, the patched version for GHSA-68fv-2mgg-jv7q. No manifest range or application code change. Lockfile dependency paths include the root `postcss` and Next.js's nested `postcss`, in addition to development tooling; patching the transitive dependency is preferable to suppressing the advisory.

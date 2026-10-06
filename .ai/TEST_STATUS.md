@@ -191,3 +191,13 @@ In `.worktrees/npm-audit-source-map-js`, updated only the `node_modules/source-m
 - `npm run build`: passed, with existing middleware deprecation and Edge Runtime `process.cwd` warnings.
 - `npx vitest run`: 82 files and 601 tests passed.
 - `git diff --check`: passed.
+
+## JAM-170 — verified 2026-10-06
+
+Worktree: `.worktrees/reassembly-coverage-memory-accounting`.
+
+- RED: `cargo test --locked memory_budget_counts_data_and_coverage_capacities -- --nocapture` failed both new tests as expected: fragment accounting was 65,535 vs 131,070 allocated capacity bytes; TCP was 16,384 vs 32,768.
+- `cargo test --locked`: 338 library, 65 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, and 1 protocol-regression tests passed; 8 ignored.
+- `cargo build --release --locked` and `cargo clippy --all-targets --locked -- -D warnings` passed.
+- `cargo +nightly fuzz run stream_reassembly -- -max_total_time=40`: 243,992 runs in 41 seconds; after restoring the per-direction invariant, the 20-second run passed 106,628 runs.
+- `git diff --check`: passed. PR #269 is rebased/merged with the JAM-198 main commit; CI rerun is pending.

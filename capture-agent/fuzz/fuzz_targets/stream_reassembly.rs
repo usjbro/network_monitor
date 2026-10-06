@@ -26,8 +26,10 @@ fuzz_target!(|data: &[u8]| {
     // 1. Arbitrary bytes must never panic. Reassembly runs on completely
     //    attacker-controlled input in the same process that holds the raw
     //    capture handle.
-    // 2. **The memory caps must actually hold.** This is asserted rather than
-    //    merely hoped for because unit tests can only try the cap-breaking
+    // 2. **The accounted memory caps must actually hold.** `bytes_held()`
+    //    includes retained capacities for both data and coverage vectors.
+    //    This is asserted rather than merely hoped for because unit tests can
+    //    only try the cap-breaking
     //    shapes someone thought of; JAM-125's real out-of-memory bug was
     //    found by a fuzz target and missed by unit tests. An unbounded-growth
     //    regression here is a crash the fuzzer reports, not a slow leak
@@ -100,12 +102,12 @@ fuzz_target!(|data: &[u8]| {
             "TCP total byte cap breached: {}",
             segments.bytes_held()
         );
-        assert!(
-            segments.bytes_held() <= MAX_TCP_STREAM_BYTES,
-            "a single stream direction exceeded its own cap: {}",
-            segments.bytes_held()
-        );
         assert!(segments.streams_held() <= MAX_TCP_STREAMS);
+        assert!(
+            segments.max_buffered_len() <= MAX_TCP_STREAM_BYTES,
+            "a TCP direction exceeded its logical buffer cap: {}",
+            segments.max_buffered_len()
+        );
         // The exposed prefix must always be a real slice of held bytes —
         // indexing it proves no out-of-range prefix length was recorded.
         let prefix = segments.prefix(&key);

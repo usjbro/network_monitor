@@ -19,13 +19,15 @@
 //!    `saturating_`, every index is bounds-checked, and every fallible path
 //!    returns `Option`. Exercised by
 //!    `fuzz/fuzz_targets/stream_reassembly.rs`.
-//! 2. **Bounded allocation, checked before it happens.** Buffers are never
-//!    grown toward a length read off the wire; a write range is clamped to
-//!    the cap *first*, and only then is the buffer resized, so a hostile
-//!    offset can never cause an allocation larger than the cap. (Contrast
-//!    the "reserve the declared length, then wait for it" pattern
-//!    `http2.rs`'s `MAX_FRAME_LEN` exists to prevent.) Per-key, total-byte,
-//!    and total-key caps all apply.
+//! 2. **Bounded growth, checked before it happens.** Buffers are never grown
+//!    toward a length read off the wire; each write range is clamped to its
+//!    per-key limit before resize. The vectors' actual retained capacities,
+//!    including growth slack and the byte-backed coverage map, count against
+//!    the global memory ceiling; oldest entries are evicted until that
+//!    ceiling holds before `feed` returns. (Contrast the "reserve the
+//!    declared length, then wait for it" pattern `http2.rs`'s `MAX_FRAME_LEN`
+//!    exists to prevent.) Per-key logical-length, total-memory, and total-key
+//!    caps all apply.
 //! 3. **Nothing is held forever.** A reassembly that never completes is
 //!    evicted by idle timeout and, under pressure, by oldest-first capacity
 //!    eviction — the classic tiny-fragment-flood / never-finish-it pattern
@@ -152,8 +154,9 @@ pub const MAX_FRAGMENT_GROUP_BYTES: usize = 65_535;
 /// Concurrent in-flight fragment groups. Fragmentation is rare in real
 /// traffic; under a flood the byte cap below binds first.
 pub const MAX_FRAGMENT_GROUPS: usize = 512;
-/// Total bytes held across every in-flight fragment group. The real binding
-/// constraint: 512 × 65 535 would be 32 MiB; this caps it at 4 MiB.
+/// Total bytes reserved by each fragment group's data and coverage vectors.
+/// The real binding constraint: 512 × 65 535 would be 32 MiB for each vector;
+/// this caps their combined capacities at 4 MiB.
 pub const MAX_FRAGMENT_BYTES_TOTAL: usize = 4 * 1024 * 1024;
 /// RFC 791's recommended reassembly timeout. Linux uses 30 s; shorter is
 /// strictly better for a monitor that is not the datagram's destination.
@@ -169,8 +172,8 @@ pub const MAX_TCP_STREAM_BYTES: usize = 16 * 1024;
 /// Concurrent buffering stream directions, well under the flow table's own
 /// `DEFAULT_MAX_FLOWS` of 10 000.
 pub const MAX_TCP_STREAMS: usize = 2_048;
-/// Total bytes held across every buffering stream direction — the real
-/// binding constraint, as for fragments.
+/// Total reserved bytes across every buffering stream direction's data and
+/// coverage vectors — the real binding constraint, as for fragments.
 pub const MAX_TCP_BYTES_TOTAL: usize = 4 * 1024 * 1024;
 /// A direction that hasn't advanced in this long is not mid-message.
 pub const TCP_STREAM_IDLE_MS: u64 = 30_000;
@@ -376,6 +379,12 @@ impl FragmentGroup {
             || now_ms.saturating_sub(self.first_seen_ms) > FRAGMENT_TIMEOUT_MS
     }
 
+    /// Retained capacity of both bounded buffers. `Vec<bool>` is byte-backed,
+    /// so each coverage marker contributes one byte to the budget.
+    fn accounted_bytes(&self) -> usize {
+        self.data.capacity().saturating_add(self.filled.capacity())
+    }
+
     /// The status this group's current prefix deserves. Truncated-at-capture
     /// takes precedence over missing-frames: it is a definite fact about this
     /// capture's configuration that an operator can act on, where "missing"
@@ -485,9 +494,8 @@ impl IpFragmentReassembler {
         Self::default()
     }
 
-    /// Real, measured bytes currently held across every in-flight group — the
-    /// sum of the groups' own buffer lengths, maintained on every write and
-    /// removal rather than estimated.
+    /// Reserved capacity of every in-flight group's data and coverage
+    /// vectors, maintained on every write and removal rather than estimated.
     pub fn bytes_held(&self) -> usize {
         self.bytes_held
     }
@@ -575,7 +583,7 @@ impl IpFragmentReassembler {
             group.total_len = Some(offset.saturating_add(declared));
         }
 
-        let before = group.data.len();
+        let before = group.accounted_bytes();
         let written = write_first_seen_wins(
             &mut group.data,
             &mut group.filled,
@@ -583,7 +591,7 @@ impl IpFragmentReassembler {
             &fragment.payload,
             MAX_FRAGMENT_GROUP_BYTES,
         );
-        let after = group.data.len();
+        let after = group.accounted_bytes();
         group.prefix_len = contiguous_len_from(&group.filled, group.prefix_len);
         let status = group.status();
         // Disjoint field borrows: `group` borrows `self.groups` only.
@@ -601,7 +609,7 @@ impl IpFragmentReassembler {
                     // A group that reached the protocol's own maximum
                     // datagram size and still has holes is not a datagram.
                     if let Some(dropped) = self.groups.remove(&key) {
-                        self.bytes_held = self.bytes_held.saturating_sub(dropped.data.len());
+                        self.bytes_held = self.bytes_held.saturating_sub(dropped.accounted_bytes());
                         self.counters.abandoned_without_completing += 1;
                     }
                 }
@@ -648,7 +656,7 @@ impl IpFragmentReassembler {
     /// a datagram from whatever contiguous prefix it held.
     fn take_group(&mut self, key: &FragmentKey, status: ReassemblyStatus) -> Option<ReassembledDatagram> {
         let group = self.groups.remove(key)?;
-        self.bytes_held = self.bytes_held.saturating_sub(group.data.len());
+        self.bytes_held = self.bytes_held.saturating_sub(group.accounted_bytes());
         match status {
             ReassemblyStatus::Reassembled => self.counters.completed += 1,
             ReassemblyStatus::IncompleteTruncatedAtCapture => self.counters.incomplete_truncated_at_capture += 1,
@@ -681,7 +689,7 @@ impl IpFragmentReassembler {
                 break;
             }
             if let Some(group) = self.groups.remove(&key) {
-                self.bytes_held = self.bytes_held.saturating_sub(group.data.len());
+                self.bytes_held = self.bytes_held.saturating_sub(group.accounted_bytes());
                 self.counters.evicted_capacity += 1;
             }
         }
@@ -727,6 +735,12 @@ impl TcpStream {
     /// No segment for longer than `TCP_STREAM_IDLE_MS`.
     fn is_idle(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.last_seen_ms) > TCP_STREAM_IDLE_MS
+    }
+
+    /// Retained capacity of both bounded buffers. `Vec<bool>` is byte-backed,
+    /// so each coverage marker contributes one byte to the budget.
+    fn accounted_bytes(&self) -> usize {
+        self.data.capacity().saturating_add(self.filled.capacity())
     }
 
     fn new(seq: u32, now_ms: u64) -> Self {
@@ -798,9 +812,22 @@ impl TcpReassembler {
         Self::default()
     }
 
-    /// Real, measured bytes currently held across every buffering direction.
+    /// Real, measured reserved bytes across every buffering direction's data
+    /// and coverage vectors.
     pub fn bytes_held(&self) -> usize {
         self.bytes_held
+    }
+
+    /// Largest logical TCP buffer length across active directions. This lets
+    /// the external fuzz target assert the per-direction bound independently
+    /// of aggregate allocation accounting.
+    #[doc(hidden)]
+    pub fn max_buffered_len(&self) -> usize {
+        self.streams
+            .values()
+            .map(|stream| stream.data.len().max(stream.filled.len()))
+            .max()
+            .unwrap_or(0)
     }
 
     /// Drops every stream, keeping the lifetime counters.
@@ -892,7 +919,7 @@ impl TcpReassembler {
             // forever. This segment's own decision is still not trusted
             // (the same as before: one segment pays the cost of clearing
             // stale state), but the next one gets a clean slate.
-            let freed = stream.data.len();
+            let freed = stream.accounted_bytes();
             self.streams.remove(key);
             self.bytes_held = self.bytes_held.saturating_sub(freed);
             return None;
@@ -901,7 +928,7 @@ impl TcpReassembler {
             // Nothing decided within the window. Stop buffering: this is what
             // keeps steady-state memory proportional to messages started
             // recently rather than to every open connection.
-            let freed = stream.data.len();
+            let freed = stream.accounted_bytes();
             stream.release();
             stream.finished = true;
             self.bytes_held = self.bytes_held.saturating_sub(freed);
@@ -909,7 +936,7 @@ impl TcpReassembler {
             return None;
         }
 
-        let before = stream.data.len();
+        let before = stream.accounted_bytes();
         // Wraparound-safe offset: the same signed-delta technique
         // `flow.rs`'s retransmit detection uses, so a sequence number
         // wrapping past u32::MAX on a long-lived flow is handled rather than
@@ -947,7 +974,7 @@ impl TcpReassembler {
 
         let written =
             write_first_seen_wins(&mut stream.data, &mut stream.filled, offset, payload, MAX_TCP_STREAM_BYTES);
-        let after = stream.data.len();
+        let after = stream.accounted_bytes();
         if (payload.len() as u32) < declared_payload_len {
             let hole_at = offset.saturating_add(payload.len());
             stream.short_captured_at = Some(stream.short_captured_at.map_or(hole_at, |at| at.min(hole_at)));
@@ -983,7 +1010,7 @@ impl TcpReassembler {
     /// out by the first one's success.
     pub fn finish(&mut self, key: &TcpStreamKey, status: ReassemblyStatus) {
         if let Some(stream) = self.streams.remove(key) {
-            self.bytes_held = self.bytes_held.saturating_sub(stream.data.len());
+            self.bytes_held = self.bytes_held.saturating_sub(stream.accounted_bytes());
             match status {
                 ReassemblyStatus::Reassembled => self.counters.completed += 1,
                 ReassemblyStatus::IncompleteTruncatedAtCapture => {
@@ -1001,7 +1028,7 @@ impl TcpReassembler {
         for from_local in [true, false] {
             let key = TcpStreamKey { flow: flow.clone(), from_local };
             if let Some(stream) = self.streams.remove(&key) {
-                self.bytes_held = self.bytes_held.saturating_sub(stream.data.len());
+                self.bytes_held = self.bytes_held.saturating_sub(stream.accounted_bytes());
             }
         }
     }
@@ -1010,7 +1037,7 @@ impl TcpReassembler {
     /// periodic sweep and by `feed`'s expire-on-arrival check.
     fn remove_idle(&mut self, key: &TcpStreamKey) {
         if let Some(stream) = self.streams.remove(key) {
-            self.bytes_held = self.bytes_held.saturating_sub(stream.data.len());
+            self.bytes_held = self.bytes_held.saturating_sub(stream.accounted_bytes());
             self.counters.evicted_idle += 1;
         }
     }
@@ -1042,7 +1069,7 @@ impl TcpReassembler {
                 break;
             }
             if let Some(stream) = self.streams.remove(&key) {
-                self.bytes_held = self.bytes_held.saturating_sub(stream.data.len());
+                self.bytes_held = self.bytes_held.saturating_sub(stream.accounted_bytes());
                 self.counters.evicted_capacity += 1;
             }
         }
@@ -1108,8 +1135,8 @@ impl StreamReassembler {
         self.last_frame_cut_at_ms = None;
     }
 
-    /// Total real bytes held by reassembly right now, across both
-    /// reassemblers. Bounded by `MAX_FRAGMENT_BYTES_TOTAL +
+    /// Total reserved bytes in reassembly's data and coverage vectors right
+    /// now, across both reassemblers. Bounded by `MAX_FRAGMENT_BYTES_TOTAL +
     /// MAX_TCP_BYTES_TOTAL` regardless of how many distinct keys hostile
     /// input invents.
     pub fn bytes_held(&self) -> usize {
@@ -1596,7 +1623,12 @@ mod tests {
         assert_eq!(r.counters().evicted_idle, 1, "the expired group is counted as evicted");
         assert_eq!(r.counters().incomplete_missing_frames, 1, "and reported as incomplete");
         assert_eq!(r.groups_held(), 1, "the late fragment starts a fresh group of its own");
-        assert_eq!(r.bytes_held(), datagram.len(), "holding only the late fragment's bytes, at its offset");
+        let group = r.groups.values().next().expect("late fragment starts one fresh group");
+        assert_eq!(
+            r.bytes_held(),
+            group.accounted_bytes(),
+            "the late fragment's data and coverage capacities are both held"
+        );
     }
 
     #[test]
@@ -1804,6 +1836,30 @@ mod tests {
     // =====================================================================
 
     #[test]
+    fn fragment_memory_budget_counts_data_and_coverage_capacities() {
+        let mut r = IpFragmentReassembler::new();
+        for i in 0..40u16 {
+            let dst = format!("10.1.{}.{}", i / 256, i % 256);
+            r.feed(
+                &ipv4_fragment("10.0.0.1", &dst, i, IpNumber::UDP, 65_528, true, &[0x41; 7]),
+                i as u64,
+            );
+
+            let allocated = r.groups.values().map(|group| group.data.capacity() + group.filled.capacity()).sum::<usize>();
+            assert_eq!(
+                r.bytes_held(),
+                allocated,
+                "the fragment budget must include both buffer capacities, including the coverage map"
+            );
+            assert!(
+                r.bytes_held() <= MAX_FRAGMENT_BYTES_TOTAL,
+                "fragment data and coverage capacities must stay within the total memory budget"
+            );
+        }
+        assert!(r.counters().evicted_capacity > 0, "coverage storage must count against the total budget");
+    }
+
+    #[test]
     fn a_flood_of_never_completing_fragment_groups_is_capped_and_evicts_oldest_first() {
         let mut r = IpFragmentReassembler::new();
         // Every group is a first fragment with MF set, so none can ever
@@ -1835,9 +1891,10 @@ mod tests {
         let offset = 65_528u16; // 8-byte aligned, near the 13-bit field's ceiling
         r.feed(&ipv4_fragment("10.0.0.1", "10.0.0.2", 1, IpNumber::UDP, offset, true, &[0x41; 1024]), 0);
         assert!(
-            r.bytes_held() <= MAX_FRAGMENT_GROUP_BYTES,
-            "a single group must never exceed the IPv4 maximum, got {}",
-            r.bytes_held()
+            r.groups.values().all(|group| {
+                group.data.len() <= MAX_FRAGMENT_GROUP_BYTES && group.filled.len() <= MAX_FRAGMENT_GROUP_BYTES
+            }),
+            "a single group must never exceed the IPv4 maximum buffer length"
         );
     }
 
@@ -1871,11 +1928,12 @@ mod tests {
         // its highest offset even while holding few real bytes. That is
         // inherent to the design and is bounded per group by
         // `MAX_FRAGMENT_GROUP_BYTES` and in aggregate by the group-count and
-        // total-byte caps (see the flood test above), not by this one.
+        // total-capacity ceilings (see the flood test above), not by this one.
         assert!(
-            r.bytes_held() <= MAX_FRAGMENT_GROUP_BYTES,
-            "one group must stay within its own cap, got {}",
-            r.bytes_held()
+            r.groups.values().all(|group| {
+                group.data.len() <= MAX_FRAGMENT_GROUP_BYTES && group.filled.len() <= MAX_FRAGMENT_GROUP_BYTES
+            }),
+            "one group's data and coverage lengths must stay within their per-key caps"
         );
     }
 
@@ -2398,6 +2456,32 @@ mod tests {
     // =====================================================================
 
     #[test]
+    fn tcp_memory_budget_counts_data_and_coverage_capacities() {
+        let mut r = TcpReassembler::new();
+        let payload = vec![0x41; MAX_TCP_STREAM_BYTES];
+        for i in 0..160u16 {
+            let key = TcpStreamKey {
+                flow: FlowKey { remote_port: i, ..flow_key() },
+                from_local: true,
+            };
+            r.feed(&key, 100, &payload, payload.len() as u32, i as u64);
+
+            assert!(r.max_buffered_len() <= MAX_TCP_STREAM_BYTES);
+            let allocated = r.streams.values().map(|stream| stream.data.capacity() + stream.filled.capacity()).sum::<usize>();
+            assert_eq!(
+                r.bytes_held(),
+                allocated,
+                "the TCP budget must include both buffer capacities, including the coverage map"
+            );
+            assert!(
+                r.bytes_held() <= MAX_TCP_BYTES_TOTAL,
+                "TCP data and coverage capacities must stay within the total memory budget"
+            );
+        }
+        assert!(r.counters().evicted_capacity > 0, "coverage storage must count against the total budget");
+    }
+
+    #[test]
     fn a_flood_of_never_completing_streams_is_capped_and_evicts_oldest_first() {
         let mut r = TcpReassembler::new();
         let over = MAX_TCP_STREAMS + 200;
@@ -2432,9 +2516,10 @@ mod tests {
             seq = seq.wrapping_add(chunk.len() as u32);
         }
         assert!(
-            r.bytes_held() <= MAX_TCP_STREAM_BYTES,
-            "a single direction must never exceed its cap, got {}",
-            r.bytes_held()
+            r.streams.values().all(|stream| {
+                stream.data.len() <= MAX_TCP_STREAM_BYTES && stream.filled.len() <= MAX_TCP_STREAM_BYTES
+            }),
+            "a single direction's data and coverage lengths must stay within their per-key caps"
         );
         assert!(r.counters().abandoned_without_completing > 0, "reaching the cap without deciding must be recorded");
     }
@@ -2510,7 +2595,9 @@ mod tests {
         r.feed(&key, 100u32.wrapping_add(1 << 30), b"far-forward", 11, 0);
         r.feed(&key, 100u32.wrapping_sub(1 << 30), b"far-backward", 12, 0);
         assert_eq!(r.bytes_held(), before, "neither wild offset may cause an allocation");
-        assert!(r.bytes_held() <= MAX_TCP_STREAM_BYTES);
+        assert!(r.streams.values().all(|stream| {
+            stream.data.len() <= MAX_TCP_STREAM_BYTES && stream.filled.len() <= MAX_TCP_STREAM_BYTES
+        }));
     }
 
     #[test]
@@ -2564,12 +2651,12 @@ mod tests {
         let key = flow_key();
         let a = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 80, 100, b"GET /partial");
         r.sniff(&a, Some((&key, true)), 0);
-        assert_eq!(r.bytes_held(), 12, "a measured count of the bytes actually buffered, not an estimate");
+        assert_eq!(r.bytes_held(), r.segments.bytes_held(), "the facade reports retained vector capacities");
 
         let datagram = udp_dns_datagram();
         let fragment = ipv4_fragment("10.0.0.1", "10.0.0.2", 99, IpNumber::UDP, 0, true, &datagram[..16]);
         r.sniff(&fragment, None, 0);
-        assert_eq!(r.bytes_held(), 12 + 16);
+        assert_eq!(r.bytes_held(), r.fragments.bytes_held() + r.segments.bytes_held());
 
         r.maybe_evict(TCP_STREAM_IDLE_MS + 2_000);
         assert_eq!(r.bytes_held(), 0, "eviction must actually release the memory it accounts for");

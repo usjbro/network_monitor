@@ -95,14 +95,14 @@ Not treating `Undecided` as terminal is deliberate: a stream whose first *captur
 |---|---|---|
 | Per fragment group | 65 535 B | The maximum length an IPv4 `total_length` can express. Cannot reject legitimate traffic by construction. |
 | Concurrent fragment groups | 512 | Generous for real traffic (fragmentation is rare); the global byte cap binds first under attack. |
-| Total fragment bytes | 4 MiB | The real binding constraint. Oldest groups evict until under. |
+| Total fragment buffer capacity | 4 MiB | Combined reserved capacity of each group's data and byte-backed coverage vectors. Oldest groups evict until under. |
 | Fragment group timeout | 15 s | RFC 791's recommended reassembly timeout. Linux uses 30 s; shorter is strictly better for a monitor that is not the datagram's destination. |
 | Per TCP stream direction | 16 KiB | Covers a full HTTP header block (nginx/Apache default limits are 8 KiB) and a complete TLS record (16 KiB max, so any ClientHello including post-quantum key shares). Past this, no detector here is going to decide. |
 | Concurrent TCP stream directions | 2 048 | Bounded well under the flow table's own `DEFAULT_MAX_FLOWS` (10 000); the global byte cap binds first. |
-| Total TCP buffered bytes | 4 MiB | The real binding constraint. Oldest streams evict until under. |
+| Total TCP buffer capacity | 4 MiB | Combined reserved capacity of each direction's data and byte-backed coverage vectors. Oldest streams evict until under. |
 | TCP stream idle timeout | 30 s | A direction that has not advanced in 30 s is not mid-message. |
 
-Worst case across both reassemblers is therefore **8 MiB**, regardless of how many distinct keys hostile input invents, and `bytes_held()` on each reassembler is a real measured number (sum of held bytes), not a fabricated statistic. Nothing about it is put on the wire, so no invented-stat rule is in play.
+Worst case across both reassemblers is therefore **8 MiB** in the data and coverage vectors, regardless of how many distinct keys hostile input invents. `bytes_held()` reports the sum of their retained vector capacities, including unused capacity, so growth slack and the byte-backed `Vec<bool>` coverage maps count against those same ceilings. Entry keys and map metadata remain bounded separately by the fragment-group and TCP-direction count caps. Nothing about this accounting is put on the wire, so no invented-stat rule is in play.
 
 Eviction is time-based *and* capacity-based, matching `FlowTable::evict_stale`'s existing pattern (retain-by-threshold, then drop oldest-first over capacity). It is driven from the capture loop rather than shared with `FlowTable::evict_stale` itself: that runs on the periodic emitter task, on the other side of the flow-table mutex from the reassembler, and plumbing evicted keys across that boundary to reuse one call site would be more coupling than the duplication it saves. Same mechanism, own call site.
 

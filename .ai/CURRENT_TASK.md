@@ -1,9 +1,9 @@
 # Current Task
 
-JAM-198: update the vulnerable `source-map-js` lockfile entry to a patched release so the npm audit CI gate passes.
+JAM-170: account for the IPv4-fragment and TCP-stream coverage buffers and allocated vector capacities in the reassembly memory budgets.
 
-Worktree: `.worktrees/npm-audit-source-map-js`; branch: `jamesmbrownjr/jam-198-p1-ci-npm-audit-gate-fails-on-source-map-js-ghsa-68fv-2mgg`.
+Worktree: `.worktrees/reassembly-coverage-memory-accounting`; branch: `jamesmbrownjr/jam-170-p2-account-for-reassembly-coverage-storage-in-memory-limits`.
 
-Scope: prefer the existing semver ranges and update only `package-lock.json` for `source-map-js` 1.2.2 or later. Verify `npm audit` and `.github/scripts/check-npm-audit.mjs`, then run lint, build and Vitest. Avoid an allowlist unless no patched release can be installed.
+Scope: `capture-agent/src/reassembly.rs` and `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs`; update the stream-reassembly design spec and `.ai/` verification state. Count `data` and byte-backed `filled` vector capacities against the existing 4 MiB total fragment and TCP ceilings. Add tests that fill each budget and verify accounting/eviction, and ensure fuzz checks use the full accounting. No wire/API or unrelated reassembly behavior changes.
 
-Gate approved by James directly in chat on 2026-10-06. PR #269 (JAM-170) is blocked by this known advisory on `main`; update it after this fix merges.
+Gate approved by James directly in chat on 2026-10-06. The gate is claimed and delegated in-session; Linear JAM-170 is In Review. JAM-198 merged as PR #270 at `13695b5`, clearing the npm-audit blocker on `main`; PR #269 is being updated to that base before its final CI/merge cycle.
