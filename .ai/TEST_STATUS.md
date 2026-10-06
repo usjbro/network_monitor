@@ -180,3 +180,14 @@ Commands run in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-re
 - `npm run lint`: passed with warnings denied.
 - `npm run build`: passed. Existing Next.js middleware deprecation and Edge Runtime `process.cwd` warnings remain.
 - `git diff --check`: passed.
+
+## JAM-198 — verified 2026-10-06
+
+In `.worktrees/npm-audit-source-map-js`, updated only the `node_modules/source-map-js` lock entry from 1.2.1 to patched 1.2.2 (existing ranges already accept it). GitHub Advisory Database confirms versions `<1.2.2` are affected by GHSA-68fv-2mgg-jv7q.
+
+- `npm update source-map-js --package-lock-only --ignore-scripts`: passed; lock resolves 1.2.2.
+- `npm audit --json`: reports no `source-map-js` advisory after the update. The command exits 1 for the repository's existing allowlisted GHSA-vfj7-8cjw-p6xm; `node .github/scripts/check-npm-audit.mjs /private/tmp/jam198-audit-after.json` passes with only that allowlisted advisory.
+- `npm run lint`: passed.
+- `npm run build`: passed, with existing middleware deprecation and Edge Runtime `process.cwd` warnings.
+- `npx vitest run`: 82 files and 601 tests passed.
+- `git diff --check`: passed.
