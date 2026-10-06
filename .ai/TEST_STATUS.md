@@ -192,6 +192,19 @@ In `.worktrees/npm-audit-source-map-js`, updated only the `node_modules/source-m
 - `npx vitest run`: 82 files and 601 tests passed.
 - `git diff --check`: passed.
 
+## JAM-199 — verified 2026-10-06
+
+In `.worktrees/npm-audit-sharp`, updated the existing Next.js optional `sharp` resolution from 0.35.4 to patched 0.35.5 using the existing `^0.35.4` range. `npm ls sharp --all` reports `next@16.3.8 -> sharp@0.35.5`.
+
+- `npm update sharp --package-lock-only --ignore-scripts --cache /private/tmp/jam199-npm-cache`: passed; sharp and its platform packages resolve to 0.35.5, with libvips packages at 1.3.4.
+- `npm ci --ignore-scripts --cache /private/tmp/jam199-npm-cache`: passed.
+- `npm audit --json`: still reports five high advisories across packages in the existing `braces` chain, plus two moderate advisories; no sharp advisory remains. `node .github/scripts/check-npm-audit.mjs /private/tmp/jam199-audit.json`: passed, only the existing allowlisted GHSA-vfj7-8cjw-p6xm.
+- `npm run lint`: passed.
+- `npm run build`: passed with existing middleware deprecation and Edge Runtime `process.cwd` warnings.
+- `npx vitest run`: 82 files, 601 tests passed.
+- `git diff --check`: passed.
+- Advisory grace-window decision: keep high/critical advisories as immediate blockers when a patched dependency is available. This fix was available within Next.js's current declared range; a grace period would knowingly leave a fixable high-risk dependency in place and delay unrelated remediation only until the audit update lands.
+
 ## JAM-170 — verified 2026-10-06
 
 Worktree: `.worktrees/reassembly-coverage-memory-accounting`.
