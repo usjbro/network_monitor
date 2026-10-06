@@ -6,4 +6,4 @@ Worktree: `.worktrees/reassembly-coverage-memory-accounting`; branch: `jamesmbro
 
 Scope: `capture-agent/src/reassembly.rs` and `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs`; update the stream-reassembly design spec and `.ai/` verification state. Count `data` and byte-backed `filled` vector capacities against the existing 4 MiB total fragment and TCP ceilings. Add tests that fill each budget and verify accounting/eviction, and ensure fuzz checks use the full accounting. No wire/API or unrelated reassembly behavior changes.
 
-Gate approved by James directly in chat on 2026-10-06. The gate is claimed and delegated in-session; Linear JAM-170 is In Progress. Full local validation and review remain.
+Gate approved by James directly in chat on 2026-10-06. The gate is claimed and delegated in-session; Linear JAM-170 is In Review. JAM-198 merged as PR #270 at `13695b5`, clearing the npm-audit blocker on `main`; PR #269 is being updated to that base before its final CI/merge cycle.

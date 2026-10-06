@@ -181,16 +181,23 @@ Commands run in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-re
 - `npm run build`: passed. Existing Next.js middleware deprecation and Edge Runtime `process.cwd` warnings remain.
 - `git diff --check`: passed.
 
+## JAM-198 — verified 2026-10-06
+
+In `.worktrees/npm-audit-source-map-js`, updated only the `node_modules/source-map-js` lock entry from 1.2.1 to patched 1.2.2 (existing ranges already accept it). GitHub Advisory Database confirms versions `<1.2.2` are affected by GHSA-68fv-2mgg-jv7q.
+
+- `npm update source-map-js --package-lock-only --ignore-scripts`: passed; lock resolves 1.2.2.
+- `npm audit --json`: reports no `source-map-js` advisory after the update. The command exits 1 for the repository's existing allowlisted GHSA-vfj7-8cjw-p6xm; `node .github/scripts/check-npm-audit.mjs /private/tmp/jam198-audit-after.json` passes with only that allowlisted advisory.
+- `npm run lint`: passed.
+- `npm run build`: passed, with existing middleware deprecation and Edge Runtime `process.cwd` warnings.
+- `npx vitest run`: 82 files and 601 tests passed.
+- `git diff --check`: passed.
+
 ## JAM-170 — verified 2026-10-06
 
 Worktree: `.worktrees/reassembly-coverage-memory-accounting`.
 
 - RED: `cargo test --locked memory_budget_counts_data_and_coverage_capacities -- --nocapture` failed both new tests as expected: fragment accounting was 65,535 vs 131,070 allocated capacity bytes; TCP was 16,384 vs 32,768.
-- GREEN: same focused command passed after accounting both vectors' retained capacities.
-- `cargo test --locked`: passed 338 library, 65 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, and 1 protocol-regression tests; 8 tests ignored (one library, five privileged live-loopback, and two exclusive-port replay). Re-run after restoring the fuzz target's per-direction logical-length assertion.
-- Final focused rerun: `cargo test --locked reassembly::tests` passed all 60 reassembly tests.
-- `cargo build --release --locked`: passed.
-- `cargo clippy --all-targets --locked -- -D warnings`: passed.
-- `cargo +nightly fuzz run stream_reassembly -- -max_total_time=40`: passed, 243,992 runs in 41 seconds.
-- After review feedback, `cargo test --locked reassembly::tests::tcp_memory_budget_counts_data_and_coverage_capacities` passed; the full `cargo test --locked` passed with 338 library tests; and `cargo +nightly fuzz run stream_reassembly -- -max_total_time=20` passed, 106,628 runs in 21 seconds. The fuzz target now checks both aggregate allocated capacity and maximum per-direction logical buffer length.
-- `git diff --check`: passed. No wire fields, dependencies, or packet-decoding behavior changed.
+- `cargo test --locked`: 338 library, 65 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, and 1 protocol-regression tests passed; 8 ignored.
+- `cargo build --release --locked` and `cargo clippy --all-targets --locked -- -D warnings` passed.
+- `cargo +nightly fuzz run stream_reassembly -- -max_total_time=40`: 243,992 runs in 41 seconds; after restoring the per-direction invariant, the 20-second run passed 106,628 runs.
+- `git diff --check`: passed. PR #269 is rebased/merged with the JAM-198 main commit; CI rerun is pending.
