@@ -1,9 +1,9 @@
 # Current Task
 
-JAM-193: render the existing `capture_file_error` SSE event when the capture agent rejects a `start_capture_file` request.
+JAM-198: update the vulnerable `source-map-js` lockfile entry to a patched release so the npm audit CI gate passes.
 
-Worktree: `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected`; branch: `jamesmbrownjr/jam-193-p2-capture_file_error-sse-event-has-no-ui-handler-rejected`.
+Worktree: `.worktrees/npm-audit-source-map-js`; branch: `jamesmbrownjr/jam-198-p1-ci-npm-audit-gate-fails-on-source-map-js-ghsa-68fv-2mgg`.
 
-Scope: add UI state and a dismissible rejection banner in `app/page.tsx`; clear the previous rejection when a new capture-file start is sent. Add integration regressions for rejected start/display/dismiss/retry and malformed event messages. No agent, wire, mapping, or control-route changes.
+Scope: prefer the existing semver ranges and update only `package-lock.json` for `source-map-js` 1.2.2 or later. Verify `npm audit` and `.github/scripts/check-npm-audit.mjs`, then run lint, build and Vitest. Avoid an allowlist unless no patched release can be installed.
 
-Gate approved by James in chat on 2026-10-05. PR #268 is open, rebased onto current main, all CI checks and independent code/security reviews pass. Waiting for James's real-browser check of the rejection banner before merge; the computer-use gate blocked Chrome access for this session.
+Gate approved by James directly in chat on 2026-10-06. PR #269 (JAM-170) is blocked by this known advisory on `main`; update it after this fix merges.
