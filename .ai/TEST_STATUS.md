@@ -201,3 +201,14 @@ Worktree: `.worktrees/reassembly-coverage-memory-accounting`.
 - `cargo build --release --locked` and `cargo clippy --all-targets --locked -- -D warnings` passed.
 - `cargo +nightly fuzz run stream_reassembly -- -max_total_time=40`: 243,992 runs in 41 seconds; after restoring the per-direction invariant, the 20-second run passed 106,628 runs.
 - `git diff --check`: passed. PR #269 is rebased/merged with the JAM-198 main commit; CI rerun is pending.
+
+## JAM-167 — verified locally 2026-10-06
+
+In `.worktrees/feed-fragment-reassembled-tcp`.
+
+- RED: `cargo test --locked tcp_segment_rebuilt_from_ip_fragments_continues_with_a_later_tcp_segment -- --nocapture` failed because the later ordinary segment produced `L7Info::None` instead of completing HTTP.
+- `cargo test --locked`: 338 library + 65 binary + 12 control-auth + 2 disk-invariant + 4 pcapng + 1 protocol-regression tests passed; 8 ignored.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed.
+- `cargo build --release --locked`: passed.
+- `git diff --check`: passed.
+- `cargo fmt --all -- --check`: reports extensive formatting differences in untouched existing Rust files; this is not a CI step. New code was formatted to rustfmt's output by inspection.

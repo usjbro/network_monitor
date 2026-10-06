@@ -1,3 +1,9 @@
+# JAM-167 — implementation underway, verified locally, 2026-10-06
+
+Claimed and started in `.worktrees/feed-fragment-reassembled-tcp` on `jamesmbrownjr/jam-167-p2-feed-fragment-reassembled-tcp-through-stream-reassembly`. Reconstructed TCP datagrams now resolve their flow key through the capture loop's `FlowTable::key_for` and pass through the existing sequence-aware TCP reassembler; original fragment packet and flow accounting are retained. Added a regression for an HTTP request line split between a fragment-reassembled TCP segment and a later ordinary segment, plus the design-spec note.
+
+The regression was observed failing before implementation and passing after. `cargo test --locked` (422 passed, 8 ignored), release build and strict Clippy pass. Repository-wide rustfmt check reports existing differences across untouched files; no formatter is enforced in CI. Local `codex review --uncommitted` found no actionable regressions and checked both fragment arrival orders. No commit or PR yet; complete the security-focused review before publication.
+
 # JAM-184 — review fix verified, publication next, 2026-10-05
 
 James invoked epic-task-cycle JAM-184 and approved BOTH feed/controls, the revised spec, implementation plan and Native execution directly in this session. Existing gate is approved/delegated; Linear In Progress. All edits remain in `.worktrees/capture-agent-control-token` on `jamesmbrownjr/jam-184-authenticate-the-capture-agent-control-socket-with-a-per`.

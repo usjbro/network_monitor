@@ -1,9 +1,9 @@
 # Current Task
 
-JAM-170: account for the IPv4-fragment and TCP-stream coverage buffers and allocated vector capacities in the reassembly memory budgets.
+JAM-167: feed fragment-reassembled TCP through stream reassembly.
 
-Worktree: `.worktrees/reassembly-coverage-memory-accounting`; branch: `jamesmbrownjr/jam-170-p2-account-for-reassembly-coverage-storage-in-memory-limits`.
+Worktree: `.worktrees/feed-fragment-reassembled-tcp`; branch: `jamesmbrownjr/jam-167-p2-feed-fragment-reassembled-tcp-through-stream-reassembly`.
 
-Scope: `capture-agent/src/reassembly.rs` and `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs`; update the stream-reassembly design spec and `.ai/` verification state. Count `data` and byte-backed `filled` vector capacities against the existing 4 MiB total fragment and TCP ceilings. Add tests that fill each budget and verify accounting/eviction, and ensure fuzz checks use the full accounting. No wire/API or unrelated reassembly behavior changes.
+Scope: route reconstructed IPv4 TCP segments into the existing TCP stream reassembly path; add a regression where an HTTP message starts in a fragment-reconstructed TCP segment and completes in a later ordinary segment. Preserve non-fragmented flow/L7 behavior. No wire changes.
 
-Gate approved by James directly in chat on 2026-10-06. The gate is claimed and delegated in-session; Linear JAM-170 is In Review. JAM-198 merged as PR #270 at `13695b5`, clearing the npm-audit blocker on `main`; PR #269 is being updated to that base before its final CI/merge cycle.
+Gate approved in Slack under James's standing queue instruction and explicitly authorized in chat on 2026-10-06. Gate claimed and delegated in-session; Linear JAM-167 is In Progress.

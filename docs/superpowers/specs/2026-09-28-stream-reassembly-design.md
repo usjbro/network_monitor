@@ -48,6 +48,8 @@ A group holds a byte-coverage map plus the first fragment's IPv4 header bytes. O
 
 A group is emitted as soon as it is fully covered. A group that can provably make no further progress (a hole created by a short-captured fragment) is emitted immediately with `incomplete — frames truncated at capture` rather than held to timeout — no future fragment can fill bytes that were never captured. Everything else is emitted at timeout with `incomplete — frames missing`.
 
+When the rebuilt datagram is TCP, the capture loop derives its flow identity from the reconstructed packet and feeds its TCP sequence/payload through the same per-direction stream reassembler used for ordinary TCP packets. This allows later non-fragmented segments to complete an application message begun in a fragment-reassembled segment. The original physical fragment remains the packet event and is counted once; the reconstructed packet supplies transport identity and L7 data only.
+
 IPv4 with an authentication extension header is deliberately **not** reassembled (its extension bytes sit between the header slice and the fragment payload, and fragmented-plus-AH is vanishingly rare) — an explicit skip, not an unnoticed gap. IPv6 fragment extension headers are out of scope per the issue (IPv4 fragments and TCP segments only).
 
 ## TCP segment reassembly

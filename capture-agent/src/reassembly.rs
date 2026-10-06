@@ -39,7 +39,7 @@
 //! the prefix and status exposed here are what it needs to build on.
 
 use crate::flow::FlowKey;
-use crate::l7::{sniff_l7, sniff_l7_desegmenting, L7Info, L7Sniff};
+use crate::l7::{sniff_l7_desegmenting, L7Info, L7Sniff};
 use crate::parse::{parse_packet, LinkType, ParsedPacket, TransportProtocol};
 use std::collections::HashMap;
 
@@ -1212,7 +1212,43 @@ impl StreamReassembler {
     /// `flow` is `FlowTable::key_for`'s result for this packet — the flow
     /// identity and direction. `None` (a packet matching no tracked flow)
     /// simply means no desegmentation, same as today.
-    pub fn sniff(&mut self, packet: &ParsedPacket, flow: Option<(&FlowKey, bool)>, now_ms: u64) -> SniffOutcome {
+    pub fn sniff(
+        &mut self,
+        packet: &ParsedPacket,
+        flow: Option<(&FlowKey, bool)>,
+        now_ms: u64,
+    ) -> SniffOutcome {
+        self.sniff_with_flow_resolver(packet, flow, now_ms, |_| None)
+    }
+
+    /// Like [`Self::sniff`], with a resolver for flow identity on packets
+    /// reconstructed from IP fragments. The physical fragments have no TCP
+    /// ports, so the caller cannot provide their flow key up front; once the
+    /// datagram is rebuilt, the resolver derives the same identity the flow
+    /// table will use and lets the TCP bytes enter the ordinary stream buffer.
+    pub fn sniff_with_flow_resolver<F>(
+        &mut self,
+        packet: &ParsedPacket,
+        flow: Option<(&FlowKey, bool)>,
+        now_ms: u64,
+        mut resolve_flow: F,
+    ) -> SniffOutcome
+    where
+        F: FnMut(&ParsedPacket) -> Option<(FlowKey, bool)>,
+    {
+        self.sniff_inner(packet, flow, now_ms, &mut resolve_flow)
+    }
+
+    fn sniff_inner<F>(
+        &mut self,
+        packet: &ParsedPacket,
+        flow: Option<(&FlowKey, bool)>,
+        now_ms: u64,
+        resolve_flow: &mut F,
+    ) -> SniffOutcome
+    where
+        F: FnMut(&ParsedPacket) -> Option<(FlowKey, bool)>,
+    {
         // An IPv4 fragment has no transport layer and no payload of its own,
         // so reassembly is the only way it gets an application layer at all.
         if packet.ip_fragment.is_some() {
@@ -1228,14 +1264,32 @@ impl StreamReassembler {
             // Back through the ordinary parser, so a reassembled datagram's
             // ports and payload come from the same path as any other packet's.
             let reassembled_packet = parse_packet(&datagram.bytes, LinkType::Raw);
-            let info = reassembled_packet
-                .as_ref()
-                .map(|rejoined| sniff_l7(&rejoined.payload, rejoined.dst_port))
-                .unwrap_or(L7Info::None);
+            let tcp_outcome = reassembled_packet.as_ref().map_or_else(
+                || SniffOutcome {
+                    info: L7Info::None,
+                    status: None,
+                    need_more_bytes: None,
+                    reassembled_packet: None,
+                },
+                |rejoined| {
+                    let resolved_flow = resolve_flow(rejoined);
+                    let resolved_flow_ref =
+                        resolved_flow.as_ref().map(|(key, outbound)| (key, *outbound));
+                    self.sniff_inner(rejoined, resolved_flow_ref, now_ms, resolve_flow)
+                },
+            );
+            // Preserve an IP-level incompleteness claim. Otherwise prefer
+            // TCP's status when it has buffered the rebuilt segment; a fully
+            // reassembled IP datagram remains the fallback status.
+            let combined_status = if status != ReassemblyStatus::Reassembled {
+                Some(status)
+            } else {
+                tcp_outcome.status.or(Some(status))
+            };
             return SniffOutcome {
-                info,
-                status: Some(status),
-                need_more_bytes: None,
+                info: tcp_outcome.info,
+                status: combined_status,
+                need_more_bytes: tcp_outcome.need_more_bytes,
                 reassembled_packet,
             };
         }
@@ -1329,6 +1383,7 @@ impl StreamReassembler {
 mod tests {
     use super::*;
     use crate::l7::build_client_hello;
+    use crate::l7::sniff_l7;
     use crate::flow::FlowTable;
     use crate::parse::Ipv4Fragment;
     use etherparse::{IpFragOffset, IpNumber, Ipv4Header, TcpHeader};
@@ -1515,6 +1570,63 @@ mod tests {
         let fragmented = ip.children().find(|(name, _)| *name == "Other").map(|(_, node)| node).unwrap();
         assert_eq!(fragmented.bytes, physical_bytes);
         assert_eq!(fragmented.packets, 2);
+    }
+
+    #[test]
+    fn tcp_segment_rebuilt_from_ip_fragments_continues_with_a_later_tcp_segment() {
+        let first_payload = b"GET /abcdefghijklmnopqrstuvw";
+        assert_eq!(
+            first_payload.len(),
+            28,
+            "the first IP fragment ends on an 8-byte boundary"
+        );
+        let second_payload = b" HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let sequence = 1_000;
+
+        let mut tcp = TcpHeader::new(51_000, 80, sequence, 65_535);
+        tcp.ack = true;
+        let mut datagram = Vec::new();
+        tcp.write(&mut datagram).expect("test TCP header write");
+        datagram.extend_from_slice(first_payload);
+
+        let (head, tail) = datagram.split_at(20 + first_payload.len());
+        let first_fragment =
+            ipv4_fragment("10.0.0.1", "10.0.0.2", 44, IpNumber::TCP, 0, true, head);
+        let last_fragment =
+            ipv4_fragment("10.0.0.1", "10.0.0.2", 44, IpNumber::TCP, 48, false, tail);
+        let ordinary_segment = tcp_segment(
+            "10.0.0.1",
+            "10.0.0.2",
+            51_000,
+            80,
+            sequence + first_payload.len() as u32,
+            second_payload,
+        );
+
+        let mut reassembly = StreamReassembler::new();
+        let flows = FlowTable::new(vec!["10.0.0.1".to_string()]);
+        reassembly
+            .sniff_with_flow_resolver(&first_fragment, None, 0, |packet| flows.key_for(packet));
+        let from_fragment = reassembly
+            .sniff_with_flow_resolver(&last_fragment, None, 1, |packet| flows.key_for(packet));
+        assert!(
+            matches!(from_fragment.info, L7Info::None),
+            "the reconstructed segment has an incomplete HTTP header"
+        );
+        assert!(from_fragment.reassembled_packet.is_some());
+
+        let flow = flows.key_for(&ordinary_segment);
+        let completed = reassembly.sniff(
+            &ordinary_segment,
+            flow.as_ref().map(|(key, outbound)| (key, *outbound)),
+            2,
+        );
+        match completed.info {
+            L7Info::Http { path, .. } => assert_eq!(path, "/abcdefghijklmnopqrstuvw"),
+            other => panic!(
+                "expected the reconstructed TCP prefix plus later segment to complete HTTP, got {other:?}"
+            ),
+        }
     }
 
     #[test]
