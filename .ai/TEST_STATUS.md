@@ -200,10 +200,11 @@ In `.worktrees/npm-audit-sharp`, updated the existing Next.js optional `sharp` r
 - `npm ci --ignore-scripts --cache /private/tmp/jam199-npm-cache`: passed.
 - `npm audit --json`: still reports five high advisories across packages in the existing `braces` chain, plus two moderate advisories; no sharp advisory remains. `node .github/scripts/check-npm-audit.mjs /private/tmp/jam199-audit.json`: passed, only the existing allowlisted GHSA-vfj7-8cjw-p6xm.
 - `npm run lint`: passed.
-- `npm run build`: passed with existing middleware deprecation and Edge Runtime `process.cwd` warnings.
+- `npm run build`: passed with the existing middleware deprecation warning.
 - `npx vitest run`: 82 files, 601 tests passed.
 - `git diff --check`: passed.
 - Advisory grace-window decision: keep high/critical advisories as immediate blockers when a patched dependency is available. This fix was available within Next.js's current declared range; a grace period would knowingly leave a fixable high-risk dependency in place and delay unrelated remediation only until the audit update lands.
+- PR #272 (`3a54697`): all GitHub checks passed, including Web (Next.js), CodeQL, Rust analysis, E2E, fuzz, and Snyk; merge state reported `CLEAN`.
 
 ## JAM-170 — verified 2026-10-06
 
