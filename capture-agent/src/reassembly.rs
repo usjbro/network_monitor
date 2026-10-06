@@ -818,6 +818,18 @@ impl TcpReassembler {
         self.bytes_held
     }
 
+    /// Largest logical TCP buffer length across active directions. This lets
+    /// the external fuzz target assert the per-direction bound independently
+    /// of aggregate allocation accounting.
+    #[doc(hidden)]
+    pub fn max_buffered_len(&self) -> usize {
+        self.streams
+            .values()
+            .map(|stream| stream.data.len().max(stream.filled.len()))
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Drops every stream, keeping the lifetime counters.
     fn clear(&mut self) {
         self.streams.clear();
@@ -2454,6 +2466,7 @@ mod tests {
             };
             r.feed(&key, 100, &payload, payload.len() as u32, i as u64);
 
+            assert!(r.max_buffered_len() <= MAX_TCP_STREAM_BYTES);
             let allocated = r.streams.values().map(|stream| stream.data.capacity() + stream.filled.capacity()).sum::<usize>();
             assert_eq!(
                 r.bytes_held(),
