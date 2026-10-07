@@ -248,3 +248,16 @@ In `.worktrees/flow-table-replay-clock`, added an opt-in authenticated binary re
 - `cargo build --release --locked`: passed.
 - `cargo clippy --all-targets --locked -- -D warnings`: passed.
 - `git diff --check`: passed.
+
+## JAM-203 — replay capture-time timestamps (2026-10-07)
+
+In `.worktrees/replay-capture-time-timestamps`. The focused binary replay regression checks capture timestamps at fast and realtime speeds for findings and transaction outcomes, checks an emitted packet timestamp, and verifies packet/finding IDs remain unique. The fast-speed packet event is intentionally rate-limited, so packet timestamp is asserted in realtime only; `relativeTimeMs` remains agent elapsed time.
+
+- `cargo test --locked --bin capture-agent unanswered_finding_timestamp_uses_the_expiry_capture_time`: passed (1 test).
+- `cargo test --locked --test replay_compatibility replay_packet_and_unanswered_timestamps_are_capture_time_at_both_speeds -- --ignored --test-threads=1`: passed (1 test; 9.33s). An initial sandbox attempt could not bind `127.0.0.1:9990` (`Operation not permitted`); the same command passed when rerun with local-network permission.
+- `cargo test --locked`: passed (339 library, 68 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, 1 protocol-regression; 9 ignored).
+- `cargo build --release --locked`: passed.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed.
+- `git diff --check`: passed.
+- `cargo fmt --check`: not clean because rustfmt reports extensive pre-existing differences across unrelated Rust files; no repository-wide formatting was applied.
+- Independent Codex and Claude Code code/security reviews of the worktree diff: no blocking findings. Documented the `u64::MAX` microsecond saturation edge noted by Claude; no timer clamp was added (JAM-190 scope).

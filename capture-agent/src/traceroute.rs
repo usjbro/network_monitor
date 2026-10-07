@@ -305,6 +305,7 @@ async fn run_traceroute_loop<P: Prober>(
     mut on_hop: impl FnMut(HopResult),
     mut prober: P,
 ) -> Vec<HopResult> {
+    // Wall-clock monotonic deadline: traceroute bounds real probe time, not capture timestamps.
     let deadline = Instant::now() + total_trace_timeout;
     let mut results = Vec::new();
 
@@ -356,6 +357,7 @@ async fn send_probe_and_await_reply(
     let identifier = session.identifier;
     let packet = build_echo_request(identifier, sequence);
 
+    // Wall-clock monotonic RTT for the live ICMP probe.
     let started = Instant::now();
     session.socket.send_to(&packet, dest).await.ok()?;
 

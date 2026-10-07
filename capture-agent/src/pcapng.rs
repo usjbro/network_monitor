@@ -255,6 +255,7 @@ impl Writer {
     }
 
     pub fn write_interface_stats(&mut self, received: u64, dropped: u64) -> io::Result<()> {
+        // Wall-clock timestamp for the time this live writer records its ISB.
         write_interface_statistics_block(&mut self.file, SystemTime::now(), received, dropped)
         // Deliberately not counted toward bytes_written: that field tracks
         // packet-data volume for the UI ("N bytes written" of *capture*),
