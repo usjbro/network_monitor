@@ -177,11 +177,9 @@ fn binary_replay_ages_reused_udp_tuple_by_capture_time() {
         .set_read_timeout(Some(Duration::from_millis(300)))
         .unwrap();
 
-    let mut final_tx_bytes = None;
     let mut replay_finished = false;
-    while Instant::now() < deadline
-        && (final_tx_bytes != Some(one_packet_bytes) || !replay_finished)
-    {
+    let mut final_tx_bytes_after_eof = None;
+    while Instant::now() < deadline && final_tx_bytes_after_eof != Some(one_packet_bytes) {
         replay_finished |= replay_finished_rx.try_recv().is_ok();
         let mut line = String::new();
         match reader.read_line(&mut line) {
@@ -190,8 +188,10 @@ fn binary_replay_ages_reused_udp_tuple_by_capture_time() {
                 if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
                     if event["type"] == "connection_update"
                         && event["connection"]["localPort"] == local_port
+                        && replay_finished
                     {
-                        final_tx_bytes = event["connection"]["txBytesTotal"].as_u64();
+                        final_tx_bytes_after_eof =
+                            event["connection"]["txBytesTotal"].as_u64();
                     }
                 }
             }
@@ -207,14 +207,11 @@ fn binary_replay_ages_reused_udp_tuple_by_capture_time() {
     drop(agent);
     let stdout = stdout_thread.join().unwrap();
     let stderr = stderr_thread.join().unwrap();
-    assert!(
-        replay_finished,
-        "stdout: {stdout}\nstderr: {stderr}"
-    );
+    assert!(replay_finished, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(
-        final_tx_bytes,
+        final_tx_bytes_after_eof,
         Some(one_packet_bytes),
-        "reused tuple retained bytes from the expired flow; stdout: {stdout}\nstderr: {stderr}"
+        "post-EOF connection snapshot retained bytes from the expired flow; stdout: {stdout}\nstderr: {stderr}"
     );
 }
 

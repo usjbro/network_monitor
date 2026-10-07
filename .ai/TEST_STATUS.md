@@ -240,7 +240,7 @@ In `.worktrees/feed-fragment-reassembled-tcp`.
 
 ## JAM-189 replay binary follow-up — verified 2026-10-07
 
-In `.worktrees/flow-table-replay-clock`, added an opt-in authenticated binary replay test using a classic-pcap fixture with the same UDP tuple at capture times 61 seconds apart. It checks the emitted connection snapshot contains only one packet's bytes after the stale flow is replaced.
+In `.worktrees/flow-table-replay-clock`, added an opt-in authenticated binary replay test using a classic-pcap fixture with the same UDP tuple at capture times 61 seconds apart. It checks a connection snapshot observed after replay EOF contains only one packet's bytes after the stale flow is replaced.
 
 - Negative control: temporarily routed replay packets through the live `observe` path; the binary test failed as intended (142 accumulated bytes vs. the expected 71). Restored the production path afterward.
 - `cargo test --locked --test replay_compatibility -- --ignored`: 2 passed under Cargo's default parallel runner; the fixed-port tests now share a mutex, and the new test waits for replay EOF before asserting its final snapshot.

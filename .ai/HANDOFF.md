@@ -18,7 +18,7 @@ The regression was observed failing before implementation and passing after. `ca
 
 # JAM-189 — end-to-end replay-aging coverage, 2026-10-07
 
-In `.worktrees/flow-table-replay-clock` on the existing PR #273 branch, added an opt-in authenticated binary replay test. It generates a classic-pcap with two equal UDP tuples 61 seconds apart and verifies, after replay EOF, the periodic connection snapshot reports only the second packet's bytes. The fixed-port replay tests share a mutex so Cargo's default parallel runner cannot race them. A negative-control run with replay observation temporarily changed to the live path failed with 142 bytes instead of 71; the production code was restored.
+In `.worktrees/flow-table-replay-clock` on the existing PR #273 branch, added an opt-in authenticated binary replay test. It generates a classic-pcap with two equal UDP tuples 61 seconds apart and verifies a periodic connection snapshot observed after replay EOF reports only the second packet's bytes. The fixed-port replay tests share a mutex so Cargo's default parallel runner cannot race them. A negative-control run with replay observation temporarily changed to the live path failed with 142 bytes instead of 71; the production code was restored.
 
 Verified: both ignored `replay_compatibility` integration tests passed; `cargo test --locked` passed (339 library, 67 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, 1 protocol-regression; 8 ignored); release build and warnings-denied Clippy passed. The test is ignored by default because it needs exclusive `127.0.0.1:9990`. Change is currently uncommitted and not yet included in PR #273.
 
