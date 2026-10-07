@@ -587,6 +587,24 @@ fn flow_aging_now_ms(replaying: bool, replay_now_ms: u64, agent_now_ms: u64) -> 
     }
 }
 
+/// Updates the observed flow and publishes its replay timestamp under the
+/// same lock used by the periodic emitter. This keeps snapshot counters and
+/// their elapsed-time denominator on a consistent replay frame boundary.
+fn with_flow_observation<T>(
+    flow_table: &Mutex<FlowTable>,
+    replay_flow_clock: &AtomicU64,
+    replaying: bool,
+    now_ms: u64,
+    observe: impl FnOnce(&mut FlowTable) -> T,
+) -> T {
+    let mut table = flow_table.lock().unwrap();
+    let result = observe(&mut table);
+    if replaying {
+        replay_flow_clock.store(now_ms, Ordering::Relaxed);
+    }
+    result
+}
+
 /// Everything `resolve_packet_source` resolves once at startup and never
 /// re-resolves — this repo's own explicit design decision (spec Components
 /// §2) to avoid doubling the state space of the capture loop with a
@@ -1714,7 +1732,6 @@ async fn main() -> std::io::Result<()> {
                             reassembly_now_ms(mode == "replay", &mut replay_clock, timestamp, now_ms);
                         let flow_now_ms =
                             flow_aging_now_ms(mode == "replay", reassembly_now_ms, now_ms);
-                        replay_flow_clock.store(flow_now_ms, Ordering::Relaxed);
                         // JAM-174: libpcap and EPBs both retain the length
                         // before capture. Check before parsing: a cut frame
                         // can still contain a complete, decodable IP packet.
@@ -1790,9 +1807,12 @@ async fn main() -> std::io::Result<()> {
                         // reconstructed datagram to its transport flow without
                         // counting its bytes as another physical frame.
                         // `parsed` remains the packet-event/capture-file data.
-                        let (observe_result, txn_flow) = {
-                            let mut table = flow_table.lock().unwrap();
-                            match sniff_outcome.reassembled_packet.as_ref() {
+                        let (observe_result, txn_flow) = with_flow_observation(
+                            &flow_table,
+                            &replay_flow_clock,
+                            mode == "replay",
+                            flow_now_ms,
+                            |table| match sniff_outcome.reassembled_packet.as_ref() {
                                 Some(reassembled) => (
                                     if mode == "replay" {
                                         table.observe_reassembled_replay(
@@ -1809,8 +1829,6 @@ async fn main() -> std::io::Result<()> {
                                             flow_now_ms,
                                         )
                                     },
-                                    // A completed fragment group's ports are
-                                    // only in the reassembled datagram.
                                     table.key_for(reassembled),
                                 ),
                                 None => (
@@ -1821,8 +1839,8 @@ async fn main() -> std::io::Result<()> {
                                     },
                                     flow_ident.clone(),
                                 ),
-                            }
-                        };
+                            },
+                        );
                         if let Some(id) = observe_result
                             .as_ref()
                             .and_then(|result| result.closed_connection_id.as_ref())
@@ -2093,11 +2111,6 @@ async fn main() -> std::io::Result<()> {
             loop {
                 interval.tick().await;
                 let agent_now_ms = start.elapsed().as_millis() as u64;
-                let now_ms = flow_aging_now_ms(
-                    replaying,
-                    replay_flow_clock.load(Ordering::Relaxed),
-                    agent_now_ms,
-                );
                 // Evict first so a flow that goes stale this tick emits only
                 // a ConnectionClosed event, not also a now-stale
                 // connection_update in the same pass.
@@ -2113,6 +2126,13 @@ async fn main() -> std::io::Result<()> {
                     protocol_hierarchy,
                 ) = {
                     let mut ft = flow_table.lock().unwrap();
+                    // Read under the same lock that protects replay-clock
+                    // publication and packet-counter updates.
+                    let now_ms = flow_aging_now_ms(
+                        replaying,
+                        replay_flow_clock.load(Ordering::Relaxed),
+                        agent_now_ms,
+                    );
                     let evicted = ft.evict_stale(now_ms);
                     let snapshots = ft.snapshot(now_ms);
                     // JAM-14: per-host/per-pair rollups, cumulative since
@@ -2672,13 +2692,16 @@ mod tests {
         is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, note_capture_truncation, parse_max_flows,
         parse_replay_local_addrs, parse_replay_speed, protocol_node_to_json,
         packet_osi_layer, resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
-        flow_aging_now_ms, reassembly_now_ms, validate_snaplen, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN,
+        flow_aging_now_ms, with_flow_observation, reassembly_now_ms, validate_snaplen, ReplayClock, ReplaySpeed,
+        MAX_CAPTURE_FILTER_LEN,
         MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::flow::FlowTable;
     use capture_agent::l7::L7Info;
     use capture_agent::parse::{LinkType, TransportProtocol};
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use tokio::sync::broadcast;
 
     #[test]
@@ -3389,7 +3412,8 @@ mod tests {
             origin + std::time::Duration::from_secs(60) + std::time::Duration::from_millis(1);
         let mut replay_clock = ReplayClock::default();
         let replay_now = reassembly_now_ms(true, &mut replay_clock, origin, 1);
-        let mut flows = FlowTable::new(vec!["192.0.2.1".to_string()]);
+        let flows = Mutex::new(FlowTable::new(vec!["192.0.2.1".to_string()]));
+        let replay_flow_clock = AtomicU64::new(0);
         let mut frame = Vec::new();
         etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
             .ipv4([192, 0, 2, 1], [198, 51, 100, 2], 64)
@@ -3397,19 +3421,35 @@ mod tests {
             .write(&mut frame, b"dns")
             .unwrap();
         let packet = parse::parse_packet(&frame, LinkType::Ethernet).unwrap();
-        assert!(flows
-            .observe_replay(&packet, &L7Info::None, flow_aging_now_ms(true, replay_now, 1))
-            .is_some());
-        let original_id = flows.snapshot(0)[0].key.connection_id();
+        let first_flow_time = flow_aging_now_ms(true, replay_now, 1);
+        let first = with_flow_observation(
+            &flows,
+            &replay_flow_clock,
+            true,
+            first_flow_time,
+            |flows| flows.observe_replay(&packet, &L7Info::None, first_flow_time),
+        );
+        assert!(first.is_some());
+        assert_eq!(replay_flow_clock.load(Ordering::Relaxed), first_flow_time);
+        let original_id = flows.lock().unwrap().snapshot(0)[0].key.connection_id();
 
         let replay_now = reassembly_now_ms(true, &mut replay_clock, later, 2);
         let flow_time = flow_aging_now_ms(true, replay_now, 2);
         assert_eq!(flow_time, 60_001);
-        let second = flows.observe_replay(&packet, &L7Info::None, flow_time).unwrap();
+        let second = with_flow_observation(
+            &flows,
+            &replay_flow_clock,
+            true,
+            flow_time,
+            |flows| flows.observe_replay(&packet, &L7Info::None, flow_time),
+        );
+        let second = second.unwrap();
+        assert_eq!(replay_flow_clock.load(Ordering::Relaxed), flow_time);
         assert_eq!(
             second.closed_connection_id.as_deref(),
             Some(original_id.as_str())
         );
+        let mut flows = flows.lock().unwrap();
         assert_eq!(flows.total_flows_observed(), 2);
         assert_eq!(flows.idle_evictions(), 1);
         assert_eq!(flows.snapshot(flow_time).len(), 1);
