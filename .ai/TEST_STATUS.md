@@ -237,3 +237,14 @@ In `.worktrees/feed-fragment-reassembled-tcp`.
 - `cargo build --release --locked`: passed.
 - `git diff --check`: passed.
 - `cargo fmt --all -- --check`: reports extensive formatting differences in untouched existing Rust files; this is not a CI step. New code was formatted to rustfmt's output by inspection.
+
+## JAM-189 replay binary follow-up — verified 2026-10-07
+
+In `.worktrees/flow-table-replay-clock`, added an opt-in authenticated binary replay test using a classic-pcap fixture with the same UDP tuple at capture times 61 seconds apart. It checks the emitted connection snapshot contains only one packet's bytes after the stale flow is replaced.
+
+- Negative control: temporarily routed replay packets through the live `observe` path; the binary test failed as intended (142 accumulated bytes vs. the expected 71). Restored the production path afterward.
+- `cargo test --locked --test replay_compatibility -- --ignored`: 2 passed under Cargo's default parallel runner; the fixed-port tests now share a mutex, and the new test waits for replay EOF before asserting its final snapshot.
+- `cargo test --locked`: 339 library + 67 binary + 12 control-auth + 2 disk-invariant + 4 pcapng + 1 protocol-regression tests passed; 8 ignored.
+- `cargo build --release --locked`: passed.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed.
+- `git diff --check`: passed.
