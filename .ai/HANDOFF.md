@@ -1,3 +1,15 @@
+# JAM-189 — replay flow-aging clock implemented, 2026-10-06
+
+Worktree: `.worktrees/flow-table-replay-clock`; branch: `jamesmbrownjr/jam-189-p2-flow-table-ages-flows-on-wall-clock-time-during-replay`. The capture loop now feeds replay-clock milliseconds to replay flow observation, and the periodic emitter reads the latest replay timestamp for idle eviction and flow snapshots. The replay observe path expires only the matching stale tuple on arrival in O(1), returning its close ID for a `connection_closed` event; this handles fast replay that processes both connections before a periodic tick. Live mode continues to use agent elapsed time and its existing periodic-only expiry behavior, including during quiet capture; emitter scheduling remains wall-clock driven.
+
+Clock choice: packet/finding rate limiters and packet-event `relative_time_ms` remain on agent elapsed time. This preserves real-time throttling during fast replay and existing UI-relative packet timeline behavior. Flow duration/age/snapshot math follows traffic time as required. The stream-reassembly design spec records this distinction.
+
+Regression tests cover UDP tuple reuse after 60.001 seconds of replay time before any periodic sweep (old flow evicted, close id returned, second flow observed) and confirm live observation still relies on the periodic sweep. Release build, full default `cargo test --locked`, and warnings-denied Clippy pass. Crate-wide rustfmt check reports substantial existing differences in untouched files, so formatting was not run across the crate. See TEST_STATUS.md for full results.
+
+Independent review, publication, CI, and merge remain. The full JAM-189 Slack thread was read; no replies. Gate claimed and delegated in-session after James's direct chat approval. No wire/API changes.
+
+---
+
 # JAM-167 — implementation underway, verified locally, 2026-10-06
 
 Claimed and started in `.worktrees/feed-fragment-reassembled-tcp` on `jamesmbrownjr/jam-167-p2-feed-fragment-reassembled-tcp-through-stream-reassembly`. Reconstructed TCP datagrams now resolve their flow key through the capture loop's `FlowTable::key_for` and pass through the existing sequence-aware TCP reassembler; original fragment packet and flow accounting are retained. Added a regression for an HTTP request line split between a fragment-reassembled TCP segment and a later ordinary segment, plus the design-spec note.

@@ -4,6 +4,15 @@ Published review follow-up: corrected the wire-fixture regeneration recipe to au
 
 # Test Status
 
+## JAM-189 — replay flow-aging clock
+
+- Regression-first evidence: the first test version incorrectly swept before re-observation; independent review reproduced the production ordering and found the stale tuple was refreshed before the periodic sweep. The corrected test initially failed because the close-id result field was absent. Now replay-specific `FlowTable::observe_replay` expires just the matching stale flow before updating it, returns its close ID, and the capture loop emits `ConnectionClosed`; live observation retains periodic-only eviction. The corrected test observes the same UDP tuple 60.001 seconds later without an intervening sweep and verifies one idle eviction plus two total flows, while a live-path test verifies no arrival-time expiry.
+- `cargo build --release --locked`: passed.
+- `cargo test --locked`: passed (338 library tests, 67 main tests, 19 integration tests across enabled suites; 5 privileged live-capture tests and 2 exclusive-port replay tests ignored by default).
+- `cargo clippy --all-targets --locked -- -D warnings`: passed.
+- `git diff --check`: passed.
+- `cargo fmt --manifest-path capture-agent/Cargo.toml --check` does not pass on the existing crate baseline; it reports formatting differences across numerous untouched files (including existing `main.rs` content). No crate-wide formatting was applied to avoid unrelated changes. New/changed lines were manually aligned with rustfmt output.
+
 ## JAM-184 — verified 2026-10-05, independent review fix verified
 
 Commands run in `.worktrees/capture-agent-control-token` (Rust in its capture-agent subdirectory or with --manifest-path).

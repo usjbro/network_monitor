@@ -339,12 +339,21 @@ fn status_for(state: &FlowState, protocol: TransportProtocol) -> &'static str {
     }
 }
 
+fn idle_threshold_ms(state: &FlowState, protocol: TransportProtocol) -> u64 {
+    match status_for(state, protocol) {
+        "TIME_WAIT" | "CLOSE_WAIT" => 120_000,
+        "SYN_SENT" => 30_000,
+        _ if protocol != TransportProtocol::Tcp => 60_000,
+        _ => 1_800_000,
+    }
+}
+
 /// `observe()`'s result: the packet's attributed direction (the single
 /// source of truth so callers, e.g. the capture loop's aggregate throughput
 /// counters, don't need their own separate src/dst-vs-local_addrs check that
-/// could drift out of sync with this one), plus two JAM-12 Expert Info
-/// signals computed from the same per-packet state update rather than
-/// requiring a second pass over the flow table.
+/// could drift out of sync with this one), plus JAM-12 Expert Info signals
+/// and the close id when this packet replaces an expired flow with the same
+/// key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObserveResult {
     /// `true` = outbound/local-to-remote, `false` = inbound.
@@ -363,6 +372,9 @@ pub struct ObserveResult {
     /// regardless of whether it's used would cost every packet on every
     /// flow to save one clone on the rare RST-transition packet.
     pub connection_id: Option<String>,
+    /// Connection id for a stale flow with this tuple that was closed before
+    /// this packet created a fresh flow.
+    pub closed_connection_id: Option<String>,
 }
 
 impl FlowTable {
@@ -497,7 +509,19 @@ impl FlowTable {
     /// Returns `None` when the packet matched no tracked flow (see
     /// `ObserveResult` for the `Some` case).
     pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<ObserveResult> {
-        self.observe_inner(packet, l7, now_ms, true)
+        self.observe_inner(packet, l7, now_ms, true, false)
+    }
+
+    /// Replay variant: expire the matching stale tuple before updating it,
+    /// since a fast replay may process several idle periods between emitter
+    /// ticks. Live capture retains the existing periodic-only semantics.
+    pub fn observe_replay(
+        &mut self,
+        packet: &ParsedPacket,
+        l7: &L7Info,
+        now_ms: u64,
+    ) -> Option<ObserveResult> {
+        self.observe_inner(packet, l7, now_ms, true, true)
     }
 
     /// Counts the completing fragment as a physical frame, then attributes
@@ -517,7 +541,39 @@ impl FlowTable {
         }
 
         let _ = self.observe(physical_fragment, &L7Info::None, now_ms);
-        self.observe_inner(reassembled, l7, now_ms, false)
+        self.observe_inner(reassembled, l7, now_ms, false, false)
+    }
+
+    /// Replay variant of `observe_reassembled`; stale flow state is expired
+    /// before the reconstructed datagram updates the tuple.
+    pub fn observe_reassembled_replay(
+        &mut self,
+        physical_fragment: &ParsedPacket,
+        reassembled: &ParsedPacket,
+        l7: &L7Info,
+        now_ms: u64,
+    ) -> Option<ObserveResult> {
+        if physical_fragment.ip_fragment.is_none() {
+            return self.observe_replay(physical_fragment, l7, now_ms);
+        }
+        let _ = self.observe_replay(physical_fragment, &L7Info::None, now_ms);
+        self.observe_inner(reassembled, l7, now_ms, false, true)
+    }
+
+    /// Expire only the flow addressed by this packet before updating it. The
+    /// periodic sweep can lag a fast replay, so a reused tuple must not revive
+    /// its stale counters and L7 state. This is O(1) rather than scanning the
+    /// full flow table on every packet.
+    fn evict_idle_flow_key(&mut self, key: &FlowKey, now_ms: u64) -> Option<String> {
+        let stale = self.flows.get(key).is_some_and(|state| {
+            now_ms.saturating_sub(state.last_seen_ms) > idle_threshold_ms(state, key.protocol)
+        });
+        if !stale {
+            return None;
+        }
+        let removed = self.flows.remove(key)?;
+        self.idle_evictions += 1;
+        Some(removed.connection_id)
     }
 
     fn observe_inner(
@@ -526,6 +582,7 @@ impl FlowTable {
         l7: &L7Info,
         now_ms: u64,
         account_protocol_hierarchy: bool,
+        expire_idle_on_arrival: bool,
     ) -> Option<ObserveResult> {
         let transport_label = match packet.protocol {
             TransportProtocol::Tcp => "TCP",
@@ -546,6 +603,11 @@ impl FlowTable {
         }
 
         let (key, is_outbound) = self.key_for(packet)?;
+        let closed_connection_id = if expire_idle_on_arrival {
+            self.evict_idle_flow_key(&key, now_ms)
+        } else {
+            None
+        };
         let remote_port = key.remote_port;
         // Saved before `key` is consumed by `self.flows.entry(key)` below —
         // JAM-14's endpoint/conversation rollups are keyed independently of
@@ -704,7 +766,13 @@ impl FlowTable {
             }
         }
 
-        Some(ObserveResult { is_outbound, is_retransmit, rst_transitioned, connection_id: connection_id_for_reset })
+        Some(ObserveResult {
+            is_outbound,
+            is_retransmit,
+            rst_transitioned,
+            connection_id: connection_id_for_reset,
+            closed_connection_id,
+        })
     }
 
     /// Looks up the given flow's observed ClientHello `client_random`, if
@@ -761,31 +829,10 @@ impl FlowTable {
     /// scan, spoofed UDP, or just many short-lived DNS queries) is bounded by
     /// entry count as well as by time.
     pub fn evict_stale(&mut self, now_ms: u64) -> EvictedFlows {
-        // SYN_SENT: a connection attempt that never completes (e.g. nothing
-        // is listening, or the SYN was dropped) shouldn't sit for the full
-        // 30-minute ceiling — 30s is generous for even a slow handshake.
-        const SYN_SENT_IDLE_MS: u64 = 30_000;
-        const CLOSING_IDLE_MS: u64 = 120_000; // TIME_WAIT/CLOSE_WAIT
-        // Non-TCP (UDP/ICMP) flows are always reported "ESTABLISHED" since
-        // they have no closing handshake — a short idle timeout stands in
-        // for that. Otherwise a single DNS query (fresh ephemeral port each
-        // time) would occupy a flow slot for the full 30-minute ceiling.
-        const UDP_IDLE_MS: u64 = 60_000;
-        const MAX_IDLE_MS: u64 = 1_800_000; // ceiling, any status
         let mut idle = Vec::new();
         self.flows.retain(|key, state| {
             let idle_ms = now_ms.saturating_sub(state.last_seen_ms);
-            let status = status_for(state, key.protocol);
-            let threshold = if matches!(status, "TIME_WAIT" | "CLOSE_WAIT") {
-                CLOSING_IDLE_MS
-            } else if status == "SYN_SENT" {
-                SYN_SENT_IDLE_MS
-            } else if key.protocol != TransportProtocol::Tcp {
-                UDP_IDLE_MS
-            } else {
-                MAX_IDLE_MS
-            };
-            let stale = idle_ms > threshold;
+            let stale = idle_ms > idle_threshold_ms(state, key.protocol);
             if stale {
                 idle.push(key.clone());
             }
