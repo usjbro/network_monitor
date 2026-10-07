@@ -115,7 +115,7 @@ Sent once per captured packet, immediately (not batched).
 }
 ```
 
-Maps to `PacketFrame` via `mapPacketEvent`, which requires `fields` to be present (including when empty). `PacketJson` (`capture-agent/src/wire.rs`) carries `fields: Vec<Field>` from `fields::build_fields` and `headerHexDump` from `ParsedPacket.header_bytes`. `timestamp` is epoch milliseconds as a string, not ISO-8601.
+Maps to `PacketFrame` via `mapPacketEvent`, which requires `fields` to be present (including when empty). `PacketJson` (`capture-agent/src/wire.rs`) carries `fields: Vec<Field>` from `fields::build_fields` and `headerHexDump` from `ParsedPacket.header_bytes`. `timestamp` is epoch milliseconds as a string, not ISO-8601. It is the packet's capture timestamp: the live capture clock in live mode, and the timestamp recorded in the file during replay. `relativeTimeMs` remains elapsed agent time, so replay speed affects that relative value but not `timestamp`.
 
 `hexDump` contains at most the first 64 payload bytes. `headerHexDump` contains all parsed Ethernet/IP/transport header bytes and has no artificial cap. Field `offset` and `len` are relative to the pane named by `region`: `"header"` for `headerHexDump`, `"payload"` for `hexDump`. A payload field can extend beyond the 64 visible bytes; its full range is retained for data consumers while the UI highlights only visible bytes.
 
@@ -166,6 +166,8 @@ Sent immediately (like `packet`, not batched) — Expert Info (JAM-12): an annot
 ```
 
 Maps to `Finding` via `mapFindingEvent` (`lib/agent-mapping.ts`), which owns the `finding` envelope unwrap the same way `mapCaptureStatsEvent`/`mapTracerouteHopEvent` do.
+
+`timestamp` is epoch milliseconds as a string. A packet-triggered finding uses the triggering frame's capture timestamp, including during replay. An `unanswered-request` finding has no triggering packet; its timestamp is the capture/live time when the request expires. Replay expiry is evaluated as packets advance through capture time, while live idle expiry continues on wall time.
 
 Field notes:
 - `severity` is advisory display metadata (`error` / `warning` / `note` / `chat`, mirroring Wireshark's own Expert Info severity vocabulary), not a verdict derived from "how bad is this" — a `connection-reset` finding is `note`, not `error`, because a reset is a normal TCP closing mechanism as often as an abnormal one.

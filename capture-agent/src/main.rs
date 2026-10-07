@@ -518,10 +518,13 @@ fn replay_speed() -> ReplaySpeed {
 
 /// Microseconds since the Unix epoch for a capture timestamp. A timestamp
 /// before the epoch (a corrupt capture file) reads as zero.
+/// Values beyond the tracker's `u64` microsecond range saturate; that edge can
+/// make every pending transaction overdue and remains a JAM-190 timer-safety
+/// concern rather than a second clamp in this event timestamp path.
 fn system_time_us(timestamp: std::time::SystemTime) -> u64 {
     timestamp
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
+        .map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
 
@@ -532,6 +535,7 @@ fn system_time_us(timestamp: std::time::SystemTime) -> u64 {
 fn emit_unanswered_findings(
     expired: Vec<Unanswered>,
     now_ms: u64,
+    expiration_time_us: u64,
     finding_event_limiter: &mut PacketEventLimiter,
     finding_seq_counter: &AtomicU64,
     tx: &broadcast::Sender<String>,
@@ -540,10 +544,9 @@ fn emit_unanswered_findings(
         if !finding_event_limiter.allow(now_ms) {
             continue;
         }
-        let finding_epoch_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
+        // An unanswered request has no triggering packet of its own. Stamp
+        // it with the capture/live time at which expire() found it overdue.
+        let finding_epoch_ms = expiration_time_us / 1000;
         let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
         let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
             finding: Box::new(wire::FindingJson {
@@ -1345,7 +1348,7 @@ async fn main() -> std::io::Result<()> {
     let hostname = host_stats::hostname();
     let ip_address = local_addrs.first().cloned().unwrap_or_default();
 
-    // Shared clock: both the capture thread and the periodic emitter need
+    // Wall-clock monotonic elapsed-time clock: both the capture thread and the periodic emitter need
     // `now_ms` to mean "milliseconds since agent start" on the SAME clock —
     // creating a fresh Instant and immediately reading its own elapsed time
     // (`Instant::now().elapsed()`) always returns ~0, not time-since-start.
@@ -1624,6 +1627,7 @@ async fn main() -> std::io::Result<()> {
             // simply never polled in that mode — `capture_stats` stays
             // `None` for the life of a replay process, reporting absent
             // rather than a fabricated value.
+            // Wall-clock monotonic interval for polling the live libpcap stats once per second.
             let mut last_stats_poll = Instant::now();
             // JAM-16 stream reassembly. Lives on this thread only: it holds
             // per-flow and per-fragment-group buffers that nothing else
@@ -1701,6 +1705,7 @@ async fn main() -> std::io::Result<()> {
                 }
                 if let PacketSource::Live(cap) = &mut packet_source {
                     if last_stats_poll.elapsed() >= Duration::from_secs(1) {
+                        // Restart the live stats poll's wall-clock interval.
                         last_stats_poll = Instant::now();
                         match cap.stats() {
                             Ok(stat) => {
@@ -1716,6 +1721,10 @@ async fn main() -> std::io::Result<()> {
                 match packet_source.next_frame() {
                     SourceFrame::Bytes { data, timestamp, original_len, link_type: frame_link_type } => {
                         let link_type = frame_link_type.unwrap_or(link_type);
+                        // Packet observations retain the frame's raw capture
+                        // time in replay; JAM-190 separately governs how
+                        // timer clocks handle outlier timestamps.
+                        let capture_epoch_ms = system_time_us(timestamp) / 1000;
                         if mode == "replay" {
                             if let (ReplaySpeed::Realtime, Some(prev_ts)) = (replay_speed, previous_frame_timestamp) {
                                 if let Ok(delta) = timestamp.duration_since(prev_ts) {
@@ -1759,10 +1768,7 @@ async fn main() -> std::io::Result<()> {
                             // packet_event_limiter) so a burst of malformed
                             // frames can't flood the broadcast channel.
                             if finding_event_limiter.allow(now_ms) {
-                                let finding_epoch_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis())
-                                    .unwrap_or(0);
+                                let finding_epoch_ms = capture_epoch_ms;
                                 let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
                                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
                                     finding: Box::new(wire::FindingJson {
@@ -1865,6 +1871,7 @@ async fn main() -> std::io::Result<()> {
                         emit_unanswered_findings(
                             transactions.expire(capture_ts_us),
                             now_ms,
+                            capture_ts_us,
                             &mut finding_event_limiter,
                             &finding_seq_counter,
                             &tx,
@@ -1902,10 +1909,7 @@ async fn main() -> std::io::Result<()> {
                         // rate-limited packet-event section.
                         if let Some(result) = &observe_result {
                             if result.rst_transitioned {
-                                let finding_epoch_ms = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_millis())
-                                    .unwrap_or(0);
+                                let finding_epoch_ms = capture_epoch_ms;
                                 let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
                                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
                                     finding: Box::new(wire::FindingJson {
@@ -1961,10 +1965,7 @@ async fn main() -> std::io::Result<()> {
                         // Emit a Packet event for the packet stream view. hex_dump is
                         // capped to the first 64 bytes of payload — plenty for display,
                         // avoids sending huge lines for large payloads.
-                        let epoch_ms = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0);
+                        let epoch_ms = capture_epoch_ms;
                         let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
                         let frame_id = format!("pkt-{epoch_ms}-{seq}");
                         let mut packet_fields = fields::build_fields(&parsed, &l7_info, link_type);
@@ -2038,9 +2039,13 @@ async fn main() -> std::io::Result<()> {
                         // never times out: it reads until EOF.)
                         if mode != "replay" {
                             let now_ms = start.elapsed().as_millis() as u64;
+                            // Live idle expiry uses wall time, the same
+                            // timeline as live packet timestamps.
+                            let now_us = system_time_us(std::time::SystemTime::now());
                             emit_unanswered_findings(
-                                transactions.expire(system_time_us(std::time::SystemTime::now())),
+                                transactions.expire(now_us),
                                 now_ms,
+                                now_us,
                                 &mut finding_event_limiter,
                                 &finding_seq_counter,
                                 &tx,
@@ -2107,6 +2112,7 @@ async fn main() -> std::io::Result<()> {
             let mut prev_tx_bytes = 0u64;
             let mut prev_rx_packets = 0u64;
             let mut prev_tx_packets = 0u64;
+            // Wall-clock monotonic baseline for throughput rate denominators.
             let mut prev_tick_at = Instant::now();
             loop {
                 interval.tick().await;
@@ -2403,6 +2409,7 @@ async fn main() -> std::io::Result<()> {
                 // (not assumed to be exactly 1s) as the rate denominator, so
                 // a delayed tick still reports an honest, not inflated, rate.
                 let tick_elapsed = prev_tick_at.elapsed().as_secs_f64();
+                // Advance the wall-clock baseline for the next rate sample.
                 prev_tick_at = Instant::now();
                 let rx_bytes_now = total_rx_bytes.load(Ordering::Relaxed);
                 let tx_bytes_now = total_tx_bytes.load(Ordering::Relaxed);
@@ -2692,17 +2699,43 @@ mod tests {
         is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, note_capture_truncation, parse_max_flows,
         parse_replay_local_addrs, parse_replay_speed, protocol_node_to_json,
         packet_osi_layer, resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
-        flow_aging_now_ms, with_flow_observation, reassembly_now_ms, validate_snaplen, ReplayClock, ReplaySpeed,
+        emit_unanswered_findings, flow_aging_now_ms, with_flow_observation, reassembly_now_ms, validate_snaplen, ReplayClock, ReplaySpeed,
         MAX_CAPTURE_FILTER_LEN,
         MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::flow::FlowTable;
     use capture_agent::l7::L7Info;
     use capture_agent::parse::{LinkType, TransportProtocol};
+    use capture_agent::rate_limit::PacketEventLimiter;
+    use capture_agent::transaction::{TxnProtocol, Unanswered};
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
     use tokio::sync::broadcast;
+
+    #[test]
+    fn unanswered_finding_timestamp_uses_the_expiry_capture_time() {
+        let (tx, mut rx) = broadcast::channel::<String>(1);
+        let mut limiter = PacketEventLimiter::new(20, 1000);
+        let seq = AtomicU64::new(0);
+        emit_unanswered_findings(
+            vec![Unanswered {
+                protocol: TxnProtocol::Dns,
+                flow_id: "flow-test".to_string(),
+                request_frame_id: Some("pkt-request".to_string()),
+                description: "example.test A".to_string(),
+            }],
+            42,
+            1_700_000_123_456_789,
+            &mut limiter,
+            &seq,
+            &tx,
+        );
+
+        let event: serde_json::Value = serde_json::from_str(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(event["finding"]["timestamp"], "1700000123456");
+        assert_eq!(event["finding"]["frameId"], "pkt-request");
+    }
 
     #[test]
     fn mixed_sections_replay_with_each_packets_link_type_and_timestamp() {

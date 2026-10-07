@@ -166,6 +166,8 @@ pub fn start(
     let writer = open_next(base_path, &ring, 1, idb, hostname, agent_version)
         .map_err(|e| format!("could not open capture file: {e}"))?;
 
+    // Wall-clock monotonic instants drive operator-requested duration limits
+    // for the whole capture and for each individual ring member.
     *state = Some(RingState {
         writer,
         base_path: base_path.to_path_buf(),
@@ -288,6 +290,7 @@ pub fn on_tick(
                 let old_writer = std::mem::replace(&mut ring_state.writer, new_writer);
                 ring_state.bytes_before_current_file += old_writer.bytes_written();
                 ring_state.packets_this_file = 0;
+                // Wall-clock monotonic start of the newly opened ring member.
                 ring_state.file_started_at = Instant::now();
                 if let Err(e) = finish_and_rename(old_writer, &old_final) {
                     eprintln!("capture-agent: error finalizing rotated capture file {}: {e}", old_final.display());

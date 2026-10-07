@@ -185,3 +185,9 @@ Verified the npm audit gate using `npm audit --json` plus `.github/scripts/check
 ## JAM-199 — sharp advisory
 
 JAM-199 was implemented in `.worktrees/npm-audit-sharp` on `jamesmbrownjr/jam-199-p1-ci-npm-audit-gate-fails-on-sharp-ghsa-wq5f-xc86-pv6w-new` and merged as PR #272 (`b4744a8`). Next's existing optional `sharp` dependency now resolves to patched 0.35.5 via `^0.35.4`; no manifest or application-code change was needed. The audit gate, lint, build, all 601 Vitest tests, and PR checks passed. Codex and Claude Code reviews found no findings. Decision recorded: keep fixable high/critical advisories as immediate blockers; do not add a grace period. PR #271 is being updated to the merged main base and needs fresh CI.
+
+## JAM-203 — replay finding timestamps
+
+Implementation and focused/full Rust verification are complete in `.worktrees/replay-capture-time-timestamps`. Replay packet events and packet-triggered findings now use the source frame timestamp; unanswered findings use the expiry timestamp already passed by capture-time replay expiry. Live packet and idle-expiry behavior remain wall-clock based. JAM-190 still owns replay timer clamping. Relative time remains agent elapsed time.
+
+Codex and Claude Code independently reviewed the uncommitted diff and found no blocking issues. Claude noted that a timestamp saturating at `u64::MAX` microseconds can expire all pending transactions; the conversion comment now records this extreme-value behavior and leaves timer hardening with JAM-190. The opt-in replay test asserts fast/realtime finding timestamps and transaction outcomes; only realtime emits the rate-limited target packet event, which is called out for the PR. The worktree is ready for commit and PR; it has not been merged.
