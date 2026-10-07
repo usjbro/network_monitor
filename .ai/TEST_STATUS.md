@@ -204,7 +204,7 @@ In `.worktrees/npm-audit-sharp`, updated the existing Next.js optional `sharp` r
 - `npx vitest run`: 82 files, 601 tests passed.
 - `git diff --check`: passed.
 - Advisory grace-window decision: keep high/critical advisories as immediate blockers when a patched dependency is available. This fix was available within Next.js's current declared range; a grace period would knowingly leave a fixable high-risk dependency in place and delay unrelated remediation only until the audit update lands.
-- PR #272 (`3a54697`): all GitHub checks passed, including Web (Next.js), CodeQL, Rust analysis, E2E, fuzz, and Snyk; merge state reported `CLEAN`.
+- PR #272 (`0f186b1`): all GitHub checks passed, including Web (Next.js), CodeQL, Rust analysis, E2E, fuzz, and Snyk; merged as `b4744a8`. PR #271 is being updated to the merged main base and needs fresh CI.
 
 ## JAM-170 — verified 2026-10-06
 
@@ -215,3 +215,14 @@ Worktree: `.worktrees/reassembly-coverage-memory-accounting`.
 - `cargo build --release --locked` and `cargo clippy --all-targets --locked -- -D warnings` passed.
 - `cargo +nightly fuzz run stream_reassembly -- -max_total_time=40`: 243,992 runs in 41 seconds; after restoring the per-direction invariant, the 20-second run passed 106,628 runs.
 - `git diff --check`: passed. PR #269 is rebased/merged with the JAM-198 main commit; CI rerun is pending.
+
+## JAM-167 — verified locally 2026-10-06
+
+In `.worktrees/feed-fragment-reassembled-tcp`.
+
+- RED: `cargo test --locked tcp_segment_rebuilt_from_ip_fragments_continues_with_a_later_tcp_segment -- --nocapture` failed because the later ordinary segment produced `L7Info::None` instead of completing HTTP.
+- `cargo test --locked`: 338 library + 65 binary + 12 control-auth + 2 disk-invariant + 4 pcapng + 1 protocol-regression tests passed; 8 ignored.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed.
+- `cargo build --release --locked`: passed.
+- `git diff --check`: passed.
+- `cargo fmt --all -- --check`: reports extensive formatting differences in untouched existing Rust files; this is not a CI step. New code was formatted to rustfmt's output by inspection.

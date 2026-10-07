@@ -1754,10 +1754,11 @@ async fn main() -> std::io::Result<()> {
                         // single-segment case this is the existing per-packet
                         // `sniff_l7` with nothing buffered.
                         let flow_ident = flow_table.lock().unwrap().key_for(&parsed);
-                        let sniff_outcome = reassembly.sniff(
+                        let sniff_outcome = reassembly.sniff_with_flow_resolver(
                             &parsed,
                             flow_ident.as_ref().map(|(key, outbound)| (key, *outbound)),
                             reassembly_now_ms,
+                            |reassembled| flow_table.lock().unwrap().key_for(reassembled),
                         );
                         let flow_packet =
                             sniff_outcome.reassembled_packet.as_ref().unwrap_or(&parsed);
