@@ -556,12 +556,8 @@ impl FlowTable {
         if physical_fragment.ip_fragment.is_none() {
             return self.observe_replay(physical_fragment, l7, now_ms);
         }
-        let physical_result = self.observe_replay(physical_fragment, &L7Info::None, now_ms);
-        let mut result = self.observe_inner(reassembled, l7, now_ms, false, true)?;
-        if result.closed_connection_id.is_none() {
-            result.closed_connection_id = physical_result.and_then(|observed| observed.closed_connection_id);
-        }
-        Some(result)
+        let _ = self.observe_replay(physical_fragment, &L7Info::None, now_ms);
+        self.observe_inner(reassembled, l7, now_ms, false, true)
     }
 
     /// Expire only the flow addressed by this packet before updating it. The

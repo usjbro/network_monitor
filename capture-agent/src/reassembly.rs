@@ -438,8 +438,6 @@ pub struct ReplayClock {
     /// A frame more than `REPLAY_REORDER_TOLERANCE` behind `latest`, held
     /// until the next frame shows whether it was a reset or an outlier.
     pending_reset: Option<std::time::SystemTime>,
-    /// A large forward jump, held until another frame confirms the new time.
-    pending_forward: Option<std::time::SystemTime>,
     elapsed: std::time::Duration,
 }
 
@@ -448,11 +446,6 @@ pub struct ReplayClock {
 /// reordering, which is milliseconds to seconds, and well short of a typical
 /// clock step.
 pub const REPLAY_REORDER_TOLERANCE: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// An isolated timestamp jump longer than a day is more likely corrupt
-/// metadata than a real inter-packet gap. Keep it pending until another frame
-/// confirms the forward timeline; ordinary idle gaps still age flows at once.
-const REPLAY_FORWARD_JUMP_CONFIRMATION: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 impl ReplayClock {
     pub fn now_ms(&mut self, frame_timestamp: std::time::SystemTime) -> u64 {
@@ -463,30 +456,16 @@ impl ReplayClock {
         match frame_timestamp.duration_since(latest) {
             // On the current timeline: forward advances, reordering holds.
             // Either way, any pending reset was an outlier.
-            Ok(step) if step > REPLAY_FORWARD_JUMP_CONFIRMATION => {
-                self.pending_reset = None;
-                match self.pending_forward.take() {
-                    Some(pending) if frame_timestamp >= pending => {
-                        self.elapsed = self.elapsed.saturating_add(step);
-                        self.latest = Some(frame_timestamp);
-                    }
-                    _ => self.pending_forward = Some(frame_timestamp),
-                }
-            }
             Ok(step) => {
-                self.pending_forward = None;
                 self.pending_reset = None;
                 self.elapsed = self.elapsed.saturating_add(step);
                 self.latest = Some(frame_timestamp);
             }
             Err(behind) if behind.duration() <= REPLAY_REORDER_TOLERANCE => {
-                self.pending_forward = None;
                 self.pending_reset = None;
             }
             // Far behind: hold until the next frame confirms a reset.
-            Err(_) => {
-                self.pending_forward = None;
-                match self.pending_reset.take() {
+            Err(_) => match self.pending_reset.take() {
                 None => self.pending_reset = Some(frame_timestamp),
                 Some(pending) => {
                     // Confirmed: move to the new timeline, counting only the
@@ -496,7 +475,6 @@ impl ReplayClock {
                     }
                     self.latest = Some(frame_timestamp);
                 }
-            }
             },
         }
         u64::try_from(self.elapsed.as_millis()).unwrap_or(u64::MAX)
@@ -1844,22 +1822,6 @@ mod tests {
         assert_eq!(clock.now_ms(at_secs(1_010)), 10_000);
         assert_eq!(clock.now_ms(at_secs(0)), 10_000, "an outlier holds the clock");
         assert_eq!(clock.now_ms(at_secs(1_011)), 11_000);
-    }
-
-    #[test]
-    fn replay_clock_ignores_a_single_far_future_outlier() {
-        let mut clock = ReplayClock::default();
-        assert_eq!(clock.now_ms(at_secs(1_000)), 0);
-        assert_eq!(clock.now_ms(at_secs(1_000_000_000)), 0, "a lone future timestamp is held");
-        assert_eq!(clock.now_ms(at_secs(1_001)), 1_000, "normal capture time resumes without a jump");
-    }
-
-    #[test]
-    fn replay_clock_accepts_a_confirmed_forward_gap() {
-        let mut clock = ReplayClock::default();
-        assert_eq!(clock.now_ms(at_secs(1_000)), 0);
-        assert_eq!(clock.now_ms(at_secs(1_000_000)), 0, "the first large gap is held pending confirmation");
-        assert_eq!(clock.now_ms(at_secs(1_000_001)), 999_001_000, "a following timestamp confirms the gap");
     }
 
     #[test]
