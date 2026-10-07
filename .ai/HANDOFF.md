@@ -1,8 +1,26 @@
+# JAM-189 — replay flow-aging clock implemented, 2026-10-06
+
+Worktree: `.worktrees/flow-table-replay-clock`; branch: `jamesmbrownjr/jam-189-p2-flow-table-ages-flows-on-wall-clock-time-during-replay`. The capture loop now feeds replay-clock milliseconds to replay flow observation, and the periodic emitter reads the latest replay timestamp for idle eviction and flow snapshots. The replay observe path expires only the matching stale tuple on arrival in O(1), returning its close ID for a `connection_closed` event; this handles fast replay that processes both connections before a periodic tick. Live mode continues to use agent elapsed time and its existing periodic-only expiry behavior, including during quiet capture; emitter scheduling remains wall-clock driven.
+
+Clock choice: packet/finding rate limiters and packet-event `relative_time_ms` remain on agent elapsed time. This preserves real-time throttling during fast replay and existing UI-relative packet timeline behavior. Flow duration/age/snapshot math follows traffic time as required. The design spec records that replay EOF leaves final flows visible until the running agent is restarted; corrupt far-future timestamp handling remains the separate JAM-190 follow-up.
+
+Regression tests cover UDP tuple reuse after 60.001 seconds of replay time before any periodic sweep (old flow evicted, close id returned, second flow observed) and confirm live observation still relies on the periodic sweep. Release build, full default `cargo test --locked`, and warnings-denied Clippy pass. Crate-wide rustfmt check reports substantial existing differences in untouched files, so formatting was not run across the crate. See TEST_STATUS.md for full results.
+
+Independent pre-PR review found the fragment-result propagation concern (the physical-fragment case is unreachable with the parser's no-ports representation), a single-future-timestamp clock issue, and the stale main base. The fragment-result concern is unreachable with current parser output (fragment packets have no transport ports). A proposed >24-hour confirmation guard was rejected after review showed it corrupts valid long-gap replay; corrupt far-future timestamp handling is explicitly out of scope for JAM-189 and tracked by JAM-190. A fresh Codex review found a snapshot race between replay-clock publication and flow counter updates. `with_flow_observation` now publishes the clock under the flow-table mutex, and the emitter reads it under that mutex; the flow-aging regression exercises this path. Branch is rebased onto PR #271/#272 current main; full Rust tests, release build, and Clippy pass. EOF persistence is documented, and the main-loop composition was checked beside JAM-167. PR #273 needs this fix pushed, CI rerun, and reviewer recheck before merge. The full JAM-189 Slack thread was read. Gate claimed and delegated in-session after James's direct chat approval. No wire/API changes.
+
+---
+
 # JAM-167 — implementation underway, verified locally, 2026-10-06
 
 Claimed and started in `.worktrees/feed-fragment-reassembled-tcp` on `jamesmbrownjr/jam-167-p2-feed-fragment-reassembled-tcp-through-stream-reassembly`. Reconstructed TCP datagrams now resolve their flow key through the capture loop's `FlowTable::key_for` and pass through the existing sequence-aware TCP reassembler; original fragment packet and flow accounting are retained. Added a regression for an HTTP request line split between a fragment-reassembled TCP segment and a later ordinary segment, plus the design-spec note.
 
 The regression was observed failing before implementation and passing after. `cargo test --locked` (422 passed, 8 ignored), release build and strict Clippy pass. Repository-wide rustfmt check reports existing differences across untouched files; no formatter is enforced in CI. Local `codex review --uncommitted` found no actionable regressions and checked both fragment arrival orders. No commit or PR yet; complete the security-focused review before publication.
+
+# JAM-189 — end-to-end replay-aging coverage, 2026-10-07
+
+In `.worktrees/flow-table-replay-clock` on the existing PR #273 branch, added an opt-in authenticated binary replay test. It generates a classic-pcap with two equal UDP tuples 61 seconds apart and verifies a periodic connection snapshot observed after replay EOF reports only the second packet's bytes. The fixed-port replay tests share a mutex so Cargo's default parallel runner cannot race them. A negative-control run with replay observation temporarily changed to the live path failed with 142 bytes instead of 71; the production code was restored.
+
+Verified: both ignored `replay_compatibility` integration tests passed; `cargo test --locked` passed (339 library, 67 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, 1 protocol-regression; 8 ignored); release build and warnings-denied Clippy passed. The test is ignored by default because it needs exclusive `127.0.0.1:9990`. Change is currently uncommitted and not yet included in PR #273.
 
 # JAM-184 — review fix verified, publication next, 2026-10-05
 

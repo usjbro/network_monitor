@@ -461,7 +461,9 @@ impl ReplayClock {
                 self.elapsed = self.elapsed.saturating_add(step);
                 self.latest = Some(frame_timestamp);
             }
-            Err(behind) if behind.duration() <= REPLAY_REORDER_TOLERANCE => self.pending_reset = None,
+            Err(behind) if behind.duration() <= REPLAY_REORDER_TOLERANCE => {
+                self.pending_reset = None;
+            }
             // Far behind: hold until the next frame confirms a reset.
             Err(_) => match self.pending_reset.take() {
                 None => self.pending_reset = Some(frame_timestamp),

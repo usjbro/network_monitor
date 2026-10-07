@@ -575,6 +575,36 @@ fn reassembly_now_ms(
     }
 }
 
+/// The replay flow table shares reassembly's traffic-time clock. Packet
+/// emission/rate limiting and UI `relative_time_ms` intentionally keep using
+/// agent elapsed time so a fast replay remains throttled and keeps the
+/// existing packet-event timeline semantics.
+fn flow_aging_now_ms(replaying: bool, replay_now_ms: u64, agent_now_ms: u64) -> u64 {
+    if replaying {
+        replay_now_ms
+    } else {
+        agent_now_ms
+    }
+}
+
+/// Updates the observed flow and publishes its replay timestamp under the
+/// same lock used by the periodic emitter. This keeps snapshot counters and
+/// their elapsed-time denominator on a consistent replay frame boundary.
+fn with_flow_observation<T>(
+    flow_table: &Mutex<FlowTable>,
+    replay_flow_clock: &AtomicU64,
+    replaying: bool,
+    now_ms: u64,
+    observe: impl FnOnce(&mut FlowTable) -> T,
+) -> T {
+    let mut table = flow_table.lock().unwrap();
+    let result = observe(&mut table);
+    if replaying {
+        replay_flow_clock.store(now_ms, Ordering::Relaxed);
+    }
+    result
+}
+
 /// Everything `resolve_packet_source` resolves once at startup and never
 /// re-resolves — this repo's own explicit design decision (spec Components
 /// §2) to avoid doubling the state space of the capture loop with a
@@ -1320,6 +1350,10 @@ async fn main() -> std::io::Result<()> {
     // creating a fresh Instant and immediately reading its own elapsed time
     // (`Instant::now().elapsed()`) always returns ~0, not time-since-start.
     let start = Instant::now();
+    // The capture thread advances this with replay capture time; the periodic
+    // emitter reads it when aging/snapshotting replay flows. In live mode the
+    // emitter continues to use agent elapsed time so quiet captures still age.
+    let replay_flow_clock = Arc::new(AtomicU64::new(0));
     let paused = Arc::new(AtomicBool::new(false));
     // Cloned before the move into FlowTable::new below — the capture thread
     // (Tier B decrypt-eligibility lookups) and FlowTable both need their own
@@ -1530,6 +1564,7 @@ async fn main() -> std::io::Result<()> {
     // that can fail silently mid-thread (see issue #63).
     {
         let flow_table = flow_table.clone();
+        let replay_flow_clock = replay_flow_clock.clone();
         let paused = paused.clone();
         let tx = tx.clone();
         let packet_seq = packet_seq.clone();
@@ -1695,6 +1730,8 @@ async fn main() -> std::io::Result<()> {
                         // agent clock it already used.
                         let reassembly_now_ms =
                             reassembly_now_ms(mode == "replay", &mut replay_clock, timestamp, now_ms);
+                        let flow_now_ms =
+                            flow_aging_now_ms(mode == "replay", reassembly_now_ms, now_ms);
                         // JAM-174: libpcap and EPBs both retain the length
                         // before capture. Check before parsing: a cut frame
                         // can still contain a complete, decodable IP packet.
@@ -1770,18 +1807,49 @@ async fn main() -> std::io::Result<()> {
                         // reconstructed datagram to its transport flow without
                         // counting its bytes as another physical frame.
                         // `parsed` remains the packet-event/capture-file data.
-                        let (observe_result, txn_flow) = {
-                            let mut table = flow_table.lock().unwrap();
-                            match sniff_outcome.reassembled_packet.as_ref() {
+                        let (observe_result, txn_flow) = with_flow_observation(
+                            &flow_table,
+                            &replay_flow_clock,
+                            mode == "replay",
+                            flow_now_ms,
+                            |table| match sniff_outcome.reassembled_packet.as_ref() {
                                 Some(reassembled) => (
-                                    table.observe_reassembled(&parsed, reassembled, &l7_info, now_ms),
-                                    // A completed fragment group's ports are
-                                    // only in the reassembled datagram.
+                                    if mode == "replay" {
+                                        table.observe_reassembled_replay(
+                                            &parsed,
+                                            reassembled,
+                                            &l7_info,
+                                            flow_now_ms,
+                                        )
+                                    } else {
+                                        table.observe_reassembled(
+                                            &parsed,
+                                            reassembled,
+                                            &l7_info,
+                                            flow_now_ms,
+                                        )
+                                    },
                                     table.key_for(reassembled),
                                 ),
-                                None => (table.observe(&parsed, &l7_info, now_ms), flow_ident.clone()),
-                            }
-                        };
+                                None => (
+                                    if mode == "replay" {
+                                        table.observe_replay(&parsed, &l7_info, flow_now_ms)
+                                    } else {
+                                        table.observe(&parsed, &l7_info, flow_now_ms)
+                                    },
+                                    flow_ident.clone(),
+                                ),
+                            },
+                        );
+                        if let Some(id) = observe_result
+                            .as_ref()
+                            .and_then(|result| result.closed_connection_id.as_ref())
+                        {
+                            decrypt_state.lock().unwrap().remove(id);
+                            let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
+                                id: id.clone(),
+                            }));
+                        }
 
                         // JAM-15: match requests to responses on the frame's
                         // own capture timestamp, so service time is the
@@ -2005,6 +2073,8 @@ async fn main() -> std::io::Result<()> {
     // Periodic emitter: every 1s, snapshot the flow table and broadcast connection_update events.
     {
         let flow_table = flow_table.clone();
+        let replay_flow_clock = replay_flow_clock.clone();
+        let replaying = mode == "replay";
         let service_time_stats = service_time_stats.clone();
         let process_map = process_map.clone();
         let decrypt_state = decrypt_state.clone();
@@ -2040,7 +2110,7 @@ async fn main() -> std::io::Result<()> {
             let mut prev_tick_at = Instant::now();
             loop {
                 interval.tick().await;
-                let now_ms = start.elapsed().as_millis() as u64;
+                let agent_now_ms = start.elapsed().as_millis() as u64;
                 // Evict first so a flow that goes stale this tick emits only
                 // a ConnectionClosed event, not also a now-stale
                 // connection_update in the same pass.
@@ -2056,6 +2126,13 @@ async fn main() -> std::io::Result<()> {
                     protocol_hierarchy,
                 ) = {
                     let mut ft = flow_table.lock().unwrap();
+                    // Read under the same lock that protects replay-clock
+                    // publication and packet-counter updates.
+                    let now_ms = flow_aging_now_ms(
+                        replaying,
+                        replay_flow_clock.load(Ordering::Relaxed),
+                        agent_now_ms,
+                    );
                     let evicted = ft.evict_stale(now_ms);
                     let snapshots = ft.snapshot(now_ms);
                     // JAM-14: per-host/per-pair rollups, cumulative since
@@ -2615,12 +2692,16 @@ mod tests {
         is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, note_capture_truncation, parse_max_flows,
         parse_replay_local_addrs, parse_replay_speed, protocol_node_to_json,
         packet_osi_layer, resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
-        validate_snaplen, reassembly_now_ms, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN, MAX_INTERFACE_NAME_LEN,
+        flow_aging_now_ms, with_flow_observation, reassembly_now_ms, validate_snaplen, ReplayClock, ReplaySpeed,
+        MAX_CAPTURE_FILTER_LEN,
+        MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::flow::FlowTable;
     use capture_agent::l7::L7Info;
     use capture_agent::parse::{LinkType, TransportProtocol};
     use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use tokio::sync::broadcast;
 
     #[test]
@@ -3320,6 +3401,82 @@ mod tests {
         assert_eq!(reassembly_now_ms(false, &mut clock, origin, 5), 5);
         assert_eq!(reassembly_now_ms(false, &mut clock, later, 6), 6);
         assert_eq!(clock.now_ms(later), 0, "live mode never advanced the replay clock");
+    }
+
+    #[test]
+    fn replay_flow_aging_expires_reused_tuple_by_capture_time() {
+        use capture_agent::parse::{self, LinkType};
+
+        let origin = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let later =
+            origin + std::time::Duration::from_secs(60) + std::time::Duration::from_millis(1);
+        let mut replay_clock = ReplayClock::default();
+        let replay_now = reassembly_now_ms(true, &mut replay_clock, origin, 1);
+        let flows = Mutex::new(FlowTable::new(vec!["192.0.2.1".to_string()]));
+        let replay_flow_clock = AtomicU64::new(0);
+        let mut frame = Vec::new();
+        etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv4([192, 0, 2, 1], [198, 51, 100, 2], 64)
+            .udp(53000, 53)
+            .write(&mut frame, b"dns")
+            .unwrap();
+        let packet = parse::parse_packet(&frame, LinkType::Ethernet).unwrap();
+        let first_flow_time = flow_aging_now_ms(true, replay_now, 1);
+        let first = with_flow_observation(
+            &flows,
+            &replay_flow_clock,
+            true,
+            first_flow_time,
+            |flows| flows.observe_replay(&packet, &L7Info::None, first_flow_time),
+        );
+        assert!(first.is_some());
+        assert_eq!(replay_flow_clock.load(Ordering::Relaxed), first_flow_time);
+        let original_id = flows.lock().unwrap().snapshot(0)[0].key.connection_id();
+
+        let replay_now = reassembly_now_ms(true, &mut replay_clock, later, 2);
+        let flow_time = flow_aging_now_ms(true, replay_now, 2);
+        assert_eq!(flow_time, 60_001);
+        let second = with_flow_observation(
+            &flows,
+            &replay_flow_clock,
+            true,
+            flow_time,
+            |flows| flows.observe_replay(&packet, &L7Info::None, flow_time),
+        );
+        let second = second.unwrap();
+        assert_eq!(replay_flow_clock.load(Ordering::Relaxed), flow_time);
+        assert_eq!(
+            second.closed_connection_id.as_deref(),
+            Some(original_id.as_str())
+        );
+        let mut flows = flows.lock().unwrap();
+        assert_eq!(flows.total_flows_observed(), 2);
+        assert_eq!(flows.idle_evictions(), 1);
+        assert_eq!(flows.snapshot(flow_time).len(), 1);
+    }
+
+    #[test]
+    fn live_flow_aging_stays_on_agent_elapsed_time() {
+        use capture_agent::parse::{self, LinkType};
+
+        assert_eq!(flow_aging_now_ms(false, 99_000, 42), 42);
+
+        let mut frame = Vec::new();
+        etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv4([192, 0, 2, 1], [198, 51, 100, 2], 64)
+            .udp(53000, 53)
+            .write(&mut frame, b"dns")
+            .unwrap();
+        let packet = parse::parse_packet(&frame, LinkType::Ethernet).unwrap();
+        let mut flows = FlowTable::new(vec!["192.0.2.1".to_string()]);
+        assert!(flows.observe(&packet, &L7Info::None, 1).is_some());
+        assert!(flows.observe(&packet, &L7Info::None, 60_001).is_some());
+        assert_eq!(
+            flows.total_flows_observed(),
+            1,
+            "live flow behavior is unchanged"
+        );
+        assert_eq!(flows.idle_evictions(), 0, "live expiry remains periodic");
     }
 }
 

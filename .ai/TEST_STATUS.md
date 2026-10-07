@@ -4,6 +4,17 @@ Published review follow-up: corrected the wire-fixture regeneration recipe to au
 
 # Test Status
 
+## JAM-189 — replay flow-aging clock
+
+- Regression-first evidence: the first test version incorrectly swept before re-observation; independent review reproduced the production ordering and found the stale tuple was refreshed before the periodic sweep. The corrected test initially failed because the close-id result field was absent. Now replay-specific `FlowTable::observe_replay` expires just the matching stale flow before updating it, returns its close ID, and the capture loop emits `ConnectionClosed`; live observation retains periodic-only eviction. The corrected test observes the same UDP tuple 60.001 seconds later without an intervening sweep and verifies one idle eviction plus two total flows, while a live-path test verifies no arrival-time expiry.
+- `cargo build --release --locked`: passed.
+- After rebasing onto current main and fixing the replay snapshot race, `cargo test --locked` passed (339 library tests, 67 main tests, 19 enabled integration tests; 5 privileged live-capture tests and 2 exclusive-port replay tests ignored by default). The 60.001-second tuple-reuse regression now exercises `with_flow_observation`, which updates the flow table and publishes its replay clock under the same mutex.
+- `cargo build --release --locked`: passed after the replay snapshot race fix.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed after rebase and replay snapshot race fix.
+- `git diff --check`: passed.
+- Independent review follow-up: the reported physical-fragment close-ID path is unreachable because current IPv4 fragments carry no ports and cannot independently address a flow. A proposed >24-hour clock guard was removed after review showed it corrupts valid long-gap replay; far-future timestamp handling is explicitly tracked as out-of-scope JAM-190. A replay snapshot race was fixed by publishing and reading the replay clock under the flow-table mutex with packet observations and snapshot counters. Replay EOF behavior is documented: the agent/emitter remain alive, replay time stops, and final flows stay visible until restart.
+- `cargo fmt --manifest-path capture-agent/Cargo.toml --check` does not pass on the existing crate baseline; it reports formatting differences across numerous untouched files (including existing `main.rs` content). No crate-wide formatting was applied to avoid unrelated changes. New/changed lines were manually aligned with rustfmt output.
+
 ## JAM-184 — verified 2026-10-05, independent review fix verified
 
 Commands run in `.worktrees/capture-agent-control-token` (Rust in its capture-agent subdirectory or with --manifest-path).
@@ -226,3 +237,14 @@ In `.worktrees/feed-fragment-reassembled-tcp`.
 - `cargo build --release --locked`: passed.
 - `git diff --check`: passed.
 - `cargo fmt --all -- --check`: reports extensive formatting differences in untouched existing Rust files; this is not a CI step. New code was formatted to rustfmt's output by inspection.
+
+## JAM-189 replay binary follow-up — verified 2026-10-07
+
+In `.worktrees/flow-table-replay-clock`, added an opt-in authenticated binary replay test using a classic-pcap fixture with the same UDP tuple at capture times 61 seconds apart. It checks a connection snapshot observed after replay EOF contains only one packet's bytes after the stale flow is replaced.
+
+- Negative control: temporarily routed replay packets through the live `observe` path; the binary test failed as intended (142 accumulated bytes vs. the expected 71). Restored the production path afterward.
+- `cargo test --locked --test replay_compatibility -- --ignored`: 2 passed under Cargo's default parallel runner; the fixed-port tests now share a mutex, and the new test waits for replay EOF before asserting its final snapshot.
+- `cargo test --locked`: 339 library + 67 binary + 12 control-auth + 2 disk-invariant + 4 pcapng + 1 protocol-regression tests passed; 8 ignored.
+- `cargo build --release --locked`: passed.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed.
+- `git diff --check`: passed.
