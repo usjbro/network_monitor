@@ -1,6 +1,6 @@
 # JAM-250 — CI job timeouts and bounded apt retries
 
-Active work in `.worktrees/ci-job-timeouts-apt-retry` on `jamesmbrownjr/jam-250-p3-ci-add-job-timeouts-and-an-apt-get-retry-so-a-hung-runner`. Gate is approved, claimed, and delegated in-session; Linear is In Progress. Inspect current jobs and durations, add evidence-based job timeouts and bounded apt retries, and document the main-branch infrastructure-failure policy. Verify retry behavior with an unreachable mirror in a temporary PR change and remove it before final review. Historical cancelled run 37677784244 does not need rerunning because current main is green. No workflow test scope or trigger changes.
+Active work in `.worktrees/ci-job-timeouts-apt-retry` on `jamesmbrownjr/jam-250-p3-ci-add-job-timeouts-and-an-apt-get-retry-so-a-hung-runner`. Gate is approved, claimed, and delegated in-session; Linear is In Progress. Added evidence-based job timeouts, bounded apt retries, and the main-branch infrastructure-failure policy. The temporary unreachable-mirror acceptance check (run 37806849918) logged attempts 1/3, 2/3, and 3/3, then failed as expected in about 24 seconds. Its test-only change is reverted in commit `77542d3`. Final PR checks must pass on the restored head; do not treat the intentional probe failure as a product failure. Historical cancelled run 37677784244 does not need rerunning because current main is green. No workflow test scope or trigger changes.
 
 # JAM-168 — reassembled L7 field offsets
 
