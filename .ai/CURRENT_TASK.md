@@ -1,7 +1,7 @@
 # Current Task
 
-JAM-250: add CI job timeouts, bounded apt-get retries, and an infrastructure failure policy.
+JAM-173: keep fragment-completing packet event fields consistent with the physical frame.
 
-Worktree: `.worktrees/ci-job-timeouts-apt-retry`; branch: `jamesmbrownjr/jam-250-p3-ci-add-job-timeouts-and-an-apt-get-retry-so-a-hung-runner`.
+Worktree: `.worktrees/fragment-completing-packet-consistency`; branch: `jamesmbrownjr/jam-173-p2-fragment-completing-packet-event-shows-contradictory`.
 
-Current phase: Implementation and the temporary unreachable-mirror acceptance check are complete. The probe logged all three failed attempts and exited in about 24 seconds; the test-only change is now reverted. Final PR state contains only job timeouts, bounded apt retries, and the main-branch infrastructure failure policy. The probe run is expectedly red; a fresh CI run on the restored PR head must pass before merge. Historical cancelled main run 37677784244 remains out of scope because current main is green.
+Current phase: Root cause confirmed: `packet_osi_layer` trusted L7 info decoded from a reconstructed datagram even when the physical completing IPv4 fragment has protocol `Other` and no ports. The packet event now stays at layer 3 in that case, while TCP/UDP packets can still report layer 7. A two-fragment DNS regression was observed failing with layer 7 before the change and passes after it. Full Rust tests, warnings-denied Clippy, release build, and diff check pass; independent review and CI remain.
