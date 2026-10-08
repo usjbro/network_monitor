@@ -116,9 +116,21 @@ export interface PacketFrame {
 // trust/sensitivity characteristics than ordinary packet metadata.
 export interface DecryptedPayloadSegment {
   connectionId: string;
+  direction: DecryptionDirection;
   streamId?: number;
   text: string;
   redacted: boolean;
+}
+
+export type DecryptionDirection = 'client_to_server' | 'server_to_client';
+
+export interface DecryptionStatus {
+  connectionId: string;
+  direction: DecryptionDirection;
+  status: 'unavailable' | 'desynchronized';
+  // Keep this open to future protocol reasons; the event is metadata and
+  // consumers must not throw when a newer agent adds a reason.
+  reason: string;
 }
 
 // A single traceroute hop, as reported by capture-agent's `traceroute_hop`

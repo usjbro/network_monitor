@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use std::fmt;
 
 use tracing::debug;
+use zeroize::Zeroize;
 
 // Re-export the main HPACK API entry points.
 pub use self::decoder::Decoder;
@@ -69,6 +70,18 @@ impl DynamicTable {
         self.size
     }
 
+    fn bytes_held(&self) -> usize {
+        self.table
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(Vec<u8>, Vec<u8>)>())
+            .saturating_add(
+                self.table
+                    .iter()
+                    .map(|(name, value)| name.capacity().saturating_add(value.capacity()))
+                    .sum::<usize>(),
+            )
+    }
+
     /// Returns an `Iterator` through the headers stored in the `DynamicTable`.
     ///
     /// The iterator will yield elements of type `(&[u8], &[u8])`,
@@ -123,19 +136,24 @@ impl DynamicTable {
     /// fashion.
     fn consolidate_table(&mut self) {
         while self.size > self.max_size {
-            {
-                let last_header = match self.table.back() {
-                    Some(x) => x,
-                    None => {
-                        // Can never happen as the size of the table must reach
-                        // 0 by the time we've exhausted all elements.
-                        panic!("Size of table != 0, but no headers left!");
-                    }
-                };
-                self.size -= last_header.0.len() + last_header.1.len() + 32;
-            }
-            self.table.pop_back();
+            let mut last_header = self.table.pop_back().unwrap_or_else(|| {
+                // Can never happen as the size of the table must reach 0 by
+                // the time we've exhausted all elements.
+                panic!("Size of table != 0, but no headers left!");
+            });
+            self.size -= last_header.0.len() + last_header.1.len() + 32;
+            last_header.0.zeroize();
+            last_header.1.zeroize();
         }
+    }
+
+    fn clear(&mut self) {
+        for (name, value) in &mut self.table {
+            name.zeroize();
+            value.zeroize();
+        }
+        self.table.clear();
+        self.size = 0;
     }
 
     /// Returns the number of headers in the dynamic table.
@@ -160,6 +178,12 @@ impl DynamicTable {
     /// dynamic table.
     fn get(&self, index: usize) -> Option<&(Vec<u8>, Vec<u8>)> {
         self.table.get(index)
+    }
+}
+
+impl Drop for DynamicTable {
+    fn drop(&mut self) {
+        self.clear();
     }
 }
 
@@ -446,6 +470,18 @@ mod tests {
         assert_eq!(0, table.to_vec().len());
         assert_eq!(0, table.get_size());
         assert_eq!(0, table.get_max_table_size());
+    }
+
+    #[test]
+    fn clearing_dynamic_table_removes_and_zeroizes_owned_header_entries() {
+        let mut table = DynamicTable::new();
+        table.add_header(b"authorization".to_vec(), b"secret-token".to_vec());
+        assert_eq!(table.len(), 1);
+
+        table.clear();
+
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.get_size(), 0);
     }
 
     /// Tests that when the initial max size of the table is 0, nothing

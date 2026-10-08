@@ -7,6 +7,7 @@ import {
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
+  mapDecryptionStatusEvent,
   mapConversationUpdateEvent,
   mapEndpointUpdateEvent,
   mapInterfaceErrorEvent,
@@ -16,6 +17,26 @@ import {
   mapSystemStatsEvent,
   mapTracerouteHopEvent,
 } from '../agent-mapping';
+
+describe('mapDecryptionStatusEvent', () => {
+  it('preserves bounded status metadata and tolerates future reasons', () => {
+    const event = {
+      type: 'decryption_status',
+      status: {
+        connectionId: 'Tcp-127.0.0.1:443-127.0.0.2:50000',
+        direction: 'server_to_client',
+        status: 'desynchronized',
+        reason: 'future_reason',
+      },
+    };
+    expect(mapDecryptionStatusEvent(event)).toEqual({
+      connectionId: 'Tcp-127.0.0.1:443-127.0.0.2:50000',
+      direction: 'server_to_client',
+      status: 'desynchronized',
+      reason: 'future_reason',
+    });
+  });
+});
 
 describe('mapConnectionEvent', () => {
   it('maps agent wire JSON to a NetworkConnection', () => {

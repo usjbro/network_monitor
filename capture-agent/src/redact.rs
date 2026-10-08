@@ -1,12 +1,22 @@
-const SENSITIVE_HEADER_NAMES: &[&str] =
-    &["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"];
+use zeroize::Zeroize;
+
+const SENSITIVE_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "proxy-authorization",
+    "x-api-key",
+];
 
 pub fn is_sensitive_header_name(name: &str) -> bool {
     SENSITIVE_HEADER_NAMES.contains(&name.to_ascii_lowercase().as_str())
 }
 
 fn looks_like_bearer_token(value: &str) -> bool {
-    value.trim_start().to_ascii_lowercase().starts_with("bearer ")
+    value
+        .trim_start()
+        .get(.."bearer ".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
 }
 
 /// Mutates header values in place — never removes the header, never touches
@@ -18,6 +28,7 @@ fn looks_like_bearer_token(value: &str) -> bool {
 pub fn redact_headers(headers: &mut [(String, String)]) {
     for (name, value) in headers.iter_mut() {
         if is_sensitive_header_name(name) || looks_like_bearer_token(value) {
+            value.zeroize();
             *value = "[REDACTED]".to_string();
         }
     }
@@ -32,13 +43,22 @@ mod tests {
         let mut headers = vec![
             ("Authorization".to_string(), "Bearer abc123".to_string()),
             ("cookie".to_string(), "session=xyz".to_string()),
-            ("Set-Cookie".to_string(), "session=xyz; HttpOnly".to_string()),
-            ("PROXY-AUTHORIZATION".to_string(), "Basic dXNlcjpwYXNz".to_string()),
+            (
+                "Set-Cookie".to_string(),
+                "session=xyz; HttpOnly".to_string(),
+            ),
+            (
+                "PROXY-AUTHORIZATION".to_string(),
+                "Basic dXNlcjpwYXNz".to_string(),
+            ),
             ("X-Api-Key".to_string(), "sk-live-12345".to_string()),
         ];
         redact_headers(&mut headers);
         for (name, value) in &headers {
-            assert_eq!(value, "[REDACTED]", "header {name} should have been redacted");
+            assert_eq!(
+                value, "[REDACTED]",
+                "header {name} should have been redacted"
+            );
         }
     }
 
@@ -49,16 +69,29 @@ mod tests {
             ("Authorization".to_string(), "Bearer abc123".to_string()),
         ];
         redact_headers(&mut headers);
-        assert_eq!(headers[0], ("Content-Type".to_string(), "application/json".to_string()));
+        assert_eq!(
+            headers[0],
+            ("Content-Type".to_string(), "application/json".to_string())
+        );
         assert_eq!(headers[1].0, "Authorization"); // name preserved
         assert_eq!(headers[1].1, "[REDACTED]");
     }
 
     #[test]
     fn redacts_bearer_token_shaped_values_in_non_listed_headers() {
-        let mut headers = vec![("X-Custom-Auth".to_string(), "Bearer eyJhbGciOiJIUzI1NiJ9.abc.def".to_string())];
+        let mut headers = vec![(
+            "X-Custom-Auth".to_string(),
+            "Bearer eyJhbGciOiJIUzI1NiJ9.abc.def".to_string(),
+        )];
         redact_headers(&mut headers);
         assert_eq!(headers[0].1, "[REDACTED]");
+    }
+
+    #[test]
+    fn bearer_prefix_detection_is_ascii_case_insensitive_after_whitespace() {
+        assert!(looks_like_bearer_token("  \tBeArEr secret"));
+        assert!(!looks_like_bearer_token("Basic secret"));
+        assert!(!looks_like_bearer_token("bearer"));
     }
 
     #[test]

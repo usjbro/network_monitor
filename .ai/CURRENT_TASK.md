@@ -1,7 +1,7 @@
 # Current Task
 
-JAM-203: derive replay finding timestamps and transaction expiry from capture time, not wall clock.
+JAM-204: reassemble TLS 1.3 records across TCP segments, track per-direction sequence numbers, and select the correct traffic secret.
 
-Worktree: `.worktrees/replay-capture-time-timestamps`; branch: `jamesmbrownjr/jam-203-p2-replay-derive-finding-timestamps-and-transaction-expiry-from`.
+Worktree: `.worktrees/tls-decrypt-record-layer`; branch: `jamesmbrownjr/jam-204-tls-decrypt-record-layer`.
 
-Scope: use capture timestamps for replay packet events and packet-triggered findings, and pass the already-correct capture-time transaction expiry timestamp into unanswered-finding emission. Code inspection confirms replay transaction matching and per-frame expiry already use capture timestamps; replay also skips the wall-clock timeout sweep. Preserve live packet stamping and its wall-clock idle timeout. Audit and classify remaining non-test `SystemTime::now()` / `Instant::now()` calls, and document timestamp meanings in `docs/wire-protocol.md`. `ReplayClock` outlier handling remains with JAM-190. Add regressions proving fast and realtime replay have identical packet/finding timestamps and transaction outcomes, and findings use the triggering frame's capture time.
+Current phase: Review fixes are implemented and locally verified; PR #276 is open and needs a refreshed CI and independent review before merge. Review fixes address sequence advancement after zeroization, replaying records after late key arrival before expiry, counting retained plaintext-ring allocations in the aggregate TLS budget, avoiding non-zeroizing header formatting temporaries, bounding key-log polling/incomplete lines, and limiting/compacting handshake parsing. Earlier review findings on capture-truncation propagation, strict key-wait/gap expiry, cleartext Finished, released-byte retransmissions, HPACK zeroization/accounting, terminal parser budget cleanup, and malformed decode temporary cleanup remain addressed. Preserve per-process opt-in decryption, in-memory-only plaintext/key handling, redaction, the rendering gate, and no-disk-write invariant.

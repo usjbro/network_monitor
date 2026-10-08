@@ -12,8 +12,12 @@ export function mapDecryptedPayloadEvent(raw: unknown): DecryptedPayloadSegment 
   if (!payload || typeof payload.connectionId !== 'string' || typeof payload.dataBase64 !== 'string') {
     throw new Error('malformed decrypted_payload event: missing required fields');
   }
+  if (payload.direction !== 'client_to_server' && payload.direction !== 'server_to_client') {
+    throw new Error('malformed decrypted_payload event: invalid direction');
+  }
   return {
     connectionId: payload.connectionId,
+    direction: payload.direction,
     streamId: typeof payload.streamId === 'number' ? payload.streamId : undefined,
     text: Buffer.from(payload.dataBase64, 'base64').toString('utf8'),
     redacted: Boolean(payload.redacted),

@@ -3,6 +3,7 @@
 //! (HPACK-draft-10, Appendix B)
 
 use std::collections::HashMap;
+use zeroize::Zeroizing;
 
 /// Represents a symbol that can be inserted into a Huffman-encoded octet
 /// string.
@@ -92,7 +93,7 @@ impl HuffmanDecoder {
     pub fn decode(&mut self, buf: &[u8]) -> HuffmanDecoderResult {
         let mut current: u32 = 0;
         let mut current_len: u8 = 0;
-        let mut result: Vec<u8> = Vec::new();
+        let mut result = Zeroizing::new(Vec::<u8>::new());
 
         for b in BitIterator::new(buf.iter()) {
             current_len += 1;
@@ -154,7 +155,7 @@ impl HuffmanDecoder {
             return Err(HuffmanDecoderError::InvalidPadding);
         }
 
-        Ok(result)
+        Ok(std::mem::take(&mut *result))
     }
 }
 
