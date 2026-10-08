@@ -4,6 +4,18 @@ Published review follow-up: corrected the wire-fixture regeneration recipe to au
 
 # Test Status
 
+## JAM-250 — CI job timeouts and bounded apt retries (2026-10-08)
+
+In `.worktrees/ci-job-timeouts-apt-retry` on `jamesmbrownjr/jam-250-p3-ci-add-job-timeouts-and-an-apt-get-retry-so-a-hung-runner`.
+
+- `python3` PyYAML validation: parsed `.github/workflows/ci.yml`; confirmed all four jobs have timeouts and both apt steps contain per-command 120-second bounds, apt acquisition retries, and exactly three outer attempts.
+- `bash -n` on all 27 workflow `run` blocks: passed.
+- `git diff --check`: passed.
+- Independent `codex review --uncommitted`: no actionable findings.
+- Initial temporary unreachable-mirror PR probe (run 37805550567, commit 3c2def0) did not trigger retries because apt-get update returned success despite the unreachable source; this revealed that apt update's partial-error default must be overridden.
+- Added `apt-get update --error-on=any` so any repository error enters the bounded retry loop.
+- Temporary unreachable-mirror probe (run 37806849918, commit `eb11e33`) failed as intended after logging all three attempts; `apt-get update` rejected the unreachable source each time. The install step completed in about 24 seconds, well below its 120-second per-command limit. The test-only change was removed with revert commit `77542d3`; this probe run is expectedly red and the restored PR head requires a fresh green run.
+
 ## JAM-168 — reassembled L7 field offsets (2026-10-08)
 
 In `.worktrees/p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`.

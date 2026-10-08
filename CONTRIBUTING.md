@@ -31,6 +31,10 @@ npx playwright test   # real-browser smoke test — see e2e/smoke.spec.ts
 
 All checks above should pass before opening a PR. CI enforces the three `cargo fuzz` commands, `cargo audit`, and `npm audit` above itself now (issues #66, #111, #112) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, `pcapng.rs`, or `capture-agent/fuzz/**` will fail CI if any fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock`/`package-lock.json` carries a dependency with a known advisory (RustSec for Rust, `high` severity or above for npm) not already in `.github/scripts/check-npm-audit.mjs`'s allowlist (reserved for advisories with no patched version published upstream — see JAM-171), same as running these locally would show.
 
+### Infrastructure failures on `main`
+
+Failed runs on `main` use GitHub's normal notifications; the repository does not automatically rerun them. A maintainer checks the failing job and logs first. When evidence points to a transient runner, network, or package-mirror failure rather than a code/test failure, the maintainer may manually rerun the affected job or workflow and note the infrastructure cause. Do not rerun a failure merely to replace a red status with green: investigate and fix code or test failures normally.
+
 ### Live-loopback packet-capture integration test (issue #114)
 
 `cargo test` above never opens a real `pcap::Capture` handle — every existing Rust test (including the fixture corpus in `tests/protocol_regression.rs`) passes fixture bytes straight to `parse_packet`/`sniff_l7`. `tests/live_loopback.rs` closes that gap: it spawns the actual compiled `capture-agent` binary against the real `lo` interface, drives real TCP traffic across it, and asserts on the resulting wire events.
