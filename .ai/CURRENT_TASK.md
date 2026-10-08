@@ -1,7 +1,7 @@
 # Current Task
 
-JAM-204: reassemble TLS 1.3 records across TCP segments, track per-direction sequence numbers, and select the correct traffic secret.
+JAM-168: keep reassembled L7 field offsets tied to bytes present in the emitted packet event.
 
-Worktree: `.worktrees/tls-decrypt-record-layer`; branch: `jamesmbrownjr/jam-204-tls-decrypt-record-layer`.
+Worktree: `.worktrees/p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`; branch: `jamesmbrownjr/jam-168-p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`.
 
-Current phase: Review fixes are implemented and locally verified; PR #276 is open and needs a refreshed CI and independent review before merge. Review fixes address sequence advancement after zeroization, replaying records after late key arrival before expiry, counting retained plaintext-ring allocations in the aggregate TLS budget, avoiding non-zeroizing header formatting temporaries, bounding key-log polling/incomplete lines, and limiting/compacting handshake parsing. Earlier review findings on capture-truncation propagation, strict key-wait/gap expiry, cleartext Finished, released-byte retransmissions, HPACK zeroization/accounting, terminal parser budget cleanup, and malformed decode temporary cleanup remain addressed. Preserve per-process opt-in decryption, in-memory-only plaintext/key handling, redaction, the rendering gate, and no-disk-write invariant.
+Current phase: Implemented and locally verified. Packet field construction now omits application fields when `SniffOutcome.status` shows L7 info came through reassembly, while preserving packet header fields and direct, unsplit L7 offsets. Split and unsplit ClientHello regressions pass. Full Rust tests, strict Clippy, release build, `git diff --check`, and independent Codex review pass. Formatting check remains noisy due to existing unrelated files. Preparing the PR.

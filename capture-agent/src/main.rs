@@ -3187,7 +3187,12 @@ async fn main() -> std::io::Result<()> {
                         let epoch_ms = capture_epoch_ms;
                         let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
                         let frame_id = format!("pkt-{epoch_ms}-{seq}");
-                        let mut packet_fields = fields::build_fields(&parsed, &l7_info, link_type);
+                        let mut packet_fields = fields::build_packet_fields(
+                            &parsed,
+                            &l7_info,
+                            link_type,
+                            sniff_outcome.status.is_some(),
+                        );
                         packet_fields.extend(fields::transaction_fields(&txn_event));
                         // JAM-15: only now does the request have an id the UI
                         // will actually receive, so only now can its response
