@@ -58,7 +58,7 @@ impl DecryptedRingBuffer {
         unsafe {
             libc::mlock(data.as_ptr() as *const libc::c_void, data.len());
         }
-        self.used_bytes += data.len();
+        self.used_bytes = self.used_bytes.saturating_add(data.capacity());
         self.entries.push_back(DecryptedRingEntry {
             direction,
             bytes: data,
@@ -78,7 +78,7 @@ impl DecryptedRingBuffer {
     /// already freed, which would be a use-after-free.
     fn evict_oldest(&mut self) -> Option<Vec<u8>> {
         let mut oldest = self.entries.pop_front()?;
-        self.used_bytes -= oldest.bytes.len();
+        self.used_bytes = self.used_bytes.saturating_sub(oldest.bytes.capacity());
         unsafe {
             libc::munlock(
                 oldest.bytes.as_ptr() as *const libc::c_void,
@@ -106,6 +106,17 @@ impl DecryptedRingBuffer {
 
     pub fn mlock_engaged(&self) -> bool {
         self.mlock_engaged
+    }
+
+    /// Retained allocation size, rather than payload length, for callers
+    /// enforcing an aggregate memory budget across multiple rings.
+    pub fn bytes_held(&self) -> usize {
+        self.used_bytes
+    }
+
+    /// Zeroes and releases every retained payload.
+    pub fn clear(&mut self) {
+        while self.evict_oldest().is_some() {}
     }
 }
 
@@ -139,6 +150,20 @@ mod tests {
             "oldest entry should have been evicted"
         );
         assert!(entries.iter().any(|e| e.bytes == vec![11, 12]));
+    }
+
+    #[test]
+    fn reports_retained_capacity_and_clear_zeroizes_the_ring() {
+        let mut buf = DecryptedRingBuffer::new(100);
+        let payload = vec![0x5a; 24];
+        let capacity = payload.capacity();
+        buf.push(payload);
+        assert_eq!(buf.bytes_held(), capacity);
+
+        buf.clear();
+
+        assert_eq!(buf.bytes_held(), 0);
+        assert!(buf.drain_since(0).0.is_empty());
     }
 
     #[test]

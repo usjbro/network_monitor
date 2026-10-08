@@ -8,6 +8,14 @@
 - **Secret/ring ownership:** Transfer a key-log secret into the relevant direction state when consumed, then remove and zeroize the stored copy. Remove handshake secrets after that direction authenticates Finished and installs its application secret; remove the application secret after installing it into direction state. Derive KeyUpdate secrets in place. Per-PID direction-cap eviction selects that PID's least-recently-active direction and never another PID's. Keep one decrypted ring buffer per connection, tagging each stored entry and emitted payload with its direction; keep directional HTTP/2/HPACK state separate.
 - **Additional tests:** Cover a key-log line arriving after encrypted handshake records, late-key timeout/cap, accepted and over-limit early-data trials, terminal/recoverable reason transitions, eviction isolation between PIDs, key removal after transfer/consumption, and the shared direction-tagged ring.
 
+## Review follow-up (2026-10-08)
+
+- Advance the contiguous plaintext offset using the decrypted byte count captured before zeroization. Periodic key-log polling transfers newly arrived secrets into matching directions and replays queued records before checking capture-clock key-wait expiry.
+- Include retained ring-buffer allocation capacity in the 4 MiB aggregate TLS budget. On pressure, evict the least-recently-active active direction; once only ring allocations remain, zero and clear the least-recently-active ring until the bound is restored.
+- Render each header block into one `Zeroizing<String>` using direct formatting, with no intermediate per-header strings. The traffic-secret-derived static IV is also held in zeroizing storage.
+- Key-log polling is bounded to 64 KiB total per poll, rotates through eligible PIDs, buffers only newline-terminated records, and discards lines above 1 KiB through the next newline. This prevents accepting an incomplete final secret line and bounds file-driven parsing work.
+- Limit an incomplete handshake message to 64 KiB and compact consumed handshake bytes once per feed call; malformed or over-limit input zeroes and releases the parser allocation. Unused-secret TTL stays on monotonic wall time so replay speed or pause cannot extend key retention; stream deadlines and eviction continue to use the capture clock.
+
 ## Goal
 
 Decrypt TLS 1.3 application data from explicitly opted-in processes only when records arrive in a contiguous TCP stream, authenticate with the negotiated cipher suite and correct directional traffic secret, and feed plaintext to direction-local HTTP/2 parsers. Never guess past a lost byte or failed authentication.

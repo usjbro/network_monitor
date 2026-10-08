@@ -277,3 +277,17 @@ In `.worktrees/replay-capture-time-timestamps`. The focused binary replay regres
 - `git diff --check`: passed.
 - `cargo fmt --check`: not clean because rustfmt reports extensive pre-existing differences across unrelated Rust files; no repository-wide formatting was applied.
 - Independent Codex and Claude Code code/security reviews of the worktree diff: no blocking findings. Documented the `u64::MAX` microsecond saturation edge noted by Claude; no timer clamp was added (JAM-190 scope).
+
+## JAM-204 TLS record-layer review fixes — 2026-10-08
+
+In `.worktrees/tls-decrypt-record-layer` on `jamesmbrownjr/jam-204-tls-decrypt-record-layer`.
+
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml -- --test-threads=1`: passed (370 library, 81 binary, 12 control-auth, 2 no-disk, 4 pcapng, and 1 protocol-regression tests; 11 ignored across live/opt-in suites).
+- `cargo test --locked --manifest-path capture-agent/vendor/fluke-hpack/Cargo.toml`: passed (59 unit + 6 doc tests).
+- `npx vitest run --maxWorkers=1 --no-file-parallelism`: passed (82 files, 602 tests).
+- `npx tsc --noEmit` and `npm run lint`: passed.
+- `cargo clippy --locked --manifest-path capture-agent/Cargo.toml --all-targets -- -D warnings`: passed after replacing needless references and aliasing the derived key/IV tuple.
+- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
+- `rustfmt --edition 2021 --check --config skip_children=true` on the five changed Rust source files and `git diff --check`: passed. Rustfmt without `skip_children` reports pre-existing formatting in the nested third-party capture fixture; that unrelated fixture was not changed.
+- Added regressions for plaintext sequence advancement, late-key replay before expiry, ring-budget accounting/eviction, header-string zeroization, bounded key-log polling and newline handling, and oversized handshake rejection. Focused module tests and full Rust suite passed.
+- CI/security review on the newly pushed PR head remains pending.

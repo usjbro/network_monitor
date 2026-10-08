@@ -70,12 +70,16 @@ fn hkdf_expand_label(secret: &[u8], label: &str, out_len: usize) -> Option<Zeroi
     Some(out)
 }
 
-fn derive_key_and_iv(traffic_secret: &[u8]) -> Option<(Zeroizing<[u8; 16]>, [u8; 12])> {
+type TrafficKey = Zeroizing<[u8; 16]>;
+type TrafficIv = Zeroizing<[u8; 12]>;
+
+fn derive_key_and_iv(traffic_secret: &[u8]) -> Option<(TrafficKey, TrafficIv)> {
     let key_bytes = hkdf_expand_label(traffic_secret, "key", 16)?;
     let iv_bytes = hkdf_expand_label(traffic_secret, "iv", 12)?;
     let mut key = Zeroizing::new([0u8; 16]);
     key.copy_from_slice(&key_bytes);
-    let iv: [u8; 12] = iv_bytes.as_slice().try_into().ok()?;
+    let mut iv = Zeroizing::new([0u8; 12]);
+    iv.copy_from_slice(&iv_bytes);
     Some((key, iv))
 }
 
@@ -113,7 +117,7 @@ pub fn decrypt_record(record: &[u8], secret: &SessionSecret, sequence: u64) -> D
             reason: "invalid key material",
         };
     };
-    let nonce = aead::Nonce::assume_unique_for_key(nonce_for_sequence(iv, sequence));
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_for_sequence(*iv, sequence));
     let key = aead::LessSafeKey::new(unbound_key);
 
     // RFC 8446 §5.2: the AEAD's additional authenticated data is the
@@ -210,7 +214,7 @@ mod tests {
         let secret = hex::decode(fx["client_traffic_secret_0"].as_str().unwrap()).unwrap();
         let (key, iv) = derive_key_and_iv(&secret).expect("derivation should succeed");
         assert_eq!(hex::encode(key), fx["expected_key"].as_str().unwrap());
-        assert_eq!(hex::encode(iv), fx["expected_iv"].as_str().unwrap());
+        assert_eq!(hex::encode(&iv[..]), fx["expected_iv"].as_str().unwrap());
     }
 
     #[test]
@@ -329,7 +333,7 @@ mod tests {
         let body_len = body.len() + aead::AES_128_GCM.tag_len();
         let mut record = vec![0x17, 0x03, 0x03, (body_len >> 8) as u8, body_len as u8];
         key.seal_in_place_append_tag(
-            aead::Nonce::assume_unique_for_key(nonce_for_sequence(iv, sequence)),
+            aead::Nonce::assume_unique_for_key(nonce_for_sequence(*iv, sequence)),
             aead::Aad::from(record.as_slice()),
             &mut body,
         )

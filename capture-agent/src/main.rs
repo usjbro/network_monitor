@@ -18,6 +18,7 @@ use capture_agent::{
     wire,
 };
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -62,6 +63,32 @@ struct DecryptDirectionState {
     terminal: Option<(wire::DecryptionAvailability, wire::DecryptionReason)>,
     terminal_status_emitted: bool,
     clean_closed: bool,
+}
+
+fn feed_plaintext_to_http2(
+    direction_state: &mut DecryptDirectionState,
+    bytes: &mut zeroize::Zeroizing<Vec<u8>>,
+) -> Vec<FrameOutcome> {
+    let plaintext_len = bytes.len() as u64;
+    let outcomes = direction_state
+        .http2
+        .feed(direction_state.plaintext_sequence, bytes);
+    zeroize::Zeroize::zeroize(bytes);
+    direction_state.plaintext_sequence = direction_state
+        .plaintext_sequence
+        .saturating_add(plaintext_len);
+    outcomes
+}
+
+fn format_decrypted_headers(headers: &[(String, String)]) -> zeroize::Zeroizing<String> {
+    let mut text = zeroize::Zeroizing::new(String::new());
+    for (index, (name, value)) in headers.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        write!(&mut *text, "{name}: {value}").expect("formatting into a String should not fail");
+    }
+    text
 }
 
 impl DecryptDirectionState {
@@ -132,6 +159,7 @@ impl DecryptConnectionState {
         self.outbound
             .held_bytes()
             .saturating_add(self.inbound.held_bytes())
+            .saturating_add(self.ring.bytes_held())
     }
 }
 
@@ -178,6 +206,7 @@ fn mark_tls_direction_evicted(
         wire::DecryptionReason::EvictedBudget,
         tx,
     );
+    connection.ring.clear();
 }
 
 fn emit_pending_decryption_status(
@@ -426,10 +455,24 @@ fn enforce_tls_buffer_budget(state: &mut DecryptState, tx: &broadcast::Sender<St
             })
             .filter(|(_, _, active, _)| *active)
             .min_by_key(|(_, _, _, last)| *last);
-        let Some((id, outbound, _, _)) = victim else {
-            break;
-        };
-        mark_tls_direction_evicted(state, &id, outbound, tx);
+        if let Some((id, outbound, _, _)) = victim {
+            mark_tls_direction_evicted(state, &id, outbound, tx);
+            continue;
+        }
+        let ring_victim = state
+            .iter()
+            .filter(|(_, connection)| connection.ring.bytes_held() > 0)
+            .min_by_key(|(_, connection)| {
+                connection
+                    .outbound
+                    .last_activity_ms
+                    .max(connection.inbound.last_activity_ms)
+            })
+            .map(|(id, _)| id.clone());
+        let Some(id) = ring_victim else { break };
+        if let Some(connection) = state.get_mut(&id) {
+            connection.ring.clear();
+        }
     }
 }
 
@@ -780,6 +823,38 @@ fn try_decrypt_and_emit(
         .collect::<Vec<_>>();
     direction_state.key_wait_bytes = 0;
     records.extend(framed);
+    process_tls_records(
+        &connection_id,
+        outbound,
+        client_is_outbound,
+        direction_name,
+        &mut negotiated_suite,
+        direction_state,
+        &mut connection.ring,
+        records,
+        event_now_ms,
+        capture_now_ms,
+        decrypt_event_limiter,
+        tx,
+    );
+    enforce_tls_buffer_budget(&mut state, tx);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_tls_records(
+    connection_id: &str,
+    outbound: bool,
+    client_is_outbound: Option<bool>,
+    direction_name: Option<wire::DecryptionDirection>,
+    negotiated_suite: &mut Option<u16>,
+    direction_state: &mut DecryptDirectionState,
+    ring: &mut DecryptedRingBuffer,
+    records: Vec<Vec<u8>>,
+    event_now_ms: u64,
+    capture_now_ms: u64,
+    decrypt_event_limiter: &Mutex<PacketEventLimiter>,
+    tx: &broadcast::Sender<String>,
+) {
     let mut deferred = VecDeque::new();
     for record in records {
         match record.first().copied() {
@@ -789,7 +864,7 @@ fn try_decrypt_and_emit(
                     Ok(events) => events,
                     Err(_) => {
                         terminate_decryption_direction(
-                            &connection_id,
+                            connection_id,
                             direction_name,
                             direction_state,
                             wire::DecryptionAvailability::Desynchronized,
@@ -800,14 +875,14 @@ fn try_decrypt_and_emit(
                     }
                 };
                 if let Some(suite) = apply_plaintext_handshake_events(direction_state, &events) {
-                    negotiated_suite = Some(suite);
+                    *negotiated_suite = Some(suite);
                 }
                 continue;
             }
             Some(0x17) if record.len() >= 5 => {}
             _ => {
                 terminate_decryption_direction(
-                    &connection_id,
+                    connection_id,
                     direction_name,
                     direction_state,
                     wire::DecryptionAvailability::Desynchronized,
@@ -818,10 +893,10 @@ fn try_decrypt_and_emit(
             }
         }
 
-        if let Some(suite) = negotiated_suite {
+        if let Some(suite) = *negotiated_suite {
             if suite != 0x1301 {
                 terminate_decryption_direction(
-                    &connection_id,
+                    connection_id,
                     direction_name,
                     direction_state,
                     wire::DecryptionAvailability::Unavailable,
@@ -836,7 +911,7 @@ fn try_decrypt_and_emit(
                 &mut deferred,
                 record,
                 capture_now_ms,
-                &connection_id,
+                connection_id,
                 direction_name,
                 tx,
             );
@@ -865,7 +940,7 @@ fn try_decrypt_and_emit(
                 &mut deferred,
                 record,
                 capture_now_ms,
-                &connection_id,
+                connection_id,
                 direction_name,
                 tx,
             );
@@ -883,7 +958,7 @@ fn try_decrypt_and_emit(
             {
                 if !count_early_data_trial(direction_state, record.len()) {
                     terminate_decryption_direction(
-                        &connection_id,
+                        connection_id,
                         direction_name,
                         direction_state,
                         wire::DecryptionAvailability::Unavailable,
@@ -896,7 +971,7 @@ fn try_decrypt_and_emit(
             }
             DecryptOutcome::Undecryptable { .. } => {
                 terminate_decryption_direction(
-                    &connection_id,
+                    connection_id,
                     direction_name,
                     direction_state,
                     wire::DecryptionAvailability::Desynchronized,
@@ -969,7 +1044,7 @@ fn try_decrypt_and_emit(
                     }
                     Err(_) => {
                         terminate_decryption_direction(
-                            &connection_id,
+                            connection_id,
                             direction_name,
                             direction_state,
                             wire::DecryptionAvailability::Desynchronized,
@@ -997,16 +1072,10 @@ fn try_decrypt_and_emit(
             } => {
                 direction_state.app_sequence = direction_state.app_sequence.saturating_add(1);
                 direction_state.key_wait_since_ms = None;
-                let outcomes = direction_state
-                    .http2
-                    .feed(direction_state.plaintext_sequence, &bytes);
-                zeroize::Zeroize::zeroize(&mut bytes);
-                direction_state.plaintext_sequence = direction_state
-                    .plaintext_sequence
-                    .saturating_add(bytes.len() as u64);
+                let outcomes = feed_plaintext_to_http2(direction_state, &mut bytes);
                 let Some(payload_direction) = direction_name else {
                     terminate_decryption_direction(
-                        &connection_id,
+                        connection_id,
                         direction_name,
                         direction_state,
                         wire::DecryptionAvailability::Unavailable,
@@ -1025,16 +1094,10 @@ fn try_decrypt_and_emit(
                         continue;
                     };
                     if !headers.is_empty() {
-                        let mut text = headers
-                            .iter()
-                            .map(|(k, v)| format!("{k}: {v}"))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        connection
-                            .ring
-                            .push_for_direction(payload_direction, text.clone().into_bytes());
+                        let mut text = format_decrypted_headers(&headers);
+                        ring.push_for_direction(payload_direction, text.as_bytes().to_vec());
                         emit_decrypted(
-                            &connection_id,
+                            connection_id,
                             payload_direction,
                             Some(stream_id),
                             false,
@@ -1043,18 +1106,16 @@ fn try_decrypt_and_emit(
                             event_now_ms,
                             tx,
                         );
-                        zeroize::Zeroize::zeroize(&mut text);
+                        zeroize::Zeroize::zeroize(&mut *text);
                         for (name, value) in &mut headers {
                             zeroize::Zeroize::zeroize(name);
                             zeroize::Zeroize::zeroize(value);
                         }
                     }
                     if !body.is_empty() {
-                        connection
-                            .ring
-                            .push_for_direction(payload_direction, body.clone());
+                        ring.push_for_direction(payload_direction, body.clone());
                         emit_decrypted(
-                            &connection_id,
+                            connection_id,
                             payload_direction,
                             Some(stream_id),
                             false,
@@ -1081,7 +1142,94 @@ fn try_decrypt_and_emit(
     if direction_state.terminal.is_none() {
         direction_state.key_wait_records = deferred;
     }
-    enforce_tls_buffer_budget(&mut state, tx);
+}
+
+fn replay_pending_tls_keys(
+    state: &mut DecryptState,
+    watcher: &mut KeyLogWatcher,
+    event_now_ms: u64,
+    capture_now_ms: u64,
+    decrypt_event_limiter: &Mutex<PacketEventLimiter>,
+    tx: &broadcast::Sender<String>,
+) {
+    for (connection_id, connection) in state.iter_mut() {
+        let (Some(client_random), Some(client_is_outbound)) = (
+            connection.client_random.as_deref(),
+            connection.client_is_outbound,
+        ) else {
+            continue;
+        };
+        if !watcher.is_eligible(connection.pid) {
+            continue;
+        }
+        watcher.mark_flow_seen(connection.pid, client_random);
+        let mut negotiated_suite = connection
+            .outbound
+            .cipher_suite
+            .or(connection.inbound.cipher_suite);
+        for outbound in [true, false] {
+            let direction = if outbound == client_is_outbound {
+                wire::DecryptionDirection::ClientToServer
+            } else {
+                wire::DecryptionDirection::ServerToClient
+            };
+            let direction_state = if outbound {
+                &mut connection.outbound
+            } else {
+                &mut connection.inbound
+            };
+            if direction_state.terminal.is_some() || direction_state.clean_closed {
+                continue;
+            }
+            let app_label = capture_agent::keylog::secret_label_for_direction(
+                client_is_outbound,
+                outbound,
+                false,
+            );
+            let handshake_label = capture_agent::keylog::secret_label_for_direction(
+                client_is_outbound,
+                outbound,
+                true,
+            );
+            if direction_state.app_secret.is_none() {
+                direction_state.app_secret =
+                    watcher.take_secret(connection.pid, client_random, app_label);
+            }
+            if !direction_state.handshake_epoch_complete
+                && direction_state.handshake_secret.is_none()
+            {
+                direction_state.handshake_secret =
+                    watcher.take_secret(connection.pid, client_random, handshake_label);
+            }
+            if direction_state.key_wait_records.is_empty()
+                || (direction_state.app_secret.is_none()
+                    && direction_state.handshake_secret.is_none())
+            {
+                continue;
+            }
+
+            direction_state.last_activity_ms = capture_now_ms;
+            let mut records = direction_state
+                .key_wait_records
+                .drain(..)
+                .collect::<Vec<_>>();
+            direction_state.key_wait_bytes = 0;
+            process_tls_records(
+                connection_id,
+                outbound,
+                Some(client_is_outbound),
+                Some(direction),
+                &mut negotiated_suite,
+                direction_state,
+                &mut connection.ring,
+                std::mem::take(&mut records),
+                event_now_ms,
+                capture_now_ms,
+                decrypt_event_limiter,
+                tx,
+            );
+        }
+    }
 }
 
 fn defer_tls_record(
@@ -3427,8 +3575,19 @@ async fn main() -> std::io::Result<()> {
                     replay_flow_clock.load(Ordering::Relaxed),
                     agent_now_ms,
                 );
-                keylog_watcher.lock().unwrap().poll();
-                expire_tls_state_timers(&mut decrypt_state.lock().unwrap(), tls_now_ms, &tx);
+                let mut keylog_watcher = keylog_watcher.lock().unwrap();
+                keylog_watcher.poll();
+                let mut decrypt_state = decrypt_state.lock().unwrap();
+                replay_pending_tls_keys(
+                    &mut decrypt_state,
+                    &mut keylog_watcher,
+                    agent_now_ms,
+                    tls_now_ms,
+                    &decrypt_event_limiter,
+                    &tx,
+                );
+                expire_tls_state_timers(&mut decrypt_state, tls_now_ms, &tx);
+                enforce_tls_buffer_budget(&mut decrypt_state, &tx);
 
                 let avg_loss = if loss_count > 0 {
                     loss_sum / loss_count as f64
@@ -4899,6 +5058,44 @@ mod tls_decrypt_state_tests {
     use super::*;
 
     #[test]
+    fn consecutive_plaintext_records_advance_the_http2_sequence_after_zeroization() {
+        fn data_frame(byte: u8) -> zeroize::Zeroizing<Vec<u8>> {
+            zeroize::Zeroizing::new(vec![0, 0, 1, 0, 0, 0, 0, 0, 1, byte])
+        }
+
+        let mut direction = DecryptDirectionState::new();
+        let mut first = data_frame(b'a');
+        let first_outcomes = feed_plaintext_to_http2(&mut direction, &mut first);
+        assert!(first_outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, FrameOutcome::Frame { .. })));
+        assert!(first.is_empty(), "plaintext buffer must be zeroized");
+
+        let mut second = data_frame(b'b');
+        let second_outcomes = feed_plaintext_to_http2(&mut direction, &mut second);
+        assert!(second_outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, FrameOutcome::Frame { .. })));
+        assert!(second.is_empty(), "plaintext buffer must be zeroized");
+        assert_eq!(direction.plaintext_sequence, 20);
+    }
+
+    #[test]
+    fn decrypted_header_rendering_uses_a_zeroizing_output_buffer() {
+        let headers = vec![
+            ("authorization".to_string(), "[REDACTED]".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let mut rendered = format_decrypted_headers(&headers);
+        assert_eq!(
+            rendered.as_str(),
+            "authorization: [REDACTED]\ncontent-type: application/json"
+        );
+        zeroize::Zeroize::zeroize(&mut *rendered);
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
     fn early_data_trials_are_bounded_by_both_record_count_and_bytes() {
         let mut by_count = DecryptDirectionState::new();
         for _ in 0..MAX_EARLY_DATA_RECORDS {
@@ -4941,6 +5138,63 @@ mod tls_decrypt_state_tests {
         assert!(!key_wait_expired(&direction, 11_999));
         assert!(key_wait_expired(&direction, 12_000));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn periodic_key_poll_replays_waiting_records_before_expiring_them() {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/tls13_rfc8446_vector.json"))
+                .unwrap();
+        let random = hex::decode(vector["client_random"].as_str().unwrap()).unwrap();
+        let record = hex::decode(vector["encrypted_record"].as_str().unwrap()).unwrap();
+        let expected_plaintext =
+            hex::decode(vector["expected_plaintext"].as_str().unwrap()).unwrap();
+        let secret = vector["client_traffic_secret_0"].as_str().unwrap();
+        let keylog_path = std::env::temp_dir().join(format!(
+            "jam204-periodic-key-wait-{}.log",
+            std::process::id()
+        ));
+        std::fs::write(&keylog_path, "").unwrap();
+        let mut watcher = KeyLogWatcher::new();
+        watcher.register_eligible_pid(88, keylog_path.clone());
+
+        let mut connection = DecryptConnectionState::new(88);
+        connection.client_random = Some(random.clone());
+        connection.client_is_outbound = Some(true);
+        connection.outbound.cipher_suite = Some(0x1301);
+        connection.outbound.handshake_epoch_started = true;
+        connection.outbound.handshake_epoch_complete = true;
+        connection.outbound.key_wait_since_ms = Some(1_000);
+        connection.outbound.key_wait_bytes = record.len();
+        connection.outbound.key_wait_records.push_back(record);
+        let mut state = DecryptState::from([("conn".to_string(), connection)]);
+        let (tx, _) = broadcast::channel(8);
+        let limiter = Mutex::new(PacketEventLimiter::new(100, 1_000));
+
+        // The app writes key-log secrets after packets reach the capture
+        // agent. The periodic poll sees the new line while no packet arrives.
+        std::fs::write(
+            &keylog_path,
+            format!(
+                "CLIENT_TRAFFIC_SECRET_0 {} {secret}\n",
+                hex::encode(&random)
+            ),
+        )
+        .unwrap();
+        watcher.poll();
+        // Replaying at the exact expiry edge must win over timer expiry.
+        replay_pending_tls_keys(&mut state, &mut watcher, 3_000, 3_000, &limiter, &tx);
+        expire_tls_state_timers(&mut state, 3_000, &tx);
+
+        let connection = &state["conn"];
+        assert!(connection.outbound.key_wait_records.is_empty());
+        assert_eq!(connection.outbound.app_sequence, 1);
+        assert_eq!(
+            connection.outbound.plaintext_sequence,
+            expected_plaintext.len() as u64
+        );
+        assert_eq!(connection.outbound.terminal, None);
+        std::fs::remove_file(keylog_path).unwrap();
     }
 
     #[test]
@@ -5121,6 +5375,30 @@ mod tls_decrypt_state_tests {
             rx.try_recv().is_ok(),
             "the evicted direction must report its budget status"
         );
+    }
+
+    #[test]
+    fn aggregate_tls_budget_includes_and_evicts_plaintext_ring_allocations() {
+        let (tx, _) = broadcast::channel(8);
+        let mut state = DecryptState::new();
+        for index in 0..17 {
+            let mut connection = DecryptConnectionState::new(100 + index);
+            connection.ring.push(vec![0x5a; DECRYPT_RING_CAP_BYTES]);
+            state.insert(format!("conn-{index}"), connection);
+        }
+        let before = state
+            .values()
+            .map(DecryptConnectionState::held_bytes)
+            .sum::<usize>();
+        assert!(before > MAX_TLS_BUFFER_BYTES);
+
+        enforce_tls_buffer_budget(&mut state, &tx);
+
+        let after = state
+            .values()
+            .map(DecryptConnectionState::held_bytes)
+            .sum::<usize>();
+        assert!(after <= MAX_TLS_BUFFER_BYTES);
     }
 }
 /// Never expose the live agent's private transport as captured user traffic.

@@ -6,6 +6,8 @@ use zeroize::{Zeroize, Zeroizing};
 
 const MAX_KEYLOG_SESSIONS_PER_PID: usize = 128;
 const MAX_KEYLOG_SECRET_BYTES: usize = 1024 * 1024;
+const MAX_KEYLOG_READ_BYTES_PER_POLL: usize = 64 * 1024;
+const MAX_KEYLOG_LINE_BYTES: usize = 1024;
 const UNUSED_SECRET_TTL: Duration = Duration::from_secs(10 * 60);
 
 pub fn secret_label_for_direction(
@@ -67,12 +69,15 @@ pub fn parse_keylog_line(line: &str) -> Option<SessionSecret> {
 struct WatchedFile {
     path: PathBuf,
     offset: u64,
+    pending_line: Zeroizing<Vec<u8>>,
+    discarding_oversized_line: bool,
 }
 
 pub struct KeyLogWatcher {
     eligible: HashMap<u32, WatchedFile>,
     secrets: HashMap<(u32, Vec<u8>, String), StoredSecret>,
     next_order: u64,
+    last_polled_pid: u32,
 }
 
 struct StoredSecret {
@@ -94,6 +99,7 @@ impl KeyLogWatcher {
             eligible: HashMap::new(),
             secrets: HashMap::new(),
             next_order: 0,
+            last_polled_pid: 0,
         }
     }
 
@@ -103,6 +109,8 @@ impl KeyLogWatcher {
             WatchedFile {
                 path: keylog_path,
                 offset: 0,
+                pending_line: Zeroizing::new(Vec::new()),
+                discarding_oversized_line: false,
             },
         );
     }
@@ -127,22 +135,58 @@ impl KeyLogWatcher {
 
     fn poll_at(&mut self, now: Instant) {
         let mut found = Vec::new();
-        for (&pid, watched) in self.eligible.iter_mut() {
+        let mut pids = self.eligible.keys().copied().collect::<Vec<_>>();
+        pids.sort_unstable();
+        let start = pids.partition_point(|pid| *pid <= self.last_polled_pid);
+        let pid_count = pids.len();
+        if pid_count > 0 {
+            pids.rotate_left(start % pid_count);
+        }
+        let mut remaining = MAX_KEYLOG_READ_BYTES_PER_POLL;
+        for pid in pids {
+            if remaining == 0 {
+                break;
+            }
+            let Some(watched) = self.eligible.get_mut(&pid) else {
+                continue;
+            };
             let Ok(mut file) = std::fs::File::open(&watched.path) else {
+                self.last_polled_pid = pid;
                 continue;
             };
             if file.seek(SeekFrom::Start(watched.offset)).is_err() {
+                self.last_polled_pid = pid;
                 continue;
             }
-            let mut buf = String::new();
-            if file.read_to_string(&mut buf).is_err() {
-                buf.zeroize();
+            let mut buf = Zeroizing::new(Vec::new());
+            let read_result = file.take(remaining as u64).read_to_end(&mut buf);
+            if read_result.is_err() {
                 continue;
             }
             watched.offset += buf.len() as u64;
-            for line in buf.lines() {
-                if let Some(secret) = parse_keylog_line(line) {
-                    found.push((pid, secret));
+            remaining = remaining.saturating_sub(buf.len());
+            self.last_polled_pid = pid;
+            for byte in buf.iter().copied() {
+                if watched.discarding_oversized_line {
+                    if byte == b'\n' {
+                        watched.discarding_oversized_line = false;
+                    }
+                    continue;
+                }
+                if byte == b'\n' {
+                    if let Ok(line) = std::str::from_utf8(&watched.pending_line) {
+                        if let Some(secret) = parse_keylog_line(line) {
+                            found.push((pid, secret));
+                        }
+                    }
+                    watched.pending_line.zeroize();
+                    watched.pending_line.clear();
+                } else if watched.pending_line.len() < MAX_KEYLOG_LINE_BYTES {
+                    watched.pending_line.push(byte);
+                } else {
+                    watched.pending_line.zeroize();
+                    watched.pending_line.clear();
+                    watched.discarding_oversized_line = true;
                 }
             }
             buf.zeroize();
@@ -439,6 +483,73 @@ mod tests {
                 999,
                 &hex::decode("11".repeat(17)).unwrap(),
                 "CLIENT_HANDSHAKE_TRAFFIC_SECRET"
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn poll_does_not_consume_an_unterminated_partial_keylog_line() {
+        let mut watcher = KeyLogWatcher::new();
+        let dir = tempfile_dir("partial-line");
+        let path = dir.join("test.keylog");
+        let random = "11".repeat(32);
+        let secret = "22".repeat(32);
+        let line = format!("CLIENT_TRAFFIC_SECRET_0 {random} {secret}");
+        std::fs::write(&path, &line).unwrap();
+        watcher.register_eligible_pid(501, path.clone());
+        let start = Instant::now();
+
+        watcher.poll_at(start);
+        assert!(watcher
+            .secret_for(
+                501,
+                &hex::decode(&random).unwrap(),
+                "CLIENT_TRAFFIC_SECRET_0"
+            )
+            .is_none());
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\n")
+            .unwrap();
+        watcher.poll_at(start + Duration::from_millis(1));
+        assert!(watcher
+            .secret_for(
+                501,
+                &hex::decode(&random).unwrap(),
+                "CLIENT_TRAFFIC_SECRET_0"
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn poll_caps_total_bytes_and_skips_oversized_lines_without_losing_later_secrets() {
+        let mut watcher = KeyLogWatcher::new();
+        let dir = tempfile_dir("bounded-read");
+        let path = dir.join("test.keylog");
+        let random = "11".repeat(32);
+        let secret = "22".repeat(32);
+        let line = format!("CLIENT_TRAFFIC_SECRET_0 {random} {secret}\n");
+        let mut contents = "#".repeat(MAX_KEYLOG_READ_BYTES_PER_POLL * 2 + 7);
+        contents.push('\n');
+        contents.push_str(&line);
+        std::fs::write(&path, contents).unwrap();
+        watcher.register_eligible_pid(502, path);
+        let start = Instant::now();
+
+        for poll in 0..4 {
+            let previous = watcher.eligible[&502].offset;
+            watcher.poll_at(start + Duration::from_millis(poll));
+            let read = watcher.eligible[&502].offset - previous;
+            assert!(read <= MAX_KEYLOG_READ_BYTES_PER_POLL as u64);
+        }
+        assert!(watcher
+            .secret_for(
+                502,
+                &hex::decode(&random).unwrap(),
+                "CLIENT_TRAFFIC_SECRET_0"
             )
             .is_some());
     }

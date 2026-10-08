@@ -1,6 +1,6 @@
 use zeroize::Zeroize;
 
-const MAX_HANDSHAKE_BUFFER: usize = 1024 * 1024;
+const MAX_HANDSHAKE_BUFFER: usize = 64 * 1024;
 const HRR_RANDOM: [u8; 32] = [
     0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
     0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
@@ -46,42 +46,50 @@ impl TlsHandshakeParser {
     pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<HandshakeEvent>, HandshakeParseError> {
         if self.buffer.len().saturating_add(bytes.len()) > MAX_HANDSHAKE_BUFFER {
             self.buffer.zeroize();
-            self.buffer.clear();
+            self.buffer = Vec::new();
             return Err(HandshakeParseError::BufferTooLarge);
         }
         self.buffer.extend_from_slice(bytes);
         let mut events = Vec::new();
+        let mut consumed = 0usize;
         loop {
-            if self.buffer.len() < 4 {
+            let available = self.buffer.len().saturating_sub(consumed);
+            if available < 4 {
                 break;
             }
-            let body_len = ((self.buffer[1] as usize) << 16)
-                | ((self.buffer[2] as usize) << 8)
-                | self.buffer[3] as usize;
+            let body_len = ((self.buffer[consumed + 1] as usize) << 16)
+                | ((self.buffer[consumed + 2] as usize) << 8)
+                | self.buffer[consumed + 3] as usize;
             let message_len = body_len
                 .checked_add(4)
                 .ok_or(HandshakeParseError::MalformedMessage)?;
             if message_len > MAX_HANDSHAKE_BUFFER {
                 self.buffer.zeroize();
-                self.buffer.clear();
+                self.buffer = Vec::new();
                 return Err(HandshakeParseError::BufferTooLarge);
             }
-            if self.buffer.len() < message_len {
+            if available < message_len {
                 break;
             }
-            let (head, tail) = self.buffer.split_at(message_len);
-            let event = match parse_message(head[0], &head[4..]) {
+            let event = match parse_message(
+                self.buffer[consumed],
+                &self.buffer[consumed + 4..consumed + message_len],
+            ) {
                 Ok(event) => event,
                 Err(error) => {
                     self.buffer.zeroize();
-                    self.buffer.clear();
+                    self.buffer = Vec::new();
                     return Err(error);
                 }
             };
             events.push(event);
-            let remainder = tail.to_vec();
-            self.buffer.zeroize();
-            self.buffer = remainder;
+            consumed += message_len;
+        }
+        if consumed > 0 {
+            let remaining = self.buffer.len() - consumed;
+            self.buffer.copy_within(consumed.., 0);
+            self.buffer[remaining..].zeroize();
+            self.buffer.truncate(remaining);
         }
         Ok(events)
     }
@@ -284,5 +292,13 @@ mod tests {
             parser.feed(&handshake(1, &body)).unwrap(),
             vec![HandshakeEvent::ClientHello { early_data: true }]
         );
+    }
+
+    #[test]
+    fn rejects_a_declared_handshake_message_above_the_64_kib_cap() {
+        let mut parser = TlsHandshakeParser::new();
+        let error = parser.feed(&[1, 0x01, 0x00, 0x01]).unwrap_err();
+        assert_eq!(error, HandshakeParseError::BufferTooLarge);
+        assert_eq!(parser.bytes_held(), 0);
     }
 }
