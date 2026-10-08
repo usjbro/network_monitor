@@ -4,6 +4,18 @@ Published review follow-up: corrected the wire-fixture regeneration recipe to au
 
 # Test Status
 
+## JAM-173 — fragment-completing packet event consistency (2026-10-08)
+
+In `.worktrees/fragment-completing-packet-consistency` on `jamesmbrownjr/jam-173-p2-fragment-completing-packet-event-shows-contradictory`.
+
+- RED: `cargo test --locked --manifest-path capture-agent/Cargo.toml fragment_completing_packet_event_uses_its_physical_network_layer -- --nocapture` reproduced `(layer 7, protocol OTHER, 192.0.2.1:0 -> 198.51.100.53:0)` for a two-fragment DNS query.
+- GREEN: the same focused regression passes and confirms the physical packet event is layer 3 while the reassembled datagram decodes as DNS.
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml`: passed (372 library tests, 82 binary tests, 12 control-auth, 2 no-disk, 4 pcapng, and 1 protocol-regression; environment-gated tests ignored).
+- `cargo clippy --all-targets --locked --manifest-path capture-agent/Cargo.toml -- -D warnings`: passed.
+- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
+- `git diff --check`: passed.
+- `cargo fmt --manifest-path capture-agent/Cargo.toml -- --check`: reports existing formatting differences in untouched code; no broad reformat was applied.
+
 ## JAM-250 — CI job timeouts and bounded apt retries (2026-10-08)
 
 In `.worktrees/ci-job-timeouts-apt-retry` on `jamesmbrownjr/jam-250-p3-ci-add-job-timeouts-and-an-apt-get-retry-so-a-hung-runner`.

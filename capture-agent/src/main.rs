@@ -508,7 +508,11 @@ const DECRYPT_RING_CAP_BYTES: usize = 256 * 1024;
 /// Returns the deepest OSI layer this packet was actually decoded through.
 /// Live capture only exposes L3, L4, and L7 packet classifications today.
 fn packet_osi_layer(protocol: parse::TransportProtocol, l7_info: &l7::L7Info) -> u8 {
-    if !matches!(l7_info, l7::L7Info::None) {
+    // Reassembled L7 can describe bytes from other frames; only promote the
+    // physical packet event to layer 7 when this frame has a parsed L4 header.
+    if matches!(protocol, parse::TransportProtocol::Tcp | parse::TransportProtocol::Udp)
+        && !matches!(l7_info, l7::L7Info::None)
+    {
         7
     } else if matches!(
         protocol,
@@ -3998,7 +4002,8 @@ mod tests {
     };
     use capture_agent::flow::FlowTable;
     use capture_agent::l7::L7Info;
-    use capture_agent::parse::{LinkType, TransportProtocol};
+    use capture_agent::parse::{parse_packet, LinkType, TransportProtocol};
+    use capture_agent::reassembly::StreamReassembler;
     use capture_agent::rate_limit::PacketEventLimiter;
     use capture_agent::transaction::{TxnProtocol, Unanswered};
     use std::path::Path;
@@ -4240,6 +4245,71 @@ mod tests {
                 },
             ),
             7
+        );
+    }
+
+    fn fragment_ethernet_ipv4(template: &[u8], payload: &[u8], offset: u16, more: bool) -> Vec<u8> {
+        let mut fragment = template[..34].to_vec();
+        fragment[16..18].copy_from_slice(&((20 + payload.len()) as u16).to_be_bytes());
+        let fragment_offset = offset | if more { 0x2000 } else { 0 };
+        fragment[20..22].copy_from_slice(&fragment_offset.to_be_bytes());
+        fragment[24..26].fill(0);
+        let ip_header = etherparse::Ipv4HeaderSlice::from_slice(&fragment[14..34])
+            .unwrap()
+            .to_header();
+        fragment[24..26].copy_from_slice(&ip_header.calc_header_checksum().to_be_bytes());
+        fragment.extend_from_slice(payload);
+        fragment
+    }
+
+    #[test]
+    fn fragment_completing_packet_event_uses_its_physical_network_layer() {
+        let mut dns = vec![
+            0x12, 0x34, // ID
+            0x01, 0x00, // standard query
+            0x00, 0x01, // one question
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // no answer/authority/additional records
+        ];
+        dns.extend_from_slice(&[
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+            0x00, 0x01, // A
+            0x00, 0x01, // IN
+        ]);
+        let mut datagram = Vec::new();
+        etherparse::PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
+            .ipv4([192, 0, 2, 1], [198, 51, 100, 53], 64)
+            .udp(53000, 53)
+            .write(&mut datagram, &dns)
+            .unwrap();
+        let ip_payload = &datagram[34..];
+        let (first_payload, last_payload) = ip_payload.split_at(16);
+        let first = fragment_ethernet_ipv4(&datagram, first_payload, 0, true);
+        let last = fragment_ethernet_ipv4(&datagram, last_payload, 2, false);
+        let first = parse_packet(&first, LinkType::Ethernet).expect("first fragment parses");
+        let completing = parse_packet(&last, LinkType::Ethernet).expect("last fragment parses");
+
+        assert_eq!(completing.protocol, TransportProtocol::Other);
+        assert_eq!(completing.src_port, None);
+        assert_eq!(completing.dst_port, None);
+
+        let mut reassembly = StreamReassembler::new();
+        let first_outcome = reassembly.sniff(&first, None, 0);
+        assert!(matches!(first_outcome.info, L7Info::None));
+        let completed = reassembly.sniff(&completing, None, 1);
+        assert!(matches!(
+            completed.info,
+            L7Info::Dns { ref query_name, .. } if query_name == "example.com"
+        ));
+        assert!(completed.reassembled_packet.is_some());
+
+        let layer = packet_osi_layer(completing.protocol, &completed.info);
+        let protocol = format!("{:?}", completing.protocol).to_uppercase();
+        let src = format!("{}:{}", completing.src_ip, completing.src_port.unwrap_or(0));
+        let dst = format!("{}:{}", completing.dst_ip, completing.dst_port.unwrap_or(0));
+        assert_eq!(
+            (layer, protocol.as_str(), src.as_str(), dst.as_str()),
+            (3, "OTHER", "192.0.2.1:0", "198.51.100.53:0"),
+            "the packet event describes this physical IP fragment, not the reconstructed UDP datagram"
         );
     }
 
