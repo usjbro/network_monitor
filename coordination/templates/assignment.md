@@ -7,7 +7,7 @@ NEXT TASK FOR <CODEX|CLAUDE CODE> (queue item <n>): <LINEAR-ID> [<priority>] <ti
 
 Status: <what just merged / is Done, and anything the assignee should clean up (worktree, branch)>.
 
-Gate: <gate file name> is created and approved under <James's standing instruction in a chat session on <date> / his direct approval on <date>>. It is approved and unclaimed: claim it with claim-gate-delegation.sh, then new-task.sh, then post `started`.
+Gate: <gate file name> is created and approved under <James's standing instruction in a chat session on <date> / his direct approval on <date>>. It is approved and unclaimed: claim it with claim-gate-delegation.sh, then run new-task.sh (it posts the `started` message itself; do not post another), then run mark-gate-delegated.sh <linear-id> <slug> <in-session|codex> so the gate shows as delegated.
 
 Scope (from the Linear issue: <url>):
 - <3 to 6 bullets, each a concrete behaviour or file, including what is explicitly OUT of scope and which sibling issue owns it>
