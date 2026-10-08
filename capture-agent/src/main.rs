@@ -524,6 +524,53 @@ fn packet_osi_layer(protocol: parse::TransportProtocol, l7_info: &l7::L7Info) ->
     }
 }
 
+struct PacketEventMetadata {
+    id: String,
+    epoch_ms: u64,
+    relative_time_ms: u64,
+}
+
+fn build_packet_json(
+    metadata: PacketEventMetadata,
+    parsed: &parse::ParsedPacket,
+    l7_info: &l7::L7Info,
+    link_type: parse::LinkType,
+    l7_from_reassembly: bool,
+    txn_event: &TxnEvent,
+) -> wire::PacketJson {
+    let mut packet_fields =
+        fields::build_packet_fields(parsed, l7_info, link_type, l7_from_reassembly);
+    packet_fields.extend(fields::transaction_fields(txn_event));
+
+    wire::PacketJson {
+        id: metadata.id,
+        timestamp: metadata.epoch_ms.to_string(),
+        relative_time_ms: metadata.relative_time_ms,
+        layer: packet_osi_layer(parsed.protocol, l7_info),
+        protocol: format!("{:?}", parsed.protocol).to_uppercase(),
+        src: format!("{}:{}", parsed.src_ip, parsed.src_port.unwrap_or(0)),
+        dst: format!("{}:{}", parsed.dst_ip, parsed.dst_port.unwrap_or(0)),
+        length: parsed.total_len as u32,
+        summary: format!("{:?} {} -> {}", parsed.protocol, parsed.src_ip, parsed.dst_ip),
+        hex_dump: parsed
+            .payload
+            .iter()
+            .take(64)
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        // Header options and extensions can be variable length, so keep all
+        // parsed header bytes available for highlighting.
+        header_hex_dump: parsed
+            .header_bytes
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+        fields: packet_fields,
+    }
+}
+
 /// Returns this packet's local-side port (the process-attribution key used
 /// by `process_map`), using the same local-address check `FlowTable`
 /// applies internally — duplicated here (rather than locking `FlowTable`
@@ -3191,49 +3238,24 @@ async fn main() -> std::io::Result<()> {
                         let epoch_ms = capture_epoch_ms;
                         let seq = packet_seq.fetch_add(1, Ordering::Relaxed);
                         let frame_id = format!("pkt-{epoch_ms}-{seq}");
-                        let mut packet_fields = fields::build_packet_fields(
-                            &parsed,
-                            &l7_info,
-                            link_type,
-                            sniff_outcome.status.is_some(),
-                        );
-                        packet_fields.extend(fields::transaction_fields(&txn_event));
                         // JAM-15: only now does the request have an id the UI
                         // will actually receive, so only now can its response
                         // (and an unanswered finding) point back at it.
                         if let TxnEvent::Request(request) = &txn_event {
                             transactions.attach_frame_id(request, frame_id.clone());
                         }
-                        let packet_json = wire::PacketJson {
-                            id: frame_id.clone(),
-                            timestamp: epoch_ms.to_string(),
-                            relative_time_ms: now_ms,
-                            layer: packet_osi_layer(parsed.protocol, &l7_info),
-                            protocol: format!("{:?}", parsed.protocol).to_uppercase(),
-                            src: format!("{}:{}", parsed.src_ip, parsed.src_port.unwrap_or(0)),
-                            dst: format!("{}:{}", parsed.dst_ip, parsed.dst_port.unwrap_or(0)),
-                            length: parsed.total_len as u32,
-                            summary: format!(
-                                "{:?} {} -> {}",
-                                parsed.protocol, parsed.src_ip, parsed.dst_ip
-                            ),
-                            hex_dump: parsed
-                                .payload
-                                .iter()
-                                .take(64)
-                                .map(|b| format!("{b:02x}"))
-                                .collect::<Vec<_>>()
-                                .join(" "),
-                            // Header options and extensions can be variable length,
-                            // so keep all parsed header bytes available for highlighting.
-                            header_hex_dump: parsed
-                                .header_bytes
-                                .iter()
-                                .map(|b| format!("{b:02x}"))
-                                .collect::<Vec<_>>()
-                                .join(" "),
-                            fields: packet_fields,
-                        };
+                        let packet_json = build_packet_json(
+                            PacketEventMetadata {
+                                id: frame_id.clone(),
+                                epoch_ms,
+                                relative_time_ms: now_ms,
+                            },
+                            &parsed,
+                            &l7_info,
+                            link_type,
+                            sniff_outcome.status.is_some(),
+                            &txn_event,
+                        );
                         let _ = tx.send(wire::encode_event(&wire::AgentEvent::Packet {
                             packet: Box::new(packet_json),
                         }));
@@ -3991,7 +4013,7 @@ mod third_party_capture;
 #[cfg(test)]
 mod tests {
     use super::{
-        build_capture_stats_json, build_system_stats_json, datalink_to_link_type,
+        build_capture_stats_json, build_packet_json, build_system_stats_json, datalink_to_link_type,
         emit_unanswered_findings, find_device_by_name, flow_aging_now_ms, is_capturable,
         is_meaningful_override, looks_like_pcapng, malformed_frame_summary,
         note_capture_truncation, packet_osi_layer, parse_max_flows, parse_replay_local_addrs,
@@ -4005,7 +4027,7 @@ mod tests {
     use capture_agent::parse::{parse_packet, LinkType, TransportProtocol};
     use capture_agent::reassembly::StreamReassembler;
     use capture_agent::rate_limit::PacketEventLimiter;
-    use capture_agent::transaction::{TxnProtocol, Unanswered};
+    use capture_agent::transaction::{TxnEvent, TxnProtocol, Unanswered};
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
@@ -4302,14 +4324,25 @@ mod tests {
         ));
         assert!(completed.reassembled_packet.is_some());
 
-        let layer = packet_osi_layer(completing.protocol, &completed.info);
-        let protocol = format!("{:?}", completing.protocol).to_uppercase();
-        let src = format!("{}:{}", completing.src_ip, completing.src_port.unwrap_or(0));
-        let dst = format!("{}:{}", completing.dst_ip, completing.dst_port.unwrap_or(0));
-        assert_eq!(
-            (layer, protocol.as_str(), src.as_str(), dst.as_str()),
-            (3, "OTHER", "192.0.2.1:0", "198.51.100.53:0"),
-            "the packet event describes this physical IP fragment, not the reconstructed UDP datagram"
+        let packet = build_packet_json(
+            super::PacketEventMetadata {
+                id: "pkt-fragment-completing".to_string(),
+                epoch_ms: 1_700_000_000_000,
+                relative_time_ms: 1,
+            },
+            &completing,
+            &completed.info,
+            LinkType::Ethernet,
+            completed.status.is_some(),
+            &TxnEvent::None,
+        );
+        assert_eq!(packet.layer, 3);
+        assert_eq!(packet.protocol, "OTHER");
+        assert_eq!(packet.src, "192.0.2.1:0");
+        assert_eq!(packet.dst, "198.51.100.53:0");
+        assert!(
+            packet.fields.iter().all(|field| !field.path.starts_with("dns.")),
+            "reassembled DNS fields must not be attached to the physical fragment event"
         );
     }
 

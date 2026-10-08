@@ -1,7 +1,7 @@
 # Current Task
 
-JAM-173: keep fragment-completing packet event fields consistent with the physical frame.
+JAM-173 follow-up: make the two-fragment regression exercise the actual packet event builder.
 
-Worktree: `.worktrees/fragment-completing-packet-consistency`; branch: `jamesmbrownjr/jam-173-p2-fragment-completing-packet-event-shows-contradictory`.
+Worktree: `.worktrees/fragment-packet-event-builder-test`; branch: `jamesmbrownjr/jam-173-fragment-packet-event-builder-test`.
 
-Current phase: Root cause confirmed: `packet_osi_layer` trusted L7 info decoded from a reconstructed datagram even when the physical completing IPv4 fragment has protocol `Other` and no ports. The packet event now stays at layer 3 in that case, while TCP/UDP packets can still report layer 7. A two-fragment DNS regression was observed failing with layer 7 before the change and passes after it. Full Rust tests, warnings-denied Clippy, release build, and diff check pass; independent review and CI remain.
+PR #279 merged as `00ef54f`. The follow-up extracts `PacketJson` construction into `build_packet_json` and changes the two-fragment DNS regression to assert the returned event fields and confirm reconstructed DNS fields are omitted. The focused test passed after the change; full Rust tests, Clippy, release build, PR, and CI are pending.

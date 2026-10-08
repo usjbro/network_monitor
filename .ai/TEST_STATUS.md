@@ -328,3 +328,16 @@ In `.worktrees/tls-decrypt-record-layer` on `jamesmbrownjr/jam-204-tls-decrypt-r
 - `rustfmt --edition 2021 --check --config skip_children=true` on the five changed Rust source files and `git diff --check`: passed. Rustfmt without `skip_children` reports pre-existing formatting in the nested third-party capture fixture; that unrelated fixture was not changed.
 - Added regressions for plaintext sequence advancement, late-key replay before expiry, ring-budget accounting/eviction, header-string zeroization, bounded key-log polling and newline handling, and oversized handshake rejection. Focused module tests and full Rust suite passed.
 - CI/security review on the newly pushed PR head remains pending.
+
+## JAM-173 packet-event builder follow-up — verified 2026-10-08
+
+In `.worktrees/fragment-packet-event-builder-test` on `jamesmbrownjr/jam-173-fragment-packet-event-builder-test`. Extracted the capture loop's `PacketJson` construction into `build_packet_json`; the two-fragment DNS regression now calls the same builder and asserts the returned event is layer 3 / `OTHER` with the physical fragment's `:0` endpoints and no `dns.*` fields.
+
+- RED: the updated focused test failed to compile because `build_packet_json` did not exist; after extraction it passed.
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml`: passed (371 library tests, 82 binary tests, 12 control-auth, 2 no-disk, 4 pcapng, and 1 protocol-regression; live/replay integration cases ignored as configured).
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml a_tls_client_hello_split_across_two_segments_decodes_once_rejoined`: passed.
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml packet_fields_keep_sni_range_for_unsplit_client_hello`: passed.
+- `cargo clippy --all-targets --locked --manifest-path capture-agent/Cargo.toml -- -D warnings`: passed.
+- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
+- `git diff --check`: passed.
+- PR and CI review are pending.
