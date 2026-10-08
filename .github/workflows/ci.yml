@@ -22,10 +22,9 @@ jobs:
 
       - name: Install libpcap
         run: |
-          echo 'deb [trusted=yes] http://127.0.0.1:9/ubuntu noble main' | sudo tee /tmp/jam250-unreachable.list >/dev/null
           for attempt in 1 2 3; do
             echo "Installing libpcap dependencies (attempt ${attempt}/3)"
-            if sudo timeout 120 apt-get update -o Acquire::Retries=3 -o Dir::Etc::sourcelist=/tmp/jam250-unreachable.list -o Dir::Etc::sourceparts=- && \
+            if sudo timeout 120 apt-get update -o Acquire::Retries=3 && \
               sudo timeout 120 apt-get install -y -o Acquire::Retries=3 libpcap-dev libcap2-bin; then
               exit 0
             fi
