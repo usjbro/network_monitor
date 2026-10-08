@@ -4,6 +4,19 @@ Published review follow-up: corrected the wire-fixture regeneration recipe to au
 
 # Test Status
 
+## JAM-168 — reassembled L7 field offsets (2026-10-08)
+
+In `.worktrees/p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`.
+
+- RED: split ClientHello regression failed before the fix because the SNI range exceeded the completing physical segment payload.
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml packet_fields_ -- --nocapture`: passed (2 focused regressions: split and unsplit ClientHello).
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml`: passed (371 library, 81 binary, 12 control-auth, 2 no-disk, 4 pcapng, 1 protocol-regression; 9 ignored).
+- `cargo clippy --locked --manifest-path capture-agent/Cargo.toml --all-targets -- -D warnings`: passed.
+- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
+- `git diff --check`: passed.
+- `cargo fmt --manifest-path capture-agent/Cargo.toml -- --check`: reports existing formatting differences across unrelated Rust files; a broad rustfmt pass was reverted to avoid unrelated churn.
+- Independent `codex review --uncommitted`: no blocking findings.
+
 ## JAM-204 — TLS 1.3 record-layer decryption
 
 - `cargo test --locked --manifest-path capture-agent/Cargo.toml -- --test-threads=1`: passed (366 library tests, 77 binary tests, 12 control-auth tests, 2 no-disk tests, 4 pcapng integration tests, 1 protocol regression; 9 environment-gated live-capture/replay tests ignored by default). A parallel run hit an existing `control_auth::Fixture::new` temp-name collision (`AlreadyExists`); serialized run passed.

@@ -458,6 +458,22 @@ pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info, link_type: crate::parse:
     fields
 }
 
+/// Builds fields for the physical packet event. Reassembled L7 info describes
+/// bytes reconstructed from multiple frames, while the event carries only this
+/// frame's payload, so its application offsets cannot be attached safely.
+pub fn build_packet_fields(
+    parsed: &ParsedPacket,
+    l7: &L7Info,
+    link_type: crate::parse::LinkType,
+    l7_from_reassembly: bool,
+) -> Vec<Field> {
+    if l7_from_reassembly {
+        build_fields(parsed, &L7Info::None, link_type)
+    } else {
+        build_fields(parsed, l7, link_type)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

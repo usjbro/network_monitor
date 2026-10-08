@@ -2188,6 +2188,59 @@ mod tests {
     }
 
     #[test]
+    fn packet_fields_for_split_client_hello_never_point_outside_or_at_wrong_packet_bytes() {
+        let hello = build_client_hello("example.com");
+        let (first, second) = hello.split_at(20);
+        let mut r = StreamReassembler::new();
+        let key = FlowKey { remote_port: 443, ..flow_key() };
+
+        let a = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 443, 500, first);
+        r.sniff(&a, Some((&key, true)), 0);
+
+        let packet = tcp_segment(
+            "192.168.1.10",
+            "93.184.216.34",
+            51000,
+            443,
+            500 + first.len() as u32,
+            second,
+        );
+        let outcome = r.sniff(&packet, Some((&key, true)), 1);
+        assert_eq!(outcome.status, Some(ReassemblyStatus::Reassembled));
+        let fields = crate::fields::build_packet_fields(
+            &packet,
+            &outcome.info,
+            LinkType::Raw,
+            outcome.status.is_some(),
+        );
+        assert!(
+            fields.iter().all(|field| field.path != "tls.handshake.sni"),
+            "the physical completing segment does not contain the reassembled SNI range"
+        );
+        for field in fields {
+            let end = (field.offset as usize).checked_add(field.len as usize).expect("field range does not overflow");
+            match field.region {
+                crate::fields::ByteRegion::Header => assert!(end <= packet.header_bytes.len()),
+                crate::fields::ByteRegion::Payload => assert!(end <= packet.payload.len()),
+            }
+        }
+    }
+
+    #[test]
+    fn packet_fields_keep_sni_range_for_unsplit_client_hello() {
+        let hello = build_client_hello("example.com");
+        let packet = tcp_segment("192.168.1.10", "93.184.216.34", 51000, 443, 500, &hello);
+        let key = FlowKey { remote_port: 443, ..flow_key() };
+        let outcome = StreamReassembler::new().sniff(&packet, Some((&key, true)), 0);
+        assert_eq!(outcome.status, None);
+        let fields = crate::fields::build_packet_fields(&packet, &outcome.info, LinkType::Raw, false);
+        let sni = fields.iter().find(|field| field.path == "tls.handshake.sni").expect("unsplit ClientHello keeps its SNI field");
+        let start = sni.offset as usize;
+        let end = start + sni.len as usize;
+        assert_eq!(&packet.payload[start..end], b"example.com");
+    }
+
+    #[test]
     fn a_new_connection_on_an_idle_four_tuple_is_not_judged_by_the_old_ones_buffer() {
         // JAM-182: connection A leaves half a ClientHello buffered and goes
         // quiet. Past the idle timeout, connection B reuses the same
