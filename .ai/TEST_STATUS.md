@@ -12,7 +12,8 @@ In `.worktrees/ci-job-timeouts-apt-retry` on `jamesmbrownjr/jam-250-p3-ci-add-jo
 - `bash -n` on all 27 workflow `run` blocks: passed.
 - `git diff --check`: passed.
 - Independent `codex review --uncommitted`: no actionable findings.
-- Temporary unreachable-mirror PR verification: pending.
+- Initial temporary unreachable-mirror PR probe (run 37805550567, commit 3c2def0) did not trigger retries because apt-get update returned success despite the unreachable source; this revealed that apt update's partial-error default must be overridden.
+- Added `apt-get update --error-on=any` so any repository error enters the bounded retry loop. Repeat the temporary unreachable-mirror probe and record all attempts before final review.
 
 ## JAM-168 — reassembled L7 field offsets (2026-10-08)
 

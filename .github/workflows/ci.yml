@@ -24,7 +24,7 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             echo "Installing libpcap dependencies (attempt ${attempt}/3)"
-            if sudo timeout 120 apt-get update -o Acquire::Retries=3 && \
+            if sudo timeout 120 apt-get update --error-on=any -o Acquire::Retries=3 && \
               sudo timeout 120 apt-get install -y -o Acquire::Retries=3 libpcap-dev libcap2-bin; then
               exit 0
             fi
@@ -152,7 +152,7 @@ jobs:
         run: |
           for attempt in 1 2 3; do
             echo "Installing libpcap (attempt ${attempt}/3)"
-            if sudo timeout 120 apt-get update -o Acquire::Retries=3 && \
+            if sudo timeout 120 apt-get update --error-on=any -o Acquire::Retries=3 && \
               sudo timeout 120 apt-get install -y -o Acquire::Retries=3 libpcap-dev; then
               exit 0
             fi
