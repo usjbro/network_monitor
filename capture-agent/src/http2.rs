@@ -1,5 +1,6 @@
 use crate::redact::redact_headers;
 use fluke_hpack::Decoder as HpackDecoder;
+use zeroize::Zeroize;
 
 /// Defensive cap on a single frame's declared length. Nothing in this
 /// reassembler ever negotiates HTTP/2 SETTINGS, so its effective max frame
@@ -13,8 +14,14 @@ use fluke_hpack::Decoder as HpackDecoder;
 const MAX_FRAME_LEN: usize = 1024 * 1024; // 1 MiB
 
 pub enum FrameOutcome {
-    Frame { stream_id: u32, headers: Vec<(String, String)>, body: Vec<u8> },
-    DesyncFallback { reason: &'static str },
+    Frame {
+        stream_id: u32,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
+    DesyncFallback {
+        reason: &'static str,
+    },
     NeedMoreData,
 }
 
@@ -27,6 +34,12 @@ pub struct Http2Reassembler {
     // integration point without hand-encoding a full HPACK literal header.
     #[cfg(test)]
     test_injected_headers: std::collections::HashMap<u32, Vec<(String, String)>>,
+}
+
+impl Drop for Http2Reassembler {
+    fn drop(&mut self) {
+        self.buffer.zeroize();
+    }
 }
 
 impl Default for Http2Reassembler {
@@ -47,9 +60,25 @@ impl Http2Reassembler {
         }
     }
 
+    pub fn bytes_held(&self) -> usize {
+        self.buffer
+            .capacity()
+            .saturating_add(self.hpack.bytes_held())
+    }
+
+    fn desync(&mut self) {
+        self.desynced = true;
+        self.buffer.zeroize();
+        self.buffer = Vec::new();
+        self.hpack = HpackDecoder::new();
+    }
+
     #[cfg(test)]
     fn debug_inject_header_for_test(&mut self, stream_id: u32, name: String, value: String) {
-        self.test_injected_headers.entry(stream_id).or_default().push((name, value));
+        self.test_injected_headers
+            .entry(stream_id)
+            .or_default()
+            .push((name, value));
     }
 
     /// Feeds one contiguous chunk of already-decrypted plaintext bytes,
@@ -62,12 +91,16 @@ impl Http2Reassembler {
     /// instance then immediately returns `DesyncFallback` too.
     pub fn feed(&mut self, seq: u64, chunk: &[u8]) -> Vec<FrameOutcome> {
         if self.desynced {
-            return vec![FrameOutcome::DesyncFallback { reason: "connection already desynced" }];
+            return vec![FrameOutcome::DesyncFallback {
+                reason: "connection already desynced",
+            }];
         }
         if let Some(expected) = self.next_expected_seq {
             if seq != expected {
-                self.desynced = true;
-                return vec![FrameOutcome::DesyncFallback { reason: "sequence gap or reorder detected" }];
+                self.desync();
+                return vec![FrameOutcome::DesyncFallback {
+                    reason: "sequence gap or reorder detected",
+                }];
             }
         }
         self.next_expected_seq = Some(seq + chunk.len() as u64);
@@ -79,15 +112,20 @@ impl Http2Reassembler {
                 outcomes.push(FrameOutcome::NeedMoreData);
                 break;
             }
-            let len = u32::from_be_bytes([0, self.buffer[0], self.buffer[1], self.buffer[2]]) as usize;
+            let len =
+                u32::from_be_bytes([0, self.buffer[0], self.buffer[1], self.buffer[2]]) as usize;
             let frame_type = self.buffer[3];
-            let stream_id =
-                u32::from_be_bytes([self.buffer[5], self.buffer[6], self.buffer[7], self.buffer[8]]) & 0x7fff_ffff;
+            let stream_id = u32::from_be_bytes([
+                self.buffer[5],
+                self.buffer[6],
+                self.buffer[7],
+                self.buffer[8],
+            ]) & 0x7fff_ffff;
             if len > MAX_FRAME_LEN {
                 // Reject before buffering toward it — waiting for `9 + len`
                 // bytes here is exactly the unbounded-growth path this cap
                 // exists to prevent.
-                self.desynced = true;
+                self.desync();
                 outcomes.push(FrameOutcome::DesyncFallback {
                     reason: "declared frame length exceeds the defensive cap",
                 });
@@ -97,7 +135,8 @@ impl Http2Reassembler {
                 outcomes.push(FrameOutcome::NeedMoreData);
                 break;
             }
-            let payload = self.buffer[9..9 + len].to_vec();
+            let payload = zeroize::Zeroizing::new(self.buffer[9..9 + len].to_vec());
+            self.buffer[..9 + len].zeroize();
             self.buffer.drain(0..9 + len);
 
             if frame_type == 0x01 {
@@ -119,21 +158,30 @@ impl Http2Reassembler {
                 // never calls into `self.hpack` again afterward — a
                 // poisoned/inconsistent decoder state post-panic is never
                 // observed.
-                let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.hpack.decode(&payload)));
+                let decode_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.hpack.decode(payload.as_slice())
+                }));
                 match decode_result {
                     Ok(Ok(pairs)) => {
-                        let mut headers: Vec<(String, String)> = pairs
-                            .into_iter()
-                            .map(|(k, v)| {
-                                (String::from_utf8_lossy(&k).to_string(), String::from_utf8_lossy(&v).to_string())
-                            })
-                            .collect();
+                        let mut headers = Vec::with_capacity(pairs.len());
+                        for (mut name, mut value) in pairs {
+                            headers.push((
+                                String::from_utf8_lossy(&name).into_owned(),
+                                String::from_utf8_lossy(&value).into_owned(),
+                            ));
+                            name.zeroize();
+                            value.zeroize();
+                        }
                         #[cfg(test)]
                         if let Some(injected) = self.test_injected_headers.get(&stream_id) {
                             headers.extend(injected.iter().cloned());
                         }
                         redact_headers(&mut headers);
-                        outcomes.push(FrameOutcome::Frame { stream_id, headers, body: Vec::new() });
+                        outcomes.push(FrameOutcome::Frame {
+                            stream_id,
+                            headers,
+                            body: Vec::new(),
+                        });
                     }
                     Ok(Err(_)) | Err(_) => {
                         // HPACK decode failure (an `Err`, OR a caught panic
@@ -143,7 +191,7 @@ impl Http2Reassembler {
                         // frame (spec Components §4 — no safe per-frame
                         // recovery once the dynamic table state is in
                         // question).
-                        self.desynced = true;
+                        self.desync();
                         outcomes.push(FrameOutcome::DesyncFallback {
                             reason: "HPACK decode failed — dynamic table state unrecoverable",
                         });
@@ -152,7 +200,11 @@ impl Http2Reassembler {
                 }
             } else if frame_type == 0x00 {
                 // DATA frame — body bytes, not header-bearing, no HPACK involvement.
-                outcomes.push(FrameOutcome::Frame { stream_id, headers: Vec::new(), body: payload });
+                outcomes.push(FrameOutcome::Frame {
+                    stream_id,
+                    headers: Vec::new(),
+                    body: payload.to_vec(),
+                });
             }
             // Other frame types (SETTINGS, WINDOW_UPDATE, PING, etc.) are
             // consumed from the buffer above but produce no FrameOutcome —
@@ -189,7 +241,9 @@ mod tests {
         let mut r = Http2Reassembler::new();
         let frame = simple_headers_frame(1, &static_indexed_get_header_block());
         let outcomes = r.feed(0, &frame);
-        assert!(outcomes.iter().any(|o| matches!(o, FrameOutcome::Frame { stream_id: 1, .. })));
+        assert!(outcomes
+            .iter()
+            .any(|o| matches!(o, FrameOutcome::Frame { stream_id: 1, .. })));
     }
 
     #[test]
@@ -198,9 +252,13 @@ mod tests {
         let frame = simple_headers_frame(3, &static_indexed_get_header_block());
         let (first_half, second_half) = frame.split_at(4);
         let outcomes1 = r.feed(0, first_half);
-        assert!(outcomes1.iter().all(|o| matches!(o, FrameOutcome::NeedMoreData)));
+        assert!(outcomes1
+            .iter()
+            .all(|o| matches!(o, FrameOutcome::NeedMoreData)));
         let outcomes2 = r.feed(4, second_half);
-        assert!(outcomes2.iter().any(|o| matches!(o, FrameOutcome::Frame { stream_id: 3, .. })));
+        assert!(outcomes2
+            .iter()
+            .any(|o| matches!(o, FrameOutcome::Frame { stream_id: 3, .. })));
     }
 
     #[test]
@@ -212,7 +270,10 @@ mod tests {
         // and 1000, which desyncs HPACK's stateful dynamic table
         // irrecoverably (spec Components §4).
         let outcomes = r.feed(1000, &frame);
-        assert!(outcomes.iter().any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })));
+        assert!(outcomes
+            .iter()
+            .any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })));
+        assert_eq!(r.bytes_held(), 0, "sequence-gap desync must release state");
     }
 
     #[test]
@@ -220,9 +281,13 @@ mod tests {
         let mut r = Http2Reassembler::new();
         let good_frame = simple_headers_frame(7, &static_indexed_get_header_block());
         let outcomes1 = r.feed(0, &good_frame);
-        assert!(outcomes1.iter().any(|o| matches!(o, FrameOutcome::Frame { stream_id: 7, .. })));
+        assert!(outcomes1
+            .iter()
+            .any(|o| matches!(o, FrameOutcome::Frame { stream_id: 7, .. })));
         let outcomes2 = r.feed(9999, &good_frame); // desync
-        assert!(outcomes2.iter().any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })));
+        assert!(outcomes2
+            .iter()
+            .any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })));
         // outcomes1 already returned the good frame to the caller in an
         // earlier feed() call — this test documents that feed() never
         // retroactively invalidates a prior return, only stops producing new
@@ -240,12 +305,22 @@ mod tests {
         // sensitive header via the reassembler's own test-only injection
         // seam rather than a full HPACK literal encoding.
         let mut r = Http2Reassembler::new();
-        r.debug_inject_header_for_test(11, "authorization".to_string(), "Bearer secret".to_string());
-        let outcomes = r.feed(0, &simple_headers_frame(11, &static_indexed_get_header_block()));
-        if let Some(FrameOutcome::Frame { headers, .. }) =
-            outcomes.into_iter().find(|o| matches!(o, FrameOutcome::Frame { .. }))
+        r.debug_inject_header_for_test(
+            11,
+            "authorization".to_string(),
+            "Bearer secret".to_string(),
+        );
+        let outcomes = r.feed(
+            0,
+            &simple_headers_frame(11, &static_indexed_get_header_block()),
+        );
+        if let Some(FrameOutcome::Frame { headers, .. }) = outcomes
+            .into_iter()
+            .find(|o| matches!(o, FrameOutcome::Frame { .. }))
         {
-            assert!(headers.iter().any(|(k, v)| k == "authorization" && v == "[REDACTED]"));
+            assert!(headers
+                .iter()
+                .any(|(k, v)| k == "authorization" && v == "[REDACTED]"));
         }
     }
 
@@ -280,10 +355,7 @@ mod tests {
             outcomes.iter().any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })),
             "expected a DesyncFallback, not NeedMoreData — the cap must reject before buffering toward the declared length"
         );
-        assert!(
-            r.buffer.len() < MAX_FRAME_LEN,
-            "buffer must not have grown toward the oversized declared length"
-        );
+        assert_eq!(r.bytes_held(), 0, "oversize desync must release state");
     }
 
     #[test]
@@ -311,8 +383,44 @@ mod tests {
         let mut r = Http2Reassembler::new();
         let outcomes = r.feed(0, crash_input);
         assert!(
-            outcomes.iter().any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })),
+            outcomes
+                .iter()
+                .any(|o| matches!(o, FrameOutcome::DesyncFallback { .. })),
             "expected a DesyncFallback outcome, not a panic or a silently-swallowed frame"
+        );
+        assert_eq!(r.bytes_held(), 0, "desync must release buffered plaintext");
+    }
+
+    #[test]
+    fn malformed_hpack_after_dynamic_insert_releases_all_decoder_and_buffer_state() {
+        let mut r = Http2Reassembler::new();
+        // Establish a dynamic table entry, then return a partial header list
+        // before an invalid index fails the next block.
+        let inserted =
+            simple_headers_frame(13, &[0x40, 1, b'x', 6, b's', b'e', b'c', b'r', b'e', b't']);
+        let first = r.feed(0, &inserted);
+        assert!(first
+            .iter()
+            .any(|outcome| matches!(outcome, FrameOutcome::Frame { .. })));
+        assert!(
+            r.hpack.bytes_held() > 0,
+            "dynamic table bytes must count toward TLS memory"
+        );
+
+        let malformed = simple_headers_frame(
+            15,
+            &[0x40, 1, b'y', 6, b's', b'e', b'c', b'r', b'e', b't', 0xff],
+        );
+
+        let outcomes = r.feed(inserted.len() as u64, &malformed);
+
+        assert!(outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, FrameOutcome::DesyncFallback { .. })));
+        assert_eq!(
+            r.bytes_held(),
+            0,
+            "desync must release all TLS-accounted state"
         );
     }
 }

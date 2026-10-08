@@ -1,5 +1,11 @@
 use zeroize::Zeroize;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecryptedRingEntry {
+    pub direction: Option<crate::wire::DecryptionDirection>,
+    pub bytes: Vec<u8>,
+}
+
 /// Capped, best-effort-`mlock`'d, explicitly-zeroed-on-evict buffer for
 /// decrypted TLS content — one per decrypt-eligible connection. Never grows
 /// past `capacity_bytes`; evicting the oldest entry always overwrites its
@@ -8,7 +14,7 @@ use zeroize::Zeroize;
 pub struct DecryptedRingBuffer {
     capacity_bytes: usize,
     used_bytes: usize,
-    entries: std::collections::VecDeque<Vec<u8>>,
+    entries: std::collections::VecDeque<DecryptedRingEntry>,
     mlock_engaged: bool,
 }
 
@@ -21,21 +27,42 @@ impl DecryptedRingBuffer {
         // platform/process (e.g. blocked by RLIMIT_MEMLOCK) so
         // mlock_engaged() has a real answer even before any push.
         let probe = vec![0u8; 4096];
-        let mlock_engaged = unsafe { libc::mlock(probe.as_ptr() as *const libc::c_void, probe.len()) == 0 };
+        let mlock_engaged =
+            unsafe { libc::mlock(probe.as_ptr() as *const libc::c_void, probe.len()) == 0 };
         if mlock_engaged {
             unsafe {
                 libc::munlock(probe.as_ptr() as *const libc::c_void, probe.len());
             }
         }
-        Self { capacity_bytes, used_bytes: 0, entries: std::collections::VecDeque::new(), mlock_engaged }
+        Self {
+            capacity_bytes,
+            used_bytes: 0,
+            entries: std::collections::VecDeque::new(),
+            mlock_engaged,
+        }
     }
 
     pub fn push(&mut self, data: Vec<u8>) {
+        self.push_entry(None, data);
+    }
+
+    pub fn push_for_direction(
+        &mut self,
+        direction: crate::wire::DecryptionDirection,
+        data: Vec<u8>,
+    ) {
+        self.push_entry(Some(direction), data);
+    }
+
+    fn push_entry(&mut self, direction: Option<crate::wire::DecryptionDirection>, data: Vec<u8>) {
         unsafe {
             libc::mlock(data.as_ptr() as *const libc::c_void, data.len());
         }
         self.used_bytes += data.len();
-        self.entries.push_back(data);
+        self.entries.push_back(DecryptedRingEntry {
+            direction,
+            bytes: data,
+        });
         while self.used_bytes > self.capacity_bytes {
             if self.evict_oldest().is_none() {
                 break;
@@ -51,12 +78,15 @@ impl DecryptedRingBuffer {
     /// already freed, which would be a use-after-free.
     fn evict_oldest(&mut self) -> Option<Vec<u8>> {
         let mut oldest = self.entries.pop_front()?;
-        self.used_bytes -= oldest.len();
+        self.used_bytes -= oldest.bytes.len();
         unsafe {
-            libc::munlock(oldest.as_ptr() as *const libc::c_void, oldest.len());
+            libc::munlock(
+                oldest.bytes.as_ptr() as *const libc::c_void,
+                oldest.bytes.len(),
+            );
         }
-        oldest.zeroize();
-        Some(oldest)
+        oldest.bytes.zeroize();
+        Some(oldest.bytes)
     }
 
     /// Returns every entry currently held after the given cursor (this
@@ -65,14 +95,31 @@ impl DecryptedRingBuffer {
     /// `cursor` and a cursor equal to the current entry count, sufficient
     /// for a single relay consumer polling forward-only, matching how the
     /// raw packet-stream cap (#27) is consumed today).
-    pub fn drain_since(&mut self, cursor: usize) -> (Vec<Vec<u8>>, usize) {
-        let all: Vec<Vec<u8>> = self.entries.iter().cloned().collect();
-        let new_entries = all.into_iter().skip(cursor.min(self.entries.len())).collect();
+    pub fn drain_since(&mut self, cursor: usize) -> (Vec<DecryptedRingEntry>, usize) {
+        let all: Vec<DecryptedRingEntry> = self.entries.iter().cloned().collect();
+        let new_entries = all
+            .into_iter()
+            .skip(cursor.min(self.entries.len()))
+            .collect();
         (new_entries, self.entries.len())
     }
 
     pub fn mlock_engaged(&self) -> bool {
         self.mlock_engaged
+    }
+}
+
+impl Drop for DecryptedRingBuffer {
+    fn drop(&mut self) {
+        for entry in &mut self.entries {
+            unsafe {
+                libc::munlock(
+                    entry.bytes.as_ptr() as *const libc::c_void,
+                    entry.bytes.len(),
+                );
+            }
+            entry.bytes.zeroize();
+        }
     }
 }
 
@@ -87,8 +134,11 @@ mod tests {
         buf.push(vec![6, 7, 8, 9, 10]); // 10 bytes total — still fits
         buf.push(vec![11, 12]); // would be 12 bytes — evict oldest (first push) to fit
         let (entries, _) = buf.drain_since(0);
-        assert!(!entries.iter().any(|e| e == &vec![1, 2, 3, 4, 5]), "oldest entry should have been evicted");
-        assert!(entries.iter().any(|e| e == &vec![11, 12]));
+        assert!(
+            !entries.iter().any(|e| e.bytes == vec![1, 2, 3, 4, 5]),
+            "oldest entry should have been evicted"
+        );
+        assert!(entries.iter().any(|e| e.bytes == vec![11, 12]));
     }
 
     #[test]
@@ -98,7 +148,13 @@ mod tests {
         let (_, cursor1) = buf.drain_since(0);
         buf.push(vec![2]);
         let (entries, _) = buf.drain_since(cursor1);
-        assert_eq!(entries, vec![vec![2]]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.bytes.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![2]]
+        );
     }
 
     #[test]
@@ -116,7 +172,34 @@ mod tests {
         // gone through push()'s normal capacity-triggered eviction path.
         let mut buf = DecryptedRingBuffer::new(5);
         buf.push(vec![0xAA; 5]);
-        let evicted = buf.evict_oldest().expect("an entry should have been evicted");
-        assert!(evicted.iter().all(|&b| b == 0), "evicted memory must be zeroed, not left with stale plaintext");
+        let evicted = buf
+            .evict_oldest()
+            .expect("an entry should have been evicted");
+        assert!(
+            evicted.iter().all(|&b| b == 0),
+            "evicted memory must be zeroed, not left with stale plaintext"
+        );
+    }
+
+    #[test]
+    fn keeps_one_ring_with_direction_tags_for_both_streams() {
+        let mut buf = DecryptedRingBuffer::new(32);
+        buf.push_for_direction(
+            crate::wire::DecryptionDirection::ClientToServer,
+            b"request".to_vec(),
+        );
+        buf.push_for_direction(
+            crate::wire::DecryptionDirection::ServerToClient,
+            b"response".to_vec(),
+        );
+        let (entries, _) = buf.drain_since(0);
+        assert_eq!(
+            entries[0].direction,
+            Some(crate::wire::DecryptionDirection::ClientToServer)
+        );
+        assert_eq!(
+            entries[1].direction,
+            Some(crate::wire::DecryptionDirection::ServerToClient)
+        );
     }
 }

@@ -1,17 +1,48 @@
 use crate::keylog::SessionSecret;
 use ring::aead;
 use ring::hkdf;
+use zeroize::Zeroizing;
 
 pub enum DecryptOutcome {
-    Plaintext(Vec<u8>),
-    Undecryptable { reason: &'static str },
+    Plaintext {
+        content_type: u8,
+        bytes: Zeroizing<Vec<u8>>,
+    },
+    Undecryptable {
+        reason: &'static str,
+    },
+}
+
+impl std::fmt::Debug for DecryptOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plaintext { content_type, .. } => f
+                .debug_struct("Plaintext")
+                .field("content_type", content_type)
+                .field("bytes", &"[REDACTED]")
+                .finish(),
+            Self::Undecryptable { reason } => f
+                .debug_struct("Undecryptable")
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
+/// TLS 1.3 §5.3 forms each record nonce by XORing the 64-bit sequence number
+/// into the final eight bytes of the traffic secret's static IV.
+pub fn nonce_for_sequence(mut iv: [u8; 12], sequence: u64) -> [u8; 12] {
+    for (byte, sequence_byte) in iv[4..].iter_mut().zip(sequence.to_be_bytes()) {
+        *byte ^= sequence_byte;
+    }
+    iv
 }
 
 /// RFC 8446 §7.1 HKDF-Expand-Label, restricted to the fixed-length outputs
 /// this module needs (16-byte key, 12-byte IV) — a general-purpose
 /// variable-length version is not needed here and would be untested dead
 /// code for any length this call site never uses.
-fn hkdf_expand_label(secret: &[u8], label: &str, out_len: usize) -> Option<Vec<u8>> {
+fn hkdf_expand_label(secret: &[u8], label: &str, out_len: usize) -> Option<Zeroizing<Vec<u8>>> {
     // RFC 8446 §7.1: HKDF-Expand-Label uses the given secret directly AS
     // the PRK for HKDF-Expand — there is no additional HKDF-Extract step
     // here (that already happened earlier in the key schedule, when this
@@ -34,45 +65,55 @@ fn hkdf_expand_label(secret: &[u8], label: &str, out_len: usize) -> Option<Vec<u
     }
     let info = [hkdf_label.as_slice()];
     let okm = prk.expand(&info, Len(out_len)).ok()?;
-    let mut out = vec![0u8; out_len];
+    let mut out = Zeroizing::new(vec![0u8; out_len]);
     okm.fill(&mut out).ok()?;
     Some(out)
 }
 
-fn derive_key_and_iv(traffic_secret: &[u8]) -> Option<([u8; 16], [u8; 12])> {
+fn derive_key_and_iv(traffic_secret: &[u8]) -> Option<(Zeroizing<[u8; 16]>, [u8; 12])> {
     let key_bytes = hkdf_expand_label(traffic_secret, "key", 16)?;
     let iv_bytes = hkdf_expand_label(traffic_secret, "iv", 12)?;
-    let key: [u8; 16] = key_bytes.try_into().ok()?;
-    let iv: [u8; 12] = iv_bytes.try_into().ok()?;
+    let mut key = Zeroizing::new([0u8; 16]);
+    key.copy_from_slice(&key_bytes);
+    let iv: [u8; 12] = iv_bytes.as_slice().try_into().ok()?;
     Some((key, iv))
 }
 
-/// Decrypts one captured TLS record using the client's application traffic
-/// secret logged via `SSLKEYLOGFILE`. This derives the record's key/IV
-/// straight from the given secret with no sequence-number tracking, so it
-/// is only correct for the FIRST record encrypted under that secret
-/// (sequence number 0) — matching how this module is currently wired
-/// (Task 13: one decrypt-eligible record per observed secret). Every
+/// RFC 8446 §7.2 KeyUpdate: derive the next generation from the current
+/// traffic secret, retaining the output in zeroizing memory.
+pub fn next_traffic_secret(secret: &SessionSecret) -> Option<Zeroizing<Vec<u8>>> {
+    hkdf_expand_label(&secret.secret, "traffic upd", secret.secret.len())
+}
+
+/// Decrypts one captured TLS record using its traffic secret and sequence number. Every
 /// failure path (truncation, wrong key, malformed padding) returns
 /// `Undecryptable`, never panics — decrypted content is best-effort and
 /// must always fail closed, per the spec's Security model.
-pub fn decrypt_record(record: &[u8], secret: &SessionSecret) -> DecryptOutcome {
+pub fn decrypt_record(record: &[u8], secret: &SessionSecret, sequence: u64) -> DecryptOutcome {
     // TLS record: type(1) version(2) length(2) || ciphertext+tag
     if record.len() < 5 || record[0] != 0x17 {
-        return DecryptOutcome::Undecryptable { reason: "not an application_data record" };
+        return DecryptOutcome::Undecryptable {
+            reason: "not an application_data record",
+        };
     }
     let body = &record[5..];
     if body.len() < aead::AES_128_GCM.tag_len() {
-        return DecryptOutcome::Undecryptable { reason: "record too short for AEAD tag" };
+        return DecryptOutcome::Undecryptable {
+            reason: "record too short for AEAD tag",
+        };
     }
 
     let Some((key_bytes, iv)) = derive_key_and_iv(&secret.secret) else {
-        return DecryptOutcome::Undecryptable { reason: "key derivation failed" };
+        return DecryptOutcome::Undecryptable {
+            reason: "key derivation failed",
+        };
     };
-    let Ok(unbound_key) = aead::UnboundKey::new(&aead::AES_128_GCM, &key_bytes) else {
-        return DecryptOutcome::Undecryptable { reason: "invalid key material" };
+    let Ok(unbound_key) = aead::UnboundKey::new(&aead::AES_128_GCM, key_bytes.as_slice()) else {
+        return DecryptOutcome::Undecryptable {
+            reason: "invalid key material",
+        };
     };
-    let nonce = aead::Nonce::assume_unique_for_key(iv);
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_for_sequence(iv, sequence));
     let key = aead::LessSafeKey::new(unbound_key);
 
     // RFC 8446 §5.2: the AEAD's additional authenticated data is the
@@ -80,7 +121,7 @@ pub fn decrypt_record(record: &[u8], secret: &SessionSecret) -> DecryptOutcome {
     // legacy_record_version || length) — NOT empty. Getting this wrong
     // makes every real record fail the AEAD tag check.
     let aad = aead::Aad::from(&record[..5]);
-    let mut buf = body.to_vec();
+    let mut buf = Zeroizing::new(body.to_vec());
     match key.open_in_place(nonce, aad, &mut buf) {
         Ok(plaintext) => {
             // TLS 1.3 records end with a content-type byte after the real
@@ -91,11 +132,24 @@ pub fn decrypt_record(record: &[u8], secret: &SessionSecret) -> DecryptOutcome {
                 end -= 1;
             }
             if end == 0 {
-                return DecryptOutcome::Undecryptable { reason: "empty plaintext after padding strip" };
+                return DecryptOutcome::Undecryptable {
+                    reason: "empty plaintext after padding strip",
+                };
             }
-            DecryptOutcome::Plaintext(plaintext[..end - 1].to_vec())
+            let content_type = plaintext[end - 1];
+            if !matches!(content_type, 20..=23) {
+                return DecryptOutcome::Undecryptable {
+                    reason: "invalid TLS inner content type",
+                };
+            }
+            DecryptOutcome::Plaintext {
+                content_type,
+                bytes: Zeroizing::new(plaintext[..end - 1].to_vec()),
+            }
         }
-        Err(_) => DecryptOutcome::Undecryptable { reason: "AEAD authentication failed" },
+        Err(_) => DecryptOutcome::Undecryptable {
+            reason: "AEAD authentication failed",
+        },
     }
 }
 
@@ -103,6 +157,7 @@ pub fn decrypt_record(record: &[u8], secret: &SessionSecret) -> DecryptOutcome {
 mod tests {
     use super::*;
     use crate::keylog::SessionSecret;
+    use zeroize::Zeroizing;
 
     // Published RFC 8448 "Example Handshake Traces for TLS 1.3" test vector
     // fields (client hello random, derived client application traffic
@@ -126,13 +181,21 @@ mod tests {
         let secret = SessionSecret {
             client_random: hex::decode(fx["client_random"].as_str().unwrap()).unwrap(),
             label: "CLIENT_TRAFFIC_SECRET_0".to_string(),
-            secret: hex::decode(fx["client_traffic_secret_0"].as_str().unwrap()).unwrap(),
+            secret: Zeroizing::new(
+                hex::decode(fx["client_traffic_secret_0"].as_str().unwrap()).unwrap(),
+            ),
         };
         let record = hex::decode(fx["encrypted_record"].as_str().unwrap()).unwrap();
         let expected_plaintext = hex::decode(fx["expected_plaintext"].as_str().unwrap()).unwrap();
 
-        match decrypt_record(&record, &secret) {
-            DecryptOutcome::Plaintext(bytes) => assert_eq!(bytes, expected_plaintext),
+        match decrypt_record(&record, &secret, 0) {
+            DecryptOutcome::Plaintext {
+                content_type,
+                bytes,
+            } => {
+                assert_eq!(content_type, 23);
+                assert_eq!(bytes.as_slice(), expected_plaintext);
+            }
             DecryptOutcome::Undecryptable { reason } => panic!("expected success, got: {reason}"),
         }
     }
@@ -151,9 +214,136 @@ mod tests {
     }
 
     #[test]
+    fn record_nonce_xors_the_sequence_number_into_the_final_eight_iv_bytes() {
+        let iv = [0xAA; 12];
+        assert_eq!(
+            nonce_for_sequence(iv, 1),
+            [0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAB]
+        );
+    }
+
+    #[test]
+    fn derives_next_tls13_traffic_secret_for_key_update() {
+        let secret = SessionSecret {
+            client_random: vec![0x11; 32],
+            label: "CLIENT_TRAFFIC_SECRET_0".to_string(),
+            secret: Zeroizing::new(vec![0x22; 32]),
+        };
+        let next =
+            next_traffic_secret(&secret).expect("AES-128-GCM-SHA256 traffic secret should update");
+        assert_eq!(next.len(), 32);
+        assert_ne!(next.as_slice(), secret.secret.as_slice());
+    }
+
+    #[test]
+    fn decrypts_three_directional_records_only_at_their_monotonic_sequences() {
+        let secret = SessionSecret {
+            client_random: vec![0x11; 32],
+            label: "CLIENT_TRAFFIC_SECRET_0".to_string(),
+            secret: Zeroizing::new(vec![0x22; 32]),
+        };
+        for sequence in 0..3 {
+            let plaintext = format!("record-{sequence}").into_bytes();
+            let record = encrypt_record_for_test(&secret, sequence, &plaintext);
+            match decrypt_record(&record, &secret, sequence) {
+                DecryptOutcome::Plaintext {
+                    content_type: 23,
+                    bytes,
+                } => assert_eq!(bytes.as_slice(), plaintext),
+                other => panic!("expected authenticated application plaintext, got {other:?}"),
+            }
+            assert!(matches!(
+                decrypt_record(&record, &secret, sequence + 1),
+                DecryptOutcome::Undecryptable { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn reassembles_out_of_order_records_then_decrypts_each_direction_from_sequence_zero() {
+        use crate::tls_stream::TlsDirectionStream;
+        let client = SessionSecret {
+            client_random: vec![0x31; 32],
+            label: "CLIENT_TRAFFIC_SECRET_0".to_string(),
+            secret: Zeroizing::new(vec![0x41; 32]),
+        };
+        let server = SessionSecret {
+            client_random: client.client_random.clone(),
+            label: "SERVER_TRAFFIC_SECRET_0".to_string(),
+            secret: Zeroizing::new(vec![0x51; 32]),
+        };
+        let client_records = (0..3)
+            .map(|seq| encrypt_record_for_test(&client, seq, format!("c{seq}").as_bytes()))
+            .collect::<Vec<_>>();
+        let server_records = (0..3)
+            .map(|seq| encrypt_record_for_test(&server, seq, format!("s{seq}").as_bytes()))
+            .collect::<Vec<_>>();
+        let client_wire = client_records.concat();
+        let server_wire = server_records.concat();
+        let mut client_stream = TlsDirectionStream::new(100);
+        let split = client_wire.len() / 3;
+        assert!(client_stream
+            .feed_segment(100 + split as u32, &client_wire[split..split * 2])
+            .unwrap()
+            .is_empty());
+        assert!(client_stream
+            .feed_segment(100 + (split * 2) as u32, &client_wire[split * 2..])
+            .unwrap()
+            .is_empty());
+        let got_client = client_stream
+            .feed_segment(100, &client_wire[..split])
+            .unwrap();
+        assert_eq!(got_client, client_records);
+
+        let mut server_stream = TlsDirectionStream::new(900);
+        let got_server = server_stream.feed_segment(900, &server_wire).unwrap();
+        assert_eq!(got_server, server_records);
+        for (sequence, record) in got_client.iter().enumerate() {
+            assert!(matches!(
+                decrypt_record(record, &client, sequence as u64),
+                DecryptOutcome::Plaintext {
+                    content_type: 23,
+                    ..
+                }
+            ));
+        }
+        for (sequence, record) in got_server.iter().enumerate() {
+            assert!(matches!(
+                decrypt_record(record, &server, sequence as u64),
+                DecryptOutcome::Plaintext {
+                    content_type: 23,
+                    ..
+                }
+            ));
+        }
+    }
+
+    fn encrypt_record_for_test(secret: &SessionSecret, sequence: u64, plaintext: &[u8]) -> Vec<u8> {
+        let (key_bytes, iv) = derive_key_and_iv(&secret.secret).unwrap();
+        let unbound = aead::UnboundKey::new(&aead::AES_128_GCM, key_bytes.as_slice()).unwrap();
+        let key = aead::LessSafeKey::new(unbound);
+        let mut body = plaintext.to_vec();
+        body.push(23);
+        let body_len = body.len() + aead::AES_128_GCM.tag_len();
+        let mut record = vec![0x17, 0x03, 0x03, (body_len >> 8) as u8, body_len as u8];
+        key.seal_in_place_append_tag(
+            aead::Nonce::assume_unique_for_key(nonce_for_sequence(iv, sequence)),
+            aead::Aad::from(record.as_slice()),
+            &mut body,
+        )
+        .unwrap();
+        record.extend_from_slice(&body);
+        record
+    }
+
+    #[test]
     fn returns_undecryptable_not_a_panic_for_a_truncated_record() {
-        let secret = SessionSecret { client_random: vec![0u8; 32], label: "x".into(), secret: vec![1u8; 32] };
-        let outcome = decrypt_record(&[0x17, 0x03, 0x03], &secret); // header only, no body
+        let secret = SessionSecret {
+            client_random: vec![0u8; 32],
+            label: "x".into(),
+            secret: Zeroizing::new(vec![1u8; 32]),
+        };
+        let outcome = decrypt_record(&[0x17, 0x03, 0x03], &secret, 0); // header only, no body
         assert!(matches!(outcome, DecryptOutcome::Undecryptable { .. }));
     }
 
@@ -163,10 +353,10 @@ mod tests {
         let wrong_secret = SessionSecret {
             client_random: hex::decode(fx["client_random"].as_str().unwrap()).unwrap(),
             label: "CLIENT_TRAFFIC_SECRET_0".to_string(),
-            secret: vec![0xAA; 32], // deliberately wrong key material
+            secret: Zeroizing::new(vec![0xAA; 32]), // deliberately wrong key material
         };
         let record = hex::decode(fx["encrypted_record"].as_str().unwrap()).unwrap();
-        let outcome = decrypt_record(&record, &wrong_secret);
+        let outcome = decrypt_record(&record, &wrong_secret, 0);
         assert!(
             matches!(outcome, DecryptOutcome::Undecryptable { .. }),
             "AEAD tag check must fail closed, not return garbage plaintext"
@@ -175,9 +365,13 @@ mod tests {
 
     #[test]
     fn returns_undecryptable_for_a_non_application_data_record() {
-        let secret = SessionSecret { client_random: vec![0u8; 32], label: "x".into(), secret: vec![1u8; 32] };
+        let secret = SessionSecret {
+            client_random: vec![0u8; 32],
+            label: "x".into(),
+            secret: Zeroizing::new(vec![1u8; 32]),
+        };
         // 0x16 = handshake record, not application_data (0x17).
-        let outcome = decrypt_record(&[0x16, 0x03, 0x03, 0x00, 0x05, 1, 2, 3, 4, 5], &secret);
+        let outcome = decrypt_record(&[0x16, 0x03, 0x03, 0x00, 0x05, 1, 2, 3, 4, 5], &secret, 0);
         assert!(matches!(outcome, DecryptOutcome::Undecryptable { .. }));
     }
 }

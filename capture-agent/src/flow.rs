@@ -43,6 +43,8 @@ struct FlowState {
     ja3_fingerprint: Option<String>,
     ja3_label: Option<&'static str>,
     client_random: Option<Vec<u8>>,
+    client_is_outbound: Option<bool>,
+    syn_sequences: HashMap<bool /* local_is_sender */, u32>,
     // Cached once at flow creation (see `observe()`'s `or_insert_with_key`)
     // rather than recomputed from FlowKey on every packet — it's a pure
     // function of a key that never changes for this flow's lifetime, and
@@ -71,6 +73,8 @@ impl Default for FlowState {
             ja3_fingerprint: None,
             ja3_label: None,
             client_random: None,
+            client_is_outbound: None,
+            syn_sequences: HashMap::new(),
             // Always overwritten by `or_insert_with_key` at real
             // construction time — never actually read as empty.
             connection_id: String::new(),
@@ -196,7 +200,10 @@ impl ProtocolNode {
         self.bytes += bytes;
         self.packets += 1;
         if let Some((head, rest)) = path.split_first() {
-            self.children.entry((*head).to_string()).or_default().add(rest, bytes);
+            self.children
+                .entry((*head).to_string())
+                .or_default()
+                .add(rest, bytes);
         }
     }
 
@@ -472,8 +479,7 @@ impl FlowTable {
             // to the same FlowKey, as this function's doc comment requires —
             // a positional convention would instead split a request and its
             // reply into two separate one-directional flows.
-            let src_is_canonical_local =
-                (&packet.src_ip, src_port) <= (&packet.dst_ip, dst_port);
+            let src_is_canonical_local = (&packet.src_ip, src_port) <= (&packet.dst_ip, dst_port);
             if src_is_canonical_local {
                 Some((
                     FlowKey {
@@ -508,7 +514,12 @@ impl FlowTable {
 
     /// Returns `None` when the packet matched no tracked flow (see
     /// `ObserveResult` for the `Some` case).
-    pub fn observe(&mut self, packet: &ParsedPacket, l7: &L7Info, now_ms: u64) -> Option<ObserveResult> {
+    pub fn observe(
+        &mut self,
+        packet: &ParsedPacket,
+        l7: &L7Info,
+        now_ms: u64,
+    ) -> Option<ObserveResult> {
         self.observe_inner(packet, l7, now_ms, true, false)
     }
 
@@ -598,8 +609,16 @@ impl FlowTable {
         // hierarchy right here, before that early return would otherwise
         // make them vanish from it entirely. No app-layer child: neither
         // has an app-layer concept in this model.
-        if account_protocol_hierarchy && !matches!(packet.protocol, TransportProtocol::Tcp | TransportProtocol::Udp) {
-            self.protocol_tree.add(&["Ethernet", "IP", transport_label], packet.total_len as u64);
+        if account_protocol_hierarchy
+            && !matches!(
+                packet.protocol,
+                TransportProtocol::Tcp | TransportProtocol::Udp
+            )
+        {
+            self.protocol_tree.add(
+                &["Ethernet", "IP", transport_label],
+                packet.total_len as u64,
+            );
         }
 
         let (key, is_outbound) = self.key_for(packet)?;
@@ -618,12 +637,10 @@ impl FlowTable {
         if is_new {
             self.total_flows_observed += 1;
         }
-        self.endpoint_rollups.entry(remote_addr.clone()).or_default().record(
-            is_outbound,
-            packet.total_len as u64,
-            now_ms,
-            is_new,
-        );
+        self.endpoint_rollups
+            .entry(remote_addr.clone())
+            .or_default()
+            .record(is_outbound, packet.total_len as u64, now_ms, is_new);
         self.conversation_rollups
             .entry((local_addr.clone(), remote_addr.clone()))
             .or_default()
@@ -638,6 +655,12 @@ impl FlowTable {
         });
         state.last_seen_ms = now_ms;
 
+        if packet.tcp_flags.is_some_and(|flags| flags.syn) {
+            if let Some(sequence) = packet.seq {
+                state.syn_sequences.entry(is_outbound).or_insert(sequence);
+            }
+        }
+
         if is_outbound {
             state.tx_bytes_total += packet.total_len as u64;
             state.tx_bytes_this_tick += packet.total_len as u64;
@@ -647,9 +670,18 @@ impl FlowTable {
         }
 
         match l7 {
-            L7Info::Http { .. } | L7Info::HttpResponse { .. } => state.app_layer_protocol = "HTTP".to_string(),
-            L7Info::Dns { .. } | L7Info::DnsResponse { .. } => state.app_layer_protocol = "DNS".to_string(),
-            L7Info::TlsClientHello { ja3, ja3_label, client_random, .. } => {
+            L7Info::Http { .. } | L7Info::HttpResponse { .. } => {
+                state.app_layer_protocol = "HTTP".to_string()
+            }
+            L7Info::Dns { .. } | L7Info::DnsResponse { .. } => {
+                state.app_layer_protocol = "DNS".to_string()
+            }
+            L7Info::TlsClientHello {
+                ja3,
+                ja3_label,
+                client_random,
+                ..
+            } => {
                 state.app_layer_protocol = "HTTPS/TLS".to_string();
                 state.encryption = "TLS".to_string();
                 // First ClientHello wins: a flow has exactly one handshake,
@@ -660,6 +692,7 @@ impl FlowTable {
                     state.ja3_fingerprint = ja3.clone();
                     state.ja3_label = *ja3_label;
                     state.client_random = client_random.clone();
+                    state.client_is_outbound = Some(is_outbound);
                 }
                 // JAM-14: unlike FlowState's own first-ClientHello-wins rule
                 // above, the host/pair rollup always takes the freshest
@@ -669,7 +702,10 @@ impl FlowTable {
                     if let Some(rollup) = self.endpoint_rollups.get_mut(&remote_addr) {
                         rollup.ja3_label = *ja3_label;
                     }
-                    if let Some(rollup) = self.conversation_rollups.get_mut(&(local_addr.clone(), remote_addr.clone())) {
+                    if let Some(rollup) = self
+                        .conversation_rollups
+                        .get_mut(&(local_addr.clone(), remote_addr.clone()))
+                    {
                         rollup.ja3_label = *ja3_label;
                     }
                 }
@@ -691,7 +727,12 @@ impl FlowTable {
         // above), so an app-layer child is always meaningful here.
         if account_protocol_hierarchy {
             self.protocol_tree.add(
-                &["Ethernet", "IP", transport_label, state.app_layer_protocol.as_str()],
+                &[
+                    "Ethernet",
+                    "IP",
+                    transport_label,
+                    state.app_layer_protocol.as_str(),
+                ],
                 packet.total_len as u64,
             );
         }
@@ -782,6 +823,23 @@ impl FlowTable {
     /// ClientHello (if any) hasn't been seen yet.
     pub fn client_random_for(&self, key: &FlowKey) -> Option<Vec<u8>> {
         self.flows.get(key)?.client_random.clone()
+    }
+
+    /// Direction of the endpoint that sent the first observed ClientHello.
+    /// `true` means the local endpoint initiated the TLS handshake.
+    pub fn client_is_outbound_for(&self, key: &FlowKey) -> Option<bool> {
+        self.flows.get(key)?.client_is_outbound
+    }
+
+    /// Original sequence number from the first observed SYN in a local
+    /// direction. Tier B uses this even if PID attribution arrives after the
+    /// SYN, so an opted-in flow can still anchor its stream at byte zero.
+    pub fn tcp_syn_sequence_for(&self, key: &FlowKey, local_is_sender: bool) -> Option<u32> {
+        self.flows
+            .get(key)?
+            .syn_sequences
+            .get(&local_is_sender)
+            .copied()
     }
 
     pub fn snapshot(&mut self, now_ms: u64) -> Vec<FlowSnapshot> {
@@ -877,7 +935,8 @@ impl FlowTable {
     /// each rollup's `_this_tick` counters, same tick-elapsed contract as
     /// `snapshot()`.
     pub fn endpoint_snapshot(&mut self, now_ms: u64) -> Vec<EndpointSnapshot> {
-        let elapsed_s = ((now_ms.saturating_sub(self.last_endpoint_snapshot_ms)).max(1)) as f64 / 1000.0;
+        let elapsed_s =
+            ((now_ms.saturating_sub(self.last_endpoint_snapshot_ms)).max(1)) as f64 / 1000.0;
         self.last_endpoint_snapshot_ms = now_ms;
 
         let mut result = Vec::with_capacity(self.endpoint_rollups.len());
@@ -905,7 +964,8 @@ impl FlowTable {
     /// `endpoint_snapshot`'s doc comment for the permanence/tick-draining
     /// contract, identical here.
     pub fn conversation_snapshot(&mut self, now_ms: u64) -> Vec<ConversationSnapshot> {
-        let elapsed_s = ((now_ms.saturating_sub(self.last_conversation_snapshot_ms)).max(1)) as f64 / 1000.0;
+        let elapsed_s =
+            ((now_ms.saturating_sub(self.last_conversation_snapshot_ms)).max(1)) as f64 / 1000.0;
         self.last_conversation_snapshot_ms = now_ms;
 
         let mut result = Vec::with_capacity(self.conversation_rollups.len());
@@ -950,8 +1010,8 @@ impl FlowTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::{ParsedPacket, TransportProtocol, TcpFlags};
     use crate::l7::L7Info;
+    use crate::parse::{ParsedPacket, TcpFlags, TransportProtocol};
 
     fn tcp_packet(local_is_src: bool, flags: TcpFlags, len: u16) -> ParsedPacket {
         tcp_packet_with_payload(local_is_src, flags, len, vec![])
@@ -964,9 +1024,19 @@ mod tests {
         payload: Vec<u8>,
     ) -> ParsedPacket {
         let (src_ip, dst_ip, src_port, dst_port) = if local_is_src {
-            ("192.168.1.10".to_string(), "93.184.216.34".to_string(), 51000u16, 443u16)
+            (
+                "192.168.1.10".to_string(),
+                "93.184.216.34".to_string(),
+                51000u16,
+                443u16,
+            )
         } else {
-            ("93.184.216.34".to_string(), "192.168.1.10".to_string(), 443u16, 51000u16)
+            (
+                "93.184.216.34".to_string(),
+                "192.168.1.10".to_string(),
+                443u16,
+                51000u16,
+            )
         };
         ParsedPacket {
             src_mac: "aa:aa:aa:aa:aa:aa".into(),
@@ -996,19 +1066,51 @@ mod tests {
     fn derives_syn_sent_then_established() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
 
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
+        let syn = tcp_packet(
+            true,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&syn, &L7Info::None, 0);
         let snap = table.snapshot(0);
         assert_eq!(snap[0].status, "SYN_SENT");
 
-        let synack = tcp_packet(false, TcpFlags { syn: true, ack: true, fin: false, rst: false, ..Default::default() }, 60);
+        let synack = tcp_packet(
+            false,
+            TcpFlags {
+                syn: true,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&synack, &L7Info::None, 20);
-        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
+        let ack = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&ack, &L7Info::None, 25);
 
         let snap = table.snapshot(25);
         assert_eq!(snap[0].status, "ESTABLISHED");
-        let rtt = snap[0].latency_ms.expect("handshake was observed, so RTT must be measured");
+        let rtt = snap[0]
+            .latency_ms
+            .expect("handshake was observed, so RTT must be measured");
         assert!((rtt - 20.0).abs() < 0.01, "expected ~20ms RTT, got {}", rtt);
     }
 
@@ -1018,7 +1120,17 @@ mod tests {
         // predates the agent starting) has no RTT measurement. That must be
         // reported as absent, never as a fabricated 0 ms.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
+        let ack = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&ack, &L7Info::None, 0);
         let snap = table.snapshot(10);
         assert_eq!(snap[0].latency_ms, None);
@@ -1037,7 +1149,12 @@ mod tests {
         table.observe(&response, &L7Info::None, 1);
 
         let snap = table.snapshot(1000);
-        assert_eq!(snap.len(), 1, "expected request+response to merge into one flow, got {}", snap.len());
+        assert_eq!(
+            snap.len(),
+            1,
+            "expected request+response to merge into one flow, got {}",
+            snap.len()
+        );
         assert_eq!(snap[0].tx_bytes_total + snap[0].rx_bytes_total, 350);
         assert!(
             snap[0].tx_bytes_total > 0 && snap[0].rx_bytes_total > 0,
@@ -1091,10 +1208,40 @@ mod tests {
         // zero-payload segments reusing the previous sequence number (which
         // is how real ACKs behave) must not inflate packet_loss at all.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
+        let syn = tcp_packet(
+            true,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         let data = tcp_packet_with_payload(true, TcpFlags::default(), 100, vec![1, 2, 3]);
-        let ack1 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
-        let ack2 = tcp_packet(false, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
+        let ack1 = tcp_packet(
+            false,
+            TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
+        let ack2 = tcp_packet(
+            false,
+            TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&syn, &L7Info::None, 0);
         table.observe(&data, &L7Info::None, 1);
         table.observe(&ack1, &L7Info::None, 2);
@@ -1114,10 +1261,16 @@ mod tests {
         let out2 = tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]);
 
         let first = table.observe(&out1, &L7Info::None, 0).unwrap();
-        assert!(!first.is_retransmit, "the first segment in a direction is never a retransmit");
+        assert!(
+            !first.is_retransmit,
+            "the first segment in a direction is never a retransmit"
+        );
 
         let second = table.observe(&out2, &L7Info::None, 1).unwrap();
-        assert!(second.is_retransmit, "a repeated sequence number on the same direction is a retransmit");
+        assert!(
+            second.is_retransmit,
+            "a repeated sequence number on the same direction is a retransmit"
+        );
     }
 
     #[test]
@@ -1126,12 +1279,21 @@ mod tests {
         // u32::MAX; the first legitimate post-wrap segment has a numerically
         // smaller seq than the last pre-wrap one, but is not a retransmit.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let pre_wrap = ParsedPacket { seq: Some(u32::MAX - 10), ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]) };
-        let post_wrap = ParsedPacket { seq: Some(50), ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![4, 5, 6]) };
+        let pre_wrap = ParsedPacket {
+            seq: Some(u32::MAX - 10),
+            ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3])
+        };
+        let post_wrap = ParsedPacket {
+            seq: Some(50),
+            ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![4, 5, 6])
+        };
 
         table.observe(&pre_wrap, &L7Info::None, 0).unwrap();
         let result = table.observe(&post_wrap, &L7Info::None, 1).unwrap();
-        assert!(!result.is_retransmit, "a post-wrap segment must not be flagged just because its numeric seq is smaller");
+        assert!(
+            !result.is_retransmit,
+            "a post-wrap segment must not be flagged just because its numeric seq is smaller"
+        );
     }
 
     #[test]
@@ -1140,12 +1302,21 @@ mod tests {
         // the boundary — a real retransmit (same seq observed twice) right
         // before the wrap is still a retransmit.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let near_wrap = ParsedPacket { seq: Some(u32::MAX - 10), ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]) };
-        let repeat = ParsedPacket { seq: Some(u32::MAX - 10), ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3]) };
+        let near_wrap = ParsedPacket {
+            seq: Some(u32::MAX - 10),
+            ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3])
+        };
+        let repeat = ParsedPacket {
+            seq: Some(u32::MAX - 10),
+            ..tcp_packet_with_payload(true, TcpFlags::default(), 60, vec![1, 2, 3])
+        };
 
         table.observe(&near_wrap, &L7Info::None, 0).unwrap();
         let result = table.observe(&repeat, &L7Info::None, 1).unwrap();
-        assert!(result.is_retransmit, "an exact seq repeat near the wraparound boundary is still a retransmit");
+        assert!(
+            result.is_retransmit,
+            "an exact seq repeat near the wraparound boundary is still a retransmit"
+        );
     }
 
     #[test]
@@ -1154,21 +1325,66 @@ mod tests {
         // lifetime, not once per RST-flagged packet (a flow can see more
         // than one RST, e.g. a retransmitted RST).
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
-        let rst1 = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: false, rst: true, ..Default::default() }, 60);
-        let rst2 = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: false, rst: true, ..Default::default() }, 60);
+        let syn = tcp_packet(
+            true,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
+        let rst1 = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: false,
+                fin: false,
+                rst: true,
+                ..Default::default()
+            },
+            60,
+        );
+        let rst2 = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: false,
+                fin: false,
+                rst: true,
+                ..Default::default()
+            },
+            60,
+        );
 
         let syn_result = table.observe(&syn, &L7Info::None, 0).unwrap();
         assert!(!syn_result.rst_transitioned);
-        assert_eq!(syn_result.connection_id, None, "connection_id is only populated on the transitioning packet");
+        assert_eq!(
+            syn_result.connection_id, None,
+            "connection_id is only populated on the transitioning packet"
+        );
 
         let first_rst = table.observe(&rst1, &L7Info::None, 5).unwrap();
-        assert!(first_rst.rst_transitioned, "the first RST on this flow must transition");
-        assert_eq!(first_rst.connection_id.as_deref(), Some("Tcp-192.168.1.10:51000-93.184.216.34:443"));
+        assert!(
+            first_rst.rst_transitioned,
+            "the first RST on this flow must transition"
+        );
+        assert_eq!(
+            first_rst.connection_id.as_deref(),
+            Some("Tcp-192.168.1.10:51000-93.184.216.34:443")
+        );
 
         let second_rst = table.observe(&rst2, &L7Info::None, 10).unwrap();
-        assert!(!second_rst.rst_transitioned, "an already-reset flow must not transition again");
-        assert_eq!(second_rst.connection_id, None, "no transition on this packet, so no connection_id either");
+        assert!(
+            !second_rst.rst_transitioned,
+            "an already-reset flow must not transition again"
+        );
+        assert_eq!(
+            second_rst.connection_id, None,
+            "no transition on this packet, so no connection_id either"
+        );
     }
 
     /// Builds a bare TCP packet like `tcp_packet`, but lets the caller choose
@@ -1176,9 +1392,19 @@ mod tests {
     /// `FlowKey`s instead of colliding on the fixture's hardcoded remote.
     fn tcp_packet_to(local_is_src: bool, flags: TcpFlags, remote_port: u16) -> ParsedPacket {
         let (src_ip, dst_ip, src_port, dst_port) = if local_is_src {
-            ("192.168.1.10".to_string(), "93.184.216.34".to_string(), 51000u16, remote_port)
+            (
+                "192.168.1.10".to_string(),
+                "93.184.216.34".to_string(),
+                51000u16,
+                remote_port,
+            )
         } else {
-            ("93.184.216.34".to_string(), "192.168.1.10".to_string(), remote_port, 51000u16)
+            (
+                "93.184.216.34".to_string(),
+                "192.168.1.10".to_string(),
+                remote_port,
+                51000u16,
+            )
         };
         ParsedPacket {
             src_mac: "aa:aa:aa:aa:aa:aa".into(),
@@ -1207,7 +1433,17 @@ mod tests {
     #[test]
     fn evicts_time_wait_flow_after_two_minutes_idle() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false, ..Default::default() }, 60);
+        let fin = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: false,
+                fin: true,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&fin, &L7Info::None, 0);
 
         // idle = 120_001ms > the 120_000ms TIME_WAIT/CLOSE_WAIT threshold.
@@ -1219,7 +1455,17 @@ mod tests {
     #[test]
     fn does_not_evict_time_wait_flow_before_threshold() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false, ..Default::default() }, 60);
+        let fin = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: false,
+                fin: true,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&fin, &L7Info::None, 0);
 
         // idle = exactly 120_000ms, not yet past the threshold.
@@ -1231,8 +1477,28 @@ mod tests {
     #[test]
     fn evicts_established_flow_past_ceiling_even_though_status_is_active() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
-        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
+        let syn = tcp_packet(
+            true,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
+        let ack = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&syn, &L7Info::None, 0);
         table.observe(&ack, &L7Info::None, 5);
 
@@ -1246,8 +1512,28 @@ mod tests {
     #[test]
     fn does_not_evict_established_flow_under_ceiling() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
-        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
+        let syn = tcp_packet(
+            true,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
+        let ack = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&syn, &L7Info::None, 0);
         table.observe(&ack, &L7Info::None, 5);
 
@@ -1264,12 +1550,42 @@ mod tests {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
 
         // Stale flow: FIN'd long ago on remote port 443.
-        let fin = tcp_packet_to(true, TcpFlags { syn: false, ack: false, fin: true, rst: false, ..Default::default() }, 443);
+        let fin = tcp_packet_to(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: false,
+                fin: true,
+                rst: false,
+                ..Default::default()
+            },
+            443,
+        );
         table.observe(&fin, &L7Info::None, 0);
 
         // Fresh flow: established just now on a different remote port.
-        let syn = tcp_packet_to(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 8443);
-        let ack = tcp_packet_to(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 8443);
+        let syn = tcp_packet_to(
+            true,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            8443,
+        );
+        let ack = tcp_packet_to(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            8443,
+        );
         table.observe(&syn, &L7Info::None, 130_000);
         table.observe(&ack, &L7Info::None, 130_005);
 
@@ -1286,8 +1602,22 @@ mod tests {
     #[test]
     fn reset_discards_every_flow_and_returns_their_keys() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn_a = tcp_packet_to(true, TcpFlags { syn: true, ..Default::default() }, 443);
-        let syn_b = tcp_packet_to(true, TcpFlags { syn: true, ..Default::default() }, 8443);
+        let syn_a = tcp_packet_to(
+            true,
+            TcpFlags {
+                syn: true,
+                ..Default::default()
+            },
+            443,
+        );
+        let syn_b = tcp_packet_to(
+            true,
+            TcpFlags {
+                syn: true,
+                ..Default::default()
+            },
+            8443,
+        );
         table.observe(&syn_a, &L7Info::None, 0);
         table.observe(&syn_b, &L7Info::None, 0);
         assert_eq!(table.snapshot(0).len(), 2);
@@ -1295,9 +1625,13 @@ mod tests {
         let closed = table.reset(vec!["10.0.0.5".to_string()]);
 
         assert_eq!(closed.len(), 2);
-        let closed_ports: std::collections::HashSet<u16> = closed.iter().map(|k| k.remote_port).collect();
+        let closed_ports: std::collections::HashSet<u16> =
+            closed.iter().map(|k| k.remote_port).collect();
         assert_eq!(closed_ports, [443, 8443].into_iter().collect());
-        assert!(table.snapshot(0).is_empty(), "reset must leave no flows behind");
+        assert!(
+            table.snapshot(0).is_empty(),
+            "reset must leave no flows behind"
+        );
     }
 
     #[test]
@@ -1311,10 +1645,16 @@ mod tests {
         assert!(table.direction_attribution_unavailable());
 
         table.reset(vec!["10.0.0.5".to_string()]);
-        assert!(!table.direction_attribution_unavailable(), "switching to an addressed interface must clear this immediately");
+        assert!(
+            !table.direction_attribution_unavailable(),
+            "switching to an addressed interface must clear this immediately"
+        );
 
         table.reset(vec![]);
-        assert!(table.direction_attribution_unavailable(), "switching to an addressless interface must set this immediately");
+        assert!(
+            table.direction_attribution_unavailable(),
+            "switching to an addressless interface must set this immediately"
+        );
     }
 
     #[test]
@@ -1338,7 +1678,13 @@ mod tests {
             protocol: TransportProtocol::Tcp,
             src_port: Some(51000),
             dst_port: Some(443),
-            tcp_flags: Some(TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }),
+            tcp_flags: Some(TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            }),
             seq: Some(1000),
             ttl: 64,
             total_len: 60,
@@ -1366,10 +1712,50 @@ mod tests {
         // syn_sent_at_ms is still set) and must be eligible for the same
         // 120s idle eviction as a FIN-closed flow.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
-        let synack = tcp_packet(false, TcpFlags { syn: true, ack: true, fin: false, rst: false, ..Default::default() }, 60);
-        let ack = tcp_packet(true, TcpFlags { syn: false, ack: true, fin: false, rst: false, ..Default::default() }, 60);
-        let rst = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: false, rst: true, ..Default::default() }, 60);
+        let syn = tcp_packet(
+            true,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
+        let synack = tcp_packet(
+            false,
+            TcpFlags {
+                syn: true,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
+        let ack = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: true,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
+        let rst = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: false,
+                fin: false,
+                rst: true,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&syn, &L7Info::None, 0);
         table.observe(&synack, &L7Info::None, 5);
         table.observe(&ack, &L7Info::None, 10);
@@ -1389,10 +1775,23 @@ mod tests {
         // Regression test: a connection attempt that never completes (SYN
         // out, nothing back) must not sit for the full 30-minute ceiling.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ack: false, fin: false, rst: false, ..Default::default() }, 60);
+        let syn = tcp_packet(
+            true,
+            TcpFlags {
+                syn: true,
+                ack: false,
+                fin: false,
+                rst: false,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&syn, &L7Info::None, 0);
 
-        assert!(table.evict_stale(30_000).is_empty(), "not yet past the 30s SYN_SENT threshold");
+        assert!(
+            table.evict_stale(30_000).is_empty(),
+            "not yet past the 30s SYN_SENT threshold"
+        );
         let evicted = table.evict_stale(30_001);
         assert_eq!(evicted.len(), 1);
     }
@@ -1428,7 +1827,10 @@ mod tests {
         };
         table.observe(&udp_packet, &L7Info::None, 0);
 
-        assert!(table.evict_stale(60_000).is_empty(), "not yet past the 60s UDP idle threshold");
+        assert!(
+            table.evict_stale(60_000).is_empty(),
+            "not yet past the 60s UDP idle threshold"
+        );
         let evicted = table.evict_stale(60_001);
         assert_eq!(evicted.len(), 1);
     }
@@ -1451,7 +1853,10 @@ mod tests {
         // time alone — only the capacity cap should trigger an eviction.
         let evicted = table.evict_stale(20);
         assert_eq!(evicted.len(), 1);
-        assert_eq!(evicted.capacity[0].remote_port, 1, "oldest (least-recently-seen) flow should be evicted first");
+        assert_eq!(
+            evicted.capacity[0].remote_port, 1,
+            "oldest (least-recently-seen) flow should be evicted first"
+        );
 
         let remaining = table.snapshot(20);
         assert_eq!(remaining.len(), 2);
@@ -1478,7 +1883,10 @@ mod tests {
         table.observe(&packet, &L7Info::None, 100); // a later, non-ClientHello packet on the same flow
 
         let snaps = table.snapshot(200);
-        let snap = snaps.iter().find(|s| s.key.remote_addr == "93.184.216.34").expect("flow present");
+        let snap = snaps
+            .iter()
+            .find(|s| s.key.remote_addr == "93.184.216.34")
+            .expect("flow present");
         assert!(snap.ja3_fingerprint.is_some());
         assert_eq!(snap.ja3_label, Some("matches Chrome 12x"));
         assert_eq!(snap.client_random, Some(vec![0xab; 32]));
@@ -1498,7 +1906,10 @@ mod tests {
         assert!(table.client_random_for(&key).is_none());
 
         table.observe(&packet, &L7Info::None, 0);
-        assert!(table.client_random_for(&key).is_none(), "no ClientHello observed yet");
+        assert!(
+            table.client_random_for(&key).is_none(),
+            "no ClientHello observed yet"
+        );
 
         let l7 = L7Info::TlsClientHello {
             sni: "example.com".to_string(),
@@ -1510,6 +1921,40 @@ mod tests {
         };
         table.observe(&packet, &l7, 1);
         assert_eq!(table.client_random_for(&key), Some(vec![0x42; 32]));
+        assert_eq!(table.client_is_outbound_for(&key), Some(true));
+    }
+
+    #[test]
+    fn retains_each_direction_initial_syn_sequence_for_late_tls_attribution() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        let outbound_syn = ParsedPacket {
+            seq: Some(u32::MAX),
+            ..tcp_packet(
+                true,
+                TcpFlags {
+                    syn: true,
+                    ..Default::default()
+                },
+                60,
+            )
+        };
+        let inbound_syn_ack = ParsedPacket {
+            seq: Some(700),
+            ..tcp_packet(
+                false,
+                TcpFlags {
+                    syn: true,
+                    ack: true,
+                    ..Default::default()
+                },
+                60,
+            )
+        };
+        table.observe(&outbound_syn, &L7Info::None, 1);
+        table.observe(&inbound_syn_ack, &L7Info::None, 2);
+        let (key, _) = table.key_for(&outbound_syn).unwrap();
+        assert_eq!(table.tcp_syn_sequence_for(&key, true), Some(u32::MAX));
+        assert_eq!(table.tcp_syn_sequence_for(&key, false), Some(700));
     }
 
     #[test]
@@ -1577,13 +2022,20 @@ mod tests {
         table.observe(&packet, &L7Info::None, 0);
 
         let flows = table.snapshot(0);
-        assert_eq!(flows.len(), 1, "an empty local_addrs list must not silently drop every packet");
+        assert_eq!(
+            flows.len(),
+            1,
+            "an empty local_addrs list must not silently drop every packet"
+        );
         // Canonical ordering compares (ip, port) pairs and picks the
         // lexicographically-smaller endpoint as "local" — regardless of
         // which side happens to be this packet's src — so that a reply
         // packet (with src/dst swapped) still maps to the same FlowKey. See
         // merges_both_directions_into_one_flow_when_local_addrs_is_empty.
-        assert_eq!(flows[0].key.local_addr, "198.51.100.9", "canonical ordering picks the lexicographically-smaller endpoint as local");
+        assert_eq!(
+            flows[0].key.local_addr, "198.51.100.9",
+            "canonical ordering picks the lexicographically-smaller endpoint as local"
+        );
     }
 
     #[test]
@@ -1606,7 +2058,11 @@ mod tests {
         table.observe(&packet, &L7Info::None, 0);
         table.observe(&packet, &L7Info::None, 100); // same flow, second packet
         table.observe(&packet, &L7Info::None, 200); // same flow, third packet
-        assert_eq!(table.total_flows_observed(), 1, "repeated packets on the same flow must not inflate the observed count");
+        assert_eq!(
+            table.total_flows_observed(),
+            1,
+            "repeated packets on the same flow must not inflate the observed count"
+        );
     }
 
     #[test]
@@ -1634,7 +2090,10 @@ mod tests {
             ip_declared_payload_len: 0,
             ip_fragment: None,
         };
-        let b = ParsedPacket { dst_port: Some(444), ..a.clone() }; // distinct key from a
+        let b = ParsedPacket {
+            dst_port: Some(444),
+            ..a.clone()
+        }; // distinct key from a
         table.observe(&a, &L7Info::None, 0);
         table.observe(&b, &L7Info::None, 0); // exceeds capacity 1 — evicts a
 
@@ -1647,9 +2106,19 @@ mod tests {
 
     fn udp_packet_to(local_is_src: bool, remote_port: u16, len: u16) -> ParsedPacket {
         let (src_ip, dst_ip, src_port, dst_port) = if local_is_src {
-            ("192.168.1.10".to_string(), "93.184.216.34".to_string(), 51000u16, remote_port)
+            (
+                "192.168.1.10".to_string(),
+                "93.184.216.34".to_string(),
+                51000u16,
+                remote_port,
+            )
         } else {
-            ("93.184.216.34".to_string(), "192.168.1.10".to_string(), remote_port, 51000u16)
+            (
+                "93.184.216.34".to_string(),
+                "192.168.1.10".to_string(),
+                remote_port,
+                51000u16,
+            )
         };
         ParsedPacket {
             src_mac: "aa:aa:aa:aa:aa:aa".into(),
@@ -1685,27 +2154,53 @@ mod tests {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
         let http = tcp_packet_with_payload(
             true,
-            TcpFlags { ack: true, ..Default::default() },
+            TcpFlags {
+                ack: true,
+                ..Default::default()
+            },
             100,
             b"GET / HTTP/1.1".to_vec(),
         );
-        table.observe(&http, &L7Info::Http { method: "GET".to_string(), path: "/".to_string() }, 0);
+        table.observe(
+            &http,
+            &L7Info::Http {
+                method: "GET".to_string(),
+                path: "/".to_string(),
+            },
+            0,
+        );
 
         let root = table.protocol_hierarchy();
         assert_eq!(root.bytes, 100);
         assert_eq!(root.packets, 1);
 
-        let eth = root.children().find(|(name, _)| *name == "Ethernet").map(|(_, n)| n).expect("Ethernet node");
+        let eth = root
+            .children()
+            .find(|(name, _)| *name == "Ethernet")
+            .map(|(_, n)| n)
+            .expect("Ethernet node");
         assert_eq!(eth.bytes, 100);
 
-        let ip = eth.children().find(|(name, _)| *name == "IP").map(|(_, n)| n).expect("IP node");
+        let ip = eth
+            .children()
+            .find(|(name, _)| *name == "IP")
+            .map(|(_, n)| n)
+            .expect("IP node");
         assert_eq!(ip.bytes, 100);
 
-        let tcp = ip.children().find(|(name, _)| *name == "TCP").map(|(_, n)| n).expect("TCP node");
+        let tcp = ip
+            .children()
+            .find(|(name, _)| *name == "TCP")
+            .map(|(_, n)| n)
+            .expect("TCP node");
         assert_eq!(tcp.bytes, 100);
         assert_eq!(tcp.packets, 1);
 
-        let http_node = tcp.children().find(|(name, _)| *name == "HTTP").map(|(_, n)| n).expect("HTTP node");
+        let http_node = tcp
+            .children()
+            .find(|(name, _)| *name == "HTTP")
+            .map(|(_, n)| n)
+            .expect("HTTP node");
         assert_eq!(http_node.bytes, 100);
         assert_eq!(http_node.packets, 1);
     }
@@ -1713,12 +2208,30 @@ mod tests {
     #[test]
     fn protocol_hierarchy_separates_transport_protocols_under_ip() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let tcp_pkt = tcp_packet_to(true, TcpFlags { ack: true, ..Default::default() }, 443);
-        let tcp_pkt = ParsedPacket { total_len: 60, ..tcp_pkt };
+        let tcp_pkt = tcp_packet_to(
+            true,
+            TcpFlags {
+                ack: true,
+                ..Default::default()
+            },
+            443,
+        );
+        let tcp_pkt = ParsedPacket {
+            total_len: 60,
+            ..tcp_pkt
+        };
         let udp_pkt = udp_packet_to(true, 53, 40);
 
         table.observe(&tcp_pkt, &L7Info::None, 0);
-        table.observe(&udp_pkt, &L7Info::Dns { query_name: "example.com".to_string(), id: 1, qtype: 1 }, 0);
+        table.observe(
+            &udp_pkt,
+            &L7Info::Dns {
+                query_name: "example.com".to_string(),
+                id: 1,
+                qtype: 1,
+            },
+            0,
+        );
 
         let root = table.protocol_hierarchy();
         let ip = root
@@ -1731,15 +2244,27 @@ mod tests {
             .map(|(_, n)| n)
             .unwrap();
 
-        let tcp = ip.children().find(|(name, _)| *name == "TCP").map(|(_, n)| n).expect("TCP node");
-        let udp = ip.children().find(|(name, _)| *name == "UDP").map(|(_, n)| n).expect("UDP node");
+        let tcp = ip
+            .children()
+            .find(|(name, _)| *name == "TCP")
+            .map(|(_, n)| n)
+            .expect("TCP node");
+        let udp = ip
+            .children()
+            .find(|(name, _)| *name == "UDP")
+            .map(|(_, n)| n)
+            .expect("UDP node");
         assert_eq!(tcp.bytes, 60);
         assert_eq!(udp.bytes, 40);
         // Children must sum exactly to the parent — this is what "percentages
         // sum correctly at each level" reduces to as an invariant on the tree.
         assert_eq!(ip.bytes, tcp.bytes + udp.bytes);
 
-        let dns = udp.children().find(|(name, _)| *name == "DNS").map(|(_, n)| n).expect("DNS node");
+        let dns = udp
+            .children()
+            .find(|(name, _)| *name == "DNS")
+            .map(|(_, n)| n)
+            .expect("DNS node");
         assert_eq!(dns.bytes, 40);
     }
 
@@ -1749,7 +2274,14 @@ mod tests {
         // Port 9999 matches no well_known_protocol guess and carries no
         // recognized L7Info, so it must still show up somewhere in the
         // tree — never silently rounded away.
-        let unidentified = tcp_packet_to(true, TcpFlags { ack: true, ..Default::default() }, 9999);
+        let unidentified = tcp_packet_to(
+            true,
+            TcpFlags {
+                ack: true,
+                ..Default::default()
+            },
+            9999,
+        );
         table.observe(&unidentified, &L7Info::None, 0);
 
         let root = table.protocol_hierarchy();
@@ -1767,22 +2299,38 @@ mod tests {
             .map(|(_, n)| n)
             .unwrap();
 
-        let undecoded = tcp.children().find(|(name, _)| *name == "Unknown").map(|(_, n)| n);
-        assert!(undecoded.is_some(), "unidentified traffic must have its own visible bucket, not be dropped");
+        let undecoded = tcp
+            .children()
+            .find(|(name, _)| *name == "Unknown")
+            .map(|(_, n)| n);
+        assert!(
+            undecoded.is_some(),
+            "unidentified traffic must have its own visible bucket, not be dropped"
+        );
         assert_eq!(undecoded.unwrap().bytes, 60);
     }
 
     #[test]
     fn protocol_hierarchy_survives_flow_eviction() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let syn = tcp_packet(true, TcpFlags { syn: true, ..Default::default() }, 60);
+        let syn = tcp_packet(
+            true,
+            TcpFlags {
+                syn: true,
+                ..Default::default()
+            },
+            60,
+        );
         table.observe(&syn, &L7Info::None, 0);
         assert_eq!(table.protocol_hierarchy().bytes, 60);
 
         // Evict every flow in the table (past the SYN_SENT idle ceiling).
         let evicted = table.evict_stale(30_001);
         assert_eq!(evicted.len(), 1);
-        assert!(table.snapshot(30_001).is_empty(), "flow must actually be gone from the live table");
+        assert!(
+            table.snapshot(30_001).is_empty(),
+            "flow must actually be gone from the live table"
+        );
 
         // The cumulative hierarchy must not have forgotten the traffic that
         // already happened — this is the main correctness trap the task
@@ -1829,7 +2377,10 @@ mod tests {
         );
 
         let root = table.protocol_hierarchy();
-        assert_eq!(root.bytes, 60, "ICMP traffic must still count toward the capture total");
+        assert_eq!(
+            root.bytes, 60,
+            "ICMP traffic must still count toward the capture total"
+        );
         let icmp = root
             .children()
             .find(|(name, _)| *name == "Ethernet")
@@ -1842,9 +2393,15 @@ mod tests {
             .children()
             .find(|(name, _)| *name == "ICMP")
             .map(|(_, n)| n);
-        assert!(icmp.is_some(), "ICMP must have its own visible node under IP, not be dropped");
+        assert!(
+            icmp.is_some(),
+            "ICMP must have its own visible node under IP, not be dropped"
+        );
         assert_eq!(icmp.unwrap().bytes, 60);
-        assert!(icmp.unwrap().children().next().is_none(), "ICMP has no app-layer concept — no spurious child");
+        assert!(
+            icmp.unwrap().children().next().is_none(),
+            "ICMP has no app-layer concept — no spurious child"
+        );
     }
 
     #[test]
@@ -1858,7 +2415,18 @@ mod tests {
         // byte-identical traffic across two agent runs.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
         table.observe(&udp_packet_to(true, 53, 10), &L7Info::None, 0);
-        table.observe(&tcp_packet_to(true, TcpFlags { ack: true, ..Default::default() }, 443), &L7Info::None, 0);
+        table.observe(
+            &tcp_packet_to(
+                true,
+                TcpFlags {
+                    ack: true,
+                    ..Default::default()
+                },
+                443,
+            ),
+            &L7Info::None,
+            0,
+        );
         table.observe(&icmp_packet(10), &L7Info::None, 0);
 
         let ip = table
@@ -1872,7 +2440,11 @@ mod tests {
             .map(|(_, n)| n)
             .unwrap();
         let names: Vec<&str> = ip.children().map(|(name, _)| name).collect();
-        assert_eq!(names, vec!["ICMP", "TCP", "UDP"], "children must always read back in a fixed order");
+        assert_eq!(
+            names,
+            vec!["ICMP", "TCP", "UDP"],
+            "children must always read back in a fixed order"
+        );
     }
 
     // JAM-14: per-host (endpoint) and per-(local,remote)-pair (conversation)
@@ -1889,7 +2461,11 @@ mod tests {
             table.observe(&out, &L7Info::None, 0);
         }
         let endpoints = table.endpoint_snapshot(1000);
-        assert_eq!(endpoints.len(), 1, "50 flows to the same remote host must collapse into one endpoint row");
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "50 flows to the same remote host must collapse into one endpoint row"
+        );
         assert_eq!(endpoints[0].host, "93.184.216.34");
         assert_eq!(endpoints[0].flow_count, 50);
         assert_eq!(endpoints[0].tx_bytes_total, 50 * 60);
@@ -1900,17 +2476,34 @@ mod tests {
     fn endpoint_totals_survive_eviction_of_every_contributing_flow() {
         // Acceptance criterion: "Totals include evicted and closed flows."
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        let fin = tcp_packet(true, TcpFlags { syn: false, ack: false, fin: true, rst: false, ..Default::default() }, 100);
+        let fin = tcp_packet(
+            true,
+            TcpFlags {
+                syn: false,
+                ack: false,
+                fin: true,
+                rst: false,
+                ..Default::default()
+            },
+            100,
+        );
         table.observe(&fin, &L7Info::None, 0);
 
         // idle = 120_001ms > the TIME_WAIT/CLOSE_WAIT threshold -- evicts the
         // only flow that ever contributed to this endpoint.
         let evicted = table.evict_stale(120_001);
         assert_eq!(evicted.len(), 1);
-        assert!(table.snapshot(120_001).is_empty(), "the underlying flow is gone");
+        assert!(
+            table.snapshot(120_001).is_empty(),
+            "the underlying flow is gone"
+        );
 
         let endpoints = table.endpoint_snapshot(120_001);
-        assert_eq!(endpoints.len(), 1, "the endpoint rollup must survive its only flow's eviction");
+        assert_eq!(
+            endpoints.len(),
+            1,
+            "the endpoint rollup must survive its only flow's eviction"
+        );
         assert_eq!(endpoints[0].tx_bytes_total, 100);
         assert_eq!(endpoints[0].flow_count, 1);
     }
@@ -1934,8 +2527,16 @@ mod tests {
     #[test]
     fn endpoint_rollup_records_first_and_last_seen_across_multiple_flows() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        table.observe(&tcp_packet_to(true, TcpFlags::default(), 1), &L7Info::None, 10);
-        table.observe(&tcp_packet_to(true, TcpFlags::default(), 2), &L7Info::None, 500);
+        table.observe(
+            &tcp_packet_to(true, TcpFlags::default(), 1),
+            &L7Info::None,
+            10,
+        );
+        table.observe(
+            &tcp_packet_to(true, TcpFlags::default(), 2),
+            &L7Info::None,
+            500,
+        );
 
         let endpoints = table.endpoint_snapshot(1000);
         assert_eq!(endpoints.len(), 1);
@@ -1950,7 +2551,11 @@ mod tests {
         // when the very first packet legitimately arrives at now_ms == 0.
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
         table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 0);
-        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 200);
+        table.observe(
+            &tcp_packet(true, TcpFlags::default(), 60),
+            &L7Info::None,
+            200,
+        );
 
         let endpoints = table.endpoint_snapshot(1000);
         assert_eq!(endpoints[0].first_seen_ms, 0);
@@ -1960,7 +2565,11 @@ mod tests {
     #[test]
     fn endpoint_rollup_computes_current_rate_from_this_tick_bytes_only() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        table.observe(&tcp_packet(true, TcpFlags::default(), 100), &L7Info::None, 0);
+        table.observe(
+            &tcp_packet(true, TcpFlags::default(), 100),
+            &L7Info::None,
+            0,
+        );
         let first = table.endpoint_snapshot(1000); // 1000ms elapsed
         assert_eq!(first[0].tx_speed, 100.0 / 1.0);
 
@@ -1974,7 +2583,11 @@ mod tests {
     #[test]
     fn distinct_remote_hosts_get_distinct_endpoint_rows() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        table.observe(&tcp_packet_to(true, TcpFlags::default(), 1), &L7Info::None, 0);
+        table.observe(
+            &tcp_packet_to(true, TcpFlags::default(), 1),
+            &L7Info::None,
+            0,
+        );
         let other = ParsedPacket {
             src_mac: "aa:aa:aa:aa:aa:aa".into(),
             dst_mac: "bb:bb:bb:bb:bb:bb".into(),
@@ -2001,18 +2614,31 @@ mod tests {
 
         let endpoints = table.endpoint_snapshot(1000);
         assert_eq!(endpoints.len(), 2);
-        let hosts: std::collections::HashSet<&str> = endpoints.iter().map(|e| e.host.as_str()).collect();
+        let hosts: std::collections::HashSet<&str> =
+            endpoints.iter().map(|e| e.host.as_str()).collect();
         assert_eq!(hosts, ["93.184.216.34", "8.8.8.8"].into_iter().collect());
     }
 
     #[test]
     fn conversation_rollup_is_keyed_by_local_and_remote_pair() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        table.observe(&tcp_packet_to(true, TcpFlags::default(), 1), &L7Info::None, 0);
-        table.observe(&tcp_packet_to(true, TcpFlags::default(), 2), &L7Info::None, 0);
+        table.observe(
+            &tcp_packet_to(true, TcpFlags::default(), 1),
+            &L7Info::None,
+            0,
+        );
+        table.observe(
+            &tcp_packet_to(true, TcpFlags::default(), 2),
+            &L7Info::None,
+            0,
+        );
 
         let conversations = table.conversation_snapshot(1000);
-        assert_eq!(conversations.len(), 1, "both flows share the same (local, remote) pair despite different remote ports");
+        assert_eq!(
+            conversations.len(),
+            1,
+            "both flows share the same (local, remote) pair despite different remote ports"
+        );
         assert_eq!(conversations[0].local_addr, "192.168.1.10");
         assert_eq!(conversations[0].remote_addr, "93.184.216.34");
         assert_eq!(conversations[0].flow_count, 2);
@@ -2021,8 +2647,16 @@ mod tests {
     #[test]
     fn conversation_rollup_reports_duration_from_first_to_last_seen() {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
-        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 10);
-        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 310);
+        table.observe(
+            &tcp_packet(true, TcpFlags::default(), 60),
+            &L7Info::None,
+            10,
+        );
+        table.observe(
+            &tcp_packet(true, TcpFlags::default(), 60),
+            &L7Info::None,
+            310,
+        );
 
         let conversations = table.conversation_snapshot(1000);
         assert_eq!(conversations[0].duration_ms, 300);
@@ -2061,10 +2695,21 @@ mod tests {
     #[test]
     fn common_service_ports_are_named_without_network_lookups() {
         for (port, expected) in [
-            (20, "FTP-DATA"), (21, "FTP"), (22, "SSH"), (25, "SMTP"),
-            (53, "DNS"), (67, "DHCP"), (80, "HTTP"), (110, "POP3"),
-            (123, "NTP"), (143, "IMAP"), (443, "HTTPS/TLS"),
-            (445, "SMB"), (993, "IMAPS"), (995, "POP3S"), (3306, "MySQL"),
+            (20, "FTP-DATA"),
+            (21, "FTP"),
+            (22, "SSH"),
+            (25, "SMTP"),
+            (53, "DNS"),
+            (67, "DHCP"),
+            (80, "HTTP"),
+            (110, "POP3"),
+            (123, "NTP"),
+            (143, "IMAP"),
+            (443, "HTTPS/TLS"),
+            (445, "SMB"),
+            (993, "IMAPS"),
+            (995, "POP3S"),
+            (3306, "MySQL"),
         ] {
             assert_eq!(well_known_protocol(port), Some(expected), "port {port}");
         }

@@ -4,6 +4,20 @@ Published review follow-up: corrected the wire-fixture regeneration recipe to au
 
 # Test Status
 
+## JAM-204 — TLS 1.3 record-layer decryption
+
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml -- --test-threads=1`: passed (366 library tests, 77 binary tests, 12 control-auth tests, 2 no-disk tests, 4 pcapng integration tests, 1 protocol regression; 9 environment-gated live-capture/replay tests ignored by default). A parallel run hit an existing `control_auth::Fixture::new` temp-name collision (`AlreadyExists`); serialized run passed.
+- Focused `cargo test --locked --manifest-path capture-agent/Cargo.toml http2::tests`: passed (10 tests), including immediate release of buffer and HPACK state on sequence gaps, oversized frames, and malformed HPACK after dynamic insertion.
+- `cargo test --locked --manifest-path capture-agent/vendor/fluke-hpack/Cargo.toml`: passed (59 unit tests, 6 doc tests), including owned Cow scrubbing and dynamic-table cleanup.
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml --test no_disk_write_invariant`: passed (2 tests).
+- `cargo clippy --all-targets --locked --manifest-path capture-agent/Cargo.toml -- -D warnings`: passed after final cleanup fixes.
+- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed after final cleanup fixes.
+- `cargo +nightly fuzz run tls_record_stream -- -runs=1000`: passed (1,000 runs, no crash).
+- `npx vitest run --maxWorkers=1 --no-file-parallelism`: passed (82 files, 602 tests). Two standard parallel runs hit an existing `ENOTEMPTY` cleanup race in `lib/__tests__/enrichment-client.test.ts`; the test file passed alone and the serial full suite passed.
+- `npm run lint`: passed.
+- `rustfmt --check --edition 2021` on the five touched TLS/HPACK Rust files and `git diff --check`: passed.
+- The ignored live capture and fixed-port replay tests were not run in this verification pass.
+
 ## JAM-189 — replay flow-aging clock
 
 - Regression-first evidence: the first test version incorrectly swept before re-observation; independent review reproduced the production ordering and found the stale tuple was refreshed before the periodic sweep. The corrected test initially failed because the close-id result field was absent. Now replay-specific `FlowTable::observe_replay` expires just the matching stale flow before updating it, returns its close ID, and the capture loop emits `ConnectionClosed`; live observation retains periodic-only eviction. The corrected test observes the same UDP tuple 60.001 seconds later without an intervening sweep and verifies one idle eviction plus two total flows, while a live-path test verifies no arrival-time expiry.

@@ -442,6 +442,7 @@ Tier B only (opt-in, per-process decrypted TLS content via `osi-inspect` / `SSLK
   "type": "decrypted_payload",
   "payload": {
     "connectionId": "Tcp-192.168.1.10:51000-93.184.216.34:443",
+    "direction": "client_to_server",
     "streamId": 3,
     "redacted": false,
     "dataBase64": "OmF1dGhvcml0eTogZXhhbXBsZS5jb20="
@@ -451,13 +452,32 @@ Tier B only (opt-in, per-process decrypted TLS content via `osi-inspect` / `SSLK
 
 Field notes:
 - `connectionId` — matches `connection_update`'s `id`, so the browser can associate decrypted content with the connection/packet stream it belongs to.
+- `direction` — `client_to_server` or `server_to_client`, derived from the endpoint that sent ClientHello.
 - `streamId` (optional) — the HTTP/2 stream ID this frame belongs to; absent for content the agent couldn't attribute to a specific stream.
 - `redacted` — `true` if this event's `dataBase64` decodes to a `[REDACTED]` placeholder (sensitive header name or bearer-token-shaped value; see `capture-agent/src/redact.rs`). The redaction pass runs on parsed HTTP/2 headers only — body content is never redacted (named limitation, not a bug).
 - `dataBase64` — base64-encoded UTF-8 text: either a decrypted HTTP/2 header block (`Name: value` pairs joined by `\n`, after redaction) or a decrypted HTTP/2 DATA frame body.
 
 **Refused outright over any non-loopback listener; once served through the LAN-access Caddy mTLS proxy (`deploy/`), requires the `X-Mtls-Verified: true` upstream header** — see `lib/decrypted-payload-gate.ts`'s `isDecryptedPayloadAllowed` (used by `app/api/stream/route.ts`; kept in its own module rather than exported from the route file because Next.js's typed-routes build step rejects non-standard exports from `route.ts`). A request with no such header at all (direct loopback, no Caddy in front) is allowed; a request proxied through Caddy without a verified client cert is refused. This is the same event type in both cases — the gating happens relay-side, per-connection, not by the agent withholding the event.
 
-Only ever produced for a captured TCP payload that itself begins with a TLS `application_data` record (`0x17`) — a record split across multiple TCP segments, or any record after the first one sent under a given logged secret (this module has no per-record sequence-number tracking), is silently not decrypted rather than partially/incorrectly shown. See `capture-agent/src/main.rs`'s `try_decrypt_and_emit` doc comment for the full list of named limitations.
+TLS records are reconstructed from in-order TCP bytes per direction. Each direction has its own traffic secret, record sequence, and HTTP/2/HPACK decoder. Unsupported suites and missing keys produce `decryption_status`; a TCP gap or authentication failure ends decryption for that direction so unauthenticated or misordered content is never emitted.
+
+### `decryption_status`
+
+This additive event reports why opted-in traffic cannot be decrypted. It contains no ciphertext, plaintext, or key material and is not subject to the `decrypted_payload` rendering gate.
+
+```json
+{
+  "type": "decryption_status",
+  "status": {
+    "connectionId": "Tcp-192.168.1.10:51000-93.184.216.34:443",
+    "direction": "server_to_client",
+    "status": "desynchronized",
+    "reason": "tcp_gap"
+  }
+}
+```
+
+`status` is `unavailable` for a missing key, unsupported cipher, unobserved handshake, or budget eviction; it is `desynchronized` when record boundaries or authentication can no longer be trusted. Reasons are bounded agent values (`no_key`, `unsupported_cipher`, `handshake_not_observed`, `evicted_budget`, `early_data_unresolved`, `tcp_gap`, `capture_truncated`, `overlap_conflict`, `record_invalid`, `record_overflow`). Consumers should tolerate future reason strings.
 
 ### `traceroute_hop`
 
