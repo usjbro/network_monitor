@@ -1,7 +1,7 @@
 # Current Task
 
-JAM-168: keep reassembled L7 field offsets tied to bytes present in the emitted packet event.
+JAM-250: add CI job timeouts, bounded apt-get retries, and an infrastructure failure policy.
 
-Worktree: `.worktrees/p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`; branch: `jamesmbrownjr/jam-168-p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`.
+Worktree: `.worktrees/ci-job-timeouts-apt-retry`; branch: `jamesmbrownjr/jam-250-p3-ci-add-job-timeouts-and-an-apt-get-retry-so-a-hung-runner`.
 
-Current phase: PR #277 is open and attached to JAM-168, which is In Review. Packet field construction omits application fields when `SniffOutcome.status` shows L7 info came through reassembly, while preserving packet header fields and direct, unsplit L7 offsets. Split and unsplit ClientHello regressions pass. Full Rust tests, strict Clippy, release build, `git diff --check`, and two independent reviews pass. GitHub CI is pending; merge only after clean checks and reviewer approval.
+Current phase: Gate approved under James's standing queue instruction, delegation claimed and marked in-session. Issue is In Progress. Inspect all workflow job durations and apt installation sites, then add timeouts/retries and document how main-branch infrastructure failures are handled. The historical cancelled main run is out of scope because current main is green. Validate retry/fail-fast behavior with a temporary unreachable apt mirror change, then revert it before opening the final PR.

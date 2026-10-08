@@ -4,6 +4,16 @@ Published review follow-up: corrected the wire-fixture regeneration recipe to au
 
 # Test Status
 
+## JAM-250 — CI job timeouts and bounded apt retries (2026-10-08)
+
+In `.worktrees/ci-job-timeouts-apt-retry` on `jamesmbrownjr/jam-250-p3-ci-add-job-timeouts-and-an-apt-get-retry-so-a-hung-runner`.
+
+- `python3` PyYAML validation: parsed `.github/workflows/ci.yml`; confirmed all four jobs have timeouts and both apt steps contain per-command 120-second bounds, apt acquisition retries, and exactly three outer attempts.
+- `bash -n` on all 27 workflow `run` blocks: passed.
+- `git diff --check`: passed.
+- Independent `codex review --uncommitted`: no actionable findings.
+- Temporary unreachable-mirror PR verification: pending.
+
 ## JAM-168 — reassembled L7 field offsets (2026-10-08)
 
 In `.worktrees/p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`.
