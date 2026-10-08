@@ -80,6 +80,8 @@ If you change anything in `capture-agent/src/wire.rs`, you must also update `lib
 
 Anything touching the capture agent's privilege model, the network binding of either process, authentication, or dependency additions in security-adjacent areas should be treated with extra scrutiny — see [docs/security.md](docs/security.md) for the current posture, including the residual risks called out for the mTLS/LAN-access design (epic #22) and the newer TLS-visibility and ownership-enrichment opt-in features. Do not casually expose either process beyond loopback.
 
+For designs and PRs that parse untrusted bytes or handle key material (decoders, reassembly, decryption, authentication), review against [docs/security-plan-review-checklist.md](docs/security-plan-review-checklist.md): once on the plan before code, once on the diff.
+
 ### Repository security settings
 
 These are repo settings, not files, so they're recorded here. James confirmed them under Settings → Advanced Security on 2026-10-04:
