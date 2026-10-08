@@ -5,17 +5,20 @@ use capture_agent::{
     flow::{self, FlowKey, FlowTable},
     host_stats,
     http2::{FrameOutcome, Http2Reassembler},
-    keylog::KeyLogWatcher,
+    keylog::{KeyLogWatcher, SessionSecret},
     l7, parse, pcapng, process_lookup,
     rate_limit::PacketEventLimiter,
     reassembly::{ReassemblyStatus, ReplayClock, StreamReassembler},
-    transaction::{ServiceTimeStats, TransactionTracker, TxnEvent, Unanswered},
     ring,
     ring_buffer::DecryptedRingBuffer,
     tls_decrypt::{self, DecryptOutcome},
+    tls_handshake::{HandshakeEvent, TlsHandshakeParser},
+    tls_stream::{first_data_sequence, TlsDirectionStream, TlsStreamError},
+    transaction::{ServiceTimeStats, TransactionTracker, TxnEvent, Unanswered},
     wire,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,12 +28,475 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
-/// Per-connection state for Tier B decrypted content: the HTTP/2 byte-stream
-/// reassembler and the capped ring buffer that holds this connection's
-/// decrypted-and-redacted content in memory only. Torn down when the flow
-/// itself is evicted (see the periodic emitter's `ConnectionClosed`
-/// handling below).
-type DecryptState = HashMap<String, (Http2Reassembler, DecryptedRingBuffer)>;
+const MAX_TLS_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const MAX_TLS_ACTIVE_DIRECTIONS: usize = 1024;
+const MAX_TLS_DIRECTIONS_PER_PID: usize = 64;
+const MAX_TLS_KEY_WAIT_BYTES: usize = 64 * 1024;
+const TLS_KEY_WAIT_MS: u64 = 2_000;
+const TLS_GAP_HOLD_MS: u64 = 2_000;
+const MAX_EARLY_DATA_RECORDS: u8 = 32;
+const MAX_EARLY_DATA_BYTES: usize = 256 * 1024;
+
+/// State is independent for each TCP direction. The TLS record sequence is
+/// advanced only after an authenticated record, and the HTTP/2 decoder gets
+/// a contiguous plaintext offset rather than the packet's TCP sequence.
+struct DecryptDirectionState {
+    stream: Option<TlsDirectionStream>,
+    handshake_secret: Option<SessionSecret>,
+    handshake_sequence: u64,
+    handshake_parser: TlsHandshakeParser,
+    handshake_epoch_started: bool,
+    handshake_epoch_complete: bool,
+    cipher_suite: Option<u16>,
+    early_data_advertised: bool,
+    early_data_records: u8,
+    early_data_bytes: usize,
+    app_secret: Option<SessionSecret>,
+    app_sequence: u64,
+    plaintext_sequence: u64,
+    http2: Http2Reassembler,
+    key_wait_records: VecDeque<Vec<u8>>,
+    key_wait_bytes: usize,
+    key_wait_since_ms: Option<u64>,
+    gap_since_ms: Option<u64>,
+    last_activity_ms: u64,
+    terminal: Option<(wire::DecryptionAvailability, wire::DecryptionReason)>,
+    terminal_status_emitted: bool,
+    clean_closed: bool,
+}
+
+fn feed_plaintext_to_http2(
+    direction_state: &mut DecryptDirectionState,
+    bytes: &mut zeroize::Zeroizing<Vec<u8>>,
+) -> Vec<FrameOutcome> {
+    let plaintext_len = bytes.len() as u64;
+    let outcomes = direction_state
+        .http2
+        .feed(direction_state.plaintext_sequence, bytes);
+    zeroize::Zeroize::zeroize(bytes);
+    direction_state.plaintext_sequence = direction_state
+        .plaintext_sequence
+        .saturating_add(plaintext_len);
+    outcomes
+}
+
+fn format_decrypted_headers(headers: &[(String, String)]) -> zeroize::Zeroizing<String> {
+    let mut text = zeroize::Zeroizing::new(String::new());
+    for (index, (name, value)) in headers.iter().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        write!(&mut *text, "{name}: {value}").expect("formatting into a String should not fail");
+    }
+    text
+}
+
+impl DecryptDirectionState {
+    fn new() -> Self {
+        Self {
+            stream: None,
+            handshake_secret: None,
+            handshake_sequence: 0,
+            handshake_parser: TlsHandshakeParser::new(),
+            handshake_epoch_started: false,
+            handshake_epoch_complete: false,
+            cipher_suite: None,
+            early_data_advertised: false,
+            early_data_records: 0,
+            early_data_bytes: 0,
+            app_secret: None,
+            app_sequence: 0,
+            plaintext_sequence: 0,
+            http2: Http2Reassembler::new(),
+            key_wait_records: VecDeque::new(),
+            key_wait_bytes: 0,
+            key_wait_since_ms: None,
+            gap_since_ms: None,
+            last_activity_ms: 0,
+            terminal: None,
+            terminal_status_emitted: false,
+            clean_closed: false,
+        }
+    }
+
+    fn held_bytes(&self) -> usize {
+        self.stream
+            .as_ref()
+            .map_or(0, TlsDirectionStream::bytes_held)
+            .saturating_add(
+                self.key_wait_records
+                    .iter()
+                    .map(Vec::capacity)
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.handshake_parser.bytes_held())
+            .saturating_add(self.http2.bytes_held())
+    }
+}
+
+struct DecryptConnectionState {
+    pid: u32,
+    client_random: Option<Vec<u8>>,
+    client_is_outbound: Option<bool>,
+    outbound: DecryptDirectionState,
+    inbound: DecryptDirectionState,
+    ring: DecryptedRingBuffer,
+}
+
+impl DecryptConnectionState {
+    fn new(pid: u32) -> Self {
+        Self {
+            pid,
+            client_random: None,
+            client_is_outbound: None,
+            outbound: DecryptDirectionState::new(),
+            inbound: DecryptDirectionState::new(),
+            ring: DecryptedRingBuffer::new(DECRYPT_RING_CAP_BYTES),
+        }
+    }
+
+    fn held_bytes(&self) -> usize {
+        self.outbound
+            .held_bytes()
+            .saturating_add(self.inbound.held_bytes())
+            .saturating_add(self.ring.bytes_held())
+    }
+}
+
+/// Per-connection decrypt state is removed together with its FlowTable entry.
+type DecryptState = HashMap<String, DecryptConnectionState>;
+
+fn active_tls_directions(state: &DecryptState, pid: Option<u32>) -> usize {
+    state
+        .values()
+        .filter(|connection| pid.is_none_or(|pid| connection.pid == pid))
+        .map(|connection| {
+            usize::from(connection.outbound.stream.is_some())
+                + usize::from(connection.inbound.stream.is_some())
+        })
+        .sum()
+}
+
+fn mark_tls_direction_evicted(
+    state: &mut DecryptState,
+    connection_id: &str,
+    outbound: bool,
+    tx: &broadcast::Sender<String>,
+) {
+    let Some(connection) = state.get_mut(connection_id) else {
+        return;
+    };
+    let direction_state = if outbound {
+        &mut connection.outbound
+    } else {
+        &mut connection.inbound
+    };
+    let direction = connection.client_is_outbound.map(|client_is_outbound| {
+        if outbound == client_is_outbound {
+            wire::DecryptionDirection::ClientToServer
+        } else {
+            wire::DecryptionDirection::ServerToClient
+        }
+    });
+    terminate_decryption_direction(
+        connection_id,
+        direction,
+        direction_state,
+        wire::DecryptionAvailability::Unavailable,
+        wire::DecryptionReason::EvictedBudget,
+        tx,
+    );
+    connection.ring.clear();
+}
+
+fn emit_pending_decryption_status(
+    connection_id: &str,
+    direction: Option<wire::DecryptionDirection>,
+    direction_state: &mut DecryptDirectionState,
+    tx: &broadcast::Sender<String>,
+) {
+    if direction_state.terminal_status_emitted {
+        return;
+    }
+    if let (Some(direction), Some((status, reason))) = (direction, direction_state.terminal) {
+        emit_decryption_status(connection_id, direction, status, reason, tx);
+        direction_state.terminal_status_emitted = true;
+    }
+}
+
+fn terminate_decryption_direction(
+    connection_id: &str,
+    direction: Option<wire::DecryptionDirection>,
+    direction_state: &mut DecryptDirectionState,
+    status: wire::DecryptionAvailability,
+    reason: wire::DecryptionReason,
+    tx: &broadcast::Sender<String>,
+) {
+    if direction_state.terminal.is_none() {
+        direction_state.terminal = Some((status, reason));
+        direction_state.stream = None;
+        direction_state.handshake_secret = None;
+        direction_state.app_secret = None;
+        direction_state.handshake_sequence = 0;
+        direction_state.app_sequence = 0;
+        direction_state.key_wait_records.clear();
+        direction_state.key_wait_bytes = 0;
+        direction_state.key_wait_since_ms = None;
+        direction_state.gap_since_ms = None;
+        direction_state.handshake_parser = TlsHandshakeParser::new();
+        direction_state.http2 = Http2Reassembler::new();
+    }
+    emit_pending_decryption_status(connection_id, direction, direction_state, tx);
+}
+
+fn count_early_data_trial(
+    direction_state: &mut DecryptDirectionState,
+    record_bytes: usize,
+) -> bool {
+    direction_state.early_data_records = direction_state.early_data_records.saturating_add(1);
+    direction_state.early_data_bytes = direction_state
+        .early_data_bytes
+        .saturating_add(record_bytes);
+    direction_state.early_data_records <= MAX_EARLY_DATA_RECORDS
+        && direction_state.early_data_bytes <= MAX_EARLY_DATA_BYTES
+}
+
+fn key_wait_expired(direction_state: &DecryptDirectionState, capture_now_ms: u64) -> bool {
+    direction_state
+        .key_wait_since_ms
+        .is_some_and(|since| capture_now_ms.saturating_sub(since) >= TLS_KEY_WAIT_MS)
+}
+
+fn expire_tls_direction_timers(
+    connection_id: &str,
+    direction: Option<wire::DecryptionDirection>,
+    direction_state: &mut DecryptDirectionState,
+    capture_now_ms: u64,
+    tx: &broadcast::Sender<String>,
+) {
+    if direction_state.terminal.is_some() {
+        return;
+    }
+    if key_wait_expired(direction_state, capture_now_ms) {
+        terminate_decryption_direction(
+            connection_id,
+            direction,
+            direction_state,
+            wire::DecryptionAvailability::Unavailable,
+            wire::DecryptionReason::NoKey,
+            tx,
+        );
+    } else if direction_state
+        .gap_since_ms
+        .is_some_and(|since| capture_now_ms.saturating_sub(since) >= TLS_GAP_HOLD_MS)
+    {
+        terminate_decryption_direction(
+            connection_id,
+            direction,
+            direction_state,
+            wire::DecryptionAvailability::Desynchronized,
+            wire::DecryptionReason::TcpGap,
+            tx,
+        );
+    }
+}
+
+fn expire_tls_state_timers(
+    state: &mut DecryptState,
+    capture_now_ms: u64,
+    tx: &broadcast::Sender<String>,
+) {
+    for (connection_id, connection) in state {
+        let client_is_outbound = connection.client_is_outbound;
+        for (outbound, direction_state) in [
+            (true, &mut connection.outbound),
+            (false, &mut connection.inbound),
+        ] {
+            let direction = client_is_outbound.map(|client_outbound| {
+                if outbound == client_outbound {
+                    wire::DecryptionDirection::ClientToServer
+                } else {
+                    wire::DecryptionDirection::ServerToClient
+                }
+            });
+            expire_tls_direction_timers(
+                connection_id,
+                direction,
+                direction_state,
+                capture_now_ms,
+                tx,
+            );
+        }
+    }
+}
+
+fn apply_plaintext_handshake_events(
+    direction_state: &mut DecryptDirectionState,
+    events: &[HandshakeEvent],
+) -> Option<u16> {
+    let mut negotiated_suite = None;
+    for event in events {
+        match *event {
+            HandshakeEvent::ClientHello { early_data } => {
+                direction_state.early_data_advertised |= early_data;
+            }
+            HandshakeEvent::ServerHello {
+                cipher_suite,
+                tls13,
+                ..
+            } => {
+                let suite = if tls13 { cipher_suite } else { 0 };
+                negotiated_suite = Some(suite);
+                direction_state.cipher_suite = Some(suite);
+            }
+            // Finished is encrypted in TLS 1.3. A cleartext handshake record
+            // must never move a direction into the application-key epoch.
+            HandshakeEvent::Finished | HandshakeEvent::KeyUpdate { .. } | HandshakeEvent::Other => {
+            }
+        }
+    }
+    negotiated_suite
+}
+
+fn mark_tls_capture_truncated(
+    connection_id: &str,
+    direction: Option<wire::DecryptionDirection>,
+    direction_state: &mut DecryptDirectionState,
+    was_truncated: bool,
+    tx: &broadcast::Sender<String>,
+) -> bool {
+    if was_truncated {
+        terminate_decryption_direction(
+            connection_id,
+            direction,
+            direction_state,
+            wire::DecryptionAvailability::Desynchronized,
+            wire::DecryptionReason::CaptureTruncated,
+            tx,
+        );
+    }
+    was_truncated
+}
+
+/// Enforce active-stream limits before creating another directional stream.
+/// The per-PID LRU is isolated; the global LRU is used only for the aggregate
+/// ceiling and never evicts a different PID to satisfy a per-PID limit.
+fn make_tls_direction_room(
+    state: &mut DecryptState,
+    pid: u32,
+    current_id: &str,
+    tx: &broadcast::Sender<String>,
+) {
+    for scoped_pid in [Some(pid), None] {
+        let limit = if scoped_pid.is_some() {
+            MAX_TLS_DIRECTIONS_PER_PID
+        } else {
+            MAX_TLS_ACTIVE_DIRECTIONS
+        };
+        while active_tls_directions(state, scoped_pid) >= limit {
+            let victim = state
+                .iter()
+                .filter(|(id, connection)| {
+                    id.as_str() != current_id
+                        && scoped_pid.is_none_or(|target| connection.pid == target)
+                })
+                .flat_map(|(id, connection)| {
+                    [
+                        (
+                            id.clone(),
+                            true,
+                            connection.pid,
+                            connection.outbound.stream.is_some(),
+                            connection.outbound.last_activity_ms,
+                        ),
+                        (
+                            id.clone(),
+                            false,
+                            connection.pid,
+                            connection.inbound.stream.is_some(),
+                            connection.inbound.last_activity_ms,
+                        ),
+                    ]
+                })
+                .filter(|(_, _, _, active, _)| *active)
+                .min_by_key(|(_, _, _, _, last)| *last);
+            let Some((id, outbound, _, _, _)) = victim else {
+                break;
+            };
+            mark_tls_direction_evicted(state, &id, outbound, tx);
+        }
+    }
+}
+
+fn enforce_tls_buffer_budget(state: &mut DecryptState, tx: &broadcast::Sender<String>) {
+    while state
+        .values()
+        .map(DecryptConnectionState::held_bytes)
+        .sum::<usize>()
+        > MAX_TLS_BUFFER_BYTES
+    {
+        let victim = state
+            .iter()
+            .flat_map(|(id, connection)| {
+                [
+                    (
+                        id.clone(),
+                        true,
+                        connection.outbound.stream.is_some(),
+                        connection.outbound.last_activity_ms,
+                    ),
+                    (
+                        id.clone(),
+                        false,
+                        connection.inbound.stream.is_some(),
+                        connection.inbound.last_activity_ms,
+                    ),
+                ]
+            })
+            .filter(|(_, _, active, _)| *active)
+            .min_by_key(|(_, _, _, last)| *last);
+        if let Some((id, outbound, _, _)) = victim {
+            mark_tls_direction_evicted(state, &id, outbound, tx);
+            continue;
+        }
+        let ring_victim = state
+            .iter()
+            .filter(|(_, connection)| connection.ring.bytes_held() > 0)
+            .min_by_key(|(_, connection)| {
+                connection
+                    .outbound
+                    .last_activity_ms
+                    .max(connection.inbound.last_activity_ms)
+            })
+            .map(|(id, _)| id.clone());
+        let Some(id) = ring_victim else { break };
+        if let Some(connection) = state.get_mut(&id) {
+            connection.ring.clear();
+        }
+    }
+}
+
+fn remove_decrypt_connection(
+    decrypt_state: &Mutex<DecryptState>,
+    keylog_watcher: &Mutex<KeyLogWatcher>,
+    connection_id: &str,
+) {
+    let identity = decrypt_state
+        .lock()
+        .unwrap()
+        .remove(connection_id)
+        .and_then(|connection| {
+            connection
+                .client_random
+                .map(|random| (connection.pid, random))
+        });
+    if let Some((pid, client_random)) = identity {
+        keylog_watcher
+            .lock()
+            .unwrap()
+            .remove_flow_secrets(pid, &client_random);
+    }
+}
 
 /// Per-connection ring buffer cap. Matches the spirit of the existing
 /// packet-stream cap discipline (issue #27: bounded per connection, never
@@ -44,7 +510,10 @@ const DECRYPT_RING_CAP_BYTES: usize = 256 * 1024;
 fn packet_osi_layer(protocol: parse::TransportProtocol, l7_info: &l7::L7Info) -> u8 {
     if !matches!(l7_info, l7::L7Info::None) {
         7
-    } else if matches!(protocol, parse::TransportProtocol::Tcp | parse::TransportProtocol::Udp) {
+    } else if matches!(
+        protocol,
+        parse::TransportProtocol::Tcp | parse::TransportProtocol::Udp
+    ) {
         4
     } else {
         3
@@ -92,8 +561,10 @@ fn build_flow_key(parsed: &parse::ParsedPacket, local_addrs: &[String]) -> Optio
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_decrypted(
     connection_id: &str,
+    direction: wire::DecryptionDirection,
     stream_id: Option<u32>,
     redacted: bool,
     data: &[u8],
@@ -111,6 +582,7 @@ fn emit_decrypted(
     let event = wire::AgentEvent::DecryptedPayload {
         payload: Box::new(wire::DecryptedPayloadJson {
             connection_id: connection_id.to_string(),
+            direction,
             stream_id,
             redacted,
             data_base64: base64::engine::general_purpose::STANDARD.encode(data),
@@ -119,30 +591,33 @@ fn emit_decrypted(
     let _ = tx.send(wire::encode_event(&event));
 }
 
-/// Attempts Tier B decryption + HTTP/2 framing for one captured packet.
-/// Entirely best-effort: any missing prerequisite (no attributed process,
-/// not decrypt-eligible, no logged secret yet, undecodable record) is a
-/// silent no-op, never a panic — this runs on the overwhelming majority of
-/// captured packets, for which none of Tier B applies at all.
-///
-/// Only ever decrypts a captured TCP payload that itself begins with the
-/// TLS `application_data` record type (0x17): this agent has no separate
-/// TLS-record-boundary reassembler distinct from `Http2Reassembler`'s own
-/// byte-stream reassembly, so a record split across multiple TCP segments
-/// is not reconstructed before this check — such a record is silently
-/// skipped here (not decrypted, not emitted), same as any other
-/// `Undecryptable` outcome. Similarly, `tls_decrypt::decrypt_record` derives
-/// its key/IV straight from the logged secret with no per-record sequence
-/// number, so only the FIRST application_data record on a given secret
-/// decrypts correctly — later records on the same secret fail the AEAD tag
-/// check and are silently skipped too, same fail-closed path. Both are
-/// named, disclosed limitations of this pass, not silent data corruption:
-/// every failure here degrades to "nothing shown for this record," never a
-/// wrong/garbled one.
+fn emit_decryption_status(
+    connection_id: &str,
+    direction: wire::DecryptionDirection,
+    status: wire::DecryptionAvailability,
+    reason: wire::DecryptionReason,
+    tx: &broadcast::Sender<String>,
+) {
+    let event = wire::AgentEvent::DecryptionStatus {
+        status: Box::new(wire::DecryptionStatusJson {
+            connection_id: connection_id.to_string(),
+            direction,
+            status,
+            reason,
+        }),
+    };
+    let _ = tx.send(wire::encode_event(&event));
+}
+
+/// Feed one eligible TCP packet into the per-flow, per-direction TLS stream.
+/// TCP ordering and TLS record framing happen before AEAD; each direction
+/// owns its secret, sequence counter, and HTTP/2/HPACK decoder.
 #[allow(clippy::too_many_arguments)]
 fn try_decrypt_and_emit(
     parsed: &parse::ParsedPacket,
-    now_ms: u64,
+    capture_truncated: bool,
+    event_now_ms: u64,
+    capture_now_ms: u64,
     local_addrs: &[String],
     process_map: &Mutex<HashMap<u16, process_lookup::ProcessInfo>>,
     flow_table: &Mutex<FlowTable>,
@@ -151,57 +626,637 @@ fn try_decrypt_and_emit(
     decrypt_event_limiter: &Mutex<PacketEventLimiter>,
     tx: &broadcast::Sender<String>,
 ) {
-    if parsed.payload.first() != Some(&0x17) {
-        return; // not a TLS application_data record — nothing to decrypt
+    if parsed.protocol != parse::TransportProtocol::Tcp {
+        return;
     }
-    let Some(local_port) = local_port_of(parsed, local_addrs) else { return };
-    let Some(pid) = process_map.lock().unwrap().get(&local_port).map(|p| p.pid) else { return };
-
-    let secret = {
-        let mut watcher = keylog_watcher.lock().unwrap();
-        // Cheap when the eligible set is empty (the overwhelming common
-        // case) — only currently-registered PIDs' key-log files are read.
-        watcher.poll();
-        if !watcher.is_eligible(pid) {
-            return;
-        }
-        let Some(flow_key) = build_flow_key(parsed, local_addrs) else { return };
-        let Some(client_random) = flow_table.lock().unwrap().client_random_for(&flow_key) else { return };
-        let Some(secret) = watcher.secret_for(&client_random).cloned() else { return };
-        secret
+    let Some(local_port) = local_port_of(parsed, local_addrs) else {
+        return;
     };
-
-    let DecryptOutcome::Plaintext(bytes) = tls_decrypt::decrypt_record(&parsed.payload, &secret) else {
-        return; // undecryptable (wrong record, wrong key, truncated, ...) — fail closed, no event
+    let Some(pid) = process_map.lock().unwrap().get(&local_port).map(|p| p.pid) else {
+        return;
     };
-
-    let Some(flow_key) = build_flow_key(parsed, local_addrs) else { return };
+    let Some(flow_key) = build_flow_key(parsed, local_addrs) else {
+        return;
+    };
     let connection_id = flow_key.connection_id();
-    let seq = parsed.seq.unwrap_or(0) as u64;
+    let Some(seq) = parsed.seq else { return };
+    let flags = parsed.tcp_flags.unwrap_or_default();
+    let outbound = local_addrs.iter().any(|address| address == &parsed.src_ip);
+    let (client_random, client_is_outbound, outbound_syn_seq, inbound_syn_seq) = {
+        let flow_table = flow_table.lock().unwrap();
+        let client_random = flow_table.client_random_for(&flow_key);
+        let client_is_outbound = flow_table.client_is_outbound_for(&flow_key);
+        let outbound_syn_seq = flow_table.tcp_syn_sequence_for(&flow_key, true);
+        let inbound_syn_seq = flow_table.tcp_syn_sequence_for(&flow_key, false);
+        (
+            client_random,
+            client_is_outbound,
+            outbound_syn_seq,
+            inbound_syn_seq,
+        )
+    };
+
+    let mut watcher = keylog_watcher.lock().unwrap();
+    watcher.poll();
+    if !watcher.is_eligible(pid) {
+        return;
+    }
+    let (candidate_secret, candidate_handshake_secret) =
+        match (client_random.as_deref(), client_is_outbound) {
+            (Some(random), Some(client_is_outbound)) => {
+                watcher.mark_flow_seen(pid, random);
+                let label = capture_agent::keylog::secret_label_for_direction(
+                    client_is_outbound,
+                    outbound,
+                    false,
+                );
+                let handshake_label = capture_agent::keylog::secret_label_for_direction(
+                    client_is_outbound,
+                    outbound,
+                    true,
+                );
+                (
+                    watcher.take_secret(pid, random, label),
+                    watcher.take_secret(pid, random, handshake_label),
+                )
+            }
+            _ => (None, None),
+        };
 
     let mut state = decrypt_state.lock().unwrap();
-    let entry = state
+    let needs_stream_slot = state.get(&connection_id).is_none_or(|connection| {
+        (outbound_syn_seq.is_some() && connection.outbound.stream.is_none())
+            || (inbound_syn_seq.is_some() && connection.inbound.stream.is_none())
+    });
+    if needs_stream_slot && (outbound_syn_seq.is_some() || inbound_syn_seq.is_some()) {
+        make_tls_direction_room(&mut state, pid, &connection_id, tx);
+    }
+    let connection = state
         .entry(connection_id.clone())
-        .or_insert_with(|| (Http2Reassembler::new(), DecryptedRingBuffer::new(DECRYPT_RING_CAP_BYTES)));
-    let outcomes = entry.0.feed(seq, &bytes);
-
-    for outcome in outcomes {
-        // DesyncFallback/NeedMoreData never emit — the whole point of the
-        // reassembler's desync handling is that garbled/out-of-order bytes
-        // must never be surfaced as if they were real decoded content.
-        let FrameOutcome::Frame { stream_id, headers, body } = outcome else { continue };
-        if !headers.is_empty() {
-            // redact_headers has already run inside Http2Reassembler::feed
-            // before these headers were ever returned here.
-            let text = headers.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n");
-            entry.1.push(text.clone().into_bytes());
-            emit_decrypted(&connection_id, Some(stream_id), false, text.as_bytes(), decrypt_event_limiter, now_ms, tx);
+        .or_insert_with(|| DecryptConnectionState::new(pid));
+    if connection.pid != pid {
+        return;
+    }
+    if connection.client_random.is_none() {
+        connection.client_random = client_random.clone();
+    }
+    if connection.client_is_outbound.is_none() {
+        connection.client_is_outbound = client_is_outbound;
+    }
+    let mut negotiated_suite = connection
+        .outbound
+        .cipher_suite
+        .or(connection.inbound.cipher_suite);
+    let direction_name = connection.client_is_outbound.map(|client_outbound| {
+        if outbound == client_outbound {
+            wire::DecryptionDirection::ClientToServer
+        } else {
+            wire::DecryptionDirection::ServerToClient
         }
-        if !body.is_empty() {
-            entry.1.push(body.clone());
-            emit_decrypted(&connection_id, Some(stream_id), false, &body, decrypt_event_limiter, now_ms, tx);
+    });
+    if connection.outbound.stream.is_none() {
+        if let Some(syn_seq) = outbound_syn_seq {
+            connection.outbound.stream =
+                Some(TlsDirectionStream::new(first_data_sequence(syn_seq, true)));
         }
     }
+    if connection.inbound.stream.is_none() {
+        if let Some(syn_seq) = inbound_syn_seq {
+            connection.inbound.stream =
+                Some(TlsDirectionStream::new(first_data_sequence(syn_seq, true)));
+        }
+    }
+    let direction_state = if outbound {
+        &mut connection.outbound
+    } else {
+        &mut connection.inbound
+    };
+    direction_state.last_activity_ms = capture_now_ms;
+    emit_pending_decryption_status(&connection_id, direction_name, direction_state, tx);
+    if mark_tls_capture_truncated(
+        &connection_id,
+        direction_name,
+        direction_state,
+        capture_truncated,
+        tx,
+    ) {
+        return;
+    }
+    expire_tls_direction_timers(
+        &connection_id,
+        direction_name,
+        direction_state,
+        capture_now_ms,
+        tx,
+    );
+    if direction_state.terminal.is_some() {
+        return;
+    }
+    if let Some(secret) = candidate_secret {
+        if direction_state.app_secret.is_none() {
+            direction_state.app_secret = Some(secret);
+        }
+    }
+    if let Some(secret) = candidate_handshake_secret {
+        if direction_state.handshake_secret.is_none() {
+            direction_state.handshake_secret = Some(secret);
+        }
+    }
+
+    let Some(stream) = direction_state.stream.as_mut() else {
+        if !parsed.payload.is_empty() && direction_state.terminal.is_none() {
+            terminate_decryption_direction(
+                &connection_id,
+                direction_name,
+                direction_state,
+                wire::DecryptionAvailability::Unavailable,
+                wire::DecryptionReason::HandshakeNotObserved,
+                tx,
+            );
+        }
+        return;
+    };
+    if direction_state.terminal.is_some() || direction_state.clean_closed {
+        return;
+    }
+    let data_seq = first_data_sequence(seq, flags.syn);
+    let framed = match stream.feed_segment(data_seq, &parsed.payload) {
+        Ok(records) => records,
+        Err(error) => {
+            let reason = match error {
+                TlsStreamError::ConflictingOverlap => wire::DecryptionReason::OverlapConflict,
+                TlsStreamError::RecordTooLarge => wire::DecryptionReason::RecordOverflow,
+                TlsStreamError::ReorderWindowExceeded => wire::DecryptionReason::TcpGap,
+            };
+            terminate_decryption_direction(
+                &connection_id,
+                direction_name,
+                direction_state,
+                wire::DecryptionAvailability::Desynchronized,
+                reason,
+                tx,
+            );
+            return;
+        }
+    };
+    let has_gap = stream.has_pending_gap();
+    if has_gap {
+        let since = *direction_state.gap_since_ms.get_or_insert(capture_now_ms);
+        if capture_now_ms.saturating_sub(since) >= TLS_GAP_HOLD_MS {
+            terminate_decryption_direction(
+                &connection_id,
+                direction_name,
+                direction_state,
+                wire::DecryptionAvailability::Desynchronized,
+                wire::DecryptionReason::TcpGap,
+                tx,
+            );
+            return;
+        }
+    } else {
+        direction_state.gap_since_ms = None;
+    }
+
+    let mut records = direction_state
+        .key_wait_records
+        .drain(..)
+        .collect::<Vec<_>>();
+    direction_state.key_wait_bytes = 0;
+    records.extend(framed);
+    process_tls_records(
+        &connection_id,
+        outbound,
+        client_is_outbound,
+        direction_name,
+        &mut negotiated_suite,
+        direction_state,
+        &mut connection.ring,
+        records,
+        event_now_ms,
+        capture_now_ms,
+        decrypt_event_limiter,
+        tx,
+    );
+    enforce_tls_buffer_budget(&mut state, tx);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_tls_records(
+    connection_id: &str,
+    outbound: bool,
+    client_is_outbound: Option<bool>,
+    direction_name: Option<wire::DecryptionDirection>,
+    negotiated_suite: &mut Option<u16>,
+    direction_state: &mut DecryptDirectionState,
+    ring: &mut DecryptedRingBuffer,
+    records: Vec<Vec<u8>>,
+    event_now_ms: u64,
+    capture_now_ms: u64,
+    decrypt_event_limiter: &Mutex<PacketEventLimiter>,
+    tx: &broadcast::Sender<String>,
+) {
+    let mut deferred = VecDeque::new();
+    for record in records {
+        match record.first().copied() {
+            Some(0x14) => continue, // plaintext compatibility ChangeCipherSpec
+            Some(0x16) if record.len() >= 5 => {
+                let events = match direction_state.handshake_parser.feed(&record[5..]) {
+                    Ok(events) => events,
+                    Err(_) => {
+                        terminate_decryption_direction(
+                            connection_id,
+                            direction_name,
+                            direction_state,
+                            wire::DecryptionAvailability::Desynchronized,
+                            wire::DecryptionReason::RecordInvalid,
+                            tx,
+                        );
+                        break;
+                    }
+                };
+                if let Some(suite) = apply_plaintext_handshake_events(direction_state, &events) {
+                    *negotiated_suite = Some(suite);
+                }
+                continue;
+            }
+            Some(0x17) if record.len() >= 5 => {}
+            _ => {
+                terminate_decryption_direction(
+                    connection_id,
+                    direction_name,
+                    direction_state,
+                    wire::DecryptionAvailability::Desynchronized,
+                    wire::DecryptionReason::RecordInvalid,
+                    tx,
+                );
+                break;
+            }
+        }
+
+        if let Some(suite) = *negotiated_suite {
+            if suite != 0x1301 {
+                terminate_decryption_direction(
+                    connection_id,
+                    direction_name,
+                    direction_state,
+                    wire::DecryptionAvailability::Unavailable,
+                    wire::DecryptionReason::UnsupportedCipher,
+                    tx,
+                );
+                break;
+            }
+        } else {
+            defer_tls_record(
+                direction_state,
+                &mut deferred,
+                record,
+                capture_now_ms,
+                connection_id,
+                direction_name,
+                tx,
+            );
+            if direction_state.terminal.is_some() {
+                break;
+            }
+            continue;
+        }
+
+        let (secret, sequence, handshake_epoch) = if direction_state.handshake_epoch_complete {
+            (
+                direction_state.app_secret.as_ref(),
+                direction_state.app_sequence,
+                false,
+            )
+        } else {
+            (
+                direction_state.handshake_secret.as_ref(),
+                direction_state.handshake_sequence,
+                true,
+            )
+        };
+        let Some(secret) = secret else {
+            defer_tls_record(
+                direction_state,
+                &mut deferred,
+                record,
+                capture_now_ms,
+                connection_id,
+                direction_name,
+                tx,
+            );
+            if direction_state.terminal.is_some() {
+                break;
+            }
+            continue;
+        };
+        match tls_decrypt::decrypt_record(&record, secret, sequence) {
+            DecryptOutcome::Undecryptable { .. }
+                if handshake_epoch
+                    && !direction_state.handshake_epoch_started
+                    && client_is_outbound == Some(outbound)
+                    && direction_state.early_data_advertised =>
+            {
+                if !count_early_data_trial(direction_state, record.len()) {
+                    terminate_decryption_direction(
+                        connection_id,
+                        direction_name,
+                        direction_state,
+                        wire::DecryptionAvailability::Unavailable,
+                        wire::DecryptionReason::EarlyDataUnresolved,
+                        tx,
+                    );
+                    break;
+                }
+                continue; // one bounded trial; failure does not advance the sequence
+            }
+            DecryptOutcome::Undecryptable { .. } => {
+                terminate_decryption_direction(
+                    connection_id,
+                    direction_name,
+                    direction_state,
+                    wire::DecryptionAvailability::Desynchronized,
+                    wire::DecryptionReason::RecordInvalid,
+                    tx,
+                );
+                break;
+            }
+            DecryptOutcome::Plaintext {
+                content_type: 21, ..
+            } => {
+                direction_state.clean_closed = true;
+                direction_state.app_secret = None;
+                direction_state.handshake_secret = None;
+                direction_state.key_wait_records.clear();
+                direction_state.key_wait_bytes = 0;
+                break;
+            }
+            DecryptOutcome::Plaintext {
+                content_type: 22,
+                bytes,
+            } => {
+                if handshake_epoch {
+                    direction_state.handshake_epoch_started = true;
+                    direction_state.handshake_sequence =
+                        direction_state.handshake_sequence.saturating_add(1);
+                } else {
+                    direction_state.app_sequence = direction_state.app_sequence.saturating_add(1);
+                }
+                direction_state.key_wait_since_ms = None;
+                match direction_state.handshake_parser.feed(&bytes) {
+                    Ok(events) => {
+                        for event in events {
+                            match event {
+                                HandshakeEvent::Finished if handshake_epoch => {
+                                    direction_state.handshake_epoch_complete = true;
+                                    direction_state.handshake_secret = None;
+                                    direction_state.handshake_sequence = 0;
+                                }
+                                HandshakeEvent::KeyUpdate { .. } if !handshake_epoch => {
+                                    let Some(app_secret) = direction_state.app_secret.as_mut()
+                                    else {
+                                        continue;
+                                    };
+                                    let Some(next) = tls_decrypt::next_traffic_secret(app_secret)
+                                    else {
+                                        continue;
+                                    };
+                                    app_secret.secret = next;
+                                    let generation = app_secret
+                                        .label
+                                        .rsplit('_')
+                                        .next()
+                                        .and_then(|n| n.parse::<u64>().ok())
+                                        .unwrap_or(0)
+                                        .saturating_add(1);
+                                    app_secret.label = format!(
+                                        "{}_TRAFFIC_SECRET_{generation}",
+                                        if client_is_outbound == Some(outbound) {
+                                            "CLIENT"
+                                        } else {
+                                            "SERVER"
+                                        }
+                                    );
+                                    direction_state.app_sequence = 0;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        terminate_decryption_direction(
+                            connection_id,
+                            direction_name,
+                            direction_state,
+                            wire::DecryptionAvailability::Desynchronized,
+                            wire::DecryptionReason::RecordInvalid,
+                            tx,
+                        );
+                        break;
+                    }
+                }
+            }
+            DecryptOutcome::Plaintext {
+                content_type: 23,
+                bytes: _,
+            } if handshake_epoch => {
+                // A successful bounded trial starts the client's handshake
+                // sequence; early application plaintext itself is discarded.
+                direction_state.handshake_epoch_started = true;
+                direction_state.handshake_sequence =
+                    direction_state.handshake_sequence.saturating_add(1);
+                direction_state.key_wait_since_ms = None;
+            }
+            DecryptOutcome::Plaintext {
+                content_type: 23,
+                mut bytes,
+            } => {
+                direction_state.app_sequence = direction_state.app_sequence.saturating_add(1);
+                direction_state.key_wait_since_ms = None;
+                let outcomes = feed_plaintext_to_http2(direction_state, &mut bytes);
+                let Some(payload_direction) = direction_name else {
+                    terminate_decryption_direction(
+                        connection_id,
+                        direction_name,
+                        direction_state,
+                        wire::DecryptionAvailability::Unavailable,
+                        wire::DecryptionReason::HandshakeNotObserved,
+                        tx,
+                    );
+                    continue;
+                };
+                for outcome in outcomes {
+                    let FrameOutcome::Frame {
+                        stream_id,
+                        mut headers,
+                        mut body,
+                    } = outcome
+                    else {
+                        continue;
+                    };
+                    if !headers.is_empty() {
+                        let mut text = format_decrypted_headers(&headers);
+                        ring.push_for_direction(payload_direction, text.as_bytes().to_vec());
+                        emit_decrypted(
+                            connection_id,
+                            payload_direction,
+                            Some(stream_id),
+                            false,
+                            text.as_bytes(),
+                            decrypt_event_limiter,
+                            event_now_ms,
+                            tx,
+                        );
+                        zeroize::Zeroize::zeroize(&mut *text);
+                        for (name, value) in &mut headers {
+                            zeroize::Zeroize::zeroize(name);
+                            zeroize::Zeroize::zeroize(value);
+                        }
+                    }
+                    if !body.is_empty() {
+                        ring.push_for_direction(payload_direction, body.clone());
+                        emit_decrypted(
+                            connection_id,
+                            payload_direction,
+                            Some(stream_id),
+                            false,
+                            &body,
+                            decrypt_event_limiter,
+                            event_now_ms,
+                            tx,
+                        );
+                    }
+                    zeroize::Zeroize::zeroize(&mut body);
+                }
+            }
+            DecryptOutcome::Plaintext { .. } => {
+                if handshake_epoch {
+                    direction_state.handshake_sequence =
+                        direction_state.handshake_sequence.saturating_add(1);
+                } else {
+                    direction_state.app_sequence = direction_state.app_sequence.saturating_add(1);
+                }
+                direction_state.key_wait_since_ms = None;
+            }
+        }
+    }
+    if direction_state.terminal.is_none() {
+        direction_state.key_wait_records = deferred;
+    }
+}
+
+fn replay_pending_tls_keys(
+    state: &mut DecryptState,
+    watcher: &mut KeyLogWatcher,
+    event_now_ms: u64,
+    capture_now_ms: u64,
+    decrypt_event_limiter: &Mutex<PacketEventLimiter>,
+    tx: &broadcast::Sender<String>,
+) {
+    for (connection_id, connection) in state.iter_mut() {
+        let (Some(client_random), Some(client_is_outbound)) = (
+            connection.client_random.as_deref(),
+            connection.client_is_outbound,
+        ) else {
+            continue;
+        };
+        if !watcher.is_eligible(connection.pid) {
+            continue;
+        }
+        watcher.mark_flow_seen(connection.pid, client_random);
+        let mut negotiated_suite = connection
+            .outbound
+            .cipher_suite
+            .or(connection.inbound.cipher_suite);
+        for outbound in [true, false] {
+            let direction = if outbound == client_is_outbound {
+                wire::DecryptionDirection::ClientToServer
+            } else {
+                wire::DecryptionDirection::ServerToClient
+            };
+            let direction_state = if outbound {
+                &mut connection.outbound
+            } else {
+                &mut connection.inbound
+            };
+            if direction_state.terminal.is_some() || direction_state.clean_closed {
+                continue;
+            }
+            let app_label = capture_agent::keylog::secret_label_for_direction(
+                client_is_outbound,
+                outbound,
+                false,
+            );
+            let handshake_label = capture_agent::keylog::secret_label_for_direction(
+                client_is_outbound,
+                outbound,
+                true,
+            );
+            if direction_state.app_secret.is_none() {
+                direction_state.app_secret =
+                    watcher.take_secret(connection.pid, client_random, app_label);
+            }
+            if !direction_state.handshake_epoch_complete
+                && direction_state.handshake_secret.is_none()
+            {
+                direction_state.handshake_secret =
+                    watcher.take_secret(connection.pid, client_random, handshake_label);
+            }
+            if direction_state.key_wait_records.is_empty()
+                || (direction_state.app_secret.is_none()
+                    && direction_state.handshake_secret.is_none())
+            {
+                continue;
+            }
+
+            direction_state.last_activity_ms = capture_now_ms;
+            let mut records = direction_state
+                .key_wait_records
+                .drain(..)
+                .collect::<Vec<_>>();
+            direction_state.key_wait_bytes = 0;
+            process_tls_records(
+                connection_id,
+                outbound,
+                Some(client_is_outbound),
+                Some(direction),
+                &mut negotiated_suite,
+                direction_state,
+                &mut connection.ring,
+                std::mem::take(&mut records),
+                event_now_ms,
+                capture_now_ms,
+                decrypt_event_limiter,
+                tx,
+            );
+        }
+    }
+}
+
+fn defer_tls_record(
+    direction_state: &mut DecryptDirectionState,
+    deferred: &mut VecDeque<Vec<u8>>,
+    record: Vec<u8>,
+    capture_now_ms: u64,
+    connection_id: &str,
+    direction: Option<wire::DecryptionDirection>,
+    tx: &broadcast::Sender<String>,
+) {
+    if direction_state.key_wait_since_ms.is_none() {
+        direction_state.key_wait_since_ms = Some(capture_now_ms);
+    }
+    if direction_state.key_wait_bytes.saturating_add(record.len()) > MAX_TLS_KEY_WAIT_BYTES {
+        terminate_decryption_direction(
+            connection_id,
+            direction,
+            direction_state,
+            wire::DecryptionAvailability::Unavailable,
+            wire::DecryptionReason::NoKey,
+            tx,
+        );
+        return;
+    }
+    direction_state.key_wait_bytes += record.len();
+    deferred.push_back(record);
 }
 
 /// The interface name carrying the OS's default route (e.g. "en0"), read via
@@ -295,9 +1350,9 @@ fn parse_max_flows(raw: Option<String>) -> usize {
 
 fn detect_interface() -> pcap::Device {
     if let Some(raw) = std::env::var_os("CAPTURE_INTERFACE") {
-        let name = raw
-            .into_string()
-            .unwrap_or_else(|invalid| panic!("CAPTURE_INTERFACE is set but not valid UTF-8: {invalid:?}"));
+        let name = raw.into_string().unwrap_or_else(|invalid| {
+            panic!("CAPTURE_INTERFACE is set but not valid UTF-8: {invalid:?}")
+        });
         if is_meaningful_override(&name) {
             let devices = pcap::Device::list().unwrap_or_else(|e| {
                 panic!("CAPTURE_INTERFACE={name} set, but failed to list capture devices: {e}")
@@ -383,7 +1438,9 @@ fn datalink_to_link_type(datalink: pcap::Linktype) -> Option<parse::LinkType> {
 /// crash the whole agent over a user's interface choice.
 fn resolve_link_type(datalink: pcap::Linktype, interface_name: &str) -> parse::LinkType {
     datalink_to_link_type(datalink).unwrap_or_else(|| {
-        let name = datalink.get_name().unwrap_or_else(|_| format!("{datalink:?}"));
+        let name = datalink
+            .get_name()
+            .unwrap_or_else(|_| format!("{datalink:?}"));
         panic!(
             "capture-agent: interface {interface_name} uses link type {name} (dlt={}), \
              which this agent doesn't know how to parse. Supported: Ethernet, loopback \
@@ -421,7 +1478,12 @@ enum PacketSource {
 /// replay file being fully consumed and a live device erroring out for any
 /// other reason. ReplayError preserves file read failures separately from EOF.
 enum SourceFrame {
-    Bytes { data: Vec<u8>, timestamp: std::time::SystemTime, original_len: u32, link_type: Option<parse::LinkType> },
+    Bytes {
+        data: Vec<u8>,
+        timestamp: std::time::SystemTime,
+        original_len: u32,
+        link_type: Option<parse::LinkType>,
+    },
     Timeout,
     Eof,
     ReplayError(String),
@@ -442,7 +1504,10 @@ impl PacketSource {
             },
             PacketSource::ReplayPcapng(reader) => match reader.next_packet() {
                 Ok(Some(packet)) => SourceFrame::Bytes {
-                    data: packet.data, timestamp: packet.timestamp, original_len: packet.original_len, link_type: Some(packet.link_type),
+                    data: packet.data,
+                    timestamp: packet.timestamp,
+                    original_len: packet.original_len,
+                    link_type: Some(packet.link_type),
                 },
                 Ok(None) => SourceFrame::Eof,
                 Err(error) => SourceFrame::ReplayError(error.to_string()),
@@ -453,7 +1518,10 @@ impl PacketSource {
                     original_len: packet.header.len,
                     link_type: None,
                     timestamp: std::time::UNIX_EPOCH
-                        + std::time::Duration::new(packet.header.ts.tv_sec as u64, (packet.header.ts.tv_usec as u32) * 1000),
+                        + std::time::Duration::new(
+                            packet.header.ts.tv_sec as u64,
+                            (packet.header.ts.tv_usec as u32) * 1000,
+                        ),
                 },
                 Err(pcap::Error::NoMorePackets) => SourceFrame::Eof,
                 Err(error) => SourceFrame::ReplayError(error.to_string()),
@@ -464,7 +1532,12 @@ impl PacketSource {
 
 /// Capture metadata proves bytes were lost, independently of live snaplen
 /// configuration and whether the retained bytes still form a valid packet.
-fn note_capture_truncation(captured_len: usize, original_len: u32, now_ms: u64, reassembly: &mut StreamReassembler) -> bool {
+fn note_capture_truncation(
+    captured_len: usize,
+    original_len: u32,
+    now_ms: u64,
+    reassembly: &mut StreamReassembler,
+) -> bool {
     if (captured_len as u64) < u64::from(original_len) {
         reassembly.note_frame_cut_at_snaplen(now_ms);
         true
@@ -480,8 +1553,13 @@ fn note_capture_truncation(captured_len: usize, original_len: u32, now_ms: u64, 
 /// helper), and `cargo test`'s parallel runner makes mutating shared
 /// process-global state from multiple tests a real flakiness risk.
 fn parse_replay_local_addrs(raw: Option<&str>) -> Vec<String> {
-    raw.map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-        .unwrap_or_default()
+    raw.map(|v| {
+        v.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// `REPLAY_LOCAL_ADDRS`, comma-separated — spec Components §2's resolution
@@ -661,7 +1739,9 @@ fn looks_like_pcapng(path: &str) -> bool {
 /// unparseable or self-contradictory startup configuration panics with a
 /// specific message naming what's wrong, never silently falls back.
 fn resolve_packet_source() -> ResolvedPacketSource {
-    let replay_file = std::env::var("REPLAY_FILE").ok().filter(|s| !s.trim().is_empty());
+    let replay_file = std::env::var("REPLAY_FILE")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     let capture_interface_set = std::env::var_os("CAPTURE_INTERFACE")
         .map(|v| !v.to_string_lossy().trim().is_empty())
         .unwrap_or(false);
@@ -671,7 +1751,8 @@ fn resolve_packet_source() -> ResolvedPacketSource {
             panic!("both CAPTURE_INTERFACE and REPLAY_FILE are set — these are mutually exclusive; unset one");
         }
 
-        let file = std::fs::File::open(&path).unwrap_or_else(|e| panic!("REPLAY_FILE={path} could not be opened: {e}"));
+        let file = std::fs::File::open(&path)
+            .unwrap_or_else(|e| panic!("REPLAY_FILE={path} could not be opened: {e}"));
 
         // Try pcapng first (this agent's own writer always produces it, and
         // it's the richer format — a real interface name/link type from the
@@ -683,9 +1764,9 @@ fn resolve_packet_source() -> ResolvedPacketSource {
         // attempt below.
         return match pcapng::Reader::new(file) {
             Ok((reader, interface)) => {
-                let interface_name = interface
-                    .interface_name
-                    .unwrap_or_else(|| "unknown (replayed pcapng, no if_name recorded)".to_string());
+                let interface_name = interface.interface_name.unwrap_or_else(|| {
+                    "unknown (replayed pcapng, no if_name recorded)".to_string()
+                });
                 ResolvedPacketSource {
                     source: PacketSource::ReplayPcapng(reader),
                     interface_name,
@@ -720,8 +1801,9 @@ fn resolve_packet_source() -> ResolvedPacketSource {
                          file already known to be malformed or unsupported: {reader_error}"
                     );
                 }
-                let cap = pcap::Capture::from_file(&path)
-                    .unwrap_or_else(|e| panic!("REPLAY_FILE={path} is neither valid pcapng nor classic pcap: {e}"));
+                let cap = pcap::Capture::from_file(&path).unwrap_or_else(|e| {
+                    panic!("REPLAY_FILE={path} is neither valid pcapng nor classic pcap: {e}")
+                });
                 let link_type = resolve_link_type(cap.get_datalink(), &path);
                 ResolvedPacketSource {
                     source: PacketSource::ReplayClassic(cap),
@@ -759,7 +1841,9 @@ fn resolve_packet_source() -> ResolvedPacketSource {
                 .immediate_mode(true)
                 .open()
         })
-        .unwrap_or_else(|e| panic!("capture-agent: failed to open capture device {interface_name}: {e}"));
+        .unwrap_or_else(|e| {
+            panic!("capture-agent: failed to open capture device {interface_name}: {e}")
+        });
     let datalink = cap.get_datalink();
     let link_type = resolve_link_type(datalink, &interface_name);
     println!("capture-agent: link type {datalink:?} on {interface_name}");
@@ -861,16 +1945,27 @@ fn validate_capture_file_path(path: &str, cwd: &Path) -> Result<PathBuf, String>
         return Err("capture file path must not be empty".to_string());
     }
     if path.contains(".data/") || path.contains(".data\\") {
-        return Err(format!("capture file path rejected: {path} must not be inside .data/"));
+        return Err(format!(
+            "capture file path rejected: {path} must not be inside .data/"
+        ));
     }
     let candidate = Path::new(path);
     // JAM-181: a `..` component can walk back into cwd from a path whose
     // text doesn't start with it, so refuse `..` outright rather than
     // trying to reason about where it lands.
-    if candidate.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err(format!("capture file path rejected: {path} must not contain '..' components"));
+    if candidate
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "capture file path rejected: {path} must not contain '..' components"
+        ));
     }
-    let resolved = if candidate.is_absolute() { candidate.to_path_buf() } else { cwd.join(candidate) };
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        cwd.join(candidate)
+    };
     // ...and a symlinked directory can do the same. Compare with symlinks
     // resolved on both sides: the deepest part of the target path that
     // already exists, and cwd itself.
@@ -912,7 +2007,11 @@ fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
 fn validate_ring_config(ring: &wire::RingConfigJson) -> Result<(), String> {
     match ring.mode.as_str() {
         "size" | "duration" | "count" => {}
-        other => return Err(format!("unknown ring mode {other:?} — expected \"size\", \"duration\", or \"count\"")),
+        other => {
+            return Err(format!(
+                "unknown ring mode {other:?} — expected \"size\", \"duration\", or \"count\""
+            ))
+        }
     }
     if ring.threshold == 0 {
         return Err("ring threshold must be greater than zero".to_string());
@@ -924,7 +2023,11 @@ fn validate_ring_config(ring: &wire::RingConfigJson) -> Result<(), String> {
 fn validate_autostop_config(autostop: &wire::AutostopConfigJson) -> Result<(), String> {
     match autostop.mode.as_str() {
         "duration" | "totalSize" => {}
-        other => return Err(format!("unknown autostop mode {other:?} — expected \"duration\" or \"totalSize\"")),
+        other => {
+            return Err(format!(
+                "unknown autostop mode {other:?} — expected \"duration\" or \"totalSize\""
+            ))
+        }
     }
     if autostop.threshold == 0 {
         return Err("autostop threshold must be greater than zero".to_string());
@@ -952,7 +2055,8 @@ fn validate_capture_filter_len(filter: &str) -> Result<(), String> {
 /// anything not representable as a positive `i32` is rejected outright
 /// rather than silently truncated or wrapped.
 fn validate_snaplen(bytes: u32) -> Result<i32, String> {
-    let snaplen = i32::try_from(bytes).map_err(|_| format!("snap length {bytes} is out of range"))?;
+    let snaplen =
+        i32::try_from(bytes).map_err(|_| format!("snap length {bytes} is out of range"))?;
     if snaplen <= 0 {
         return Err("snap length must be greater than zero".to_string());
     }
@@ -988,16 +2092,24 @@ fn apply_capture_config_request(
     match request {
         CaptureConfigRequest::SetFilter(filter) => {
             if let Err(message) = validate_capture_filter_len(&filter) {
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError { message }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
+                    message,
+                }));
                 return;
             }
             match cap.filter(&filter, true) {
                 Ok(()) => {
                     let mut s = state.lock().unwrap();
-                    s.filter = if filter.is_empty() { None } else { Some(filter) };
+                    s.filter = if filter.is_empty() {
+                        None
+                    } else {
+                        Some(filter)
+                    };
                     let snapshot = s.clone();
                     drop(s);
-                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig { config: snapshot }));
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig {
+                        config: snapshot,
+                    }));
                 }
                 Err(e) => {
                     let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
@@ -1010,12 +2122,19 @@ fn apply_capture_config_request(
             let snaplen = match validate_snaplen(bytes) {
                 Ok(snaplen) => snaplen,
                 Err(message) => {
-                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError { message }));
+                    let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
+                        message,
+                    }));
                     return;
                 }
             };
-            let reopened = pcap::Capture::from_device(device.clone())
-                .and_then(|c| c.promisc(true).snaplen(snaplen).timeout(1000).immediate_mode(true).open());
+            let reopened = pcap::Capture::from_device(device.clone()).and_then(|c| {
+                c.promisc(true)
+                    .snaplen(snaplen)
+                    .timeout(1000)
+                    .immediate_mode(true)
+                    .open()
+            });
             let mut new_cap = match reopened {
                 Ok(new_cap) => new_cap,
                 Err(e) => {
@@ -1051,8 +2170,12 @@ fn apply_capture_config_request(
             s.snaplen = bytes;
             let snapshot = s.clone();
             drop(s);
-            println!("capture-agent: snap length changed to {bytes} bytes (capture briefly reopened)");
-            let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig { config: snapshot }));
+            println!(
+                "capture-agent: snap length changed to {bytes} bytes (capture briefly reopened)"
+            );
+            let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig {
+                config: snapshot,
+            }));
         }
         CaptureConfigRequest::SwitchInterface(_) => {
             unreachable!(
@@ -1117,7 +2240,9 @@ fn apply_interface_switch_request(
     tx: &broadcast::Sender<String>,
 ) {
     if let Err(message) = validate_interface_name_len(name) {
-        let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError { message }));
+        let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
+            message,
+        }));
         return;
     }
     let devices = match pcap::Device::list() {
@@ -1145,8 +2270,13 @@ fn apply_interface_switch_request(
         return;
     }
 
-    let reopened = pcap::Capture::from_device(device.clone())
-        .and_then(|c| c.promisc(true).snaplen(DEFAULT_SNAPLEN).timeout(1000).immediate_mode(true).open());
+    let reopened = pcap::Capture::from_device(device.clone()).and_then(|c| {
+        c.promisc(true)
+            .snaplen(DEFAULT_SNAPLEN)
+            .timeout(1000)
+            .immediate_mode(true)
+            .open()
+    });
     let new_cap = match reopened {
         Ok(c) => c,
         Err(e) => {
@@ -1158,7 +2288,9 @@ fn apply_interface_switch_request(
     };
     let Some(new_link_type) = datalink_to_link_type(new_cap.get_datalink()) else {
         let datalink = new_cap.get_datalink();
-        let dl_name = datalink.get_name().unwrap_or_else(|_| format!("{datalink:?}"));
+        let dl_name = datalink
+            .get_name()
+            .unwrap_or_else(|_| format!("{datalink:?}"));
         let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
             message: format!(
                 "{name} uses link type {dl_name}, which this agent doesn't know how to parse"
@@ -1177,10 +2309,15 @@ fn apply_interface_switch_request(
     // comment).
     let closed_ids: Vec<String> = {
         let mut ft = flow_table.lock().unwrap();
-        ft.reset(new_local_addrs.clone()).into_iter().map(|k| k.connection_id()).collect()
+        ft.reset(new_local_addrs.clone())
+            .into_iter()
+            .map(|k| k.connection_id())
+            .collect()
     };
     for id in closed_ids {
-        let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed { id }));
+        let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
+            id,
+        }));
     }
     // JAM-183: stream reassembly is keyed on the same addresses and ports.
     // Bytes buffered from the old interface must not combine with traffic on
@@ -1200,12 +2337,17 @@ fn apply_interface_switch_request(
     // A filter/snaplen tuned for the previous interface may not even be
     // meaningful on this one — reset to defaults rather than carry it
     // forward silently.
-    *capture_config_state.lock().unwrap() =
-        wire::CaptureConfigJson { filter: None, snaplen: DEFAULT_SNAPLEN as u32 };
+    *capture_config_state.lock().unwrap() = wire::CaptureConfigJson {
+        filter: None,
+        snaplen: DEFAULT_SNAPLEN as u32,
+    };
 
     println!("capture-agent: switched capture interface to {name}");
     let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceChanged {
-        interface: wire::InterfaceChangedJson { name: name.to_string(), ip_address: new_ip_address },
+        interface: wire::InterfaceChangedJson {
+            name: name.to_string(),
+            ip_address: new_ip_address,
+        },
     }));
 }
 
@@ -1337,7 +2479,10 @@ async fn main() -> std::io::Result<()> {
     } = resolve_packet_source();
     println!(
         "capture-agent: mode={mode} interface={interface_name}{}",
-        replay_source.as_deref().map(|s| format!(" replay_source={s}")).unwrap_or_default()
+        replay_source
+            .as_deref()
+            .map(|s| format!(" replay_source={s}"))
+            .unwrap_or_default()
     );
 
     // Hostname is read once at startup and never changes for the life of
@@ -1433,7 +2578,10 @@ async fn main() -> std::io::Result<()> {
     // emitter so a client that only just (re)connected sees the current
     // values immediately, not only a client that was connected at the
     // moment the change happened.
-    let capture_config_state = Arc::new(Mutex::new(wire::CaptureConfigJson { filter: None, snaplen: DEFAULT_SNAPLEN as u32 }));
+    let capture_config_state = Arc::new(Mutex::new(wire::CaptureConfigJson {
+        filter: None,
+        snaplen: DEFAULT_SNAPLEN as u32,
+    }));
     // The open `pcap::Capture` handle only ever lives on the capture
     // thread, so a capture-config change requested from the async
     // control-message task below has to be queued across this channel
@@ -1493,22 +2641,39 @@ async fn main() -> std::io::Result<()> {
         let writer_autostop_reason = writer_autostop_reason.clone();
         std::thread::spawn(move || {
             let mut current: Option<ring::RingState> = None;
-            let apply_status = |status: &wire::CaptureFileStatusJson,
-                                 writer_active: &AtomicBool,
-                                 writer_path: &Mutex<Option<String>>,
-                                 writer_bytes_written: &AtomicU64,
-                                 writer_ring_file: &Mutex<Option<u32>>,
-                                 writer_autostop_reason: &Mutex<Option<String>>| {
-                writer_active.store(status.writing, Ordering::Relaxed);
-                *writer_path.lock().unwrap() = status.path.clone();
-                writer_bytes_written.store(status.bytes_written, Ordering::Relaxed);
-                *writer_ring_file.lock().unwrap() = status.ring_file;
-                *writer_autostop_reason.lock().unwrap() = status.autostop_reason.clone();
-            };
+            let apply_status =
+                |status: &wire::CaptureFileStatusJson,
+                 writer_active: &AtomicBool,
+                 writer_path: &Mutex<Option<String>>,
+                 writer_bytes_written: &AtomicU64,
+                 writer_ring_file: &Mutex<Option<u32>>,
+                 writer_autostop_reason: &Mutex<Option<String>>| {
+                    writer_active.store(status.writing, Ordering::Relaxed);
+                    *writer_path.lock().unwrap() = status.path.clone();
+                    writer_bytes_written.store(status.bytes_written, Ordering::Relaxed);
+                    *writer_ring_file.lock().unwrap() = status.ring_file;
+                    *writer_autostop_reason.lock().unwrap() = status.autostop_reason.clone();
+                };
             while let Ok(cmd) = writer_rx.recv() {
                 match cmd {
-                    WriterCommand::Start { path, ring: ring_config, autostop, idb, hostname, agent_version } => {
-                        match ring::start(&mut current, &path, ring_config, autostop, &idb, &hostname, &agent_version, ring::real_free_space_bytes) {
+                    WriterCommand::Start {
+                        path,
+                        ring: ring_config,
+                        autostop,
+                        idb,
+                        hostname,
+                        agent_version,
+                    } => {
+                        match ring::start(
+                            &mut current,
+                            &path,
+                            ring_config,
+                            autostop,
+                            &idb,
+                            &hostname,
+                            &agent_version,
+                            ring::real_free_space_bytes,
+                        ) {
                             Ok(()) => {
                                 *writer_autostop_reason.lock().unwrap() = None;
                                 *writer_ring_file.lock().unwrap() = None;
@@ -1517,7 +2682,9 @@ async fn main() -> std::io::Result<()> {
                                 writer_active.store(true, Ordering::Relaxed);
                             }
                             Err(message) => {
-                                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError { message }));
+                                let _ = tx.send(wire::encode_event(
+                                    &wire::AgentEvent::CaptureFileError { message },
+                                ));
                             }
                         }
                     }
@@ -1526,7 +2693,11 @@ async fn main() -> std::io::Result<()> {
                         *writer_autostop_reason.lock().unwrap() = None; // operator-requested, not an *auto*-stop
                         ring::stop(&mut current);
                     }
-                    WriterCommand::Packet { timestamp, direction, data } => {
+                    WriterCommand::Packet {
+                        timestamp,
+                        direction,
+                        data,
+                    } => {
                         if let Some(ring_state) = current.as_mut() {
                             // I/O errors here surface via the next tick's
                             // capture_file_status simply reporting a stalled
@@ -1534,13 +2705,26 @@ async fn main() -> std::io::Result<()> {
                             // writer thread's own "never take the process
                             // down over a disk problem" posture.
                             if ring_state.write_packet(timestamp, direction, &data).is_ok() {
-                                writer_bytes_written.store(ring_state.bytes_written(), Ordering::Relaxed);
+                                writer_bytes_written
+                                    .store(ring_state.bytes_written(), Ordering::Relaxed);
                             }
                         }
                     }
                     WriterCommand::Stats { received, dropped } => {
-                        if let Some(status) = ring::on_tick(&mut current, received as u64, dropped as u64, ring::real_free_space_bytes) {
-                            apply_status(&status, &writer_active, &writer_path, &writer_bytes_written, &writer_ring_file, &writer_autostop_reason);
+                        if let Some(status) = ring::on_tick(
+                            &mut current,
+                            received as u64,
+                            dropped as u64,
+                            ring::real_free_space_bytes,
+                        ) {
+                            apply_status(
+                                &status,
+                                &writer_active,
+                                &writer_path,
+                                &writer_bytes_written,
+                                &writer_ring_file,
+                                &writer_autostop_reason,
+                            );
                         }
                     }
                 }
@@ -1677,7 +2861,13 @@ async fn main() -> std::io::Result<()> {
                                 );
                             }
                             other => {
-                                apply_capture_config_request(other, cap, device_for_reopen, &capture_config_state, &tx);
+                                apply_capture_config_request(
+                                    other,
+                                    cap,
+                                    device_for_reopen,
+                                    &capture_config_state,
+                                    &tx,
+                                );
                             }
                         },
                         // Replay mode: these control messages have no live
@@ -1711,7 +2901,10 @@ async fn main() -> std::io::Result<()> {
                             Ok(stat) => {
                                 *capture_stats.lock().unwrap() = Some(stat);
                                 if writer_active.load(Ordering::Relaxed) {
-                                    let _ = writer_tx.try_send(WriterCommand::Stats { received: stat.received, dropped: stat.dropped });
+                                    let _ = writer_tx.try_send(WriterCommand::Stats {
+                                        received: stat.received,
+                                        dropped: stat.dropped,
+                                    });
                                 }
                             }
                             Err(e) => eprintln!("capture-agent: failed to read capture stats: {e}"),
@@ -1719,14 +2912,21 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
                 match packet_source.next_frame() {
-                    SourceFrame::Bytes { data, timestamp, original_len, link_type: frame_link_type } => {
+                    SourceFrame::Bytes {
+                        data,
+                        timestamp,
+                        original_len,
+                        link_type: frame_link_type,
+                    } => {
                         let link_type = frame_link_type.unwrap_or(link_type);
                         // Packet observations retain the frame's raw capture
                         // time in replay; JAM-190 separately governs how
                         // timer clocks handle outlier timestamps.
                         let capture_epoch_ms = system_time_us(timestamp) / 1000;
                         if mode == "replay" {
-                            if let (ReplaySpeed::Realtime, Some(prev_ts)) = (replay_speed, previous_frame_timestamp) {
+                            if let (ReplaySpeed::Realtime, Some(prev_ts)) =
+                                (replay_speed, previous_frame_timestamp)
+                            {
                                 if let Ok(delta) = timestamp.duration_since(prev_ts) {
                                     std::thread::sleep(delta.min(Duration::from_secs(5)));
                                 }
@@ -1737,16 +2937,24 @@ async fn main() -> std::io::Result<()> {
                         // JAM-182: reassembly runs on the traffic's own time
                         // (see `ReplayClock`). Everything else here keeps the
                         // agent clock it already used.
-                        let reassembly_now_ms =
-                            reassembly_now_ms(mode == "replay", &mut replay_clock, timestamp, now_ms);
+                        let reassembly_now_ms = reassembly_now_ms(
+                            mode == "replay",
+                            &mut replay_clock,
+                            timestamp,
+                            now_ms,
+                        );
                         let flow_now_ms =
                             flow_aging_now_ms(mode == "replay", reassembly_now_ms, now_ms);
                         // JAM-174: libpcap and EPBs both retain the length
                         // before capture. Check before parsing: a cut frame
                         // can still contain a complete, decodable IP packet.
-                        if note_capture_truncation(data.len(), original_len, reassembly_now_ms, &mut reassembly)
-                            && !snaplen_truncation_warned
-                        {
+                        let capture_truncated = note_capture_truncation(
+                            data.len(),
+                            original_len,
+                            reassembly_now_ms,
+                            &mut reassembly,
+                        );
+                        if capture_truncated && !snaplen_truncation_warned {
                             snaplen_truncation_warned = true;
                             eprintln!(
                                 "capture-agent: frames are being cut short at capture ({} captured bytes, {original_len} original bytes); \
@@ -1769,7 +2977,8 @@ async fn main() -> std::io::Result<()> {
                             // frames can't flood the broadcast channel.
                             if finding_event_limiter.allow(now_ms) {
                                 let finding_epoch_ms = capture_epoch_ms;
-                                let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
+                                let finding_seq =
+                                    finding_seq_counter.fetch_add(1, Ordering::Relaxed);
                                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
                                     finding: Box::new(wire::FindingJson {
                                         id: format!("finding-{finding_epoch_ms}-{finding_seq}"),
@@ -1786,7 +2995,9 @@ async fn main() -> std::io::Result<()> {
                         };
                         // Authentication is plaintext on this private loopback channel.
                         // Exclude before reassembly, flow/payload events and raw recording.
-                        if exclude_live_control_capture(&parsed, mode == "live") { continue; }
+                        if exclude_live_control_capture(&parsed, mode == "live") {
+                            continue;
+                        }
                         // JAM-16: sniff through reassembly, so a request line
                         // or ClientHello split across TCP segments resolves
                         // instead of silently disappearing, and an IPv4
@@ -1851,10 +3062,11 @@ async fn main() -> std::io::Result<()> {
                             .as_ref()
                             .and_then(|result| result.closed_connection_id.as_ref())
                         {
-                            decrypt_state.lock().unwrap().remove(id);
-                            let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
-                                id: id.clone(),
-                            }));
+                            remove_decrypt_connection(&decrypt_state, &keylog_watcher, id);
+                            let _ =
+                                tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
+                                    id: id.clone(),
+                                }));
                         }
 
                         // JAM-15: match requests to responses on the frame's
@@ -1910,7 +3122,8 @@ async fn main() -> std::io::Result<()> {
                         if let Some(result) = &observe_result {
                             if result.rst_transitioned {
                                 let finding_epoch_ms = capture_epoch_ms;
-                                let finding_seq = finding_seq_counter.fetch_add(1, Ordering::Relaxed);
+                                let finding_seq =
+                                    finding_seq_counter.fetch_add(1, Ordering::Relaxed);
                                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::Finding {
                                     finding: Box::new(wire::FindingJson {
                                         id: format!("finding-{finding_epoch_ms}-{finding_seq}"),
@@ -1936,7 +3149,11 @@ async fn main() -> std::io::Result<()> {
                         // (not cloned) here — nothing downstream needs the
                         // raw frame bytes again after this point.
                         if writer_active.load(Ordering::Relaxed) {
-                            let cmd = WriterCommand::Packet { timestamp, direction, data };
+                            let cmd = WriterCommand::Packet {
+                                timestamp,
+                                direction,
+                                data,
+                            };
                             if writer_tx.try_send(cmd).is_err() {
                                 writer_backpressure_drops.fetch_add(1, Ordering::Relaxed);
                             }
@@ -1948,7 +3165,9 @@ async fn main() -> std::io::Result<()> {
                         // early-return conditions).
                         try_decrypt_and_emit(
                             &parsed,
+                            capture_truncated,
                             now_ms,
+                            flow_now_ms,
                             &local_addrs,
                             &process_map,
                             &flow_table,
@@ -2066,7 +3285,11 @@ async fn main() -> std::io::Result<()> {
                         // it already has.
                         println!(
                             "capture-agent: {} finished — no more frames",
-                            if mode == "replay" { "replay" } else { "capture" }
+                            if mode == "replay" {
+                                "replay"
+                            } else {
+                                "capture"
+                            }
                         );
                         break;
                     }
@@ -2083,6 +3306,7 @@ async fn main() -> std::io::Result<()> {
         let service_time_stats = service_time_stats.clone();
         let process_map = process_map.clone();
         let decrypt_state = decrypt_state.clone();
+        let keylog_watcher = keylog_watcher.clone();
         let tx = tx.clone();
         let capture_stats = capture_stats.clone();
         let relay_lagged_events = relay_lagged_events.clone();
@@ -2181,10 +3405,13 @@ async fn main() -> std::io::Result<()> {
                 // falls back to "unknown"/0, same as an unrecognized local
                 // port already does for ConnectionJson below.
                 let mut endpoint_attribution: HashMap<String, (String, u32, u64)> = HashMap::new();
-                let mut conversation_attribution: HashMap<(String, String), (String, u32, u64)> = HashMap::new();
+                let mut conversation_attribution: HashMap<(String, String), (String, u32, u64)> =
+                    HashMap::new();
                 for snap in &snapshots {
                     let proc_info = processes.get(&snap.key.local_port);
-                    let name = proc_info.map(|p| p.name.clone()).unwrap_or_else(|| "unknown".to_string());
+                    let name = proc_info
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
                     let pid = proc_info.map(|p| p.pid).unwrap_or(0);
                     let last_seen = snap.last_seen_ms;
                     endpoint_attribution
@@ -2228,15 +3455,22 @@ async fn main() -> std::io::Result<()> {
                         }
                     })
                     .collect();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::EndpointUpdate { endpoints }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::EndpointUpdate {
+                    endpoints,
+                }));
                 let summaries = service_time_stats.lock().unwrap().snapshot();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ServiceTimeUpdate { summaries }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ServiceTimeUpdate {
+                    summaries,
+                }));
 
                 let conversations: Vec<wire::ConversationJson> = conversation_snapshots
                     .into_iter()
                     .map(|conversation| {
                         let (process_name, pid, _) = conversation_attribution
-                            .get(&(conversation.local_addr.clone(), conversation.remote_addr.clone()))
+                            .get(&(
+                                conversation.local_addr.clone(),
+                                conversation.remote_addr.clone(),
+                            ))
                             .cloned()
                             .unwrap_or_else(|| ("unknown".to_string(), 0, 0));
                         wire::ConversationJson {
@@ -2258,7 +3492,9 @@ async fn main() -> std::io::Result<()> {
                         }
                     })
                     .collect();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConversationUpdate { conversations }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConversationUpdate {
+                    conversations,
+                }));
 
                 // Per-layer aggregates for the layer_update event, accumulated
                 // alongside the per-connection events below. This agent only
@@ -2299,15 +3535,14 @@ async fn main() -> std::io::Result<()> {
                         protocol: snap.app_layer_protocol.clone(),
                         app_layer_protocol: snap.app_layer_protocol,
                         transport_protocol: format!("{:?}", snap.key.protocol).to_uppercase(),
-                        osi_stack: format!(
-                            "L4:{:?} -> L3:IP",
-                            snap.key.protocol
-                        ),
+                        osi_stack: format!("L4:{:?} -> L3:IP", snap.key.protocol),
                         local_addr: snap.key.local_addr,
                         local_port: snap.key.local_port,
                         remote_addr: snap.key.remote_addr,
                         remote_port: snap.key.remote_port,
-                        process_name: proc_info.map(|p| p.name.clone()).unwrap_or_else(|| "unknown".to_string()),
+                        process_name: proc_info
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| "unknown".to_string()),
                         pid: proc_info.map(|p| p.pid).unwrap_or(0),
                         rx_speed: snap.rx_speed,
                         tx_speed: snap.tx_speed,
@@ -2329,16 +3564,30 @@ async fn main() -> std::io::Result<()> {
 
                 for key in evicted.iter() {
                     let connection_id = key.connection_id();
-                    // Tear down this connection's decrypted-content ring
-                    // buffer/reassembler along with the flow itself — the
-                    // ring buffer's own Drop (via zeroize on eviction, plus
-                    // ordinary deallocation here) means no decrypted
-                    // plaintext outlives the connection it belonged to.
-                    decrypt_state.lock().unwrap().remove(&connection_id);
+                    remove_decrypt_connection(&decrypt_state, &keylog_watcher, &connection_id);
                     let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
                         id: connection_id,
                     }));
                 }
+
+                let tls_now_ms = flow_aging_now_ms(
+                    replaying,
+                    replay_flow_clock.load(Ordering::Relaxed),
+                    agent_now_ms,
+                );
+                let mut keylog_watcher = keylog_watcher.lock().unwrap();
+                keylog_watcher.poll();
+                let mut decrypt_state = decrypt_state.lock().unwrap();
+                replay_pending_tls_keys(
+                    &mut decrypt_state,
+                    &mut keylog_watcher,
+                    agent_now_ms,
+                    tls_now_ms,
+                    &decrypt_event_limiter,
+                    &tx,
+                );
+                expire_tls_state_timers(&mut decrypt_state, tls_now_ms, &tx);
+                enforce_tls_buffer_budget(&mut decrypt_state, &tx);
 
                 let avg_loss = if loss_count > 0 {
                     loss_sum / loss_count as f64
@@ -2380,15 +3629,19 @@ async fn main() -> std::io::Result<()> {
                         sparkline: vec![],
                     },
                 ];
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::LayerUpdate { layers }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::LayerUpdate {
+                    layers,
+                }));
 
                 // JAM-13: measured protocol hierarchy, cumulative since
                 // capture start — see flow::ProtocolNode's doc comment for
                 // why this is never derived from `snapshots` above.
                 let hierarchy_json = protocol_node_to_json("Capture", &protocol_hierarchy);
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ProtocolHierarchyUpdate {
-                    hierarchy: Box::new(hierarchy_json),
-                }));
+                let _ = tx.send(wire::encode_event(
+                    &wire::AgentEvent::ProtocolHierarchyUpdate {
+                        hierarchy: Box::new(hierarchy_json),
+                    },
+                ));
 
                 let stat = *capture_stats.lock().unwrap();
                 let lagged = relay_lagged_events.load(Ordering::Relaxed);
@@ -2401,7 +3654,9 @@ async fn main() -> std::io::Result<()> {
                     capacity_evictions,
                     idle_evictions,
                 );
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats { stats: stats_json }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats {
+                    stats: stats_json,
+                }));
 
                 // System/throughput stats (issue #64) — reuses `stat.received`
                 // above as this event's total_packets_captured rather than a
@@ -2432,7 +3687,9 @@ async fn main() -> std::io::Result<()> {
                 prev_tx_bytes = tx_bytes_now;
                 prev_rx_packets = rx_packets_now;
                 prev_tx_packets = tx_packets_now;
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::SystemStats { stats: system_stats_json }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::SystemStats {
+                    stats: system_stats_json,
+                }));
 
                 // Active capture filter/snap length (issue #68) — sent every
                 // tick, same as capture_stats/system_stats above, so a
@@ -2440,7 +3697,9 @@ async fn main() -> std::io::Result<()> {
                 // values immediately rather than only a client that was
                 // connected at the moment a filter/snaplen change happened.
                 let config_snapshot = capture_config_state.lock().unwrap().clone();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig { config: config_snapshot }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig {
+                    config: config_snapshot,
+                }));
 
                 // Capture-to-file status (epic #55, JAM-132/GitHub #70) —
                 // same "sent every tick, always current" pattern as
@@ -2455,7 +3714,9 @@ async fn main() -> std::io::Result<()> {
                     autostop_reason: writer_autostop_reason.lock().unwrap().clone(),
                     backpressure_drops: writer_backpressure_drops.load(Ordering::Relaxed),
                 };
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileStatus { status: capture_file_status }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileStatus {
+                    status: capture_file_status,
+                }));
 
                 // Agent mode/direction-attribution status (issue #73/
                 // JAM-133) — same "sent every tick, always current" pattern
@@ -2471,20 +3732,31 @@ async fn main() -> std::io::Result<()> {
                     replay_source: replay_source.clone(),
                     direction_attribution_unavailable,
                 };
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::AgentStatus { status: agent_status }));
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::AgentStatus {
+                    status: agent_status,
+                }));
             }
         });
     }
 
     let listener = TcpListener::bind("127.0.0.1:9990").await?;
-    let credential_location = std::env::var_os("AGENT_TOKEN_FILE").map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".network-monitor/agent-control-token")));
-    let credential_error = |e: std::io::Error| std::io::Error::new(e.kind(), format!(
+    let credential_location = std::env::var_os("AGENT_TOKEN_FILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".network-monitor/agent-control-token"))
+        });
+    let credential_error = |e: std::io::Error| {
+        std::io::Error::new(e.kind(), format!(
         "agent credential publication failed at {}: check ownership, permissions and symlinks",
         credential_location.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "unresolved HOME/AGENT_TOKEN_FILE".into())
-    ));
+    ))
+    };
     let credential_path = CredentialPath::from_env().map_err(credential_error)?;
-    let credential = Arc::new(PublishedCredential::publish(&credential_path, AgentToken::generate()?).map_err(credential_error)?);
+    let credential = Arc::new(
+        PublishedCredential::publish(&credential_path, AgentToken::generate()?)
+            .map_err(credential_error)?,
+    );
     let admission = Arc::new(Admission::new());
     println!("capture-agent: listening on 127.0.0.1:9990");
 
@@ -2496,11 +3768,15 @@ async fn main() -> std::io::Result<()> {
                 continue;
             }
         };
-        let pending = match admission.try_pending() { Ok(permit) => permit, Err(_) => continue };
+        let pending = match admission.try_pending() {
+            Ok(permit) => permit,
+            Err(_) => continue,
+        };
         let admission = admission.clone();
         let credential = credential.clone();
         let paused = paused.clone();
         let keylog_watcher = keylog_watcher.clone();
+        let decrypt_state = decrypt_state.clone();
         let trace_tx = tx.clone();
         let relay_lagged_events = relay_lagged_events.clone();
         let capture_config_tx = capture_config_tx.clone();
@@ -2513,9 +3789,19 @@ async fn main() -> std::io::Result<()> {
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half);
-            if control_auth::verify_peer(&mut reader, credential.token()).await.is_err() { return; }
-            let _authenticated = match admission.try_authenticated() { Ok(permit) => permit, Err(_) => return };
-            if control_auth::write_ack(&mut write_half).await.is_err() { return; }
+            if control_auth::verify_peer(&mut reader, credential.token())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _authenticated = match admission.try_authenticated() {
+                Ok(permit) => permit,
+                Err(_) => return,
+            };
+            if control_auth::write_ack(&mut write_half).await.is_err() {
+                return;
+            }
             drop(pending);
             let mut rx = trace_tx.subscribe();
             let mut reader = reader.lines();
@@ -2546,6 +3832,7 @@ async fn main() -> std::io::Result<()> {
                                     }
                                     Some(wire::ControlMessage::UnregisterDecryptEligible { pid }) => {
                                         keylog_watcher.lock().unwrap().unregister_pid(pid);
+                                        decrypt_state.lock().unwrap().retain(|_, connection| connection.pid != pid);
                                     }
                                     Some(wire::ControlMessage::TraceRoute { target_ip }) => {
                                         // Traceroute is on-demand only (never
@@ -2695,12 +3982,13 @@ mod third_party_capture;
 #[cfg(test)]
 mod tests {
     use super::{
-        build_capture_stats_json, build_system_stats_json, datalink_to_link_type, find_device_by_name,
-        is_capturable, is_meaningful_override, looks_like_pcapng, malformed_frame_summary, note_capture_truncation, parse_max_flows,
-        parse_replay_local_addrs, parse_replay_speed, protocol_node_to_json,
-        packet_osi_layer, resolve_link_type, validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
-        emit_unanswered_findings, flow_aging_now_ms, with_flow_observation, reassembly_now_ms, validate_snaplen, ReplayClock, ReplaySpeed,
-        MAX_CAPTURE_FILTER_LEN,
+        build_capture_stats_json, build_system_stats_json, datalink_to_link_type,
+        emit_unanswered_findings, find_device_by_name, flow_aging_now_ms, is_capturable,
+        is_meaningful_override, looks_like_pcapng, malformed_frame_summary,
+        note_capture_truncation, packet_osi_layer, parse_max_flows, parse_replay_local_addrs,
+        parse_replay_speed, protocol_node_to_json, reassembly_now_ms, resolve_link_type,
+        validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
+        validate_snaplen, with_flow_observation, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN,
         MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::flow::FlowTable;
@@ -2741,14 +4029,27 @@ mod tests {
     fn mixed_sections_replay_with_each_packets_link_type_and_timestamp() {
         use super::{PacketSource, SourceFrame};
         let file = super::third_party_capture::mixed_sections("source");
-        let (reader, _) = capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap()).unwrap();
+        let (reader, _) =
+            capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap()).unwrap();
         let mut source = PacketSource::ReplayPcapng(reader);
-        for (index, expected_link) in [LinkType::Ethernet, LinkType::Raw, LinkType::NullLoopback].into_iter().enumerate() {
-            let SourceFrame::Bytes { data, timestamp, original_len, link_type } = source.next_frame() else {
+        for (index, expected_link) in [LinkType::Ethernet, LinkType::Raw, LinkType::NullLoopback]
+            .into_iter()
+            .enumerate()
+        {
+            let SourceFrame::Bytes {
+                data,
+                timestamp,
+                original_len,
+                link_type,
+            } = source.next_frame()
+            else {
                 panic!("missing packet {index}");
             };
             assert_eq!(link_type, Some(expected_link));
-            assert_eq!(timestamp.duration_since(std::time::UNIX_EPOCH).unwrap(), std::time::Duration::from_secs(index as u64 + 1));
+            assert_eq!(
+                timestamp.duration_since(std::time::UNIX_EPOCH).unwrap(),
+                std::time::Duration::from_secs(index as u64 + 1)
+            );
             assert_eq!(data.len(), original_len as usize);
             let parsed = capture_agent::parse::parse_packet(&data, link_type.unwrap()).unwrap();
             assert_eq!(parsed.src_ip, format!("192.0.2.{}", index + 1));
@@ -2763,8 +4064,15 @@ mod tests {
         let cap = pcap::Capture::from_file(&file.0).unwrap();
         let link = resolve_link_type(cap.get_datalink(), "raw fixture");
         let mut source = PacketSource::ReplayClassic(cap);
-        let SourceFrame::Bytes { data, .. } = source.next_frame() else { panic!("missing raw frame"); };
-        assert_eq!(capture_agent::parse::parse_packet(&data, link).unwrap().src_ip, "192.0.2.4");
+        let SourceFrame::Bytes { data, .. } = source.next_frame() else {
+            panic!("missing raw frame");
+        };
+        assert_eq!(
+            capture_agent::parse::parse_packet(&data, link)
+                .unwrap()
+                .src_ip,
+            "192.0.2.4"
+        );
         assert!(matches!(source.next_frame(), SourceFrame::Eof));
     }
 
@@ -2775,7 +4083,8 @@ mod tests {
         let mut bytes = std::fs::read(&file.0).unwrap();
         bytes.extend([6, 0, 0]); // partial next block header
         std::fs::write(&file.0, bytes).unwrap();
-        let (reader, _) = capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap()).unwrap();
+        let (reader, _) =
+            capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap()).unwrap();
         let mut source = PacketSource::ReplayPcapng(reader);
         assert!(matches!(source.next_frame(), SourceFrame::Bytes { .. }));
         assert!(matches!(source.next_frame(), SourceFrame::Bytes { .. }));
@@ -2792,7 +4101,9 @@ mod tests {
         for format in ["pcapng", "pcap"] {
             let file = super::replay_capture::fixture(format, "source-lengths", &[0x41; 96], 128);
             let mut source = if format == "pcapng" {
-                let (reader, interface) = capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap()).unwrap();
+                let (reader, interface) =
+                    capture_agent::pcapng::Reader::new(std::fs::File::open(&file.0).unwrap())
+                        .unwrap();
                 assert_eq!(interface.snaplen, 96);
                 PacketSource::ReplayPcapng(reader)
             } else {
@@ -2800,14 +4111,26 @@ mod tests {
             };
             let mut reassembly = StreamReassembler::new();
             for _ in 0..2 {
-                let SourceFrame::Bytes { data, original_len, .. } = source.next_frame() else {
+                let SourceFrame::Bytes {
+                    data, original_len, ..
+                } = source.next_frame()
+                else {
                     panic!("{format} did not yield the fixture frame");
                 };
                 assert_eq!(data, vec![0x41; 96]);
                 assert_eq!(original_len, 128);
-                assert!(note_capture_truncation(data.len(), original_len, 0, &mut reassembly));
+                assert!(note_capture_truncation(
+                    data.len(),
+                    original_len,
+                    0,
+                    &mut reassembly
+                ));
             }
-            assert_eq!(reassembly.frames_cut_at_snaplen(), 2, "{format}: count each cut even after the warning latch");
+            assert_eq!(
+                reassembly.frames_cut_at_snaplen(),
+                2,
+                "{format}: count each cut even after the warning latch"
+            );
             assert!(matches!(source.next_frame(), SourceFrame::Eof));
         }
     }
@@ -2824,19 +4147,29 @@ mod tests {
             (0, 128, 1, ReassemblyStatus::IncompleteTruncatedAtCapture),
         ] {
             let mut reassembly = StreamReassembler::new();
-            assert_eq!(note_capture_truncation(captured, original, 0, &mut reassembly), expected_cuts != 0);
+            assert_eq!(
+                note_capture_truncation(captured, original, 0, &mut reassembly),
+                expected_cuts != 0
+            );
             assert_eq!(reassembly.frames_cut_at_snaplen(), expected_cuts);
             let mut raw = Vec::new();
             etherparse::PacketBuilder::ipv4([192, 0, 2, 1], [192, 0, 2, 2], 64)
-                .tcp(51000, 80, 100, 65535).write(&mut raw, b"GET ").unwrap();
+                .tcp(51000, 80, 100, 65535)
+                .write(&mut raw, b"GET ")
+                .unwrap();
             let first = capture_agent::parse::parse_packet(&raw, LinkType::Raw).unwrap();
             let key = super::build_flow_key(&first, &["192.0.2.1".to_string()]).unwrap();
             reassembly.sniff(&first, Some((&key, true)), 0);
             raw.clear();
             etherparse::PacketBuilder::ipv4([192, 0, 2, 1], [192, 0, 2, 2], 64)
-                .tcp(51000, 80, 400, 65535).write(&mut raw, b"HTTP/1.1\r\n").unwrap();
+                .tcp(51000, 80, 400, 65535)
+                .write(&mut raw, b"HTTP/1.1\r\n")
+                .unwrap();
             let far = capture_agent::parse::parse_packet(&raw, LinkType::Raw).unwrap();
-            assert_eq!(reassembly.sniff(&far, Some((&key, true)), 1).status, Some(expected_status));
+            assert_eq!(
+                reassembly.sniff(&far, Some((&key, true)), 1).status,
+                Some(expected_status)
+            );
         }
     }
 
@@ -2860,14 +4193,35 @@ mod tests {
     #[test]
     fn packet_osi_layer_reports_application_layer_for_recognized_protocols() {
         assert_eq!(
-            packet_osi_layer(TransportProtocol::Tcp, &L7Info::Http { method: "GET".into(), path: "/".into() }),
+            packet_osi_layer(
+                TransportProtocol::Tcp,
+                &L7Info::Http {
+                    method: "GET".into(),
+                    path: "/".into()
+                }
+            ),
             7
         );
         assert_eq!(
-            packet_osi_layer(TransportProtocol::Tcp, &L7Info::HttpResponse { status: "200".into() }),
+            packet_osi_layer(
+                TransportProtocol::Tcp,
+                &L7Info::HttpResponse {
+                    status: "200".into()
+                }
+            ),
             7
         );
-        assert_eq!(packet_osi_layer(TransportProtocol::Udp, &L7Info::Dns { query_name: "example.com".into(), id: 1, qtype: 1 }), 7);
+        assert_eq!(
+            packet_osi_layer(
+                TransportProtocol::Udp,
+                &L7Info::Dns {
+                    query_name: "example.com".into(),
+                    id: 1,
+                    qtype: 1
+                }
+            ),
+            7
+        );
         assert_eq!(
             packet_osi_layer(
                 TransportProtocol::Tcp,
@@ -2936,13 +4290,22 @@ mod tests {
 
     #[test]
     fn resolve_link_type_maps_ethernet() {
-        assert_eq!(resolve_link_type(pcap::Linktype::ETHERNET, "en0"), LinkType::Ethernet);
+        assert_eq!(
+            resolve_link_type(pcap::Linktype::ETHERNET, "en0"),
+            LinkType::Ethernet
+        );
     }
 
     #[test]
     fn resolve_link_type_maps_null_and_loop_to_null_loopback() {
-        assert_eq!(resolve_link_type(pcap::Linktype::NULL, "lo0"), LinkType::NullLoopback);
-        assert_eq!(resolve_link_type(pcap::Linktype::LOOP, "lo0"), LinkType::NullLoopback);
+        assert_eq!(
+            resolve_link_type(pcap::Linktype::NULL, "lo0"),
+            LinkType::NullLoopback
+        );
+        assert_eq!(
+            resolve_link_type(pcap::Linktype::LOOP, "lo0"),
+            LinkType::NullLoopback
+        );
     }
 
     #[test]
@@ -2954,7 +4317,10 @@ mod tests {
 
     #[test]
     fn resolve_link_type_maps_raw() {
-        assert_eq!(resolve_link_type(pcap::Linktype::RAW, "tun0"), LinkType::Raw);
+        assert_eq!(
+            resolve_link_type(pcap::Linktype::RAW, "tun0"),
+            LinkType::Raw
+        );
     }
 
     #[test]
@@ -2985,10 +4351,22 @@ mod tests {
 
     #[test]
     fn datalink_to_link_type_maps_the_three_supported_datalinks() {
-        assert_eq!(datalink_to_link_type(pcap::Linktype::ETHERNET), Some(LinkType::Ethernet));
-        assert_eq!(datalink_to_link_type(pcap::Linktype::NULL), Some(LinkType::NullLoopback));
-        assert_eq!(datalink_to_link_type(pcap::Linktype::LOOP), Some(LinkType::NullLoopback));
-        assert_eq!(datalink_to_link_type(pcap::Linktype::RAW), Some(LinkType::Raw));
+        assert_eq!(
+            datalink_to_link_type(pcap::Linktype::ETHERNET),
+            Some(LinkType::Ethernet)
+        );
+        assert_eq!(
+            datalink_to_link_type(pcap::Linktype::NULL),
+            Some(LinkType::NullLoopback)
+        );
+        assert_eq!(
+            datalink_to_link_type(pcap::Linktype::LOOP),
+            Some(LinkType::NullLoopback)
+        );
+        assert_eq!(
+            datalink_to_link_type(pcap::Linktype::RAW),
+            Some(LinkType::Raw)
+        );
     }
 
     #[test]
@@ -3003,7 +4381,10 @@ mod tests {
     #[test]
     fn validate_capture_filter_len_accepts_a_normal_expression() {
         assert!(validate_capture_filter_len("tcp port 443").is_ok());
-        assert!(validate_capture_filter_len("").is_ok(), "empty (clear) must always be accepted");
+        assert!(
+            validate_capture_filter_len("").is_ok(),
+            "empty (clear) must always be accepted"
+        );
     }
 
     #[test]
@@ -3065,7 +4446,10 @@ mod tests {
     #[test]
     fn parse_replay_local_addrs_splits_on_commas_and_trims_whitespace() {
         let addrs = parse_replay_local_addrs(Some("192.168.1.10, 10.0.0.5,"));
-        assert_eq!(addrs, vec!["192.168.1.10".to_string(), "10.0.0.5".to_string()]);
+        assert_eq!(
+            addrs,
+            vec!["192.168.1.10".to_string(), "10.0.0.5".to_string()]
+        );
     }
 
     #[test]
@@ -3080,7 +4464,10 @@ mod tests {
 
     #[test]
     fn looks_like_pcapng_recognizes_a_real_pcapng_files_magic_bytes() {
-        let path = std::env::temp_dir().join(format!("looks-like-pcapng-test-real-{}.pcapng", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "looks-like-pcapng-test-real-{}.pcapng",
+            std::process::id()
+        ));
         // The literal bytes a real Section Header Block starts with,
         // regardless of the rest of the file — this test only needs the
         // magic, not a fully valid file.
@@ -3091,7 +4478,10 @@ mod tests {
 
     #[test]
     fn looks_like_pcapng_rejects_classic_pcap_magic() {
-        let path = std::env::temp_dir().join(format!("looks-like-pcapng-test-classic-{}.pcap", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "looks-like-pcapng-test-classic-{}.pcap",
+            std::process::id()
+        ));
         std::fs::write(&path, [0xD4, 0xC3, 0xB2, 0xA1, 0, 0, 0, 0]).unwrap();
         assert!(!looks_like_pcapng(path.to_str().unwrap()));
         std::fs::remove_file(&path).ok();
@@ -3099,12 +4489,17 @@ mod tests {
 
     #[test]
     fn looks_like_pcapng_is_false_for_a_nonexistent_path() {
-        assert!(!looks_like_pcapng("/nonexistent/path/that/does/not/exist.pcapng"));
+        assert!(!looks_like_pcapng(
+            "/nonexistent/path/that/does/not/exist.pcapng"
+        ));
     }
 
     #[test]
     fn looks_like_pcapng_is_false_for_a_file_shorter_than_the_magic() {
-        let path = std::env::temp_dir().join(format!("looks-like-pcapng-test-short-{}.bin", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "looks-like-pcapng-test-short-{}.bin",
+            std::process::id()
+        ));
         std::fs::write(&path, [0x0A, 0x0D]).unwrap();
         assert!(!looks_like_pcapng(path.to_str().unwrap()));
         std::fs::remove_file(&path).ok();
@@ -3141,7 +4536,10 @@ mod tests {
 
         // The channel should be usable again after Lagged, not stuck.
         let next = rx.recv().await;
-        assert!(next.is_ok(), "recv after Lagged should succeed, got {next:?}");
+        assert!(
+            next.is_ok(),
+            "recv after Lagged should succeed, got {next:?}"
+        );
     }
 
     #[test]
@@ -3205,20 +4603,47 @@ mod tests {
             ip_declared_payload_len: 0,
             ip_fragment: None,
         };
-        table.observe(&packet, &L7Info::Dns { query_name: "example.com".to_string(), id: 1, qtype: 1 }, 0);
+        table.observe(
+            &packet,
+            &L7Info::Dns {
+                query_name: "example.com".to_string(),
+                id: 1,
+                qtype: 1,
+            },
+            0,
+        );
 
         let json = protocol_node_to_json("Capture", table.protocol_hierarchy());
         assert_eq!(json.name, "Capture");
         assert_eq!(json.bytes, 40);
         assert_eq!(json.packets, 1);
 
-        let eth = json.children.iter().find(|c| c.name == "Ethernet").expect("Ethernet child");
-        let ip = eth.children.iter().find(|c| c.name == "IP").expect("IP child");
-        let udp = ip.children.iter().find(|c| c.name == "UDP").expect("UDP child");
-        let dns = udp.children.iter().find(|c| c.name == "DNS").expect("DNS child");
+        let eth = json
+            .children
+            .iter()
+            .find(|c| c.name == "Ethernet")
+            .expect("Ethernet child");
+        let ip = eth
+            .children
+            .iter()
+            .find(|c| c.name == "IP")
+            .expect("IP child");
+        let udp = ip
+            .children
+            .iter()
+            .find(|c| c.name == "UDP")
+            .expect("UDP child");
+        let dns = udp
+            .children
+            .iter()
+            .find(|c| c.name == "DNS")
+            .expect("DNS child");
         assert_eq!(dns.bytes, 40);
         assert_eq!(dns.packets, 1);
-        assert!(dns.children.is_empty(), "a leaf's children must be an empty array, not omitted");
+        assert!(
+            dns.children.is_empty(),
+            "a leaf's children must be an empty array, not omitted"
+        );
     }
 
     #[test]
@@ -3255,8 +4680,16 @@ mod tests {
         assert_eq!(json.hostname, "osi-gw-01");
         assert_eq!(json.interface_name, "en0");
         assert_eq!(json.ip_address, "192.168.1.104");
-        assert!((json.rx_total_mbps - 10.0).abs() < 1e-9, "got {}", json.rx_total_mbps);
-        assert!((json.tx_total_mbps - 1.0).abs() < 1e-9, "got {}", json.tx_total_mbps);
+        assert!(
+            (json.rx_total_mbps - 10.0).abs() < 1e-9,
+            "got {}",
+            json.rx_total_mbps
+        );
+        assert!(
+            (json.tx_total_mbps - 1.0).abs() < 1e-9,
+            "got {}",
+            json.tx_total_mbps
+        );
         assert!((json.rx_pps_total - 500.0).abs() < 1e-9);
         assert!((json.tx_pps_total - 50.0).abs() < 1e-9);
         assert_eq!(json.total_packets_captured, 184_200);
@@ -3269,7 +4702,11 @@ mod tests {
         // divides by actual elapsed time rather than assuming a fixed 1s
         // tick (a delayed tick must not report an inflated rate).
         let json = build_system_stats_json("h", "en0", "10.0.0.1", 1_250_000, 0, 0, 0, 2.0, 0);
-        assert!((json.rx_total_mbps - 5.0).abs() < 1e-9, "got {}", json.rx_total_mbps);
+        assert!(
+            (json.rx_total_mbps - 5.0).abs() < 1e-9,
+            "got {}",
+            json.rx_total_mbps
+        );
     }
 
     #[test]
@@ -3283,7 +4720,11 @@ mod tests {
 
     #[test]
     fn validate_capture_file_path_rejects_an_empty_path() {
-        assert!(validate_capture_file_path("", Path::new("/home/user/network_monitor/capture-agent")).is_err());
+        assert!(validate_capture_file_path(
+            "",
+            Path::new("/home/user/network_monitor/capture-agent")
+        )
+        .is_err());
     }
 
     #[test]
@@ -3296,13 +4737,18 @@ mod tests {
     #[test]
     fn validate_capture_file_path_rejects_an_absolute_path_inside_cwd() {
         let cwd = Path::new("/home/user/network_monitor/capture-agent");
-        assert!(validate_capture_file_path("/home/user/network_monitor/capture-agent/run1.pcapng", cwd).is_err());
+        assert!(validate_capture_file_path(
+            "/home/user/network_monitor/capture-agent/run1.pcapng",
+            cwd
+        )
+        .is_err());
     }
 
     #[test]
     fn validate_capture_file_path_rejects_any_dot_data_component() {
         let cwd = Path::new("/home/user/network_monitor/capture-agent");
-        let err = validate_capture_file_path("/home/user/network_monitor/.data/run1.pcapng", cwd).unwrap_err();
+        let err = validate_capture_file_path("/home/user/network_monitor/.data/run1.pcapng", cwd)
+            .unwrap_err();
         assert!(err.contains(".data/"), "got: {err}");
     }
 
@@ -3314,7 +4760,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_capture_file_path_rejects_a_dot_dot_relative_path_even_when_semantically_outside_cwd() {
+    fn validate_capture_file_path_rejects_a_dot_dot_relative_path_even_when_semantically_outside_cwd(
+    ) {
         // This resolves to cwd.join("../captures/run1.pcapng") — lexically
         // (not semantically) still prefixed by cwd's own components, since
         // this function never canonicalizes (the target file doesn't exist
@@ -3332,7 +4779,11 @@ mod tests {
         // JAM-181: textually this doesn't start with cwd, but `..` walks
         // straight back into it.
         let cwd = Path::new("/home/user/network_monitor/capture-agent");
-        let err = validate_capture_file_path("/tmp/../home/user/network_monitor/capture-agent/run1.pcapng", cwd).unwrap_err();
+        let err = validate_capture_file_path(
+            "/tmp/../home/user/network_monitor/capture-agent/run1.pcapng",
+            cwd,
+        )
+        .unwrap_err();
         assert!(err.contains(".."), "got: {err}");
     }
 
@@ -3362,7 +4813,8 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&captures).unwrap();
 
-        let result = validate_capture_file_path(captures.join("run1.pcapng").to_str().unwrap(), &cwd);
+        let result =
+            validate_capture_file_path(captures.join("run1.pcapng").to_str().unwrap(), &cwd);
         std::fs::remove_dir_all(&root).ok();
         assert!(result.is_ok(), "got: {result:?}");
     }
@@ -3377,7 +4829,10 @@ mod tests {
 
     #[test]
     fn parse_max_flows_falls_back_to_default_when_unset() {
-        assert_eq!(parse_max_flows(None), capture_agent::flow::DEFAULT_MAX_FLOWS);
+        assert_eq!(
+            parse_max_flows(None),
+            capture_agent::flow::DEFAULT_MAX_FLOWS
+        );
     }
 
     #[test]
@@ -3385,8 +4840,14 @@ mod tests {
         // Same "empty means unset" tolerance `resolve_packet_source`
         // already applies to REPLAY_FILE — an exported-but-empty var is a
         // shell accident, not an operator asking for a zero-flow table.
-        assert_eq!(parse_max_flows(Some(String::new())), capture_agent::flow::DEFAULT_MAX_FLOWS);
-        assert_eq!(parse_max_flows(Some("   ".to_string())), capture_agent::flow::DEFAULT_MAX_FLOWS);
+        assert_eq!(
+            parse_max_flows(Some(String::new())),
+            capture_agent::flow::DEFAULT_MAX_FLOWS
+        );
+        assert_eq!(
+            parse_max_flows(Some("   ".to_string())),
+            capture_agent::flow::DEFAULT_MAX_FLOWS
+        );
     }
 
     #[test]
@@ -3433,7 +4894,11 @@ mod tests {
         let mut clock = ReplayClock::default();
         assert_eq!(reassembly_now_ms(false, &mut clock, origin, 5), 5);
         assert_eq!(reassembly_now_ms(false, &mut clock, later, 6), 6);
-        assert_eq!(clock.now_ms(later), 0, "live mode never advanced the replay clock");
+        assert_eq!(
+            clock.now_ms(later),
+            0,
+            "live mode never advanced the replay clock"
+        );
     }
 
     #[test]
@@ -3455,13 +4920,10 @@ mod tests {
             .unwrap();
         let packet = parse::parse_packet(&frame, LinkType::Ethernet).unwrap();
         let first_flow_time = flow_aging_now_ms(true, replay_now, 1);
-        let first = with_flow_observation(
-            &flows,
-            &replay_flow_clock,
-            true,
-            first_flow_time,
-            |flows| flows.observe_replay(&packet, &L7Info::None, first_flow_time),
-        );
+        let first =
+            with_flow_observation(&flows, &replay_flow_clock, true, first_flow_time, |flows| {
+                flows.observe_replay(&packet, &L7Info::None, first_flow_time)
+            });
         assert!(first.is_some());
         assert_eq!(replay_flow_clock.load(Ordering::Relaxed), first_flow_time);
         let original_id = flows.lock().unwrap().snapshot(0)[0].key.connection_id();
@@ -3469,13 +4931,9 @@ mod tests {
         let replay_now = reassembly_now_ms(true, &mut replay_clock, later, 2);
         let flow_time = flow_aging_now_ms(true, replay_now, 2);
         assert_eq!(flow_time, 60_001);
-        let second = with_flow_observation(
-            &flows,
-            &replay_flow_clock,
-            true,
-            flow_time,
-            |flows| flows.observe_replay(&packet, &L7Info::None, flow_time),
-        );
+        let second = with_flow_observation(&flows, &replay_flow_clock, true, flow_time, |flows| {
+            flows.observe_replay(&packet, &L7Info::None, flow_time)
+        });
         let second = second.unwrap();
         assert_eq!(replay_flow_clock.load(Ordering::Relaxed), flow_time);
         assert_eq!(
@@ -3516,40 +4974,431 @@ mod tests {
 #[cfg(test)]
 mod control_capture_privacy_tests {
     use super::*;
-    fn frame(src: [u8;4], dst: [u8;4], src_port: u16, dst_port: u16, payload: &[u8]) -> parse::ParsedPacket {
-        let mut data=Vec::new();
-        etherparse::PacketBuilder::ethernet2([0;6],[1;6]).ipv4(src,dst,64).tcp(src_port,dst_port,1,65535).write(&mut data,payload).unwrap();
-        parse::parse_packet(&data,parse::LinkType::Ethernet).unwrap()
+    fn frame(
+        src: [u8; 4],
+        dst: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> parse::ParsedPacket {
+        let mut data = Vec::new();
+        etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv4(src, dst, 64)
+            .tcp(src_port, dst_port, 1, 65535)
+            .write(&mut data, payload)
+            .unwrap();
+        parse::parse_packet(&data, parse::LinkType::Ethernet).unwrap()
     }
     #[test]
     fn live_control_frames_are_excluded_before_raw_outputs() {
-        let token=b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let mut auth=b"{\"type\":\"authenticate\",\"token\":\"".to_vec();auth.extend(token);auth.extend(b"\"}\n");
+        let token = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut auth = b"{\"type\":\"authenticate\",\"token\":\"".to_vec();
+        auth.extend(token);
+        auth.extend(b"\"}\n");
         // Full, split-token and reverse-direction ACK frames all belong to the private transport.
-        for payload in [&auth[..],&token[..],b"{\"type\":\"authenticated\"}\n"] {
-            let p=frame([127,0,0,2],[127,0,0,1],42000,9990,payload);
-            assert!(exclude_live_control_capture(&p,true));
-            assert!(!exclude_live_control_capture(&p,false),"replay data must remain intact");
+        for payload in [&auth[..], &token[..], b"{\"type\":\"authenticated\"}\n"] {
+            let p = frame([127, 0, 0, 2], [127, 0, 0, 1], 42000, 9990, payload);
+            assert!(exclude_live_control_capture(&p, true));
+            assert!(
+                !exclude_live_control_capture(&p, false),
+                "replay data must remain intact"
+            );
         }
-        let reply=frame([127,0,0,1],[127,0,0,2],9990,42000,b"reply");
-        assert!(exclude_live_control_capture(&reply,true));
-        for p in [frame([127,0,0,1],[127,0,0,1],42000,8080,b"ordinary"),frame([192,0,2,1],[192,0,2,2],42000,9990,b"remote"),frame([127,0,0,2],[127,0,0,3],42000,9990,b"different loopback service")] {
-            assert!(!exclude_live_control_capture(&p,true));
+        let reply = frame([127, 0, 0, 1], [127, 0, 0, 2], 9990, 42000, b"reply");
+        assert!(exclude_live_control_capture(&reply, true));
+        for p in [
+            frame([127, 0, 0, 1], [127, 0, 0, 1], 42000, 8080, b"ordinary"),
+            frame([192, 0, 2, 1], [192, 0, 2, 2], 42000, 9990, b"remote"),
+            frame(
+                [127, 0, 0, 2],
+                [127, 0, 0, 3],
+                42000,
+                9990,
+                b"different loopback service",
+            ),
+        ] {
+            assert!(!exclude_live_control_capture(&p, true));
         }
     }
     #[test]
     fn live_loopback_tcp_fragments_are_excluded_without_ports() {
-        for (offset,more) in [(0,true),(8,false)] {
-            let mut ip=etherparse::Ipv4Header::new(64,64,etherparse::IpNumber::TCP,[127,0,0,2],[127,0,0,1]).unwrap();
-            ip.more_fragments=more;ip.fragment_offset=etherparse::IpFragOffset::try_new(offset).unwrap();
-            let mut data=ip.to_bytes().to_vec();data.extend([b'a';64]);
-            let mut p=parse::parse_packet(&data,parse::LinkType::Raw).unwrap();
-            assert!(exclude_live_control_capture(&p,true));assert!(!exclude_live_control_capture(&p,false));
-            p.ip_fragment.as_mut().unwrap().protocol=17;
-            assert!(!exclude_live_control_capture(&p,true),"non-TCP fragments are unaffected");
-            p.ip_fragment.as_mut().unwrap().protocol=6;p.src_ip="192.0.2.1".into();
-            assert!(!exclude_live_control_capture(&p,true),"non-loopback fragments are unaffected");
+        for (offset, more) in [(0, true), (8, false)] {
+            let mut ip = etherparse::Ipv4Header::new(
+                64,
+                64,
+                etherparse::IpNumber::TCP,
+                [127, 0, 0, 2],
+                [127, 0, 0, 1],
+            )
+            .unwrap();
+            ip.more_fragments = more;
+            ip.fragment_offset = etherparse::IpFragOffset::try_new(offset).unwrap();
+            let mut data = ip.to_bytes().to_vec();
+            data.extend([b'a'; 64]);
+            let mut p = parse::parse_packet(&data, parse::LinkType::Raw).unwrap();
+            assert!(exclude_live_control_capture(&p, true));
+            assert!(!exclude_live_control_capture(&p, false));
+            p.ip_fragment.as_mut().unwrap().protocol = 17;
+            assert!(
+                !exclude_live_control_capture(&p, true),
+                "non-TCP fragments are unaffected"
+            );
+            p.ip_fragment.as_mut().unwrap().protocol = 6;
+            p.src_ip = "192.0.2.1".into();
+            assert!(
+                !exclude_live_control_capture(&p, true),
+                "non-loopback fragments are unaffected"
+            );
         }
+    }
+}
+
+#[cfg(test)]
+mod tls_decrypt_state_tests {
+    use super::*;
+
+    #[test]
+    fn consecutive_plaintext_records_advance_the_http2_sequence_after_zeroization() {
+        fn data_frame(byte: u8) -> zeroize::Zeroizing<Vec<u8>> {
+            zeroize::Zeroizing::new(vec![0, 0, 1, 0, 0, 0, 0, 0, 1, byte])
+        }
+
+        let mut direction = DecryptDirectionState::new();
+        let mut first = data_frame(b'a');
+        let first_outcomes = feed_plaintext_to_http2(&mut direction, &mut first);
+        assert!(first_outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, FrameOutcome::Frame { .. })));
+        assert!(first.is_empty(), "plaintext buffer must be zeroized");
+
+        let mut second = data_frame(b'b');
+        let second_outcomes = feed_plaintext_to_http2(&mut direction, &mut second);
+        assert!(second_outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, FrameOutcome::Frame { .. })));
+        assert!(second.is_empty(), "plaintext buffer must be zeroized");
+        assert_eq!(direction.plaintext_sequence, 20);
+    }
+
+    #[test]
+    fn decrypted_header_rendering_uses_a_zeroizing_output_buffer() {
+        let headers = vec![
+            ("authorization".to_string(), "[REDACTED]".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ];
+        let mut rendered = format_decrypted_headers(&headers);
+        assert_eq!(
+            rendered.as_str(),
+            "authorization: [REDACTED]\ncontent-type: application/json"
+        );
+        zeroize::Zeroize::zeroize(&mut *rendered);
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn early_data_trials_are_bounded_by_both_record_count_and_bytes() {
+        let mut by_count = DecryptDirectionState::new();
+        for _ in 0..MAX_EARLY_DATA_RECORDS {
+            assert!(count_early_data_trial(&mut by_count, 1));
+        }
+        assert!(!count_early_data_trial(&mut by_count, 1));
+
+        let mut by_bytes = DecryptDirectionState::new();
+        for _ in 0..15 {
+            assert!(count_early_data_trial(&mut by_bytes, 16_645));
+        }
+        assert!(!count_early_data_trial(&mut by_bytes, 16_645));
+    }
+
+    #[test]
+    fn late_key_wait_is_bounded_by_capture_time_and_keeps_records_ordered() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut direction = DecryptDirectionState::new();
+        let mut deferred = VecDeque::new();
+        defer_tls_record(
+            &mut direction,
+            &mut deferred,
+            vec![1, 2, 3],
+            10_000,
+            "connection",
+            Some(wire::DecryptionDirection::ServerToClient),
+            &tx,
+        );
+        defer_tls_record(
+            &mut direction,
+            &mut deferred,
+            vec![4, 5],
+            10_100,
+            "connection",
+            Some(wire::DecryptionDirection::ServerToClient),
+            &tx,
+        );
+        assert_eq!(deferred, VecDeque::from([vec![1, 2, 3], vec![4, 5]]));
+        assert_eq!(direction.key_wait_bytes, 5);
+        assert!(!key_wait_expired(&direction, 11_999));
+        assert!(key_wait_expired(&direction, 12_000));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn periodic_key_poll_replays_waiting_records_before_expiring_them() {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/tls13_rfc8446_vector.json"))
+                .unwrap();
+        let random = hex::decode(vector["client_random"].as_str().unwrap()).unwrap();
+        let record = hex::decode(vector["encrypted_record"].as_str().unwrap()).unwrap();
+        let expected_plaintext =
+            hex::decode(vector["expected_plaintext"].as_str().unwrap()).unwrap();
+        let secret = vector["client_traffic_secret_0"].as_str().unwrap();
+        let keylog_path = std::env::temp_dir().join(format!(
+            "jam204-periodic-key-wait-{}.log",
+            std::process::id()
+        ));
+        std::fs::write(&keylog_path, "").unwrap();
+        let mut watcher = KeyLogWatcher::new();
+        watcher.register_eligible_pid(88, keylog_path.clone());
+
+        let mut connection = DecryptConnectionState::new(88);
+        connection.client_random = Some(random.clone());
+        connection.client_is_outbound = Some(true);
+        connection.outbound.cipher_suite = Some(0x1301);
+        connection.outbound.handshake_epoch_started = true;
+        connection.outbound.handshake_epoch_complete = true;
+        connection.outbound.key_wait_since_ms = Some(1_000);
+        connection.outbound.key_wait_bytes = record.len();
+        connection.outbound.key_wait_records.push_back(record);
+        let mut state = DecryptState::from([("conn".to_string(), connection)]);
+        let (tx, _) = broadcast::channel(8);
+        let limiter = Mutex::new(PacketEventLimiter::new(100, 1_000));
+
+        // The app writes key-log secrets after packets reach the capture
+        // agent. The periodic poll sees the new line while no packet arrives.
+        std::fs::write(
+            &keylog_path,
+            format!(
+                "CLIENT_TRAFFIC_SECRET_0 {} {secret}\n",
+                hex::encode(&random)
+            ),
+        )
+        .unwrap();
+        watcher.poll();
+        // Replaying at the exact expiry edge must win over timer expiry.
+        replay_pending_tls_keys(&mut state, &mut watcher, 3_000, 3_000, &limiter, &tx);
+        expire_tls_state_timers(&mut state, 3_000, &tx);
+
+        let connection = &state["conn"];
+        assert!(connection.outbound.key_wait_records.is_empty());
+        assert_eq!(connection.outbound.app_sequence, 1);
+        assert_eq!(
+            connection.outbound.plaintext_sequence,
+            expected_plaintext.len() as u64
+        );
+        assert_eq!(connection.outbound.terminal, None);
+        std::fs::remove_file(keylog_path).unwrap();
+    }
+
+    #[test]
+    fn late_key_wait_cap_terminates_and_clears_the_direction() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut direction = DecryptDirectionState::new();
+        let mut deferred = VecDeque::new();
+        defer_tls_record(
+            &mut direction,
+            &mut deferred,
+            vec![0; MAX_TLS_KEY_WAIT_BYTES],
+            1,
+            "connection",
+            Some(wire::DecryptionDirection::ClientToServer),
+            &tx,
+        );
+        defer_tls_record(
+            &mut direction,
+            &mut deferred,
+            vec![1],
+            2,
+            "connection",
+            Some(wire::DecryptionDirection::ClientToServer),
+            &tx,
+        );
+        assert!(direction.key_wait_records.is_empty());
+        assert_eq!(direction.key_wait_bytes, 0);
+        assert_eq!(
+            direction.terminal,
+            Some((
+                wire::DecryptionAvailability::Unavailable,
+                wire::DecryptionReason::NoKey,
+            ))
+        );
+        let event = rx.try_recv().unwrap();
+        assert!(event.contains("decryption_status"));
+        assert!(event.contains("no_key"));
+    }
+
+    #[test]
+    fn periodic_capture_clock_expiry_terminates_idle_key_wait_and_tcp_gap() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut connection = DecryptConnectionState::new(8);
+        connection.client_is_outbound = Some(true);
+        connection.outbound.key_wait_since_ms = Some(1_000);
+        connection.inbound.gap_since_ms = Some(1_000);
+        let mut state = DecryptState::from([("conn".to_string(), connection)]);
+
+        expire_tls_state_timers(&mut state, 3_000, &tx);
+
+        let connection = &state["conn"];
+        assert_eq!(
+            connection.outbound.terminal,
+            Some((
+                wire::DecryptionAvailability::Unavailable,
+                wire::DecryptionReason::NoKey
+            ))
+        );
+        assert_eq!(
+            connection.inbound.terminal,
+            Some((
+                wire::DecryptionAvailability::Desynchronized,
+                wire::DecryptionReason::TcpGap
+            ))
+        );
+        assert!(rx.try_recv().unwrap().contains("no_key"));
+        assert!(rx.try_recv().unwrap().contains("tcp_gap"));
+    }
+
+    #[test]
+    fn cleartext_finished_cannot_advance_tls_handshake_epoch() {
+        let mut direction = DecryptDirectionState::new();
+        apply_plaintext_handshake_events(&mut direction, &[HandshakeEvent::Finished]);
+        assert!(!direction.handshake_epoch_complete);
+        assert!(direction.handshake_secret.is_none());
+    }
+
+    #[test]
+    fn capture_truncation_ends_the_direction_with_explicit_status() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut direction = DecryptDirectionState::new();
+        assert!(mark_tls_capture_truncated(
+            "conn",
+            Some(wire::DecryptionDirection::ServerToClient),
+            &mut direction,
+            true,
+            &tx,
+        ));
+        assert_eq!(
+            direction.terminal,
+            Some((
+                wire::DecryptionAvailability::Desynchronized,
+                wire::DecryptionReason::CaptureTruncated
+            ))
+        );
+        let event = rx.try_recv().unwrap();
+        assert!(event.contains("capture_truncated"));
+    }
+
+    #[test]
+    fn terminating_direction_releases_partial_handshake_parser_capacity() {
+        let (tx, _) = broadcast::channel(8);
+        let mut direction = DecryptDirectionState::new();
+        direction
+            .handshake_parser
+            .feed(&[1, 0, 0, 8, 0xaa])
+            .unwrap();
+        assert!(direction.handshake_parser.bytes_held() > 0);
+        assert!(direction.held_bytes() > 0);
+
+        terminate_decryption_direction(
+            "conn",
+            Some(wire::DecryptionDirection::ClientToServer),
+            &mut direction,
+            wire::DecryptionAvailability::Desynchronized,
+            wire::DecryptionReason::TcpGap,
+            &tx,
+        );
+
+        assert_eq!(direction.handshake_parser.bytes_held(), 0);
+        assert_eq!(direction.held_bytes(), 0);
+    }
+
+    #[test]
+    fn outbound_and_inbound_http2_parsers_keep_independent_state() {
+        fn data_frame(byte: u8) -> Vec<u8> {
+            vec![0, 0, 1, 0, 0, 0, 0, 0, 1, byte]
+        }
+        let mut connection = DecryptConnectionState::new(8);
+        let outbound = connection.outbound.http2.feed(0, &data_frame(b'o'));
+        let inbound = connection.inbound.http2.feed(0, &data_frame(b'i'));
+        let FrameOutcome::Frame {
+            body: outbound_body,
+            ..
+        } = &outbound[0]
+        else {
+            panic!("expected outbound HTTP/2 DATA frame");
+        };
+        let FrameOutcome::Frame {
+            body: inbound_body, ..
+        } = &inbound[0]
+        else {
+            panic!("expected inbound HTTP/2 DATA frame");
+        };
+        assert_eq!(outbound_body, b"o");
+        assert_eq!(inbound_body, b"i");
+    }
+
+    #[test]
+    fn per_pid_direction_eviction_does_not_evict_another_pid() {
+        let (tx, mut rx) = broadcast::channel(8);
+        let mut state = DecryptState::new();
+        for index in 0..32 {
+            let mut connection = DecryptConnectionState::new(10);
+            connection.client_is_outbound = Some(true);
+            connection.outbound.stream = Some(TlsDirectionStream::new(index));
+            connection.inbound.stream = Some(TlsDirectionStream::new(index));
+            connection.outbound.last_activity_ms = index as u64;
+            connection.inbound.last_activity_ms = index as u64;
+            state.insert(format!("pid10-{index}"), connection);
+        }
+        let mut other = DecryptConnectionState::new(20);
+        other.client_is_outbound = Some(true);
+        other.outbound.stream = Some(TlsDirectionStream::new(1));
+        state.insert("pid20".to_string(), other);
+
+        assert_eq!(
+            active_tls_directions(&state, Some(10)),
+            MAX_TLS_DIRECTIONS_PER_PID
+        );
+        make_tls_direction_room(&mut state, 10, "new-pid10", &tx);
+        assert_eq!(
+            active_tls_directions(&state, Some(10)),
+            MAX_TLS_DIRECTIONS_PER_PID - 1
+        );
+        assert_eq!(active_tls_directions(&state, Some(20)), 1);
+        assert!(
+            rx.try_recv().is_ok(),
+            "the evicted direction must report its budget status"
+        );
+    }
+
+    #[test]
+    fn aggregate_tls_budget_includes_and_evicts_plaintext_ring_allocations() {
+        let (tx, _) = broadcast::channel(8);
+        let mut state = DecryptState::new();
+        for index in 0..17 {
+            let mut connection = DecryptConnectionState::new(100 + index);
+            connection.ring.push(vec![0x5a; DECRYPT_RING_CAP_BYTES]);
+            state.insert(format!("conn-{index}"), connection);
+        }
+        let before = state
+            .values()
+            .map(DecryptConnectionState::held_bytes)
+            .sum::<usize>();
+        assert!(before > MAX_TLS_BUFFER_BYTES);
+
+        enforce_tls_buffer_budget(&mut state, &tx);
+
+        let after = state
+            .values()
+            .map(DecryptConnectionState::held_bytes)
+            .sum::<usize>();
+        assert!(after <= MAX_TLS_BUFFER_BYTES);
     }
 }
 /// Never expose the live agent's private transport as captured user traffic.
@@ -3557,10 +5406,21 @@ mod control_capture_privacy_tests {
 /// TCP fragments involving our listening address rather than persist credentials.
 /// Replay remains byte-faithful, and unrelated unfragmented traffic is retained.
 fn exclude_live_control_capture(packet: &parse::ParsedPacket, live: bool) -> bool {
-    if !live { return false; }
-    let loopback = |ip: &str| ip.parse::<std::net::IpAddr>().is_ok_and(|addr| addr.is_loopback());
-    if !loopback(&packet.src_ip) || !loopback(&packet.dst_ip) { return false; }
-    if packet.ip_fragment.as_ref().is_some_and(|fragment| fragment.protocol == 6) {
+    if !live {
+        return false;
+    }
+    let loopback = |ip: &str| {
+        ip.parse::<std::net::IpAddr>()
+            .is_ok_and(|addr| addr.is_loopback())
+    };
+    if !loopback(&packet.src_ip) || !loopback(&packet.dst_ip) {
+        return false;
+    }
+    if packet
+        .ip_fragment
+        .as_ref()
+        .is_some_and(|fragment| fragment.protocol == 6)
+    {
         return packet.src_ip == "127.0.0.1" || packet.dst_ip == "127.0.0.1";
     }
     matches!(packet.protocol, parse::TransportProtocol::Tcp)

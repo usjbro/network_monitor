@@ -127,10 +127,49 @@ pub struct PacketJson {
 #[serde(rename_all = "camelCase")]
 pub struct DecryptedPayloadJson {
     pub connection_id: String,
+    pub direction: DecryptionDirection,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_id: Option<u32>,
     pub redacted: bool,
     pub data_base64: String,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DecryptionDirection {
+    ClientToServer,
+    ServerToClient,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DecryptionAvailability {
+    Unavailable,
+    Desynchronized,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DecryptionReason {
+    NoKey,
+    UnsupportedCipher,
+    HandshakeNotObserved,
+    EvictedBudget,
+    EarlyDataUnresolved,
+    TcpGap,
+    CaptureTruncated,
+    OverlapConflict,
+    RecordInvalid,
+    RecordOverflow,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DecryptionStatusJson {
+    pub connection_id: String,
+    pub direction: DecryptionDirection,
+    pub status: DecryptionAvailability,
+    pub reason: DecryptionReason,
 }
 
 /// Expert Info (JAM-12) severity — advisory display metadata only, not a
@@ -209,23 +248,56 @@ pub enum AgentEvent {
     // 1024-slot broadcast channel — every slot would pay that worst case
     // regardless of which variant it actually holds. Also what keeps
     // `clippy::large_enum_variant` (`-D warnings` in CI) satisfied.
-    ConnectionUpdate { connection: Box<ConnectionJson> },
-    ConnectionClosed { id: String },
+    ConnectionUpdate {
+        connection: Box<ConnectionJson>,
+    },
+    ConnectionClosed {
+        id: String,
+    },
     // Boxed because packet dumps and field lists can grow; see the
     // `ConnectionUpdate` comment above for why boxing matters here.
-    Packet { packet: Box<PacketJson> },
-    LayerUpdate { layers: Vec<LayerStatsJson> },
-    AgentStatus { status: AgentStatusJson },
-    DecryptedPayload { payload: Box<DecryptedPayloadJson> },
-    TracerouteHop { hop: Box<TracerouteHopJson> },
-    CaptureStats { stats: CaptureStatsJson },
-    SystemStats { stats: SystemStatsJson },
-    CaptureConfig { config: CaptureConfigJson },
-    CaptureConfigError { message: String },
-    InterfaceList { interfaces: Vec<InterfaceJson> },
-    InterfaceChanged { interface: InterfaceChangedJson },
-    InterfaceError { message: String },
-    CaptureFileStatus { status: CaptureFileStatusJson },
+    Packet {
+        packet: Box<PacketJson>,
+    },
+    LayerUpdate {
+        layers: Vec<LayerStatsJson>,
+    },
+    AgentStatus {
+        status: AgentStatusJson,
+    },
+    DecryptedPayload {
+        payload: Box<DecryptedPayloadJson>,
+    },
+    DecryptionStatus {
+        status: Box<DecryptionStatusJson>,
+    },
+    TracerouteHop {
+        hop: Box<TracerouteHopJson>,
+    },
+    CaptureStats {
+        stats: CaptureStatsJson,
+    },
+    SystemStats {
+        stats: SystemStatsJson,
+    },
+    CaptureConfig {
+        config: CaptureConfigJson,
+    },
+    CaptureConfigError {
+        message: String,
+    },
+    InterfaceList {
+        interfaces: Vec<InterfaceJson>,
+    },
+    InterfaceChanged {
+        interface: InterfaceChangedJson,
+    },
+    InterfaceError {
+        message: String,
+    },
+    CaptureFileStatus {
+        status: CaptureFileStatusJson,
+    },
     /// Sent once, immediately, when a `start_capture_file` control message
     /// is rejected — an unsafe/empty path, ring/autostop options not yet
     /// supported, or a capture already active. Same flat, one-off shape as
@@ -233,25 +305,37 @@ pub enum AgentEvent {
     /// dedicated event per control-message domain rather than reusing one
     /// generic error type across them, matching this file's existing
     /// convention.
-    CaptureFileError { message: String },
+    CaptureFileError {
+        message: String,
+    },
     /// Expert Info (JAM-12) — an annotated observation, never a verdict. See
     /// docs/superpowers/specs/2026-09-26-expert-info-findings-design.md.
-    Finding { finding: Box<FindingJson> },
+    Finding {
+        finding: Box<FindingJson>,
+    },
     /// Measured protocol hierarchy (JAM-13) — cumulative since capture
     /// start, not a snapshot of currently-live flows. Boxed for the same
     /// `clippy::large_enum_variant` reason as `ConnectionUpdate`/`Packet`
     /// above; the tree itself can grow arbitrarily wide as new protocols
     /// are observed.
-    ProtocolHierarchyUpdate { hierarchy: Box<ProtocolNodeJson> },
+    ProtocolHierarchyUpdate {
+        hierarchy: Box<ProtocolNodeJson>,
+    },
     /// Per-remote-host traffic rollups (JAM-14) — cumulative since capture
     /// start, surviving flow eviction; see `flow::EndpointSnapshot`.
-    EndpointUpdate { endpoints: Vec<EndpointJson> },
+    EndpointUpdate {
+        endpoints: Vec<EndpointJson>,
+    },
     /// Per-(local,remote)-pair traffic rollups (JAM-14) — see
     /// `flow::ConversationSnapshot`.
-    ConversationUpdate { conversations: Vec<ConversationJson> },
+    ConversationUpdate {
+        conversations: Vec<ConversationJson>,
+    },
     /// Service response time per protocol (JAM-15), sent every tick — see
     /// `ServiceTimeSummaryJson`.
-    ServiceTimeUpdate { summaries: Vec<ServiceTimeSummaryJson> },
+    ServiceTimeUpdate {
+        summaries: Vec<ServiceTimeSummaryJson>,
+    },
 }
 
 /// One capturable network interface, as reported in response to a
@@ -615,11 +699,17 @@ mod tests {
     fn omits_latency_ms_when_not_measured() {
         // JAM-156: unmeasured latency is absent on the wire, not 0.
         let measured = encode_event(&AgentEvent::ConnectionUpdate {
-            connection: Box::new(ConnectionJson { latency_ms: Some(20.0), ..fixture_connection_json() }),
+            connection: Box::new(ConnectionJson {
+                latency_ms: Some(20.0),
+                ..fixture_connection_json()
+            }),
         });
         assert!(measured.contains("\"latencyMs\":20.0"), "{measured}");
         let unmeasured = encode_event(&AgentEvent::ConnectionUpdate {
-            connection: Box::new(ConnectionJson { latency_ms: None, ..fixture_connection_json() }),
+            connection: Box::new(ConnectionJson {
+                latency_ms: None,
+                ..fixture_connection_json()
+            }),
         });
         assert!(!unmeasured.contains("latencyMs"), "{unmeasured}");
     }
@@ -735,8 +825,14 @@ mod tests {
 
     #[test]
     fn decodes_pause_and_resume() {
-        assert!(matches!(decode_control("{\"type\":\"pause\"}"), Some(ControlMessage::Pause)));
-        assert!(matches!(decode_control("{\"type\":\"resume\"}"), Some(ControlMessage::Resume)));
+        assert!(matches!(
+            decode_control("{\"type\":\"pause\"}"),
+            Some(ControlMessage::Pause)
+        ));
+        assert!(matches!(
+            decode_control("{\"type\":\"resume\"}"),
+            Some(ControlMessage::Resume)
+        ));
         assert!(decode_control("not json").is_none());
     }
 
@@ -778,13 +874,23 @@ mod tests {
         // A well-formed JSON object this agent doesn't understand (unknown
         // type, missing field) is a version-skew/validation problem, not a
         // foreign protocol: ignored, connection kept, exactly as before.
-        for case in [r#"{"type":"nonexistent"}"#, r#"{"type":"register_decrypt_eligible","pid":4242}"#, "{}"] {
-            assert!(matches!(classify_control_line(case), ControlLine::Ignored), "expected Ignored for {case:?}");
+        for case in [
+            r#"{"type":"nonexistent"}"#,
+            r#"{"type":"register_decrypt_eligible","pid":4242}"#,
+            "{}",
+        ] {
+            assert!(
+                matches!(classify_control_line(case), ControlLine::Ignored),
+                "expected Ignored for {case:?}"
+            );
         }
         // Blank lines never start an HTTP request, so tolerating them costs
         // nothing.
         assert!(matches!(classify_control_line(""), ControlLine::Ignored));
-        assert!(matches!(classify_control_line("  \r"), ControlLine::Ignored));
+        assert!(matches!(
+            classify_control_line("  \r"),
+            ControlLine::Ignored
+        ));
     }
 
     #[test]
@@ -806,7 +912,10 @@ mod tests {
             r#"[]"#,
         ];
         for case in cases {
-            assert!(decode_control(case).is_none(), "expected None for malformed input: {case}");
+            assert!(
+                decode_control(case).is_none(),
+                "expected None for malformed input: {case}"
+            );
         }
     }
 
@@ -835,7 +944,10 @@ mod tests {
     #[test]
     fn encodes_capture_config_with_and_without_an_active_filter() {
         let with_filter = AgentEvent::CaptureConfig {
-            config: CaptureConfigJson { filter: Some("tcp port 443".to_string()), snaplen: 96 },
+            config: CaptureConfigJson {
+                filter: Some("tcp port 443".to_string()),
+                snaplen: 96,
+            },
         };
         let line = encode_event(&with_filter);
         assert!(line.contains("\"type\":\"capture_config\""));
@@ -843,10 +955,16 @@ mod tests {
         assert!(line.contains("\"snaplen\":96"));
 
         let without_filter = AgentEvent::CaptureConfig {
-            config: CaptureConfigJson { filter: None, snaplen: 65535 },
+            config: CaptureConfigJson {
+                filter: None,
+                snaplen: 65535,
+            },
         };
         let line = encode_event(&without_filter);
-        assert!(line.contains("\"filter\":null"), "no active filter must be explicit null, not omitted");
+        assert!(
+            line.contains("\"filter\":null"),
+            "no active filter must be explicit null, not omitted"
+        );
     }
 
     #[test]
@@ -880,12 +998,17 @@ mod tests {
         };
         let line = encode_event(&event);
         assert!(line.contains("\"mode\":\"live\""));
-        assert!(!line.contains("replaySource"), "replay_source must be omitted, not null, when mode is live");
+        assert!(
+            !line.contains("replaySource"),
+            "replay_source must be omitted, not null, when mode is live"
+        );
     }
 
     #[test]
     fn encodes_capture_config_error_with_type_tag() {
-        let event = AgentEvent::CaptureConfigError { message: "invalid capture filter: syntax error".to_string() };
+        let event = AgentEvent::CaptureConfigError {
+            message: "invalid capture filter: syntax error".to_string(),
+        };
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"capture_config_error\""));
         assert!(line.contains("\"message\":\"invalid capture filter: syntax error\""));
@@ -909,7 +1032,10 @@ mod tests {
     fn encodes_interface_list_with_addresses_per_interface() {
         let event = AgentEvent::InterfaceList {
             interfaces: vec![
-                InterfaceJson { name: "en0".to_string(), addresses: vec!["192.168.1.10".to_string()] },
+                InterfaceJson {
+                    name: "en0".to_string(),
+                    addresses: vec!["192.168.1.10".to_string()],
+                },
                 InterfaceJson {
                     name: "en1".to_string(),
                     addresses: vec!["10.0.0.5".to_string(), "fe80::1".to_string()],
@@ -933,7 +1059,10 @@ mod tests {
     #[test]
     fn encodes_interface_changed_with_camel_case_ip_address() {
         let event = AgentEvent::InterfaceChanged {
-            interface: InterfaceChangedJson { name: "en1".to_string(), ip_address: "10.0.0.5".to_string() },
+            interface: InterfaceChangedJson {
+                name: "en1".to_string(),
+                ip_address: "10.0.0.5".to_string(),
+            },
         };
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"interface_changed\""));
@@ -943,7 +1072,9 @@ mod tests {
 
     #[test]
     fn encodes_interface_error_with_type_tag() {
-        let event = AgentEvent::InterfaceError { message: "no such interface: en9".to_string() };
+        let event = AgentEvent::InterfaceError {
+            message: "no such interface: en9".to_string(),
+        };
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"interface_error\""));
         assert!(line.contains("\"message\":\"no such interface: en9\""));
@@ -953,10 +1084,26 @@ mod tests {
     fn decodes_start_capture_file_with_ring_and_autostop() {
         let json = r#"{"type":"start_capture_file","path":"/Users/me/captures/run1.pcapng","ring":{"mode":"size","threshold":104857600},"autostop":{"mode":"duration","threshold":3600}}"#;
         match decode_control(json) {
-            Some(ControlMessage::StartCaptureFile { path, ring, autostop }) => {
+            Some(ControlMessage::StartCaptureFile {
+                path,
+                ring,
+                autostop,
+            }) => {
                 assert_eq!(path, "/Users/me/captures/run1.pcapng");
-                assert_eq!(ring, Some(RingConfigJson { mode: "size".into(), threshold: 104_857_600 }));
-                assert_eq!(autostop, Some(AutostopConfigJson { mode: "duration".into(), threshold: 3600 }));
+                assert_eq!(
+                    ring,
+                    Some(RingConfigJson {
+                        mode: "size".into(),
+                        threshold: 104_857_600
+                    })
+                );
+                assert_eq!(
+                    autostop,
+                    Some(AutostopConfigJson {
+                        mode: "duration".into(),
+                        threshold: 3600
+                    })
+                );
             }
             other => panic!("expected StartCaptureFile, got {other:?}"),
         }
@@ -966,7 +1113,11 @@ mod tests {
     fn decodes_start_capture_file_with_no_ring_or_autostop() {
         let json = r#"{"type":"start_capture_file","path":"/tmp/one-shot.pcapng"}"#;
         match decode_control(json) {
-            Some(ControlMessage::StartCaptureFile { path, ring, autostop }) => {
+            Some(ControlMessage::StartCaptureFile {
+                path,
+                ring,
+                autostop,
+            }) => {
                 assert_eq!(path, "/tmp/one-shot.pcapng");
                 assert!(ring.is_none());
                 assert!(autostop.is_none());
@@ -977,7 +1128,10 @@ mod tests {
 
     #[test]
     fn decodes_stop_capture_file() {
-        assert!(matches!(decode_control(r#"{"type":"stop_capture_file"}"#), Some(ControlMessage::StopCaptureFile)));
+        assert!(matches!(
+            decode_control(r#"{"type":"stop_capture_file"}"#),
+            Some(ControlMessage::StopCaptureFile)
+        ));
     }
 
     #[test]
@@ -996,7 +1150,10 @@ mod tests {
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"capture_file_status\""));
         assert!(line.contains("\"writing\":false"));
-        assert!(!line.contains("\"path\""), "absent Option fields must be omitted, not null");
+        assert!(
+            !line.contains("\"path\""),
+            "absent Option fields must be omitted, not null"
+        );
         assert!(!line.contains("\"ringFile\""));
         assert!(!line.contains("\"ringTotal\""));
         assert!(!line.contains("\"autostopReason\""));
@@ -1042,7 +1199,9 @@ mod tests {
 
     #[test]
     fn encodes_capture_file_error_with_type_tag() {
-        let event = AgentEvent::CaptureFileError { message: "refused: already active".to_string() };
+        let event = AgentEvent::CaptureFileError {
+            message: "refused: already active".to_string(),
+        };
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"capture_file_error\""));
         assert!(line.contains("\"message\":\"refused: already active\""));
@@ -1052,6 +1211,7 @@ mod tests {
     fn decrypted_payload_json_serializes_expected_camel_case_fields() {
         let json = DecryptedPayloadJson {
             connection_id: "Tcp-1.2.3.4:1-5.6.7.8:443".to_string(),
+            direction: DecryptionDirection::ClientToServer,
             stream_id: Some(3),
             redacted: false,
             data_base64: "aGVsbG8=".to_string(),
@@ -1068,6 +1228,7 @@ mod tests {
         let event = AgentEvent::DecryptedPayload {
             payload: Box::new(DecryptedPayloadJson {
                 connection_id: "Tcp-1.2.3.4:1-5.6.7.8:443".to_string(),
+                direction: DecryptionDirection::ServerToClient,
                 stream_id: None,
                 redacted: true,
                 data_base64: "".to_string(),
@@ -1075,7 +1236,31 @@ mod tests {
         };
         let line = encode_event(&event);
         assert!(line.contains("\"type\":\"decrypted_payload\""));
-        assert!(!line.contains("\"streamId\""), "streamId should be omitted when None");
+        assert!(
+            !line.contains("\"streamId\""),
+            "streamId should be omitted when None"
+        );
+    }
+
+    #[test]
+    fn serializes_directional_decryption_status_as_bounded_metadata() {
+        let event = AgentEvent::DecryptionStatus {
+            status: Box::new(DecryptionStatusJson {
+                connection_id: "Tcp-127.0.0.1:443-127.0.0.2:50000".to_string(),
+                direction: DecryptionDirection::ServerToClient,
+                status: DecryptionAvailability::Desynchronized,
+                reason: DecryptionReason::TcpGap,
+            }),
+        };
+        let value: serde_json::Value = serde_json::from_str(&encode_event(&event)).unwrap();
+        assert_eq!(value["type"], "decryption_status");
+        assert_eq!(
+            value["status"]["connectionId"],
+            "Tcp-127.0.0.1:443-127.0.0.2:50000"
+        );
+        assert_eq!(value["status"]["direction"], "server_to_client");
+        assert_eq!(value["status"]["status"], "desynchronized");
+        assert_eq!(value["status"]["reason"], "tcp_gap");
     }
 
     #[test]
@@ -1155,9 +1340,14 @@ mod tests {
                 hex_dump: "00 01".into(),
                 header_hex_dump: "aa bb cc".into(),
                 fields: vec![crate::fields::Field::leaf(
-                    "tcp.src_port", "Source Port", "tcp",
-                    crate::fields::FieldType::Uint, crate::fields::FieldValue::Uint(51000),
-                    crate::fields::ByteRegion::Header, 34, 2,
+                    "tcp.src_port",
+                    "Source Port",
+                    "tcp",
+                    crate::fields::FieldType::Uint,
+                    crate::fields::FieldValue::Uint(51000),
+                    crate::fields::ByteRegion::Header,
+                    34,
+                    2,
                 )],
             }),
         };
@@ -1251,7 +1441,10 @@ mod tests {
         assert!(line.contains("\"firstSeenMs\":10"));
         assert!(line.contains("\"lastSeenMs\":5000"));
         assert!(line.contains("\"processName\":\"Safari\""));
-        assert!(!line.contains("ja3Label"), "absent JA3 label must be omitted, not null: {line}");
+        assert!(
+            !line.contains("ja3Label"),
+            "absent JA3 label must be omitted, not null: {line}"
+        );
     }
 
     #[test]

@@ -28,3 +28,4 @@ thiserror = "1.0.58"
 
 [dependencies]
 tracing = "0.1"
+zeroize = "1.9.0"

@@ -47,6 +47,7 @@
 
 use std::borrow::Cow;
 use std::num::Wrapping;
+use zeroize::Zeroize;
 
 use tracing::{debug, trace};
 
@@ -242,6 +243,17 @@ pub enum DecoderError {
 /// The result returned by the `decode` method of the `Decoder`.
 pub type DecoderResult = Result<Vec<(Vec<u8>, Vec<u8>)>, DecoderError>;
 
+struct ZeroizingHeaderList(Vec<(Vec<u8>, Vec<u8>)>);
+
+impl Drop for ZeroizingHeaderList {
+    fn drop(&mut self) {
+        for (name, value) in &mut self.0 {
+            name.zeroize();
+            value.zeroize();
+        }
+    }
+}
+
 /// Decodes headers encoded using HPACK.
 ///
 /// For now, incremental decoding is not supported, i.e. it is necessary
@@ -266,6 +278,26 @@ impl Default for Decoder<'_> {
 
 type DecodedLiteralCow<'a> = ((Cow<'a, [u8]>, Cow<'a, [u8]>), usize);
 type DecodedLiteralSlice<'a> = ((&'a [u8], &'a [u8]), usize);
+
+struct ZeroizingCowBytes<'a>(Cow<'a, [u8]>);
+
+impl<'a> ZeroizingCowBytes<'a> {
+    fn into_inner(mut self) -> Cow<'a, [u8]> {
+        std::mem::replace(&mut self.0, Cow::Borrowed(&[]))
+    }
+
+    fn zeroize_owned(&mut self) {
+        if let Cow::Owned(bytes) = &mut self.0 {
+            bytes.zeroize();
+        }
+    }
+}
+
+impl Drop for ZeroizingCowBytes<'_> {
+    fn drop(&mut self) {
+        self.zeroize_owned();
+    }
+}
 
 /// Represents a decoder of HPACK encoded headers. Maintains the state
 /// necessary to correctly decode subsequent HPACK blocks.
@@ -318,6 +350,11 @@ impl<'a> Decoder<'a> {
     /// [DecoderError::InvalidMaxDynamicSize]
     pub fn set_max_allowed_table_size(&mut self, max_allowed_size: usize) {
         self.max_allowed_table_size = Some(max_allowed_size);
+    }
+
+    /// Returns the allocated bytes retained by the dynamic header table.
+    pub fn bytes_held(&self) -> usize {
+        self.header_table.dynamic_table.bytes_held()
     }
 
     /// Decodes the headers found in the given buffer `buf`. Invokes the callback `cb` for each
@@ -427,13 +464,13 @@ impl<'a> Decoder<'a> {
     /// For example, in HTTP/2, all continuation frames need to be concatenated
     /// to a single buffer before passing them to the decoder.
     pub fn decode(&mut self, buf: &[u8]) -> DecoderResult {
-        let mut header_list = Vec::new();
+        let mut header_list = ZeroizingHeaderList(Vec::new());
 
         self.decode_with_cb(buf, |n, v| {
-            header_list.push((n.into_owned(), v.into_owned()))
+            header_list.0.push((n.into_owned(), v.into_owned()))
         })?;
 
-        Ok(header_list)
+        Ok(std::mem::take(&mut header_list.0))
     }
 
     /// Decodes an indexed header representation.
@@ -485,12 +522,13 @@ impl<'a> Decoder<'a> {
             let (name, _) = self.get_from_table(table_index)?;
             Cow::Borrowed(name)
         };
+        let name = ZeroizingCowBytes(name);
 
         // Now read the value as a literal...
         let (value, value_len) = decode_string(&buf[consumed..])?;
         consumed += value_len;
 
-        Ok(((name, value), consumed))
+        Ok(((name.into_inner(), value), consumed))
     }
 
     /// Handles processing the `SizeUpdate` HPACK block: updates the maximum
@@ -540,6 +578,19 @@ mod tests {
     use super::FieldRepresentation;
     use super::{DecoderError, DecoderResult};
     use super::{IntegerDecodingError, StringDecodingError};
+
+    #[test]
+    fn zeroizing_cow_scrubs_owned_bytes_but_preserves_borrowed_static_data() {
+        let mut owned = super::ZeroizingCowBytes(Cow::Owned(b"secret".to_vec()));
+        owned.zeroize_owned();
+        assert!(owned.0.is_empty());
+
+        let static_bytes: &[u8] = b"static";
+        let mut borrowed = super::ZeroizingCowBytes(Cow::Borrowed(static_bytes));
+        borrowed.zeroize_owned();
+        assert_eq!(borrowed.0.as_ref(), static_bytes);
+        assert_eq!(static_bytes, b"static");
+    }
 
     /// Tests that valid integer encodings are properly decoded.
     #[test]

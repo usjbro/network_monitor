@@ -110,6 +110,7 @@ name = "fluke-hpack"
 version = "0.3.1"
 dependencies = [
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

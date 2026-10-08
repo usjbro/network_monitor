@@ -35,6 +35,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "tls_record_stream"
+path = "fuzz_targets/tls_record_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "pcapng_reader"
 path = "fuzz_targets/pcapng_reader.rs"
 test = false

@@ -16,7 +16,7 @@ describe('PacketStreamView decrypted content', () => {
         packets={[]}
         theme={THEMES.matrix}
         onClearPackets={() => {}}
-        decryptedSegments={[{ connectionId: 'c1', streamId: undefined, text: '[REDACTED]', redacted: true }]}
+        decryptedSegments={[{ connectionId: 'c1', direction: 'client_to_server', streamId: undefined, text: '[REDACTED]', redacted: true }]}
       />
     );
     const el = screen.getByText('[REDACTED]');
@@ -30,7 +30,7 @@ describe('PacketStreamView decrypted content', () => {
         packets={[]}
         theme={THEMES.matrix}
         onClearPackets={() => {}}
-        decryptedSegments={[{ connectionId: 'c1', streamId: undefined, text: 'GET /api/x', redacted: false }]}
+        decryptedSegments={[{ connectionId: 'c1', direction: 'client_to_server', streamId: undefined, text: 'GET /api/x', redacted: false }]}
       />
     );
     expect(screen.getByText(/GET \/api\/x/)).toBeInTheDocument();
@@ -52,7 +52,7 @@ describe('PacketStreamView decrypted content', () => {
         packets={[]}
         theme={THEMES.matrix}
         onClearPackets={() => {}}
-        decryptedSegments={[{ connectionId: 'c1', streamId: undefined, text: malicious, redacted: false }]}
+        decryptedSegments={[{ connectionId: 'c1', direction: 'server_to_client', streamId: undefined, text: malicious, redacted: false }]}
       />
     );
     expect(screen.getByText(malicious)).toBeInTheDocument();

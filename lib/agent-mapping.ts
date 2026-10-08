@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, Endpoint, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -6,6 +6,18 @@ function requireField<T>(obj: Record<string, unknown>, key: string): T {
     throw new Error(`agent event missing required field "${key}"`);
   }
   return obj[key] as T;
+}
+
+export function mapDecryptionStatusEvent(json: unknown): DecryptionStatus {
+  const envelope = json as { status?: Record<string, unknown> };
+  const status = envelope.status;
+  if (!status) throw new Error('malformed decryption_status event: missing "status" field');
+  return {
+    connectionId: requireField(status, 'connectionId'),
+    direction: requireField<DecryptionDirection>(status, 'direction'),
+    status: requireField<'unavailable' | 'desynchronized'>(status, 'status'),
+    reason: requireField(status, 'reason'),
+  };
 }
 
 export function mapConnectionEvent(json: unknown): NetworkConnection {

@@ -18,7 +18,10 @@ fn unique_dir(label: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "no-disk-write-test-{label}-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -38,8 +41,15 @@ fn a_full_decrypt_session_creates_no_files_beyond_the_keylog_itself() {
     ring.push(b"decrypted plaintext that must never touch disk".to_vec());
     let (_entries, _cursor) = ring.drain_since(0);
 
-    let files_after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-    assert_eq!(files_after.len(), 1, "only the SSLKEYLOGFILE itself should exist on disk, found: {files_after:?}");
+    let files_after: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        files_after.len(),
+        1,
+        "only the SSLKEYLOGFILE itself should exist on disk, found: {files_after:?}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -68,7 +78,12 @@ fn a_real_decrypt_and_http2_reassembly_pass_creates_no_files_beyond_the_keylog_i
     // bin/osi-inspect.js produces) and register/poll it through the
     // watcher exactly like the capture loop does.
     {
-        let mut f = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&keylog_path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&keylog_path)
+            .unwrap();
         writeln!(f, "CLIENT_TRAFFIC_SECRET_0 {client_random} {secret_hex}").unwrap();
     }
     let mut watcher = KeyLogWatcher::new();
@@ -76,12 +91,20 @@ fn a_real_decrypt_and_http2_reassembly_pass_creates_no_files_beyond_the_keylog_i
     watcher.poll();
 
     let secret = watcher
-        .secret_for(&hex::decode(client_random).unwrap())
+        .secret_for(
+            4242,
+            &hex::decode(client_random).unwrap(),
+            "CLIENT_TRAFFIC_SECRET_0",
+        )
         .cloned()
         .expect("secret should have been picked up from the key-log file");
 
     let record = hex::decode(record_hex).unwrap();
-    let DecryptOutcome::Plaintext(plaintext) = decrypt_record(&record, &secret) else {
+    let DecryptOutcome::Plaintext {
+        bytes: plaintext,
+        content_type: 23,
+    } = decrypt_record(&record, &secret, 0)
+    else {
         panic!("expected the fixture record to decrypt successfully");
     };
 
@@ -94,10 +117,13 @@ fn a_real_decrypt_and_http2_reassembly_pass_creates_no_files_beyond_the_keylog_i
     // re-proving HTTP/2 framing correctness (Task 12 already covers that
     // with its own fixtures).
     let _ = reassembler.feed(0, &plaintext);
-    ring.push(plaintext);
+    ring.push(plaintext.to_vec());
     let _ = ring.drain_since(0);
 
-    let files_after: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+    let files_after: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
     assert_eq!(
         files_after.len(),
         1,
