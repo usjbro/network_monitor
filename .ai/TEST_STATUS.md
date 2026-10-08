@@ -15,6 +15,7 @@ Published review follow-up: corrected the wire-fixture regeneration recipe to au
 - `cargo +nightly fuzz run tls_record_stream -- -runs=1000`: passed (1,000 runs, no crash).
 - `npx vitest run --maxWorkers=1 --no-file-parallelism`: passed (82 files, 602 tests). Two standard parallel runs hit an existing `ENOTEMPTY` cleanup race in `lib/__tests__/enrichment-client.test.ts`; the test file passed alone and the serial full suite passed.
 - `npm run lint`: passed.
+- After PR #276's first CI run caught three stale `DecryptedPayloadSegment` fixtures missing the newly required `direction`, updated those fixtures in commit `07ac312`; `npx tsc --noEmit` and `npx vitest run lib/__tests__/packet-stream-decrypted.test.tsx` passed (4 tests). Refreshed PR checks are running.
 - `rustfmt --check --edition 2021` on the five touched TLS/HPACK Rust files and `git diff --check`: passed.
 - The ignored live capture and fixed-port replay tests were not run in this verification pass.
 
