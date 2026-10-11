@@ -1,4 +1,4 @@
-use etherparse::{LinkExtSlice, NetSlice, SlicedPacket, TransportSlice};
+use etherparse::{EtherType, LinkExtSlice, NetSlice, SlicedPacket, TransportSlice};
 
 /// The link-layer framing a captured frame's raw bytes are in, matching the
 /// open capture handle's datalink type (`pcap::Capture::get_datalink()`,
@@ -156,18 +156,119 @@ const NO_MAC: &str = "00:00:00:00:00:00";
 const NULL_LOOPBACK_HEADER_LEN: usize = 4;
 
 /// Never panics on malformed input — returns None instead. This function
-/// is exercised by the cargo-fuzz target in `fuzz/fuzz_targets/parse_packet.rs`
-/// specifically because it runs on untrusted, attacker-reachable bytes, for
-/// every `LinkType`.
+/// delegates to the classified parser, exercised by the cargo-fuzz target
+/// in `fuzz/fuzz_targets/parse_packet.rs` on untrusted, attacker-reachable
+/// bytes for every `LinkType`.
 pub fn parse_packet(data: &[u8], link_type: LinkType) -> Option<ParsedPacket> {
+    parse_packet_result(data, link_type).ok()
+}
+
+/// A decode failure is distinct from successfully decoded Ethernet framing
+/// whose payload protocol this IP-only agent intentionally does not track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseFailure {
+    Malformed,
+    UnsupportedNonIp,
+}
+
+/// Classify only after etherparse validates the framing and any supported
+/// protocol headers. A truncated ARP/VLAN/IP header remains a decode failure;
+/// unknown EtherTypes are unsupported, not proof their payload is valid.
+/// The Option-returning API above remains available to existing consumers
+/// while the fuzz target exercises this classified path for every link type.
+pub fn parse_packet_result(
+    data: &[u8],
+    link_type: LinkType,
+) -> Result<ParsedPacket, ParseFailure> {
     match link_type {
         LinkType::Ethernet => {
-            let sliced = SlicedPacket::from_ethernet(data).ok()?;
+            let sliced = SlicedPacket::from_ethernet(data).map_err(|_| ParseFailure::Malformed)?;
+            if !matches!(sliced.net, Some(NetSlice::Ipv4(_)) | Some(NetSlice::Ipv6(_))) {
+                // Opaque MACsec can conceal IP traffic. A decodable SecTag
+                // without an inspectable next protocol is still a decode
+                // failure for this agent, not evidence of unsupported non-IP.
+                if sliced.link_exts.iter().any(|ext| {
+                    matches!(ext, LinkExtSlice::Macsec(macsec)
+                        if macsec.header.encrypted() || macsec.header.userdata_changed())
+                }) {
+                    return Err(ParseFailure::Malformed);
+                }
+                // etherparse can return success when its bounded link-extension
+                // array fills, before validating the next known header. Do not
+                // silently certify that undecoded encapsulation as non-IP.
+                const DECODER_KNOWN_ETHER_TYPES: [EtherType; 7] = [
+                    EtherType::VLAN_TAGGED_FRAME,
+                    EtherType::PROVIDER_BRIDGING,
+                    EtherType::VLAN_DOUBLE_TAGGED_FRAME,
+                    EtherType::MACSEC,
+                    EtherType::IPV4,
+                    EtherType::IPV6,
+                    EtherType::ARP,
+                ];
+                if sliced
+                    .payload_ether_type()
+                    .is_some_and(|kind| DECODER_KNOWN_ETHER_TYPES.contains(&kind))
+                {
+                    return Err(ParseFailure::Malformed);
+                }
+                // These undecoded WAN/carrier/bridging encapsulations may carry
+                // IP. Keep a health signal until inner decoding exists (JAM-253);
+                // this is separate from the decoder-limit guard above.
+                const IP_CARRYING_ENCAPSULATIONS: [EtherType; 5] = [
+                    EtherType(0x8864), // PPPoE session
+                    EtherType(0x8847), // MPLS unicast
+                    EtherType(0x8848), // MPLS multicast
+                    EtherType(0x88e7), // 802.1ah PBB (MAC-in-MAC)
+                    EtherType(0x893f), // 802.1BR E-tag
+                ];
+                if sliced
+                    .payload_ether_type()
+                    .is_some_and(|kind| IP_CARRYING_ENCAPSULATIONS.contains(&kind))
+                {
+                    return Err(ParseFailure::Malformed);
+                }
+                // The innermost type/length field also covers VLAN-wrapped
+                // 802.3 frames. Padding may exceed the declared payload size.
+                if let Some(payload) = sliced.ether_payload() {
+                    let kind = payload.ether_type.0;
+                    if (kind <= 1500 && payload.payload.len() < usize::from(kind))
+                        || (1501..=1535).contains(&kind)
+                    {
+                        return Err(ParseFailure::Malformed);
+                    }
+                    // LLC/SNAP with an EtherType-carrying OUI (RFC 1042
+                    // 00-00-00, 802.1H 00-00-F8) can wrap IP, which this
+                    // decoder does not unwrap; keep it as a health signal.
+                    if kind <= 1500 {
+                        if let [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 | 0xf8, hi, lo, ..] =
+                            payload.payload
+                        {
+                            let pid = EtherType(u16::from_be_bytes([*hi, *lo]));
+                            if pid == EtherType::IPV4 || pid == EtherType::IPV6 {
+                                return Err(ParseFailure::Malformed);
+                            }
+                        }
+                    }
+                }
+                // ARP's length check trusts its address-size fields. Check
+                // consistency for known types before excluding it from health
+                // signals; this adds no ARP events or address decoding.
+                if let Some(NetSlice::Arp(arp)) = &sliced.net {
+                    if arp.hw_addr_size() == 0
+                        || arp.proto_addr_size() == 0
+                        || (arp.hw_addr_type().0 == 1 && arp.hw_addr_size() != 6)
+                        || (arp.proto_addr_type().0 == 0x0800 && arp.proto_addr_size() != 4)
+                    {
+                        return Err(ParseFailure::Malformed);
+                    }
+                }
+                return Err(ParseFailure::UnsupportedNonIp);
+            }
             let (src_mac, dst_mac) = match &sliced.link {
                 Some(etherparse::LinkSlice::Ethernet2(eth)) => {
                     (mac_to_string(eth.source()), mac_to_string(eth.destination()))
                 }
-                _ => return None,
+                _ => return Err(ParseFailure::Malformed),
             };
             // The outermost 802.1Q tag, if this frame is VLAN-tagged —
             // `link_exts` also carries MACsec headers, which aren't a VLAN
@@ -179,15 +280,18 @@ pub fn parse_packet(data: &[u8], link_type: LinkType) -> Option<ParsedPacket> {
                 _ => None,
             });
             build_parsed_packet(&sliced, src_mac, dst_mac, vlan_tag, data)
+                .ok_or(ParseFailure::Malformed)
         }
         LinkType::NullLoopback => {
-            let ip_data = data.get(NULL_LOOPBACK_HEADER_LEN..)?;
-            let sliced = SlicedPacket::from_ip(ip_data).ok()?;
+            let ip_data = data.get(NULL_LOOPBACK_HEADER_LEN..).ok_or(ParseFailure::Malformed)?;
+            let sliced = SlicedPacket::from_ip(ip_data).map_err(|_| ParseFailure::Malformed)?;
             build_parsed_packet(&sliced, NO_MAC.to_string(), NO_MAC.to_string(), None, ip_data)
+                .ok_or(ParseFailure::Malformed)
         }
         LinkType::Raw => {
-            let sliced = SlicedPacket::from_ip(data).ok()?;
+            let sliced = SlicedPacket::from_ip(data).map_err(|_| ParseFailure::Malformed)?;
             build_parsed_packet(&sliced, NO_MAC.to_string(), NO_MAC.to_string(), None, data)
+                .ok_or(ParseFailure::Malformed)
         }
     }
 }

@@ -166,6 +166,6 @@ describe('TerminalApp capture_stats stream handling', () => {
       } as MessageEvent);
     });
     expect(bannerText()).toMatch(/capture degraded/i);
-    expect(bannerText()).toMatch(/6 frame\(s\) could not be parsed/i);
+    expect(bannerText()).toMatch(/6 frame\(s\) could not be parsed \(non-IP traffic excluded\)/i);
   });
 });

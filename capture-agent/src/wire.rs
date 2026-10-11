@@ -480,8 +480,8 @@ pub struct CaptureStatsJson {
     /// backlog, not a capture-side loss.
     pub relay_lagged_events: u64,
     /// Cumulative count of frames this process received from the capture
-    /// handle but `parse::parse_packet` couldn't decode at all — an
-    /// unsupported or malformed link-layer/network-layer shape. Unrelated
+    /// handle but couldn't decode (malformed/truncated input or decoder limits).
+    /// Successfully framed non-IP Ethernet traffic is excluded. Unrelated
     /// to `dropped`/`if_dropped` (which never even reached this process)
     /// and to `relay_lagged_events` (a purely relay-side backlog) — see
     /// issue #63.

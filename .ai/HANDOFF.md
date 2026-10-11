@@ -1,3 +1,11 @@
+# JAM-165 / JAM-192 — non-IP parse-failure classification (PR #281, 2026-10-11)
+
+Branch `jamesmbrownjr/jam-165-unparsed-frames-non-ip-and-counter`, worktree `.worktrees/unparsed-frames-non-ip-and-counter`. `parse_packet_result` separates decode failures from successfully framed unsupported non-IP Ethernet; the capture loop excludes the latter from `unparseableFrames` and malformed-frame findings. Wire shape unchanged. Decoder limits, malformed ARP sizes, opaque MACsec, short 802.3 payloads, and IP-capable encapsulations (PPPoE session, MPLS, PBB, E-tag, IP-over-SNAP) remain failures; inner decoding is JAM-253, non-IP capture-file recording JAM-254.
+
+Claude review follow-ups landed on the PR: CI now runs the ignored `non_ip_replay` test; PBB/E-tag/SNAP guards and named EtherType constants added. Original live capture is unavailable, so the fixture does not establish its failure distribution or reassembly root cause. Merge not authorized. See TEST_STATUS.
+
+---
+
 # JAM-250 — CI job timeouts and bounded apt retries
 
 JAM-250 completed: PR #278 squash-merged at `9dd6b678532c486ad92572c9279333fbe5642969`; Linear is Done. The unreachable-mirror acceptance probe logged all three attempts and failed as intended in about 24 seconds, then its test-only change was reverted. Final PR CI passed. See `TEST_STATUS.md`.

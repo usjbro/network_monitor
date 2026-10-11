@@ -1,7 +1,9 @@
 # Current Task
 
-JAM-173 follow-up: make the two-fragment regression exercise the actual packet event builder.
+JAM-165 / JAM-192: distinguish unsupported non-IP Ethernet traffic from genuine parse failures. James approved implementation on 2026-10-10 and publication (commit/push/PR for Claude review) directly in chat on 2026-10-11. Merge is not authorized.
 
-Worktree: `.worktrees/fragment-packet-event-builder-test`; branch: `jamesmbrownjr/jam-173-fragment-packet-event-builder-test`.
+Worktree: `.worktrees/unparsed-frames-non-ip-and-counter`; branch: `jamesmbrownjr/jam-165-unparsed-frames-non-ip-and-counter`.
 
-PR #279 merged as `00ef54f`. The follow-up extracts `PacketJson` construction into `build_packet_json` and changes the two-fragment DNS regression to assert the returned event fields and confirm reconstructed DNS fields are omitted. The focused test passed after the change; full Rust tests, Clippy, release build, PR, and CI are pending.
+Implementation and all Claude review findings are addressed on PR #281 (CI runs the non-IP replay; PBB/E-tag/IP-over-SNAP guards; named EtherType constants). Unsupported non-IP traffic is excluded from decode-failure counts/findings without changing wire fields. See TEST_STATUS and HANDOFF.
+
+Original live capture is unavailable. Fixture evidence does not establish its failure distribution or reassembly root cause; the counter increments before reassembly sniffing. Previous task was merged in PR #280 (`28e19db`).

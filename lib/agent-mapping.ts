@@ -153,6 +153,7 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     dropped: requireField(w, 'dropped'),
     ifDropped: requireField(w, 'ifDropped'),
     relayLaggedEvents: requireField(w, 'relayLaggedEvents'),
+    // Decode failures only; the agent excludes successfully framed non-IP traffic.
     unparseableFrames: requireField(w, 'unparseableFrames'),
     totalConnectionsObserved: requireField(w, 'totalConnectionsObserved'),
     capacityEvictions: requireField(w, 'capacityEvictions'),

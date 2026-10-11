@@ -89,6 +89,15 @@ jobs:
       - name: Live-loopback packet-capture integration test
         run: cargo test --locked --test live_loopback -- --ignored --test-threads=1
 
+      # JAM-165: the only test that drives the real capture loop end to end
+      # for non-IP exclusion (unparseableFrames and malformed-frame findings).
+      # #[ignore]d by default because it needs exclusive 127.0.0.1:9990, which
+      # this single-job runner guarantees. Offline replay needs no capture
+      # capability; it runs after the live test so its build can't relink the
+      # setcap'd binary that test depends on.
+      - name: Non-IP replay integration test
+        run: cargo test --locked --test non_ip_replay -- --ignored --test-threads=1
+
       - name: Clippy (warnings deny)
         run: cargo clippy --all-targets --locked -- -D warnings
 
