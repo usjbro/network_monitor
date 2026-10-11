@@ -1,3 +1,11 @@
+# PR #281 — Claude code-review corrections (2026-10-11)
+
+Reproduced PPPoE/MPLS and incomplete 802.3 payloads being excluded as unsupported. Added separate IP-carrying encapsulation guard for PPPoE session/MPLS unicast/multicast; innermost 802.3 length validation permits padding and rejects reserved values 1501–1535. Regressions cover plain/VLAN frames and boundary lengths. Replaced tautological wrapper-parity fuzz assertion with Ethernet-only unsupported classification invariant. Capture-file docs now explicitly exclude non-IP frames and link JAM-254; inner PPPoE/MPLS decoding remains JAM-253.
+
+Both added tests failed before fixes and pass after. Final checks: 484 Rust tests passed (11 ignored), authenticated replay passed, strict Clippy/release passed, 1,650,280 fuzz runs in 31 seconds passed, diff check passed. Independent read-only re-review found no findings. Web code/dependencies unchanged; prior web/audit/browser results remain recorded below. Previous commit7e73530 CI passed; new commit CI and Claude re-review pending. No merge authorized or performed.
+
+---
+
 # JAM-165 / JAM-192 — Claude review follow-ups (2026-10-11)
 
 James directly approved commit/push/PR for Claude code review in chat; no merge authorized. Claude's Slack plan review is agent-authored, not a human gate approval. Posting the PR/review request via Slack is explicitly authorized by the user.

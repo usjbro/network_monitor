@@ -156,9 +156,9 @@ const NO_MAC: &str = "00:00:00:00:00:00";
 const NULL_LOOPBACK_HEADER_LEN: usize = 4;
 
 /// Never panics on malformed input — returns None instead. This function
-/// is exercised by the cargo-fuzz target in `fuzz/fuzz_targets/parse_packet.rs`
-/// specifically because it runs on untrusted, attacker-reachable bytes, for
-/// every `LinkType`.
+/// delegates to the classified parser, exercised by the cargo-fuzz target
+/// in `fuzz/fuzz_targets/parse_packet.rs` on untrusted, attacker-reachable
+/// bytes for every `LinkType`.
 pub fn parse_packet(data: &[u8], link_type: LinkType) -> Option<ParsedPacket> {
     parse_packet_result(data, link_type).ok()
 }
@@ -175,7 +175,7 @@ pub enum ParseFailure {
 /// protocol headers. A truncated ARP/VLAN/IP header remains a decode failure;
 /// unknown EtherTypes are unsupported, not proof their payload is valid.
 /// The Option-returning API above remains available to existing consumers
-/// and fuzzes this same path for all supported link types.
+/// while the fuzz target exercises this classified path for every link type.
 pub fn parse_packet_result(
     data: &[u8],
     link_type: LinkType,
@@ -200,6 +200,25 @@ pub fn parse_packet_result(
                     matches!(kind.0, 0x8100 | 0x88a8 | 0x9100 | 0x88e5 | 0x0800 | 0x86dd | 0x0806)
                 }) {
                     return Err(ParseFailure::Malformed);
+                }
+                // These undecoded WAN/carrier encapsulations may carry IP.
+                // Keep a health signal until inner decoding exists (JAM-253);
+                // this is separate from the decoder-limit guard above.
+                const IP_CARRYING_ENCAPSULATIONS: [u16; 3] = [0x8864, 0x8847, 0x8848];
+                if sliced.payload_ether_type().is_some_and(|kind| {
+                    IP_CARRYING_ENCAPSULATIONS.contains(&kind.0)
+                }) {
+                    return Err(ParseFailure::Malformed);
+                }
+                // The innermost type/length field also covers VLAN-wrapped
+                // 802.3 frames. Padding may exceed the declared payload size.
+                if let Some(payload) = sliced.ether_payload() {
+                    let kind = payload.ether_type.0;
+                    if (kind <= 1500 && payload.payload.len() < usize::from(kind))
+                        || (1501..=1535).contains(&kind)
+                    {
+                        return Err(ParseFailure::Malformed);
+                    }
                 }
                 // ARP's length check trusts its address-size fields. Check
                 // consistency for known types before excluding it from health

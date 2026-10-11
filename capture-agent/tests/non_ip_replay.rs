@@ -92,6 +92,68 @@ fn ieee8023_llc_stp_is_unsupported_instead_of_malformed() {
 }
 
 #[test]
+fn ip_carrying_pppoe_and_mpls_remain_decode_failures() {
+    let mut ip = Vec::new();
+    etherparse::PacketBuilder::ipv4([192, 0, 2, 1], [192, 0, 2, 2], 64)
+        .udp(12000, 12001)
+        .write(&mut ip, b"inner")
+        .unwrap();
+    for kind in [0x8864u16, 0x8847, 0x8848] {
+        let mut payload = if kind == 0x8864 {
+            let mut p = vec![0x11, 0, 0, 1];
+            p.extend(((ip.len() + 2) as u16).to_be_bytes());
+            p.extend([0, 0x21]);
+            p
+        } else {
+            vec![0, 0, 1, 64]
+        };
+        payload.extend(&ip);
+        for tagged in [false, true] {
+            let mut frame = vec![0; 12];
+            if tagged {
+                frame.extend([0x81, 0, 0, 7]);
+            }
+            frame.extend(kind.to_be_bytes());
+            frame.extend(&payload);
+            assert_eq!(
+                parse_packet_result(&frame, LinkType::Ethernet).unwrap_err(),
+                ParseFailure::Malformed,
+                "kind {kind:#06x}, tagged {tagged}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ieee8023_length_requires_complete_payload_and_allows_padding() {
+    for tagged in [false, true] {
+        for (declared, captured, expected) in [
+            (100u16, 0, ParseFailure::Malformed),
+            (100, 46, ParseFailure::Malformed),
+            (1500, 1499, ParseFailure::Malformed),
+            (1500, 1500, ParseFailure::UnsupportedNonIp),
+            (38, 46, ParseFailure::UnsupportedNonIp),
+            (0, 46, ParseFailure::UnsupportedNonIp),
+            (1501, 1501, ParseFailure::Malformed),
+            (1535, 1535, ParseFailure::Malformed),
+            (1536, 0, ParseFailure::UnsupportedNonIp),
+        ] {
+            let mut frame = vec![0; 12];
+            if tagged {
+                frame.extend([0x81, 0, 0, 7]);
+            }
+            frame.extend(declared.to_be_bytes());
+            frame.resize(frame.len() + captured, 0);
+            assert_eq!(
+                parse_packet_result(&frame, LinkType::Ethernet).unwrap_err(),
+                expected,
+                "declared {declared}, captured {captured}, tagged {tagged}"
+            );
+        }
+    }
+}
+
+#[test]
 fn ethernet_padding_does_not_turn_valid_arp_into_a_parse_failure() {
     for padding in [0, 0xa5] {
         let mut frame = arp();
