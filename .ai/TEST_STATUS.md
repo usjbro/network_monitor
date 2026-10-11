@@ -1,20 +1,9 @@
-# PR #281 — Claude code-review corrections (2026-10-11)
+# PR #281 — review follow-ups (2026-10-11)
 
-Reproduced PPPoE/MPLS and incomplete 802.3 payloads being excluded as unsupported. Added separate IP-carrying encapsulation guard for PPPoE session/MPLS unicast/multicast; innermost 802.3 length validation permits padding and rejects reserved values 1501–1535. Regressions cover plain/VLAN frames and boundary lengths. Replaced tautological wrapper-parity fuzz assertion with Ethernet-only unsupported classification invariant. Capture-file docs now explicitly exclude non-IP frames and link JAM-254; inner PPPoE/MPLS decoding remains JAM-253.
-
-Both added tests failed before fixes and pass after. Final checks: 484 Rust tests passed (11 ignored), authenticated replay passed, strict Clippy/release passed, 1,650,280 fuzz runs in 31 seconds passed, diff check passed. Independent read-only re-review found no findings. Web code/dependencies unchanged; prior web/audit/browser results remain recorded below. Previous commit7e73530 CI passed; new commit CI and Claude re-review pending. No merge authorized or performed.
-
----
-
-# JAM-165 / JAM-192 — Claude review follow-ups (2026-10-11)
-
-James directly approved commit/push/PR for Claude code review in chat; no merge authorized. Claude's Slack plan review is agent-authored, not a human gate approval. Posting the PR/review request via Slack is explicitly authorized by the user.
-
-Added LLC/STP, padded ARP, opaque and cleartext MACsec regressions; opaque MACsec reproduced a false unsupported classification before the guard and passes afterward. The replay now checks that a truncated non-IP frame still produces the existing capture-length warning. The fuzz target asserts Option/classified API status agreement. Docs state the deliberate visibility tradeoff: no non-IP packet/flow events or dedicated counter, with wire shape preserved.
-
-Final checks pass: 482 Rust tests (11 ignored), authenticated replay (1), 602 web tests, strict Clippy, lint/typecheck, release/web builds, Chromium smoke (1), cargo audit, npm audit allowlist gate, and 867,936 seeded fuzz runs in 31s. Independent code/security re-review found no remaining findings. Tooling is staged outside the repository at `/workspace/.network-monitor-tools`; no dependency/lockfile changes.
-
-Original live capture is unavailable; do not infer its 75% distribution from the fixture or claim its reassembly cause has been ruled out. Parse-failure counting precedes reassembly sniffing in code. Linear/contract remain In Review pending PR review. Main tracked files remain clean.
+- RED/GREEN: `ip_carrying_pbb_and_etag_remain_decode_failures` and `ieee8023_snap_carrying_ip_remains_a_decode_failure` failed (classified `UnsupportedNonIp`) before the guards and pass after. Earlier follow-ups (`35c3028`) likewise reproduced PPPoE/MPLS and short-802.3 false exclusions, and opaque MACsec, before fixing them.
+- `non_ip_replay` (ignored) passes locally and now runs in CI after live-loopback; it fails when the capture-loop `UnsupportedNonIp` exclusion is removed. CI run 38157352312 (`c347e61`) passed including that step.
+- `cargo test --locked` (capture-agent): 486 passed, 11 ignored. Warnings-denied Clippy and release build pass. `cargo +nightly fuzz run parse_packet` 30 s: 915,348 runs, no crash; the fuzz target asserts only Ethernet can yield `UnsupportedNonIp`.
+- Web code unchanged since the original commit; web/audit/browser results below still apply.
 
 ---
 

@@ -3028,8 +3028,7 @@ async fn main() -> std::io::Result<()> {
                             // this frame. Unsupported non-IP frames were
                             // excluded above; the summary still reports the
                             // link type and length, not a decoder stage.
-                            // Gated by its
-                            // own finding_event_limiter (not shared with
+                            // Gated by its own finding_event_limiter (not shared with
                             // packet_event_limiter) so a burst of malformed
                             // frames can't flood the broadcast channel.
                             if finding_event_limiter.allow(now_ms) {

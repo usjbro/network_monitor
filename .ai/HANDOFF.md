@@ -1,32 +1,8 @@
-# PR #281 — Claude code-review corrections (2026-10-11)
+# JAM-165 / JAM-192 — non-IP parse-failure classification (PR #281, 2026-10-11)
 
-Reproduced PPPoE/MPLS and incomplete 802.3 payloads being excluded as unsupported. Added separate IP-carrying encapsulation guard for PPPoE session/MPLS unicast/multicast; innermost 802.3 length validation permits padding and rejects reserved values 1501–1535. Regressions cover plain/VLAN frames and boundary lengths. Replaced tautological wrapper-parity fuzz assertion with Ethernet-only unsupported classification invariant. Capture-file docs now explicitly exclude non-IP frames and link JAM-254; inner PPPoE/MPLS decoding remains JAM-253.
+Branch `jamesmbrownjr/jam-165-unparsed-frames-non-ip-and-counter`, worktree `.worktrees/unparsed-frames-non-ip-and-counter`. `parse_packet_result` separates decode failures from successfully framed unsupported non-IP Ethernet; the capture loop excludes the latter from `unparseableFrames` and malformed-frame findings. Wire shape unchanged. Decoder limits, malformed ARP sizes, opaque MACsec, short 802.3 payloads, and IP-capable encapsulations (PPPoE session, MPLS, PBB, E-tag, IP-over-SNAP) remain failures; inner decoding is JAM-253, non-IP capture-file recording JAM-254.
 
-Both added tests failed before fixes and pass after. Final checks: 484 Rust tests passed (11 ignored), authenticated replay passed, strict Clippy/release passed, 1,650,280 fuzz runs in 31 seconds passed, diff check passed. Independent read-only re-review found no findings. Web code/dependencies unchanged; prior web/audit/browser results remain recorded below. Previous commit7e73530 CI passed; new commit CI and Claude re-review pending. No merge authorized or performed.
-
----
-
-# JAM-165 / JAM-192 — Claude review follow-ups (2026-10-11)
-
-James directly approved commit/push/PR for Claude code review in chat; no merge authorized. Claude's Slack plan review is agent-authored, not a human gate approval. Posting the PR/review request via Slack is explicitly authorized by the user.
-
-Added LLC/STP, padded ARP, opaque and cleartext MACsec regressions; opaque MACsec reproduced a false unsupported classification before the guard and passes afterward. The replay now checks that a truncated non-IP frame still produces the existing capture-length warning. The fuzz target asserts Option/classified API status agreement. Docs state the deliberate visibility tradeoff: no non-IP packet/flow events or dedicated counter, with wire shape preserved.
-
-Final checks pass: 482 Rust tests (11 ignored), authenticated replay (1), 602 web tests, strict Clippy, lint/typecheck, release/web builds, Chromium smoke (1), cargo audit, npm audit allowlist gate, and 867,936 seeded fuzz runs in 31s. Independent code/security re-review found no remaining findings. Tooling is staged outside the repository at `/workspace/.network-monitor-tools`; no dependency/lockfile changes.
-
-Original live capture is unavailable; do not infer its 75% distribution from the fixture or claim its reassembly cause has been ruled out. Parse-failure counting precedes reassembly sniffing in code. Linear/contract remain In Review pending PR review. Main tracked files remain clean.
-
----
-
-# JAM-165 / JAM-192 — non-IP parse-failure classification (2026-10-10)
-
-James approved this paired task directly in chat. Worktree `.worktrees/unparsed-frames-non-ip-and-counter`, branch `jamesmbrownjr/jam-165-unparsed-frames-non-ip-and-counter`. Cloud-local gate is approved/delegated in-session. No Slack bot/webhook is configured; status is reported in chat, never through a connector posting as James. Linear issues and the coordination contract are In Review.
-
-`parse_packet_result` separates decoder failures from successfully framed unsupported non-IP Ethernet traffic; `parse_packet` remains Option-returning and exercises the same implementation through existing fuzz coverage. The capture loop excludes unsupported traffic from `unparseableFrames` and malformed-frame findings. Wire shape is unchanged; UI wording and contract comments/docs clarify that unsupported non-IP traffic is excluded from decode-failure counts. Truncated ARP/VLAN/IP headers remain failures. Unknown protocol payloads are not certified valid or decoded.
-
-Mixed authenticated binary replay (two UDP frames, ARP, LLDP, VLAN ARP, and a 4-byte truncated frame): before, 4 failures/findings; after, 1 failure/finding for the truncated frame only. Unsupported traffic explains 75% of the old failure count in this fixture; no original live-capture proportion is claimed. Final verification passes: 478 Rust tests (11 ignored), authenticated replay (1), 602 web tests, strict Clippy, lint, typecheck, Rust release and web builds, and 2,538,928 seeded parser fuzz runs (31s). Independent code/security re-review found no remaining findings after boundary guards for VLAN decoder limits and inconsistent known ARP address sizes. See TEST_STATUS for final results.
-
-Changes remain uncommitted; commit/push/PR/merge have not been authorized in this session. Leave the changes reviewable in the worktree. The main checkout has no tracked changes; the coordination contract is kept only at the main root per repository instructions.
+Claude review follow-ups landed on the PR: CI now runs the ignored `non_ip_replay` test; PBB/E-tag/SNAP guards and named EtherType constants added. Original live capture is unavailable, so the fixture does not establish its failure distribution or reassembly root cause. Merge not authorized. See TEST_STATUS.
 
 ---
 

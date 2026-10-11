@@ -125,6 +125,70 @@ fn ip_carrying_pppoe_and_mpls_remain_decode_failures() {
 }
 
 #[test]
+fn ip_carrying_pbb_and_etag_remain_decode_failures() {
+    let mut inner = Vec::new();
+    etherparse::PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
+        .ipv4([192, 0, 2, 1], [192, 0, 2, 2], 64)
+        .udp(12000, 12001)
+        .write(&mut inner, b"inner")
+        .unwrap();
+    // PBB carries a whole customer Ethernet frame after its 4-byte I-TAG;
+    // an E-tag is 6 bytes followed by the next EtherType.
+    let pbb: Vec<u8> = [&[0, 0, 0, 1][..], &inner].concat();
+    let etag: Vec<u8> = [&[0, 0, 0, 0, 0, 0][..], &inner[12..]].concat();
+    for (kind, payload) in [(0x88e7u16, pbb), (0x893f, etag)] {
+        for tagged in [false, true] {
+            let mut frame = vec![0; 12];
+            if tagged {
+                frame.extend([0x81, 0, 0, 7]);
+            }
+            frame.extend(kind.to_be_bytes());
+            frame.extend(&payload);
+            assert_eq!(
+                parse_packet_result(&frame, LinkType::Ethernet).unwrap_err(),
+                ParseFailure::Malformed,
+                "kind {kind:#06x}, tagged {tagged}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ieee8023_snap_carrying_ip_remains_a_decode_failure() {
+    let mut ip = Vec::new();
+    etherparse::PacketBuilder::ipv4([192, 0, 2, 1], [192, 0, 2, 2], 64)
+        .udp(12000, 12001)
+        .write(&mut ip, b"inner")
+        .unwrap();
+    // RFC 1042 (OUI 00-00-00) and 802.1H (OUI 00-00-F8) both carry an
+    // EtherType in the SNAP protocol ID; CDP (Cisco OUI) does not carry IP.
+    for (oui, pid, expected) in [
+        ([0, 0, 0], 0x0800u16, ParseFailure::Malformed),
+        ([0, 0, 0], 0x86dd, ParseFailure::Malformed),
+        ([0, 0, 0xf8], 0x0800, ParseFailure::Malformed),
+        ([0, 0, 0x0c], 0x2000, ParseFailure::UnsupportedNonIp),
+    ] {
+        for tagged in [false, true] {
+            let mut payload = vec![0xaa, 0xaa, 0x03];
+            payload.extend(oui);
+            payload.extend(pid.to_be_bytes());
+            payload.extend(&ip);
+            let mut frame = vec![0; 12];
+            if tagged {
+                frame.extend([0x81, 0, 0, 7]);
+            }
+            frame.extend((payload.len() as u16).to_be_bytes());
+            frame.extend(payload);
+            assert_eq!(
+                parse_packet_result(&frame, LinkType::Ethernet).unwrap_err(),
+                expected,
+                "oui {oui:02x?}, pid {pid:#06x}, tagged {tagged}"
+            );
+        }
+    }
+}
+
+#[test]
 fn ieee8023_length_requires_complete_payload_and_allows_padding() {
     for tagged in [false, true] {
         for (declared, captured, expected) in [

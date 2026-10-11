@@ -1,4 +1,4 @@
-use etherparse::{LinkExtSlice, NetSlice, SlicedPacket, TransportSlice};
+use etherparse::{EtherType, LinkExtSlice, NetSlice, SlicedPacket, TransportSlice};
 
 /// The link-layer framing a captured frame's raw bytes are in, matching the
 /// open capture handle's datalink type (`pcap::Capture::get_datalink()`,
@@ -196,18 +196,35 @@ pub fn parse_packet_result(
                 // etherparse can return success when its bounded link-extension
                 // array fills, before validating the next known header. Do not
                 // silently certify that undecoded encapsulation as non-IP.
-                if sliced.payload_ether_type().is_some_and(|kind| {
-                    matches!(kind.0, 0x8100 | 0x88a8 | 0x9100 | 0x88e5 | 0x0800 | 0x86dd | 0x0806)
-                }) {
+                const DECODER_KNOWN_ETHER_TYPES: [EtherType; 7] = [
+                    EtherType::VLAN_TAGGED_FRAME,
+                    EtherType::PROVIDER_BRIDGING,
+                    EtherType::VLAN_DOUBLE_TAGGED_FRAME,
+                    EtherType::MACSEC,
+                    EtherType::IPV4,
+                    EtherType::IPV6,
+                    EtherType::ARP,
+                ];
+                if sliced
+                    .payload_ether_type()
+                    .is_some_and(|kind| DECODER_KNOWN_ETHER_TYPES.contains(&kind))
+                {
                     return Err(ParseFailure::Malformed);
                 }
-                // These undecoded WAN/carrier encapsulations may carry IP.
-                // Keep a health signal until inner decoding exists (JAM-253);
+                // These undecoded WAN/carrier/bridging encapsulations may carry
+                // IP. Keep a health signal until inner decoding exists (JAM-253);
                 // this is separate from the decoder-limit guard above.
-                const IP_CARRYING_ENCAPSULATIONS: [u16; 3] = [0x8864, 0x8847, 0x8848];
-                if sliced.payload_ether_type().is_some_and(|kind| {
-                    IP_CARRYING_ENCAPSULATIONS.contains(&kind.0)
-                }) {
+                const IP_CARRYING_ENCAPSULATIONS: [EtherType; 5] = [
+                    EtherType(0x8864), // PPPoE session
+                    EtherType(0x8847), // MPLS unicast
+                    EtherType(0x8848), // MPLS multicast
+                    EtherType(0x88e7), // 802.1ah PBB (MAC-in-MAC)
+                    EtherType(0x893f), // 802.1BR E-tag
+                ];
+                if sliced
+                    .payload_ether_type()
+                    .is_some_and(|kind| IP_CARRYING_ENCAPSULATIONS.contains(&kind))
+                {
                     return Err(ParseFailure::Malformed);
                 }
                 // The innermost type/length field also covers VLAN-wrapped
@@ -218,6 +235,19 @@ pub fn parse_packet_result(
                         || (1501..=1535).contains(&kind)
                     {
                         return Err(ParseFailure::Malformed);
+                    }
+                    // LLC/SNAP with an EtherType-carrying OUI (RFC 1042
+                    // 00-00-00, 802.1H 00-00-F8) can wrap IP, which this
+                    // decoder does not unwrap; keep it as a health signal.
+                    if kind <= 1500 {
+                        if let [0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00 | 0xf8, hi, lo, ..] =
+                            payload.payload
+                        {
+                            let pid = EtherType(u16::from_be_bytes([*hi, *lo]));
+                            if pid == EtherType::IPV4 || pid == EtherType::IPV6 {
+                                return Err(ParseFailure::Malformed);
+                            }
+                        }
                     }
                 }
                 // ARP's length check trusts its address-size fields. Check
