@@ -1,12 +1,12 @@
 #![no_main]
 use capture_agent::l7::sniff_l7;
-use capture_agent::parse::{parse_packet, LinkType};
+use capture_agent::parse::{parse_packet, parse_packet_result, LinkType};
 use capture_agent::traceroute::parse_icmp_reply;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // The only property under test: arbitrary bytes must never panic.
-    // A None/Some result are both acceptable outcomes. Exercises all three
+    // Arbitrary bytes must never panic, and the classified and legacy APIs
+    // must agree on whether an IP packet decoded. Exercises all three
     // LinkType framing paths (issue #63), not just Ethernet — the first
     // byte (consumed here, not passed to the parser) selects which, so the
     // same corpus fuzzes every link-layer assumption parse_packet makes.
@@ -16,7 +16,10 @@ fuzz_target!(|data: &[u8]| {
         _ => LinkType::Ethernet,
     };
     let rest = if data.is_empty() { data } else { &data[1..] };
-    if let Some(parsed) = parse_packet(rest, link_type) {
+    let classified = parse_packet_result(rest, link_type);
+    let legacy = parse_packet(rest, link_type);
+    assert_eq!(legacy.is_some(), classified.is_ok());
+    if let Ok(parsed) = classified {
         // Also fuzzes l7::sniff_l7 (HTTP/DNS/TLS ClientHello + JA3 field
         // extraction, Task 2) on whatever payload parse_packet extracted —
         // this is the same attacker-reachable entry point the real capture

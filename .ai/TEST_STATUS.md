@@ -1,3 +1,38 @@
+# JAM-165 / JAM-192 — Claude review follow-ups (2026-10-11)
+
+James directly approved commit/push/PR for Claude code review in chat; no merge authorized. Claude's Slack plan review is agent-authored, not a human gate approval. Posting the PR/review request via Slack is explicitly authorized by the user.
+
+Added LLC/STP, padded ARP, opaque and cleartext MACsec regressions; opaque MACsec reproduced a false unsupported classification before the guard and passes afterward. The replay now checks that a truncated non-IP frame still produces the existing capture-length warning. The fuzz target asserts Option/classified API status agreement. Docs state the deliberate visibility tradeoff: no non-IP packet/flow events or dedicated counter, with wire shape preserved.
+
+Final checks pass: 482 Rust tests (11 ignored), authenticated replay (1), 602 web tests, strict Clippy, lint/typecheck, release/web builds, Chromium smoke (1), cargo audit, npm audit allowlist gate, and 867,936 seeded fuzz runs in 31s. Independent code/security re-review found no remaining findings. Tooling is staged outside the repository at `/workspace/.network-monitor-tools`; no dependency/lockfile changes.
+
+Original live capture is unavailable; do not infer its 75% distribution from the fixture or claim its reassembly cause has been ruled out. Parse-failure counting precedes reassembly sniffing in code. Linear/contract remain In Review pending PR review. Main tracked files remain clean.
+
+---
+
+# JAM-165 / JAM-192 — unsupported non-IP traffic versus parse failures (2026-10-10)
+
+Worktree `.worktrees/unparsed-frames-non-ip-and-counter`, branch `jamesmbrownjr/jam-165-unparsed-frames-non-ip-and-counter`, based on main `28e19db`.
+
+- RED: `cargo test --locked --manifest-path capture-agent/Cargo.toml --test non_ip_replay -- --ignored --test-threads=1 --nocapture` on the old capture loop: the six-frame classic-pcap fixture produced `unparseableFrames=4` and four malformed-frame findings (ARP 42 bytes, LLDP 16 bytes, VLAN ARP 46 bytes, truncated Ethernet 4 bytes). The assertion expected 1 and failed. The other two frames were valid UDP. Thus unsupported non-IP traffic explained 3/4 (75%) of this fixture's old failure count.
+- GREEN: the same authenticated binary replay passed after the change, reporting count 1 and only the 4-byte truncated-frame finding. Final rerun passed again. The test binds an exclusive loopback port and is opt-in by default.
+- RED/GREEN: the capture-stats UI regression failed on the old generic text; after the update the banner explicitly excludes non-IP traffic from its parse-failure count.
+- Review RED/GREEN: added regressions reproduced suppression at etherparse's bounded VLAN-extension limit and inconsistent known ARP address sizes; both failed before the guards and passed after. Six default classification tests now pass (ARP, VLAN/QinQ, unknown EtherTypes, header truncation, decoder-limit handling, and ARP address-size consistency).
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml`: final pass, 478 passed, 11 ignored across library/binary/integration tests. The ignored set includes live/port-dependent tests and the new replay test; the new replay was separately exercised as above.
+- `cargo clippy --all-targets --locked --manifest-path capture-agent/Cargo.toml -- -D warnings`: final pass.
+- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: final pass.
+- `npx vitest run --maxWorkers=2`: final pass, 82 files / 602 tests.
+- `npm run lint`: final pass; `npx tsc --noEmit`: final pass.
+- `npm run build`: final pass (Next.js 16.3.8, Webpack). `cargo +nightly fuzz run parse_packet /tmp/network-monitor-fuzz-corpus -- -max_total_time=30 -max_len=65535` (from capture-agent/): passed, 2,538,928 runs in 31 seconds, no crash. Seeds include ARP prefixes, inconsistent address sizes, and VLAN nesting boundaries.
+- Independent code/security review: two initial boundary findings were reproduced and fixed; final re-review reported no remaining findings and ran six focused tests (one ignored).
+- `git diff --check`: passed. No whole-crate formatting was applied; the new Rust test file was formatted with rustfmt.
+
+Environment: Rust stable 1.99 and libpcap 1.10.5 were staged under `/tmp` because the cloud workspace initially lacked them; `/tmp/network-monitor-env.sh` selects those tools/libraries. npm used a writable `/tmp` cache. No product dependency or lockfile changes. Existing Vite config migration and Next.js middleware deprecation notices are informational.
+
+Limits: this is fixture evidence, not a replay of the original live capture/screenshots. Unknown non-IP payloads are intentionally not decoded or certified valid. Known undecoded encapsulation retains the prior parse-failure behavior. The existing Option parser/fuzz API delegates to the classified path. No commit, push, PR or merge performed.
+
+---
+
 CI follow-up: Rust1.99 clippy rejected `map_err(&credential_error)` as an unnecessary borrow; changed to `map_err(credential_error)`. Local warnings-denied clippy and full Rust suite passed again; CI must verify its newer toolchain. No behavior change or new test required for this lint correction.
 
 Published review follow-up: corrected the wire-fixture regeneration recipe to authenticate; `npx vitest run lib/__tests__/agent-wire-contract.test.ts` passed all 10 tests. Signal cleanup documentation clarified; no production behavior changed.
