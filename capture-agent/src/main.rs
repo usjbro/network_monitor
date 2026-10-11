@@ -2605,8 +2605,8 @@ async fn main() -> std::io::Result<()> {
     // the client catches up.
     let relay_lagged_events = Arc::new(AtomicU64::new(0));
     // Cumulative count of frames the capture thread received but couldn't
-    // parse at all (`parse::parse_packet` returned `None`) — an
-    // unsupported/malformed link-layer or network-layer shape, distinct
+    // decode because of malformed/truncated input or decoder limits. Successfully
+    // framed non-IP Ethernet traffic is intentionally excluded, distinct
     // from both `capture_stats.dropped` (the kernel/driver never delivered
     // the frame to this process at all) and `relay_lagged_events` above
     // (this process's own outbound backlog). Before this counter existed,
@@ -3013,16 +3013,22 @@ async fn main() -> std::io::Result<()> {
                                 data.len(), ReassemblyStatus::IncompleteTruncatedAtCapture.label()
                             );
                         }
-                        let Some(parsed) = parse::parse_packet(&data, link_type) else {
+                        let parsed_result = parse::parse_packet_result(&data, link_type);
+                        // Non-IP Ethernet traffic is intentionally outside flow
+                        // analysis; successful framing is not a capture failure.
+                        if matches!(parsed_result, Err(parse::ParseFailure::UnsupportedNonIp)) {
+                            continue;
+                        }
+                        let Ok(parsed) = parsed_result else {
                             unparseable_frames.fetch_add(1, Ordering::Relaxed);
                             // JAM-12 Expert Info: malformed-frame. Neither
-                            // frameId nor flowId — parse_packet failing
+                            // frameId nor flowId — a malformed parse result
                             // means no ParsedPacket, and therefore no
                             // packet event or flow, was ever produced for
-                            // this frame (see the design spec's "Deliberate
-                            // deviation": this doesn't thread a per-parse-
-                            // stage reason out of parse_packet, only what
-                            // this call site already knows). Gated by its
+                            // this frame. Unsupported non-IP frames were
+                            // excluded above; the summary still reports the
+                            // link type and length, not a decoder stage.
+                            // Gated by its
                             // own finding_event_limiter (not shared with
                             // packet_event_limiter) so a burst of malformed
                             // frames can't flood the broadcast channel.

@@ -152,8 +152,9 @@ export interface TracerouteHop {
 // `dropped`/`ifDropped` are kernel/driver-side losses (packets that never
 // reached the agent process at all); `relayLaggedEvents` is this relay's
 // own outbound backlog to a slow SSE client; `unparseableFrames` is frames
-// the agent did receive but couldn't decode at all (e.g. an unsupported
-// link-layer shape — see issue #63). All three are independent of, and a
+// the agent did receive but couldn't decode (malformed/truncated input or
+// decoder limits); successfully framed non-IP Ethernet traffic is excluded.
+// All three are independent of, and a
 // precondition for trusting, any connection's retransmit-derived
 // `packetLoss` figure — see issue #61. `totalConnectionsObserved`/
 // `capacityEvictions`/`idleEvictions` are the "showing N of M" horizon

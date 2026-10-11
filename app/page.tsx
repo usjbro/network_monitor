@@ -775,7 +775,7 @@ export default function TerminalApp() {
         <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2">
           capture degraded — {captureStats.dropped + captureStats.ifDropped} frame(s) dropped by the kernel/driver
           {captureStats.relayLaggedEvents > 0 && `, ${captureStats.relayLaggedEvents} event(s) dropped for a lagging client`}
-          {captureStats.unparseableFrames > 0 && `, ${captureStats.unparseableFrames} frame(s) could not be parsed`}
+          {captureStats.unparseableFrames > 0 && `, ${captureStats.unparseableFrames} frame(s) could not be parsed (non-IP traffic excluded)`}
           {' '}— per-connection loss figures below may under-report
         </div>
       )}
