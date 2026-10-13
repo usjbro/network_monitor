@@ -1,3 +1,20 @@
+# JAM-257 — CI supply-chain hardening (2026-10-13)
+
+Worktree `.worktrees/ci-pin-actions-and-npx`; PR https://github.com/usjbro/network_monitor/pull/283. All 13 Action references pinned to verified upstream SHAs. Both Rust steps use durable master-history SHA `e2a55d2ffb04f378e9626c28d38b36d230d1e12f` with explicit stable/nightly inputs, following upstream guidance. CI tools use installed local binaries; explicit scripts-disabled installs preserve `.npmrc` policy.
+
+- `python3 /private/tmp/jam257-check-workflows.py`: baseline failed (13 floating refs, four npx calls, two implicit install policies); edited workflow passed.
+- `node /private/tmp/jam257-check-semantics.cjs`: passed; parsed YAML preserves all jobs, steps, conditions, permissions, timeouts, audit, capture and fuzz/E2E checks except the approved pin/tool/install fields. Final references match saved upstream provenance.
+- `npm ci --ignore-scripts`: passed, 480 packages installed fresh. Lockfile install-script packages are oxide, unrs-resolver and fsevents; native binding loads and Sharp 2x2 PNG generation passed without rebuilds.
+- `./node_modules/.bin/tsc --noEmit`, `npm run lint`, `npm run build`: passed. Existing middleware/Edge warnings; Next webpack flags unchanged.
+- `./node_modules/.bin/vitest run`: initial sandbox run hit listener EPERM errors/timeouts; approved unsandboxed rerun passed all 82 files / 602 tests, exit 0. No tests suppressed or changed. JAM-261 WHOIS error did not reproduce and is not claimed fixed.
+- `npm audit --json`: initial sandbox DNS failure; approved network rerun reported advisories (exit 1). `node .github/scripts/check-npm-audit.mjs /private/tmp/jam257-npm-audit.json`: passed unchanged gate, only existing allowlisted GHSA-vfj7-8cjw-p6xm.
+- `./node_modules/.bin/playwright --version`: 1.63.0. Missing-local-tool probes fail immediately without package-manager fallback.
+- `git diff --check`: passed. Scope checks confirm application, Rust, dependency manifests/lockfile, .npmrc, Next configuration/flags and deploy unchanged.
+
+Independent local review corrected generated Rust-channel candidates to durable master history; re-review passed. Published PR code review found historical test-status loss; this entry restores the complete baseline below. Published workflow/Dependabot security review found no actionable issues. Reviewer inspected actual PR diff and saved provenance, without rerunning suites. Local Node25 has a Vitest engine-support warning; CI remains Node22. PR Sonar gate and Playwright passed on initial head; full CI/reviews on the updated head and post-merge main Sonar findings remain required. Do not merge own branch.
+
+---
+
 # PR #281 — review follow-ups (2026-10-11)
 
 - RED/GREEN: `ip_carrying_pbb_and_etag_remain_decode_failures` and `ieee8023_snap_carrying_ip_remains_a_decode_failure` failed (classified `UnsupportedNonIp`) before the guards and pass after. Earlier follow-ups (`35c3028`) likewise reproduced PPPoE/MPLS and short-802.3 false exclusions, and opaque MACsec, before fixing them.
