@@ -1,3 +1,17 @@
+# JAM-255 — publication handoff (2026-10-13)
+
+Worktree `.worktrees/spike-local-query-service-between-the-web-ui-and-recorded`, branch `jamesmbrownjr/jam-255-spike-local-query-service-between-the-web-ui-and-recorded`, source baseline `fce195e0d87dac6fb3d14cec5b459ab3b7efc141`. James authorized finishing publication/closeout in chat after the draft was reviewed. Existing gate remains approved/delegated; do not merge your own branch.
+
+Deliverable: decision record, companion method/measurement/validation record, three raw JSON results. Compares four process options; recommends an isolated worker and proposed patched SQLite index for opt-in finalized incident captures. Raw-cleartext storage, missing provenance/auth, filter parity, query bounds, plaintext-at-rest and high-rate limitations are explicit. Five James adoption decisions remain future work. Benchmark harness/generated artifacts stay `/private/tmp/jam255-bench`, outside repository; clean-clone non-reproducibility is documented. No service, dependency or recording-policy change.
+
+Independent source/security review passed with at-rest disclosure corrected; Claude approved all three review corrections at 11:50 EDT (`1791906618.440619`) in task Slack thread `1791755482.718159`. Affected JAM-17/18/19/20/28/29/117 have proposal-impact comments; JAM-18/19/117 have high-rate follow-up; JAM-196 has caller-auth evidence.
+
+Validation: 88 focused Vitest pass; 487 full Rust pass/10 ignored. Full local Vitest fails with unhandled WHOIS ECONNRESET despite 602 passing assertions; separately filed JAM-261. Evidence identity/math/checksum/link and final scope/diff checks pass. This local failure is disclosed, not suppressed; PR CI still must be verified.
+
+Next: publish the docs PR, request Claude/Codex review, wait for clean required checks and final approval, then ask a human/reviewer to merge per the no-own-merge rule. Once merge is verified, mark JAM-255 Done and complete coordination. No implicit authorization to implement the proposed service or adopt its privacy/store/default choices. Leave pre-existing node_modules symlink and main-checkout changes alone.
+
+---
+
 # JAM-165 / JAM-192 — non-IP parse-failure classification (PR #281, 2026-10-11)
 
 Branch `jamesmbrownjr/jam-165-unparsed-frames-non-ip-and-counter`, worktree `.worktrees/unparsed-frames-non-ip-and-counter`. `parse_packet_result` separates decode failures from successfully framed unsupported non-IP Ethernet; the capture loop excludes the latter from `unparseableFrames` and malformed-frame findings. Wire shape unchanged. Decoder limits, malformed ARP sizes, opaque MACsec, short 802.3 payloads, and IP-capable encapsulations (PPPoE session, MPLS, PBB, E-tag, IP-over-SNAP) remain failures; inner decoding is JAM-253, non-IP capture-file recording JAM-254.

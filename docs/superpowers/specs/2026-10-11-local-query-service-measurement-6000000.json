@@ -1,0 +1,433 @@
+{
+  "n": 6000000,
+  "synthetic_seconds": 60,
+  "synthetic_pps_proxy": 100000,
+  "source": "/private/tmp/jam255-bench/packets-6000000.pcapng",
+  "database": "/private/tmp/jam255-bench/packets-6000000.sqlite",
+  "schema": "CREATE TABLE packets (\n id INTEGER PRIMARY KEY, ts_us INTEGER NOT NULL, interface_id INTEGER NOT NULL,\n block_offset INTEGER NOT NULL, data_offset INTEGER NOT NULL, cap_len INTEGER NOT NULL,\n wire_len INTEGER NOT NULL, ethertype INTEGER NOT NULL, ip_version INTEGER NOT NULL,\n ip_proto INTEGER NOT NULL, src_ip INTEGER NOT NULL, dst_ip INTEGER NOT NULL,\n src_port INTEGER NOT NULL, dst_port INTEGER NOT NULL, flow_id INTEGER NOT NULL);\nCREATE INDEX packets_time ON packets(ts_us,id);\nCREATE INDEX packets_flow ON packets(flow_id,ts_us,id);\nCREATE INDEX packets_filter ON packets(ip_proto,dst_port,ts_us,id);\nCREATE INDEX packets_length ON packets(wire_len DESC,ts_us,id);",
+  "batch_rows": 5000,
+  "python": "3.9.6 (default, Aug 25 2026, 21:26:21) \n[Clang 21.0.0 (clang-2100.3.34.2)]",
+  "sqlite": "3.51.0",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "cpu": "Apple M3",
+  "logical_cpus": 8,
+  "ram_bytes": 17179869184,
+  "harness_sha256": "535e4339f6a12ff1d1566f500dc8bb4174f32e295195f8582f72c06227106ce2",
+  "limits": [
+    "synthetic 64-byte fixed Ethernet/IPv4 frames, 4096 unidirectional flow tuples; no real home/office/datacenter traffic",
+    "header metadata only; no Rust decoder, field tree, summary, enrichment, reassembly, TLS, IPv6, other linktypes or malformed captures",
+    "SQLite3.51.0 measurement runtime only; production needs patched pinned version and rebench",
+    "first queries occur after import and OS cache is not dropped; no cold-cache claim",
+    "single writer/checkpointer; readers only between commits; no concurrent OS traffic or UI workload deliberately injected"
+  ],
+  "generate_seconds": 2.641874584,
+  "scan_decode": {
+    "seconds": 7.236265625,
+    "us_per_packet": 1.2060442708333334,
+    "pps": 829156.9589804824,
+    "rows": 6000000
+  },
+  "pragmas": [
+    "journal_mode=WAL",
+    "synchronous=NORMAL",
+    "cache_size=-32768",
+    "mmap_size=0",
+    "temp_store=FILE",
+    "wal_autocheckpoint=1000"
+  ],
+  "ingest_progress": [
+    {
+      "rows": 5000,
+      "elapsed_seconds": 0.014229750000000152,
+      "page_ms": 0.1029999999992981,
+      "page_rows": 200,
+      "visible_rows": 5000
+    },
+    {
+      "rows": 3000000,
+      "elapsed_seconds": 93.53556325,
+      "page_ms": 4.8921249999978045,
+      "page_rows": 200,
+      "visible_rows": 3000000
+    },
+    {
+      "rows": 6000000,
+      "elapsed_seconds": 185.143928833,
+      "page_ms": 0.655416999990166,
+      "page_rows": 200,
+      "visible_rows": 6000000
+    }
+  ],
+  "ingest": {
+    "seconds": 185.143982583,
+    "us_per_packet": 30.8573304305,
+    "pps": 32407.210411552,
+    "includes": "header scan/decode, four maintained indexes, commits, automatic checkpoints and three progress reads; generation excluded"
+  },
+  "final_checkpoint_ms": 5.709332999998651,
+  "analyze_ms": 17052.965458000017,
+  "correctness": {
+    "rows": 6000000,
+    "sum_id": 18000003000000,
+    "filter_rows": 1500000,
+    "integrity_check": "ok"
+  },
+  "queries": {
+    "time_first_page": {
+      "sql": "SELECT id,ts_us,src_ip,dst_ip,ip_proto,wire_len,data_offset,cap_len FROM packets ORDER BY ts_us,id LIMIT 200",
+      "args": [],
+      "plan": [
+        [
+          5,
+          0,
+          248,
+          "SCAN packets USING INDEX packets_time"
+        ]
+      ],
+      "first_query_ms_cache_not_controlled": 0.12054100000113976,
+      "warm_samples_ms": [
+        0.08491700000945457,
+        0.08375000001592525,
+        0.08149999999318425,
+        0.08149999999318425,
+        0.08191700001702884,
+        0.08170899999981884,
+        0.08112499997992018,
+        0.08129100001497136,
+        0.08174999999255306,
+        0.08191700001702884,
+        0.08083299999839255,
+        0.08141699998986951,
+        0.08087499998055137,
+        0.08124999999381544,
+        0.08141700001829122,
+        0.08174999999255306,
+        0.08187500000644832,
+        0.08058299999902374,
+        0.08108299999776136,
+        0.08012500001086664
+      ],
+      "warm_p50_ms": 0.08141700001829122,
+      "warm_p95_ms": 0.08375000001592525,
+      "warm_max_ms": 0.08491700000945457,
+      "rows": 200,
+      "sample": [
+        [
+          1,
+          1700000000000000,
+          167772161,
+          3221225985,
+          6,
+          64,
+          76,
+          64
+        ],
+        [
+          2,
+          1700000000000010,
+          167772162,
+          3221225986,
+          17,
+          64,
+          172,
+          64
+        ]
+      ],
+      "correctness": "expected rows verified"
+    },
+    "time_keyset_middle": {
+      "sql": "SELECT id,ts_us,src_ip,dst_ip,ip_proto,wire_len,data_offset,cap_len FROM packets WHERE (ts_us,id)>(?,?) ORDER BY ts_us,id LIMIT 200",
+      "args": [
+        1700000029999990,
+        3000000
+      ],
+      "plan": [
+        [
+          5,
+          0,
+          228,
+          "SEARCH packets USING INDEX packets_time (ts_us>?)"
+        ]
+      ],
+      "first_query_ms_cache_not_controlled": 0.12112499999261672,
+      "warm_samples_ms": [
+        0.08579199999303455,
+        0.08891600000993094,
+        0.0836659999947642,
+        0.0852499999837164,
+        0.08287500000392356,
+        0.08295799997881659,
+        0.08258399998339883,
+        0.08258399998339883,
+        0.0822920000018712,
+        0.08212500000581713,
+        0.08233299999460542,
+        0.08224999999129068,
+        0.08262500000455475,
+        0.08262500000455475,
+        0.08220799998071016,
+        0.08233399998403002,
+        0.08254200000124001,
+        0.08270799997944778,
+        0.08258399998339883,
+        0.08241700001576646
+      ],
+      "warm_p50_ms": 0.08258399998339883,
+      "warm_p95_ms": 0.08579199999303455,
+      "warm_max_ms": 0.08891600000993094,
+      "rows": 200,
+      "sample": [
+        [
+          3000001,
+          1700000030000000,
+          167773889,
+          3221226207,
+          6,
+          64,
+          288000076,
+          64
+        ],
+        [
+          3000002,
+          1700000030000010,
+          167773890,
+          3221226208,
+          17,
+          64,
+          288000172,
+          64
+        ]
+      ],
+      "correctness": "expected rows verified"
+    },
+    "flow_first_page": {
+      "sql": "SELECT id,ts_us,src_ip,dst_ip,ip_proto,wire_len,data_offset,cap_len FROM packets WHERE flow_id=? ORDER BY ts_us,id LIMIT 200",
+      "args": [
+        42
+      ],
+      "plan": [
+        [
+          5,
+          0,
+          129,
+          "SEARCH packets USING INDEX packets_flow (flow_id=?)"
+        ]
+      ],
+      "first_query_ms_cache_not_controlled": 0.42145800000525924,
+      "warm_samples_ms": [
+        0.16204100001004917,
+        0.14325000000781074,
+        0.1389159999973799,
+        0.13629200000764286,
+        0.13545899997779998,
+        0.13466699999753473,
+        0.13670800001364114,
+        0.1436249999926531,
+        0.14345799999659903,
+        0.13987500000212094,
+        0.13541699999564116,
+        0.13337499999011015,
+        0.13225000000716136,
+        0.1314170000057402,
+        0.13133300001300086,
+        0.1319170000044778,
+        0.13183300001173848,
+        0.13162499999452848,
+        0.13174999998000203,
+        0.13162499999452848
+      ],
+      "warm_p50_ms": 0.13466699999753473,
+      "warm_p95_ms": 0.1436249999926531,
+      "warm_max_ms": 0.16204100001004917,
+      "rows": 200,
+      "sample": [
+        [
+          43,
+          1700000000000420,
+          167772203,
+          3221226027,
+          6,
+          64,
+          4108,
+          64
+        ],
+        [
+          4139,
+          1700000000041380,
+          167772203,
+          3221226027,
+          6,
+          64,
+          397324,
+          64
+        ]
+      ],
+      "correctness": "expected rows verified"
+    },
+    "filter_sort_latest": {
+      "sql": "SELECT id,ts_us,src_ip,dst_ip,ip_proto,wire_len,data_offset,cap_len FROM packets WHERE ip_proto=6 AND dst_port=443 ORDER BY ts_us DESC,id DESC LIMIT 200",
+      "args": [],
+      "plan": [
+        [
+          5,
+          0,
+          229,
+          "SEARCH packets USING INDEX packets_filter (ip_proto=? AND dst_port=?)"
+        ]
+      ],
+      "first_query_ms_cache_not_controlled": 0.12745799998015173,
+      "warm_samples_ms": [
+        0.11420800001360476,
+        0.1140839999891341,
+        0.11262500001407716,
+        0.1129590000061853,
+        0.112957999988339,
+        0.11262499998565545,
+        0.11237499998628664,
+        0.11233400002197413,
+        0.11220799999023257,
+        0.11237499998628664,
+        0.11220800001865427,
+        0.1125000000001819,
+        0.11283299997444374,
+        0.11279200001013123,
+        0.12012499999514148,
+        0.11779100000808285,
+        0.1167909999821859,
+        0.11695800000666168,
+        0.11683299999276642,
+        0.11737499997366285
+      ],
+      "warm_p50_ms": 0.11283299997444374,
+      "warm_p95_ms": 0.11779100000808285,
+      "warm_max_ms": 0.12012499999514148,
+      "rows": 200,
+      "sample": [
+        [
+          5999997,
+          1700000059999960,
+          167775613,
+          3221226174,
+          6,
+          64,
+          575999692,
+          64
+        ],
+        [
+          5999993,
+          1700000059999920,
+          167775609,
+          3221226170,
+          6,
+          64,
+          575999308,
+          64
+        ]
+      ],
+      "correctness": "expected rows verified"
+    },
+    "full_aggregate_top10": {
+      "sql": "SELECT flow_id,COUNT(*),SUM(wire_len) AS bytes FROM packets GROUP BY flow_id ORDER BY bytes DESC,flow_id LIMIT 10",
+      "args": [],
+      "plan": [
+        [
+          9,
+          0,
+          249,
+          "SCAN packets USING INDEX packets_flow"
+        ],
+        [
+          48,
+          0,
+          0,
+          "USE TEMP B-TREE FOR ORDER BY"
+        ]
+      ],
+      "first_query_ms_cache_not_controlled": 2284.5524169999862,
+      "warm_samples_ms": [
+        2453.846959000003,
+        2396.8433329999925,
+        2297.421583000016,
+        2307.6608749999823,
+        2178.2751659999917,
+        2176.174708000019,
+        2199.074875000008,
+        2158.4992500000053,
+        2171.2610000000154,
+        2258.674792000022,
+        2269.4993750000094,
+        2281.9232079999947,
+        2178.1843330000183,
+        2304.5609999999783,
+        2222.5895840000476,
+        2241.1407499999996,
+        2206.890166999983,
+        2220.7719589999897,
+        2340.649041000006,
+        2345.890749999967
+      ],
+      "warm_p50_ms": 2241.1407499999996,
+      "warm_p95_ms": 2396.8433329999925,
+      "warm_max_ms": 2453.846959000003,
+      "rows": 10,
+      "sample": [
+        [
+          0,
+          1465,
+          93760
+        ],
+        [
+          1,
+          1465,
+          93760
+        ]
+      ],
+      "correctness": "expected rows verified"
+    }
+  },
+  "raw_page_seek_read": {
+    "packets": 200,
+    "samples_ms": [
+      1.252292000003763,
+      0.15754100002141058,
+      0.15637500001730587,
+      0.15662500004509639,
+      0.15779199998178228,
+      0.156917000026624,
+      0.15616600001067127,
+      0.15650000000277942,
+      0.15679199998430704,
+      0.15658299997767244,
+      0.1562499999749889,
+      0.15650000000277942,
+      0.15637500001730587,
+      0.15675000003056994,
+      0.15637500001730587,
+      0.1564590000384669,
+      0.15674999997372652,
+      0.16420899999047833,
+      0.16287500000089494,
+      0.1961250000022119
+    ],
+    "p50_ms": 0.15662500004509639,
+    "p95_ms": 0.1961250000022119,
+    "note": "200 direct source seeks and 64-byte reads using already-indexed offsets; no metadata decode or full packet UI expansion; warm OS cache uncontrolled"
+  },
+  "cancel_probe": {
+    "deadline_ms": 50,
+    "observed_ms": 50.17687499997692,
+    "progress_calls": 7068,
+    "interrupted": true,
+    "connection_reusable": true
+  },
+  "bytes": {
+    "source": 576000048,
+    "database": 1004785664,
+    "source_per_packet": 96.000008,
+    "database_per_packet": 167.46427733333334,
+    "combined_per_packet": 263.46428533333335,
+    "wal_bytes_before_final_checkpoint": 21110912,
+    "scratch_total_scale": 1580851248
+  },
+  "peak_rss_bytes": 56623104
+}
