@@ -373,3 +373,23 @@ In `.worktrees/fragment-packet-event-builder-test` on `jamesmbrownjr/jam-173-fra
 - `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
 - `git diff --check`: passed.
 - PR and CI review are pending.
+
+
+## JAM-255 architecture spike — 2026-10-13
+
+Documentation and measurement evidence only; source baseline `fce195e0d87dac6fb3d14cec5b459ab3b7efc141`. Three original synthetic runs (60k/600k/6m packets) retained with hashes/methodology in `docs/superpowers/specs/2026-10-11-local-query-service-measurements.md` and raw JSON. No production capacity or worker enforcement claim.
+
+- Evidence validation: raw-copy/harness hashes, deterministic counts, source-size/import math, p50/p95/max, cancellation flags and all 4096 template checksums pass; Markdown local links resolve. No fresh performance or database integrity run.
+- Focused seven-file Vitest security/filter command in measurement record: 88 passed.
+- `cargo test --locked --test no_disk_write_invariant --test pcapng_roundtrip`: 6 passed.
+- `cargo test --locked -- --test-threads=1`: 487 passed, 10 ignored (live privileges/fixed-port opt-ins not run).
+- `npx vitest run --maxWorkers=1` and `npx vitest run`: both exit 1 despite 82 files/602 assertions passing, due to unhandled `read ECONNRESET` in `enrichment-whois-client.test.ts`. Focused `npx vitest run lib/__tests__/enrichment-whois-client.test.ts --maxWorkers=1` reproduces the error with 6 passing assertions. Full TypeScript is not green.
+- Read-only diagnosis: fixture accepted sockets lack an error listener; client has one. A loopback Node timeout probe (approved after sandbox EPERM) did not reproduce the error. Root cause not conclusively established; no out-of-scope fix applied.
+- Independent source/security/evidence review: missing plaintext-at-rest disclosure fixed and re-review found no remaining issues. Claude Code cross-review pending.
+- `git diff --check` and final scope/link checks pass. No commit, push, PR, service, dependency or recording-policy change.
+
+JAM-255 review delta: Claude's three MUST items addressed without changing scope: corrected retained evidence links and explicit non-reproducibility from a clean clone; measured-cost quota/rate arithmetic and high-rate selection/rollup follow-up; admin installation cost and same-user sandbox comparison with explicit deny-case proof. Two SHOULD items documented (unmeasured post-load indexing; high-cardinality risk). Independent delta review verified numbers and found only a contradictory OS-identity requirement sentence; qualified it to the recommended path. Re-review requested from Claude. JAM-18/19/117 received the high-rate consequence update.
+
+JAM-255 cross-review checked on 2026-10-13: Claude approved the corrected record at 11:50 EDT (Slack `1791906618.440619`), resolving all three MUST items and accepting both SHOULD responses. Verified those corrections in the current files; no new test run was needed for this review-state update. Optional harness attachment to Linear remains unapproved/not performed. Local Vitest error is reported separately as JAM-261; full local TS validation remains non-green.
+
+JAM-255 publication continuation: James authorized finishing the reviewed spike on 2026-10-13. No production changes were added. Final evidence, local-link, whitespace, JSON and owned-file checks plus `git diff --check` are rerun before commit; local suites above are retained as executed evidence, with JAM-261's full-Vitest failure disclosed. PR CI/review will supply publication checks.
