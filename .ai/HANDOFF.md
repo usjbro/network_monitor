@@ -1,3 +1,17 @@
+# JAM-257 — prepared implementation (2026-10-13)
+
+Claimed existing approved gate `jam-257__ci-pin-actions-and-npx` under James's direct chat instruction; delegated to Codex. Linear In Progress. Worktree `.worktrees/ci-pin-actions-and-npx`; exact Linear branch `jamesmbrownjr/jam-257-p3-ci-supply-chain-pin-github-actions-to-commit-shas-and-pin`; fresh base `c73a0b0`.
+
+Changes: CI Action refs all full SHAs; existing major-version release comments, with a truthful master-history/date comment for dtolnay (no invented action release). Both Rust steps use durable master-history SHA e2a55d2ffb04f378e9626c28d38b36d230d1e12f, following upstream requirements; generated channel candidate SHAs were replaced. Rust stable/nightly explicitly selected via toolchain input. Four CI tool invocations now use ./node_modules/.bin directly and fail when absent. Both npm ci commands explicitly disable lifecycle scripts, matching existing .npmrc policy. Added optional weekly github-actions Dependabot configuration. Same jobs/checks/coverage/conditions/timeouts/permissions and audit/capture setup; no app/dependency/wire/deployment edits.
+
+Verification: baseline static check failed, edited check passes; upstream tags/commits/action inputs verified; YAML semantic comparison passes; missing-binary probes fail closed. Fresh install --ignore-scripts, native bindings/in-memory Sharp PNG, typecheck, lint, build and all 602 tests pass. Initial sandbox-only EPERM test failures were resolved by approved unsandboxed rerun; no test changes or suppression. Existing audit gate passes its unchanged allowlist. No Linux/E2E CI evidence yet. Local Node 25 warns outside Vitest engine support; CI remains Node22.
+
+Independent review found no regression; its unresolved durability check was addressed by verified master-history Rust pins and a passing narrow re-review.
+
+James approved commit/push/PR publication directly in chat on 2026-10-13. Next: publish the verified result and obtain CI/review evidence. The complete task Slack thread was read and early Claude notes addressed. PR must prove full CI with --ignore-scripts and verify main Sonar findings after reviewer merge. Do not commit/push/merge without authorization; do not merge own branch. No scope expansion to JAM-258/259/260/261. Temporary check/provenance scripts/data are /private/tmp/jam257-* and not committed. Main checkout untouched.
+
+---
+
 # JAM-255 — publication handoff (2026-10-13)
 
 Worktree `.worktrees/spike-local-query-service-between-the-web-ui-and-recorded`, branch `jamesmbrownjr/jam-255-spike-local-query-service-between-the-web-ui-and-recorded`, source baseline `fce195e0d87dac6fb3d14cec5b459ab3b7efc141`. James authorized finishing publication/closeout in chat after the draft was reviewed. Existing gate remains approved/delegated; do not merge your own branch.

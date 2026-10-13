@@ -18,7 +18,7 @@ jobs:
       run:
         working-directory: capture-agent
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install libpcap
         run: |
@@ -35,13 +35,16 @@ jobs:
           echo "apt-get update/install failed after 3 bounded attempts" >&2
           exit 1
 
+      # Pin the action implementation from master history for durable SHA refs;
+      # refresh it manually while keeping the compiler channel explicit.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (2026-10-09); toolchain selected below
         with:
+          toolchain: stable
           components: clippy
 
       - name: Cache cargo registry and build output
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -115,7 +118,7 @@ jobs:
       run:
         working-directory: capture-agent
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # Full history so the path filter below can diff a PR's head
           # against its actual merge-base, not just the checked-out tip.
@@ -172,13 +175,16 @@ jobs:
           echo "apt-get update/install failed after 3 bounded attempts" >&2
           exit 1
 
+      # Use the same durable master-history action; select nightly via the input.
       - name: Install nightly Rust toolchain
         if: steps.filter.outputs.run_fuzz == 'true'
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (2026-10-09); toolchain selected below
+        with:
+          toolchain: nightly
 
       - name: Cache cargo registry and fuzz build output
         if: steps.filter.outputs.run_fuzz == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -220,7 +226,7 @@ jobs:
 
       - name: Upload crash artifacts
         if: failure() && steps.filter.outputs.run_fuzz == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: fuzz-crash-artifacts
           path: capture-agent/fuzz/artifacts/
@@ -231,16 +237,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Audit dependencies (npm advisory database)
         # Plain `npm audit --audit-level=high` can't distinguish a fixable
@@ -254,14 +260,16 @@ jobs:
           npm audit --json > /tmp/npm-audit.json || true
           node .github/scripts/check-npm-audit.mjs /tmp/npm-audit.json
 
+      # Invoke lockfile-installed binaries directly; a missing binary must fail
+      # rather than let npx fetch an undeclared package.
       - name: Type check
-        run: npx tsc --noEmit
+        run: ./node_modules/.bin/tsc --noEmit
 
       - name: Lint
         run: npm run lint
 
       - name: Test
-        run: npx vitest run
+        run: ./node_modules/.bin/vitest run
 
       - name: Build
         run: npm run build
@@ -271,19 +279,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         id: playwright-cache
         with:
           path: ~/.cache/ms-playwright
@@ -297,10 +305,10 @@ jobs:
         # miss: the OS-level dependencies it installs aren't cached, but
         # they're already present on this image after the first run within
         # a cache-key's lifetime pulled the browser itself.
-        run: npx playwright install --with-deps chromium
+        run: ./node_modules/.bin/playwright install --with-deps chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
       - name: Install Playwright Chromium (browser only, deps already present)
-        run: npx playwright install chromium
+        run: ./node_modules/.bin/playwright install chromium
         if: steps.playwright-cache.outputs.cache-hit == 'true'
 
       - name: Run Playwright smoke test
@@ -308,7 +316,7 @@ jobs:
 
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-report
           path: playwright-report/

@@ -1,395 +1,255 @@
-# PR #281 — review follow-ups (2026-10-11)
+# JAM-257 — prepared implementation (2026-10-13)
 
-- RED/GREEN: `ip_carrying_pbb_and_etag_remain_decode_failures` and `ieee8023_snap_carrying_ip_remains_a_decode_failure` failed (classified `UnsupportedNonIp`) before the guards and pass after. Earlier follow-ups (`35c3028`) likewise reproduced PPPoE/MPLS and short-802.3 false exclusions, and opaque MACsec, before fixing them.
-- `non_ip_replay` (ignored) passes locally and now runs in CI after live-loopback; it fails when the capture-loop `UnsupportedNonIp` exclusion is removed. CI run 38157352312 (`c347e61`) passed including that step.
-- `cargo test --locked` (capture-agent): 486 passed, 11 ignored. Warnings-denied Clippy and release build pass. `cargo +nightly fuzz run parse_packet` 30 s: 915,348 runs, no crash; the fuzz target asserts only Ethernet can yield `UnsupportedNonIp`.
-- Web code unchanged since the original commit; web/audit/browser results below still apply.
+Claimed existing approved gate `jam-257__ci-pin-actions-and-npx` under James's direct chat instruction; delegated to Codex. Linear In Progress. Worktree `.worktrees/ci-pin-actions-and-npx`; exact Linear branch `jamesmbrownjr/jam-257-p3-ci-supply-chain-pin-github-actions-to-commit-shas-and-pin`; fresh base `c73a0b0`.
 
----
+Changes: CI Action refs all full SHAs; existing major-version release comments, with a truthful master-history/date comment for dtolnay (no invented action release). Both Rust steps use durable master-history SHA e2a55d2ffb04f378e9626c28d38b36d230d1e12f, following upstream requirements; generated channel candidate SHAs were replaced. Rust stable/nightly explicitly selected via toolchain input. Four CI tool invocations now use ./node_modules/.bin directly and fail when absent. Both npm ci commands explicitly disable lifecycle scripts, matching existing .npmrc policy. Added optional weekly github-actions Dependabot configuration. Same jobs/checks/coverage/conditions/timeouts/permissions and audit/capture setup; no app/dependency/wire/deployment edits.
 
-# JAM-165 / JAM-192 — unsupported non-IP traffic versus parse failures (2026-10-10)
+Verification: baseline static check failed, edited check passes; upstream tags/commits/action inputs verified; YAML semantic comparison passes; missing-binary probes fail closed. Fresh install --ignore-scripts, native bindings/in-memory Sharp PNG, typecheck, lint, build and all 602 tests pass. Initial sandbox-only EPERM test failures were resolved by approved unsandboxed rerun; no test changes or suppression. Existing audit gate passes its unchanged allowlist. No Linux/E2E CI evidence yet. Local Node 25 warns outside Vitest engine support; CI remains Node22.
 
-Worktree `.worktrees/unparsed-frames-non-ip-and-counter`, branch `jamesmbrownjr/jam-165-unparsed-frames-non-ip-and-counter`, based on main `28e19db`.
-
-- RED: `cargo test --locked --manifest-path capture-agent/Cargo.toml --test non_ip_replay -- --ignored --test-threads=1 --nocapture` on the old capture loop: the six-frame classic-pcap fixture produced `unparseableFrames=4` and four malformed-frame findings (ARP 42 bytes, LLDP 16 bytes, VLAN ARP 46 bytes, truncated Ethernet 4 bytes). The assertion expected 1 and failed. The other two frames were valid UDP. Thus unsupported non-IP traffic explained 3/4 (75%) of this fixture's old failure count.
-- GREEN: the same authenticated binary replay passed after the change, reporting count 1 and only the 4-byte truncated-frame finding. Final rerun passed again. The test binds an exclusive loopback port and is opt-in by default.
-- RED/GREEN: the capture-stats UI regression failed on the old generic text; after the update the banner explicitly excludes non-IP traffic from its parse-failure count.
-- Review RED/GREEN: added regressions reproduced suppression at etherparse's bounded VLAN-extension limit and inconsistent known ARP address sizes; both failed before the guards and passed after. Six default classification tests now pass (ARP, VLAN/QinQ, unknown EtherTypes, header truncation, decoder-limit handling, and ARP address-size consistency).
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml`: final pass, 478 passed, 11 ignored across library/binary/integration tests. The ignored set includes live/port-dependent tests and the new replay test; the new replay was separately exercised as above.
-- `cargo clippy --all-targets --locked --manifest-path capture-agent/Cargo.toml -- -D warnings`: final pass.
-- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: final pass.
-- `npx vitest run --maxWorkers=2`: final pass, 82 files / 602 tests.
-- `npm run lint`: final pass; `npx tsc --noEmit`: final pass.
-- `npm run build`: final pass (Next.js 16.3.8, Webpack). `cargo +nightly fuzz run parse_packet /tmp/network-monitor-fuzz-corpus -- -max_total_time=30 -max_len=65535` (from capture-agent/): passed, 2,538,928 runs in 31 seconds, no crash. Seeds include ARP prefixes, inconsistent address sizes, and VLAN nesting boundaries.
-- Independent code/security review: two initial boundary findings were reproduced and fixed; final re-review reported no remaining findings and ran six focused tests (one ignored).
-- `git diff --check`: passed. No whole-crate formatting was applied; the new Rust test file was formatted with rustfmt.
-
-Environment: Rust stable 1.99 and libpcap 1.10.5 were staged under `/tmp` because the cloud workspace initially lacked them; `/tmp/network-monitor-env.sh` selects those tools/libraries. npm used a writable `/tmp` cache. No product dependency or lockfile changes. Existing Vite config migration and Next.js middleware deprecation notices are informational.
-
-Limits: this is fixture evidence, not a replay of the original live capture/screenshots. Unknown non-IP payloads are intentionally not decoded or certified valid. Known undecoded encapsulation retains the prior parse-failure behavior. The existing Option parser/fuzz API delegates to the classified path. No commit, push, PR or merge performed.
+Next: independent local diff review (requested), read full Slack task thread, then obtain James's commit/push/PR authorization. PR must prove full CI with --ignore-scripts and verify main Sonar findings after reviewer merge. Do not commit/push/merge without authorization; do not merge own branch. No scope expansion to JAM-258/259/260/261. Temporary check/provenance scripts/data are /private/tmp/jam257-* and not committed. Main checkout untouched.
 
 ---
 
-CI follow-up: Rust1.99 clippy rejected `map_err(&credential_error)` as an unnecessary borrow; changed to `map_err(credential_error)`. Local warnings-denied clippy and full Rust suite passed again; CI must verify its newer toolchain. No behavior change or new test required for this lint correction.
-
-Published review follow-up: corrected the wire-fixture regeneration recipe to authenticate; `npx vitest run lib/__tests__/agent-wire-contract.test.ts` passed all 10 tests. Signal cleanup documentation clarified; no production behavior changed.
-
-# Test Status
-
-## JAM-173 — fragment-completing packet event consistency (2026-10-08)
-
-In `.worktrees/fragment-completing-packet-consistency` on `jamesmbrownjr/jam-173-p2-fragment-completing-packet-event-shows-contradictory`.
-
-- RED: `cargo test --locked --manifest-path capture-agent/Cargo.toml fragment_completing_packet_event_uses_its_physical_network_layer -- --nocapture` reproduced `(layer 7, protocol OTHER, 192.0.2.1:0 -> 198.51.100.53:0)` for a two-fragment DNS query.
-- GREEN: the same focused regression passes and confirms the physical packet event is layer 3 while the reassembled datagram decodes as DNS.
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml`: passed (372 library tests, 82 binary tests, 12 control-auth, 2 no-disk, 4 pcapng, and 1 protocol-regression; environment-gated tests ignored).
-- `cargo clippy --all-targets --locked --manifest-path capture-agent/Cargo.toml -- -D warnings`: passed.
-- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
-- `git diff --check`: passed.
-- `cargo fmt --manifest-path capture-agent/Cargo.toml -- --check`: reports existing formatting differences in untouched code; no broad reformat was applied.
-
-## JAM-250 — CI job timeouts and bounded apt retries (2026-10-08)
-
-In `.worktrees/ci-job-timeouts-apt-retry` on `jamesmbrownjr/jam-250-p3-ci-add-job-timeouts-and-an-apt-get-retry-so-a-hung-runner`.
-
-- `python3` PyYAML validation: parsed `.github/workflows/ci.yml`; confirmed all four jobs have timeouts and both apt steps contain per-command 120-second bounds, apt acquisition retries, and exactly three outer attempts.
-- `bash -n` on all 27 workflow `run` blocks: passed.
-- `git diff --check`: passed.
-- Independent `codex review --uncommitted`: no actionable findings.
-- Initial temporary unreachable-mirror PR probe (run 37805550567, commit 3c2def0) did not trigger retries because apt-get update returned success despite the unreachable source; this revealed that apt update's partial-error default must be overridden.
-- Added `apt-get update --error-on=any` so any repository error enters the bounded retry loop.
-- Temporary unreachable-mirror probe (run 37806849918, commit `eb11e33`) failed as intended after logging all three attempts; `apt-get update` rejected the unreachable source each time. The install step completed in about 24 seconds, well below its 120-second per-command limit. The test-only change was removed with revert commit `77542d3`; this probe run is expectedly red and the restored PR head requires a fresh green run.
-
-## JAM-168 — reassembled L7 field offsets (2026-10-08)
-
-In `.worktrees/p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`.
-
-- RED: split ClientHello regression failed before the fix because the SNI range exceeded the completing physical segment payload.
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml packet_fields_ -- --nocapture`: passed (2 focused regressions: split and unsplit ClientHello).
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml`: passed (371 library, 81 binary, 12 control-auth, 2 no-disk, 4 pcapng, 1 protocol-regression; 9 ignored).
-- `cargo clippy --locked --manifest-path capture-agent/Cargo.toml --all-targets -- -D warnings`: passed.
-- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
-- `git diff --check`: passed.
-- `cargo fmt --manifest-path capture-agent/Cargo.toml -- --check`: reports existing formatting differences across unrelated Rust files; a broad rustfmt pass was reverted to avoid unrelated churn.
-- Independent `codex review --uncommitted`: no blocking findings.
-
-## JAM-204 — TLS 1.3 record-layer decryption
-
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml -- --test-threads=1`: passed (366 library tests, 77 binary tests, 12 control-auth tests, 2 no-disk tests, 4 pcapng integration tests, 1 protocol regression; 9 environment-gated live-capture/replay tests ignored by default). A parallel run hit an existing `control_auth::Fixture::new` temp-name collision (`AlreadyExists`); serialized run passed.
-- Focused `cargo test --locked --manifest-path capture-agent/Cargo.toml http2::tests`: passed (10 tests), including immediate release of buffer and HPACK state on sequence gaps, oversized frames, and malformed HPACK after dynamic insertion.
-- `cargo test --locked --manifest-path capture-agent/vendor/fluke-hpack/Cargo.toml`: passed (59 unit tests, 6 doc tests), including owned Cow scrubbing and dynamic-table cleanup.
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml --test no_disk_write_invariant`: passed (2 tests).
-- `cargo clippy --all-targets --locked --manifest-path capture-agent/Cargo.toml -- -D warnings`: passed after final cleanup fixes.
-- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed after final cleanup fixes.
-- `cargo +nightly fuzz run tls_record_stream -- -runs=1000`: passed (1,000 runs, no crash).
-- `npx vitest run --maxWorkers=1 --no-file-parallelism`: passed (82 files, 602 tests). Two standard parallel runs hit an existing `ENOTEMPTY` cleanup race in `lib/__tests__/enrichment-client.test.ts`; the test file passed alone and the serial full suite passed.
-- `npm run lint`: passed.
-- After PR #276's first CI run caught three stale `DecryptedPayloadSegment` fixtures missing the newly required `direction`, updated those fixtures in commit `07ac312`; `npx tsc --noEmit` and `npx vitest run lib/__tests__/packet-stream-decrypted.test.tsx` passed (4 tests). Refreshed PR checks are running.
-- CodeQL then flagged the nonce unit test's fixed `[0xAA; 12]` input as a hard-coded cryptographic IV. Changed the deterministic test input to runtime-generated bytes without altering production logic; the focused `tls_decrypt::tests::record_nonce_xors_the_sequence_number_into_the_final_eight_iv_bytes` test passes. Refreshed checks are pending.
-- `rustfmt --check --edition 2021` on the five touched TLS/HPACK Rust files and `git diff --check`: passed.
-- The ignored live capture and fixed-port replay tests were not run in this verification pass.
-
-## JAM-189 — replay flow-aging clock
-
-- Regression-first evidence: the first test version incorrectly swept before re-observation; independent review reproduced the production ordering and found the stale tuple was refreshed before the periodic sweep. The corrected test initially failed because the close-id result field was absent. Now replay-specific `FlowTable::observe_replay` expires just the matching stale flow before updating it, returns its close ID, and the capture loop emits `ConnectionClosed`; live observation retains periodic-only eviction. The corrected test observes the same UDP tuple 60.001 seconds later without an intervening sweep and verifies one idle eviction plus two total flows, while a live-path test verifies no arrival-time expiry.
-- `cargo build --release --locked`: passed.
-- After rebasing onto current main and fixing the replay snapshot race, `cargo test --locked` passed (339 library tests, 67 main tests, 19 enabled integration tests; 5 privileged live-capture tests and 2 exclusive-port replay tests ignored by default). The 60.001-second tuple-reuse regression now exercises `with_flow_observation`, which updates the flow table and publishes its replay clock under the same mutex.
-- `cargo build --release --locked`: passed after the replay snapshot race fix.
-- `cargo clippy --all-targets --locked -- -D warnings`: passed after rebase and replay snapshot race fix.
-- `git diff --check`: passed.
-- Independent review follow-up: the reported physical-fragment close-ID path is unreachable because current IPv4 fragments carry no ports and cannot independently address a flow. A proposed >24-hour clock guard was removed after review showed it corrupts valid long-gap replay; far-future timestamp handling is explicitly tracked as out-of-scope JAM-190. A replay snapshot race was fixed by publishing and reading the replay clock under the flow-table mutex with packet observations and snapshot counters. Replay EOF behavior is documented: the agent/emitter remain alive, replay time stops, and final flows stay visible until restart.
-- `cargo fmt --manifest-path capture-agent/Cargo.toml --check` does not pass on the existing crate baseline; it reports formatting differences across numerous untouched files (including existing `main.rs` content). No crate-wide formatting was applied to avoid unrelated changes. New/changed lines were manually aligned with rustfmt output.
-
-## JAM-184 — verified 2026-10-05, independent review fix verified
-
-Commands run in `.worktrees/capture-agent-control-token` (Rust in its capture-agent subdirectory or with --manifest-path).
-
-- Initial credential tests failed on missing modules/contracts; high-bit credential regression then failed because Node ASCII decoding masked non-ASCII bytes. Switched to byte-preserving latin1 validation; 14 credential/ACK-shape tests pass.
-- Relay pre-ACK regression failed with isConnected:true, expected false. Auth-first/no controls until ACK, rejection/rotation/buffer reset/old callbacks and every ACK split boundary now pass. TCP tests required sandbox escalation.
-- Actual unsafe-file startup regression failed because its diagnostic lacked the configured path; now exits non-zero before accepting, preserves the unsafe file and names its path without contents.
-- Playwright smoke failed on the visible disconnected banner before fake-server authentication; passed after the fixture handshake migration.
-- `cargo test --locked`: 419 passed, 8 ignored, including 12 credential/admission/framing/deadline tests.
-- `cargo test --locked --test live_loopback -- --ignored --test-threads=1`: all 5 passed, including actual rejection without feed/file side effects, 16 pending/64 authenticated bounds, existing-session service under pending saturation, failed-second-bind preservation, strict post-auth HTTP rejection and unsafe publication. Existing fixtures first failed on Linux lo naming on macOS; tests now select lo0 on macOS and lo on Linux.
-- `cargo test --locked --test replay_compatibility -- --ignored --test-threads=1`: passed, 3 scenarios with authenticated observers.
-- `cargo test --locked --test replay_truncation -- --ignored --test-threads=1`: passed, 8 scenarios with isolated credential paths.
-- `cargo build --release --locked` and `cargo clippy --locked --all-targets -- -D warnings`: passed.
-- `npx vitest run`: 82 files, 600 tests passed.
-- `npx tsc --noEmit`, `npm run lint`, `npm run build`: passed. Build retains existing Next middleware/Edge-runtime warnings; no new dependency/config changes.
-- `npx playwright test`: 1 actual Chromium smoke passed through authenticated fake TCP agent → real relay/SSE → browser and control return path.
-- `/private/tmp/jam184-audit-tools/bin/cargo-audit audit --file capture-agent/Cargo.lock`: clean, 70 dependencies scanned. `npm audit --json` plus `.github/scripts/check-npm-audit.mjs`: only existing allowlisted GHSA-vfj7-8cjw-p6xm.
-- Independent whole-branch code/security review found one Important leak through live loopback packet/capture output. Two new full/split-auth and fragment exclusion tests failed; actual recording test failed on raw credential persistence. Fixed by early live endpoint/fragment exclusion, documented narrow omission, preserving replay and unrelated traffic. Two exclusion tests and actual raw-recording regression now pass; final default Rust suite (419), all 5 live tests, both replay suites, release/clippy and full Vitest (600) rerun green. No Critical or Minor findings; reviewed Important finding fixed in one RED→GREEN pass.
-
-James approved temporary agent stop/restart; original main-checkout agent restored again after final verification as PID32578 on en0/default filter/snaplen, no recording active. No token contents printed. No privileged foreign-UID file fixture was available; actual current-UID/mode/type/link/symlink cases were exercised, while foreign-UID rejection remains implemented and subject to review. No new fuzz target/parser files requiring existing fuzz commands changed.
-
-## JAM-194 — verified 2026-10-05
-
-Commands ran in `.worktrees/third-party-pcapng-replay`, with `--manifest-path capture-agent/Cargo.toml` where applicable.
-
-- Pre-fix native RAW DLT mapping test failed (None versus Raw); malformed-tail test failed because source returned EOF. Reader mixed-endian regression failed on bogus little-endian length 469762048.
-- `cargo test --locked`: 405 passed, 6 ignored. Includes per-source link type, timestamp and decoded-IP checks across mixed sections, native classic RAW and malformed replay errors; pcapng suite has 34 tests.
-- `cargo build --release --locked`: passed.
-- `cargo clippy --all-targets --locked -- -D warnings`: passed, rerun after final reader tests.
-- `cargo test --locked --test replay_compatibility --test replay_truncation -- --ignored --test-threads=1`: passed both tests, three JAM-194 binary scenarios plus eight JAM-174 cases. Loopback bind needed sandbox escalation; no existing agent was stopped.
-- Negative control: temporarily forcing every frame through the startup link type failed binary compatibility exactly on missing raw/loopback flows (only port3001 observed, expected3001/3002/3003). Restored code and reran both binary tests green.
-- `cargo +nightly fuzz run pcapng_reader -- -max_total_time=40 -rss_limit_mb=512`: seeded mixed-section reader fuzz passed 1,150,653 executions in41s; no crashes. Existing target unchanged.
-- `git diff --check`: passed.
-- Review follow-up: retry now clears a stale rejection; the test verifies a fresh rejection renders again. Focused suite: 12 passed; standard full suite rerun: 82 files / 601 passed. An intermediate concurrent full run had an `ENOTEMPTY` cleanup error in an unrelated enrichment test; a single-worker run exposed existing `ECONNRESET` from the unrelated WHOIS timeout test server. The subsequent standard full run was clean.
-- Independent correctness and security reviews found no introduced issues. Reviewers reran reader/source tests; binary validation was run by implementer.
-
-No live capture exercised. Timestamp offsets, FCS stripping and interface-address fallback remain excluded follow-ups; Simple Packet and obsolete Packet blocks fail explicitly.
+# JAM-255 — publication handoff (2026-10-13)
 
-## JAM-174 — verified 2026-10-05
+Worktree `.worktrees/spike-local-query-service-between-the-web-ui-and-recorded`, branch `jamesmbrownjr/jam-255-spike-local-query-service-between-the-web-ui-and-recorded`, source baseline `fce195e0d87dac6fb3d14cec5b459ab3b7efc141`. James authorized finishing publication/closeout in chat after the draft was reviewed. Existing gate remains approved/delegated; do not merge your own branch.
 
-Commands ran in `.worktrees/replay-capture-truncation/capture-agent`.
+Deliverable: decision record, companion method/measurement/validation record, three raw JSON results. Compares four process options; recommends an isolated worker and proposed patched SQLite index for opt-in finalized incident captures. Raw-cleartext storage, missing provenance/auth, filter parity, query bounds, plaintext-at-rest and high-rate limitations are explicit. Five James adoption decisions remain future work. Benchmark harness/generated artifacts stay `/private/tmp/jam255-bench`, outside repository; clean-clone non-reproducibility is documented. No service, dependency or recording-policy change.
 
-| Command | Result |
-|---|---|
-| Baseline `cargo test --locked` | Passed before edits. |
-| Pre-fix `cargo test --locked --test replay_truncation` | Failed as expected: small-snaplen pcapng replay emitted 0 warnings, expected 1. |
-| `cargo test --locked` | 392 passed, 5 ignored (existing 1 reassembly + 3 live-loopback, and new opt-in binary replay). Includes real-file pcap/pcapng source metadata and truncation count tests, boundary original lengths, and TCP gap attribution. |
-| `cargo build --release --locked` | Passed. |
-| `cargo clippy --all-targets --locked -- -D warnings` | Passed after all test additions. |
-| `cargo +nightly fuzz run pcapng_reader -- -max_total_time=40` | Passed: 1,403,207 executions in 41s. |
-| `cargo +nightly fuzz run pcapng_reader /private/tmp/jam174-pcapng-corpus -- -max_total_time=30` | Passed: 1,094,427 executions in 31s, seeded with valid EPBs and original lengths 0/4/128/u32::MAX. |
-| `git diff --check` | Passed. |
-| Earlier post-fix binary replay attempts | NOT a pass: sandbox denied loopback bind; unsandboxed retry found port 9990 occupied by PID 94514. Truncation warning appeared, but replay did not finish. |
+Independent source/security review passed with at-rest disclosure corrected; Claude approved all three review corrections at 11:50 EDT (`1791906618.440619`) in task Slack thread `1791755482.718159`. Affected JAM-17/18/19/20/28/29/117 have proposal-impact comments; JAM-18/19/117 have high-rate follow-up; JAM-196 has caller-auth evidence.
 
-Final verification after James approved resuming on 2026-10-05:
+Validation: 88 focused Vitest pass; 487 full Rust pass/10 ignored. Full local Vitest fails with unhandled WHOIS ECONNRESET despite 602 passing assertions; separately filed JAM-261. Evidence identity/math/checksum/link and final scope/diff checks pass. This local failure is disclosed, not suppressed; PR CI still must be verified.
 
-- `cargo test --locked --test replay_truncation -- --ignored`: passed (one test, eight scenarios across pcapng/classic-pcap; actual binary startup, once-only warning, decodable/unparseable cuts, and no warning for complete frames).
-- `cargo test --locked` rerun: 392 passed, 5 ignored.
-- `cargo clippy --all-targets --locked -- -D warnings` rerun: passed.
-- The old agent had already exited; no process needed to be stopped or restarted. Test child agents were cleaned up.
-- A classic raw-IP fixture first reproduced a separate macOS DLT12/101 startup mapping failure, recorded on JAM-194. The final truncation fixtures declare Ethernet1 and use Ethernet frames; this test-only change passed independent review.
+Next: publish the docs PR, request Claude/Codex review, wait for clean required checks and final approval, then ask a human/reviewer to merge per the no-own-merge rule. Once merge is verified, mark JAM-255 Done and complete coordination. No implicit authorization to implement the proposed service or adopt its privacy/store/default choices. Leave pre-existing node_modules symlink and main-checkout changes alone.
 
-Publication checks rerun on 2026-10-05: release build, default suite (392 passed, 5 ignored), clippy and opt-in binary replay (eight scenarios) all passed. Independent security review found no introduced issues and reran three focused tests successfully.
+---
 
-Independent review: no remaining findings. No live capture exercised for this change.
+# JAM-165 / JAM-192 — non-IP parse-failure classification (PR #281, 2026-10-11)
 
+Branch `jamesmbrownjr/jam-165-unparsed-frames-non-ip-and-counter`, worktree `.worktrees/unparsed-frames-non-ip-and-counter`. `parse_packet_result` separates decode failures from successfully framed unsupported non-IP Ethernet; the capture loop excludes the latter from `unparseableFrames` and malformed-frame findings. Wire shape unchanged. Decoder limits, malformed ARP sizes, opaque MACsec, short 802.3 payloads, and IP-capable encapsulations (PPPoE session, MPLS, PBB, E-tag, IP-over-SNAP) remain failures; inner decoding is JAM-253, non-IP capture-file recording JAM-254.
 
-# Security review fixes JAM-175 to JAM-179 — verified 2026-10-04
+Claude review follow-ups landed on the PR: CI now runs the ignored `non_ip_replay` test; PBB/E-tag/SNAP guards and named EtherType constants added. Original live capture is unavailable, so the fixture does not establish its failure distribution or reassembly root cause. Merge not authorized. See TEST_STATUS.
 
-Each fix ran in its own `.worktrees/<slug>` worktree; changed tests failed before the fix and pass after.
+---
 
-| Issue / PR | Command | Result |
-|---|---|---|
-| JAM-175 / #247 | `cargo test --locked --test live_loopback -- --ignored --test-threads=1` (as root) | 3/3 passed; the new cross-protocol test failed against the unpatched loop (`start_capture_file` from an HTTP body ran). |
-| JAM-175 / #247 | `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo build --release --locked` | Passed (204 lib tests). |
-| JAM-176 / #248 | `npx vitest run` + manual `next start` Host probes | 522 tests passed; a foreign Host got 421 on `/`, `/api/control`, `/api/stream`. |
-| JAM-177 / #249 | `npx vitest run` | 504 tests passed. |
-| JAM-178 / #250 | `npx vitest run` | 504 tests passed. |
-| JAM-179 | `npx vitest run` | 509 tests passed. |
-| all web PRs | `npm run lint`, `npx tsc --noEmit` | Passed. |
+# JAM-250 — CI job timeouts and bounded apt retries
 
-# JAM-27 — verified 2026-09-28
+JAM-250 completed: PR #278 squash-merged at `9dd6b678532c486ad92572c9279333fbe5642969`; Linear is Done. The unreachable-mirror acceptance probe logged all three attempts and failed as intended in about 24 seconds, then its test-only change was reverted. Final PR CI passed. See `TEST_STATUS.md`.
 
-All local commands ran in `.worktrees/offline-name-resolution-mac-vendor-oui-lookup-and-port-service-names`.
+# JAM-173 — fragment-completing packet event consistency
 
-| Command | Result |
-|---|---|
-| `npx vitest run lib/__tests__/mac-vendor.test.ts lib/__tests__/packet-stream-mac-vendor.test.tsx` | 3 targeted tests passed; resolver test asserts no `fetch` calls. |
-| `npx vitest run` | 501 tests passed across 75 files. |
-| `npx tsc --noEmit` | Passed. |
-| `npm run lint` | Passed. |
-| `cargo test --locked common_service_ports_are_named_without_network_lookups` | Passed. |
-| `cargo test --locked` | Passed; privileged live-loopback tests are ignored by default. |
-| `cargo clippy --all-targets --locked -- -D warnings` | Passed. |
-| `cargo build --release --locked` | Passed. |
-| `git diff --check` | Passed. |
+Active work in `.worktrees/fragment-completing-packet-consistency` on `jamesmbrownjr/jam-173-p2-fragment-completing-packet-event-shows-contradictory`. Gate approved and delegated in-session; Linear is In Progress. The two-fragment DNS regression reproduced a layer-7 event built from a physical IPv4 fragment with `protocol=OTHER` and no ports. `packet_osi_layer` now reports the deepest layer supported by the physical protocol, while reassembled L7 remains available for flow analysis and is omitted from fragment byte fields. Wire docs clarify that packet event identity stays physical. Full Rust tests, warnings-denied Clippy, release build, and `git diff --check` pass. Next: independent review, CI, and PR handoff.
 
-## JAM-164 — verified 2026-09-28
+# JAM-168 — reassembled L7 field offsets
 
-All local commands ran in `.worktrees/live-pcap-per-packet-layer-field-is-hardcoded-to-4-breaking`.
+Implementation is ready for PR in `.worktrees/p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes` on `jamesmbrownjr/jam-168-p2-keep-reassembled-l7-field-offsets-tied-to-packet-bytes`. The capture loop now calls `fields::build_packet_fields`, which preserves decoded packet/header fields but suppresses application byte ranges when the L7 result came from reassembly. Regression tests cover a split ClientHello (no invalid SNI range) and an unsplit ClientHello (SNI range still points to `example.com`). Full Rust tests, strict Clippy, release build, diff check, and independent Codex review passed. `cargo fmt --check` reports existing formatting across unrelated files; no broad reformat was retained. PR #277 is open and attached to JAM-168, which is In Review. Cross-review was requested in the task Slack thread; CI is pending. Wait for clean checks and reviewer approval before squash merge.
 
-| Command | Result |
-|---|---|
-| `cargo test --locked packet_osi_layer` | 2 targeted Rust tests passed. |
-| `cargo test --locked` | Passed: 202 library tests, 53 binary tests, 6 integration tests; 2 privileged live-loopback tests ignored by default. |
-| `cargo clippy --all-targets --locked -- -D warnings` | Passed. |
-| `cargo build --release --locked` | Passed. |
-| `npx vitest run lib/__tests__/packet-stream-layer-filter.test.tsx` | 1 component test passed. |
-| `npx vitest run` | 498 tests passed across 73 files. |
-| `npm run lint` | Passed. |
-| `npx tsc --noEmit` | Passed. |
-| `git diff --check` | Passed. |
-| `codex review --uncommitted` and `codex review --commit 8257fca` | No actionable findings. |
+# JAM-204 — TLS 1.3 record-layer implementation verified locally, 2026-10-07
 
-PR #240's CI also passed Rust, Web, Playwright E2E, fuzz targets, and all CodeQL analyses. Verify the live checks again before merge.
+Implementation and local verification are complete in `.worktrees/tls-decrypt-record-layer` on `jamesmbrownjr/jam-204-tls-decrypt-record-layer`. Added bounded per-direction TCP/TLS framing, handshake parsing and epoch/sequence transitions, bounded early-data trials and late-key waiting, PID-scoped zeroizing key-log secrets, directional HTTP/2 state and decrypted ring tags, additive decryption status events, protocol/security documentation, regression tests, and a `tls_record_stream` fuzz target. Review findings on snaplen propagation, timer expiry, cleartext Finished, retransmissions, HPACK allocation zeroization/accounting, parser termination/desynchronization cleanup, and malformed decode temporaries have been addressed. Full Rust tests (serialized due an existing fixture-name collision), standalone HPACK tests (59 unit/6 doc), single-worker Vitest (82 files/602 tests), lint, release build, warnings-denied Clippy, targeted rustfmt and the prior 1,000-run fuzz smoke passed; see `TEST_STATUS.md`. CI initially found three outdated TypeScript test fixtures missing the new direction field; `07ac312` fixes them and local `npx tsc --noEmit` plus the focused four-test Vitest file pass. GitHub CodeQL subsequently flagged the nonce test's fixed IV fixture, not production key handling; the deterministic test now generates its bytes at runtime and the focused Rust test passes. Latest CI and review rerun are pending. Nine default Rust tests remain environment-gated (live capture privileges or exclusive port 9990).
 
-## JAM-16 — verified 2026-09-28
+Next: complete final independent re-review, refresh `git diff --check`, then prepare the PR and tracker handoff. No PR has been opened yet.
 
-2026-09-28, in `.worktrees/stream-reassembly-ip-fragments-and-tcp-segments` (branch `jamesmbrownjr/jam-16-stream-reassembly-ip-fragments-and-tcp-segments`, based on `main` at `3140d89d`), for JAM-16 (stream reassembly: IP fragments and TCP segments). Commands below were run twice independently — once by the implementing agent, once by the reviewing session — with matching results.
+# JAM-189 — replay flow-aging clock implemented, 2026-10-06
 
-### Rust (`capture-agent/`)
+Worktree: `.worktrees/flow-table-replay-clock`; branch: `jamesmbrownjr/jam-189-p2-flow-table-ages-flows-on-wall-clock-time-during-replay`. The capture loop now feeds replay-clock milliseconds to replay flow observation, and the periodic emitter reads the latest replay timestamp for idle eviction and flow snapshots. The replay observe path expires only the matching stale tuple on arrival in O(1), returning its close ID for a `connection_closed` event; this handles fast replay that processes both connections before a periodic tick. Live mode continues to use agent elapsed time and its existing periodic-only expiry behavior, including during quiet capture; emitter scheduling remains wall-clock driven.
 
-| Command | Result |
-| --- | --- |
-| `cargo build --release --locked` | PASS — clean release build |
-| `cargo test --locked` | PASS — 259 lib tests + 51 main-bin tests + 2 no_disk_write_invariant + 3 pcapng_roundtrip + 1 protocol_regression = 316 passing, 0 failed, 3 ignored (2 live_loopback need `CAP_NET_RAW`, 1 pre-existing) |
-| `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings |
-| `cargo +nightly fuzz run stream_reassembly -- -max_total_time=45` | PASS — two independent runs (421,330 and 199,510 executions), no crash, no cap-assertion failure |
+Clock choice: packet/finding rate limiters and packet-event `relative_time_ms` remain on agent elapsed time. This preserves real-time throttling during fast replay and existing UI-relative packet timeline behavior. Flow duration/age/snapshot math follows traffic time as required. The design spec records that replay EOF leaves final flows visible until the running agent is restarted; corrupt far-future timestamp handling remains the separate JAM-190 follow-up.
 
-New: `capture-agent/src/reassembly.rs` (IP fragment + TCP segment reassemblers, 38 tests), `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs` (new fuzz target, wired into `.github/workflows/ci.yml`'s fuzz job and its path filter). Modified: `parse.rs` (+`ip_declared_payload_len`, `ip_fragment` fields, 7 new tests), `l7.rs` (desegmentation hand-off `sniff_l7_desegmenting`/`L7Sniff`, 11 new tests, plus a truncated-start-line fix to `sniff_http`/`sniff_http_response` — see Decisions/Handoff below), `flow.rs` (`FlowTable::key_for` made public), `fields.rs`/`main.rs` (wiring + snap-length-truncation attribution).
+Regression tests cover UDP tuple reuse after 60.001 seconds of replay time before any periodic sweep (old flow evicted, close id returned, second flow observed) and confirm live observation still relies on the periodic sweep. Release build, full default `cargo test --locked`, and warnings-denied Clippy pass. Crate-wide rustfmt check reports substantial existing differences in untouched files, so formatting was not run across the crate. See TEST_STATUS.md for full results.
 
-### TypeScript / Web
+Independent pre-PR review found the fragment-result propagation concern (the physical-fragment case is unreachable with the parser's no-ports representation), a single-future-timestamp clock issue, and the stale main base. The fragment-result concern is unreachable with current parser output (fragment packets have no transport ports). A proposed >24-hour confirmation guard was rejected after review showed it corrupts valid long-gap replay; corrupt far-future timestamp handling is explicitly out of scope for JAM-189 and tracked by JAM-190. A fresh Codex review found a snapshot race between replay-clock publication and flow counter updates. `with_flow_observation` now publishes the clock under the flow-table mutex, and the emitter reads it under that mutex; the flow-aging regression exercises this path. Branch is rebased onto PR #271/#272 current main; full Rust tests, release build, and Clippy pass. EOF persistence is documented, and the main-loop composition was checked beside JAM-167. PR #273 needs this fix pushed, CI rerun, and reviewer recheck before merge. The full JAM-189 Slack thread was read. Gate claimed and delegated in-session after James's direct chat approval. No wire/API changes.
 
-| Command | Result |
-| --- | --- |
-| `npx vitest run` | PASS — 72 files, 497/497 tests (no wire/type change — confirms no TS-visible regression) |
+---
 
-No `lib/types.ts` or `docs/wire-protocol.md` change; reassembly is internal to the capture agent (see spec's Deferred section for the wire-visible-status follow-up).
+# JAM-167 — implementation underway, verified locally, 2026-10-06
 
-### Security Review
+Claimed and started in `.worktrees/feed-fragment-reassembled-tcp` on `jamesmbrownjr/jam-167-p2-feed-fragment-reassembled-tcp-through-stream-reassembly`. Reconstructed TCP datagrams now resolve their flow key through the capture loop's `FlowTable::key_for` and pass through the existing sequence-aware TCP reassembler; original fragment packet and flow accounting are retained. Added a regression for an HTTP request line split between a fragment-reassembled TCP segment and a later ordinary segment, plus the design-spec note.
 
-Manual review by the implementing agent (the `security-review` skill's own harness produced an empty diff in that context) plus the fuzz run above. Two robustness issues found and fixed during that review (an `unwrap_or` decoupled from its invariant; an unbounded printable-ASCII scan, now capped at 2048 bytes).
+The regression was observed failing before implementation and passing after. `cargo test --locked` (422 passed, 8 ignored), release build and strict Clippy pass. Repository-wide rustfmt check reports existing differences across untouched files; no formatter is enforced in CI. Local `codex review --uncommitted` found no actionable regressions and checked both fragment arrival orders. No commit or PR yet; complete the security-focused review before publication.
 
-An independent security-review pass by the orchestrating session (on the actual pushed PR diff) then found a real, concrete Medium-High severity bug: `TcpStream::rebase`'s only guard was `shift > MAX_TCP_STREAM_BYTES`, not `shift + already-held bytes`, so a crafted backward-sequence segment could silently truncate away already-filled (first-seen) bytes and their `filled` markers — voiding the documented first-seen-wins guarantee for the truncated range, since a later segment could then write different content there without being counted as a conflict. Reproduced with a failing regression test first (`a_backward_shift_that_would_truncate_already_held_bytes_is_rejected_not_silently_evicted`), then fixed by checking `shift + stream.data.len()` against the cap instead of `shift` alone. Re-verified after the fix: full test suite green (316 passing, +1 for the regression test), clippy clean, fuzz re-run 45s / 179,169 executions with no crash.
+# JAM-189 — end-to-end replay-aging coverage, 2026-10-07
 
-### Known Limits
+In `.worktrees/flow-table-replay-clock` on the existing PR #273 branch, added an opt-in authenticated binary replay test. It generates a classic-pcap with two equal UDP tuples 61 seconds apart and verifies a periodic connection snapshot observed after replay EOF reports only the second packet's bytes. The fixed-port replay tests share a mutex so Cargo's default parallel runner cannot race them. A negative-control run with replay observation temporarily changed to the live path failed with 142 bytes instead of 71; the production code was restored.
 
-- Live capture against a real interface was not exercised for this task (no `CAP_NET_RAW` in this environment); reassembly correctness is established by the unit/fuzz suite, not a live run.
-- A pre-existing, unrelated bug was found in the course of this work: `parse_packet` returns `None` (not a partial parse) for any frame shorter than its declared IP header length, so a narrowed `snaplen` currently causes affected frames to disappear entirely rather than show as truncated. Documented on `ReassemblyStatus` rather than silently assumed fixed; not in JAM-16's scope to fix the root cause. See task contract Handoff for tracker follow-up.
+Verified: both ignored `replay_compatibility` integration tests passed; `cargo test --locked` passed (339 library, 67 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, 1 protocol-regression; 8 ignored); release build and warnings-denied Clippy passed. The test is ignored by default because it needs exclusive `127.0.0.1:9990`. Change is currently uncommitted and not yet included in PR #273.
 
-## JAM-166 — verified 2026-10-03
+# JAM-184 — review fix verified, publication next, 2026-10-05
 
-Fix for PR #239 review finding #2 (reconstructed transport identity lost for flow tracking), merged via PR #242 into the JAM-16 branch as commit `1dd1999`. Verified independently in `.worktrees/preserve-reconstructed-transport-identity` before merge (`cargo test --locked` 318 passed/0 failed/2 ignored, clippy clean).
+James invoked epic-task-cycle JAM-184 and approved BOTH feed/controls, the revised spec, implementation plan and Native execution directly in this session. Existing gate is approved/delegated; Linear In Progress. All edits remain in `.worktrees/capture-agent-control-token` on `jamesmbrownjr/jam-184-authenticate-the-capture-agent-control-socket-with-a-per`.
 
-## Post-rebase re-verification — 2026-10-03
+Implemented private random per-launch credentials, directory-FD publication after bind, bounded authentication/ACK before subscription/control dispatch, separate 16-pending/64-authenticated caps, relay auth-first/reconnect rotation and safe lifecycle reset. Test doubles and actual live/replay observers authenticate using isolated private token files. Updated protocol/security/setup/troubleshooting/architecture docs. No dependencies, binds, deployment or TLS opt-in changes. Relay HTTP auth remains JAM-196.
 
-Rebased the JAM-16 branch onto `main` at `539f055` to clear PR #239's merge conflict. The rebase produced a **clean-but-wrong merge** in `capture-agent/src/main.rs`'s `use capture_agent::{...}` block: it silently dropped the `l7` import (still needed by `packet_osi_layer`'s `l7::L7Info` reference) because this branch's own commit removed the only other usage (`l7::sniff_l7`, replaced by the reassembler) in the same import list, and `origin/main` had reordered that same hunk — `cargo build` failed with `error[E0433]: cannot find module or crate l7`, not a silent `git rebase` success. Fixed by re-adding `l7` to the import list; no other changes needed.
+Validation: default Rust 419 passed/8 ignored; all five live-loopback tests passed; binary replay compatibility (3 scenarios) and truncation (8 scenarios) passed. Release build/clippy passed. Vitest 600 passed; typecheck/lint/build passed; authenticated Playwright smoke passed. Rust dependency audit clean (isolated cargo-audit CLI installed in /private/tmp); npm audit only the existing allowlisted lint-only braces advisory. See TEST_STATUS.md for commands, red evidence and limitations.
 
-| Command | Result |
-| --- | --- |
-| `cargo build --release --locked` | PASS — clean release build |
-| `cargo test --locked` | PASS — 261 lib + 53 main-bin + 0/2 ignored (live-loopback) + 2 no_disk_write + 3 pcapng + 1 protocol_regression = 320 passed, 0 failed, 3 ignored |
-| `cargo clippy --all-targets --locked -- -D warnings` | PASS — zero warnings |
+James approved temporarily stopping the main-checkout release agent PID73161. Original process used en0, capturing:true, no file recording, filter:null, snaplen65535. It was restored using the same original binary/cwd and saved launch settings as PID18299; startup/port verified. Temporary stop/restart authorization was exercised only for the live/replay tests; the original agent is running again. Test-only live interface selection fixed to macOS lo0/Linux lo after actual macOS failures; production interface behavior unchanged.
 
-Remaining PR #239 review findings (JAM-169 `[P1]`, JAM-167/168/170 `[P2]`) are not yet fixed — see `HANDOFF.md`.
+Plan/ledger: `docs/superpowers/plans/2026-10-05-agent-control-authentication.md`; `.superpowers/sdd/2026-10-05-agent-control-authentication/progress.md`. Task 1 e9b746f, Task 2 a1e1ec1, Task 3 4410450. Task 4 fixture/docs and verification ready; independent whole-branch review completed; an Important raw loopback capture leak was fixed before publication. Unit full/split-auth and fragment exclusions plus actual raw-recording regression were observed RED→GREEN; full Rust/live/replay/TS suites and release/clippy passed afterward. Conservative omission applies only to live IPv4 loopback control traffic and unclassifiable TCP fragments involving 127.0.0.1; replay is preserved. Publication/CI/published review and merge remain. No PR yet. Keep unrelated worktrees and operator token files untouched.
 
-## JAM-193 — verified 2026-10-05
+Claude Code branch review reported five low observations. Deferred separate connect-error diagnostics and bounded agent-side rejection telemetry; retained the approved 5-second admission deadline. Node documentation already states its narrower file-FD validation; E2E intentionally fails on occupied port3100 rather than reuse an operator server. Published Claude Code code/security review and cloud Codex review covered the final privacy fix: no blockers. Corrected the low regeneration-recipe finding and clarified signal-termination stale-file cleanup; diagnostic enhancements remain deferred. PR #266 is open; consult GitHub/Linear for final publication state. Consult GitHub/Linear for publication state.
 
-Commands run in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected`.
+Previous handoff follows.
 
-- New rejected `start_capture_file` UI test failed before implementation because `capture_file_error` had no handler; passed after adding the SSE state and dismissible banner.
-- `npx vitest run lib/__tests__/page-command-bar-capture.test.tsx`: 12 passed.
-- `npx vitest run`: 82 files, 601 tests passed.
-- `npm run lint`: passed with warnings denied.
-- `npm run build`: passed. Existing Next.js middleware deprecation and Edge Runtime `process.cwd` warnings remain.
-- `git diff --check`: passed.
+---
 
-## JAM-198 — verified 2026-10-06
+# JAM-194 — 2026-10-05
 
-In `.worktrees/npm-audit-source-map-js`, updated only the `node_modules/source-map-js` lock entry from 1.2.1 to patched 1.2.2 (existing ranges already accept it). GitHub Advisory Database confirms versions `<1.2.2` are affected by GHSA-68fv-2mgg-jv7q.
+Approved scope implemented in `.worktrees/third-party-pcapng-replay`, branch `jamesmbrownjr/jam-194-p2-pcapng-replay-rejects-valid-third-party-blocks-sections`, based on JAM-174 merge5399704.
 
-- `npm update source-map-js --package-lock-only --ignore-scripts`: passed; lock resolves 1.2.2.
-- `npm audit --json`: reports no `source-map-js` advisory after the update. The command exits 1 for the repository's existing allowlisted GHSA-vfj7-8cjw-p6xm; `node .github/scripts/check-npm-audit.mjs /private/tmp/jam198-audit-after.json` passes with only that allowlisted advisory.
-- `npm run lint`: passed.
-- `npm run build`: passed, with existing middleware deprecation and Edge Runtime `process.cwd` warnings.
-- `npx vitest run`: 82 files and 601 tests passed.
-- `git diff --check`: passed.
+Reader now honors section byte order/version, section-local interfaces and per-packet link type/timestamp units; skips validated unknown/nonpacket blocks; rejects unsupported packet blocks explicitly. Replay read failures have distinct diagnostics; native RAW datalink identity maps correctly. Writer, wire, dependencies and TLS ingestion unchanged. Embedded DSB secrets are ignored.
 
-## JAM-199 — verified 2026-10-06
+Validation: 405 default Rust tests passed,6ignored; release/clippy clean; opt-in binary tests passed all3compatibility+8truncation scenarios; seeded reader fuzz1,150,653runs/41s clean; independent code/security review clean. Negative binary control caught wrong interface decoding before restoration. See TEST_STATUS.md and approved implementation plan for commands and limitations.
 
-In `.worktrees/npm-audit-sharp`, updated the existing Next.js optional `sharp` resolution from 0.35.4 to patched 0.35.5 using the existing `^0.35.4` range. `npm ls sharp --all` reports `next@16.3.8 -> sharp@0.35.5`.
+James invoked epic-task-cycle and approved the scope directly in chat, authorizing publication through PR/CI/merge. Consult GitHub/Linear for the publication state. Offset/FCS/interface-address fallback remain follow-ups; no next issue is claimed.
 
-- `npm update sharp --package-lock-only --ignore-scripts --cache /private/tmp/jam199-npm-cache`: passed; sharp and its platform packages resolve to 0.35.5, with libvips packages at 1.3.4.
-- `npm ci --ignore-scripts --cache /private/tmp/jam199-npm-cache`: passed.
-- `npm audit --json`: still reports five high advisories across packages in the existing `braces` chain, plus two moderate advisories; no sharp advisory remains. `node .github/scripts/check-npm-audit.mjs /private/tmp/jam199-audit.json`: passed, only the existing allowlisted GHSA-vfj7-8cjw-p6xm.
-- `npm run lint`: passed.
-- `npm run build`: passed with the existing middleware deprecation warning.
-- `npx vitest run`: 82 files, 601 tests passed.
-- `git diff --check`: passed.
-- Advisory grace-window decision: keep high/critical advisories as immediate blockers when a patched dependency is available. This fix was available within Next.js's current declared range; a grace period would knowingly leave a fixable high-risk dependency in place and delay unrelated remediation only until the audit update lands.
-- PR #272 (`0f186b1`): all GitHub checks passed, including Web (Next.js), CodeQL, Rust analysis, E2E, fuzz, and Snyk; merged as `b4744a8`. PR #271 is being updated to the merged main base and needs fresh CI.
+Historical handoff follows.
 
-## JAM-170 — verified 2026-10-06
+---
 
-Worktree: `.worktrees/reassembly-coverage-memory-accounting`.
+# JAM-174 — 2026-10-05
 
-- RED: `cargo test --locked memory_budget_counts_data_and_coverage_capacities -- --nocapture` failed both new tests as expected: fragment accounting was 65,535 vs 131,070 allocated capacity bytes; TCP was 16,384 vs 32,768.
-- `cargo test --locked`: 338 library, 65 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, and 1 protocol-regression tests passed; 8 ignored.
-- `cargo build --release --locked` and `cargo clippy --all-targets --locked -- -D warnings` passed.
-- `cargo +nightly fuzz run stream_reassembly -- -max_total_time=40`: 243,992 runs in 41 seconds; after restoring the per-direction invariant, the 20-second run passed 106,628 runs.
-- `git diff --check`: passed. PR #269 is rebased/merged with the JAM-198 main commit; CI rerun is pending.
+Worktree: `.worktrees/replay-capture-truncation`; branch: `jamesmbrownjr/jam-174-snap-length-truncation-detector-is-dead-during-pcappcapng`. Implementation is verified. James approved this scope directly in chat; the local gate is approved/delegated.
 
-## JAM-167 — verified locally 2026-10-06
+- `pcapng::ParsedPacket` preserves EPB original length; live/classic libpcap sources preserve `packet.header.len` in `SourceFrame`.
+- `note_capture_truncation` checks actual captured bytes < original length before parsing, counts each cut, and preserves reassembly gap attribution. Complete packets at snaplen do not trigger.
+- New real-file source tests and gap-attribution tests run by default; opt-in binary replay regression covers both formats, unparseable/decodable cuts, complete frames and warning latching. Fixtures live in `tests/fixtures/replay_capture.rs`.
+- `cargo test --locked`: 392 passed, 5 ignored. Release build, warnings-denied clippy, and 40s + seeded 30s reader fuzz checks passed. Independent review's only finding (fixed-port dependency in default tests) was fixed by making the binary test opt-in and adding socket-free source coverage.
+- Final verification on 2026-10-05: `cargo test --locked --test replay_truncation -- --ignored` passed across eight classic-pcap/pcapng scenarios; default suite rerun: 392 passed, 5 ignored; clippy rerun clean. The default suite ignores the binary test because it needs exclusive port9990.
+- James approved a temporary agent stop in chat; PID94514 had already exited, so no process was stopped or restarted. Binary tests clean up their own child agents.
+- The initial raw-IP classic-pcap fixture exposed a separate macOS startup bug: system libpcap returns DLT_RAW12, but the crate's RAW constant is101. Recorded on JAM-194. JAM-174 now uses Ethernet fixtures for portable truncation tests; the test-only change passed independent review.
+- Implementation and verification complete. James invoked `epic-task-cycle JAM-174` to authorize publication through commit, PR, CI and merge. Check Linear/GitHub for publication state.
+- Independent security review before publication: no introduced findings; original length is scalar metadata, no new allocations/exposure/secrets behavior. Three focused tests rerun by reviewer passed.
+- Reader compatibility remains JAM-194; no wire, writer, TLS or deployment changes.
 
-In `.worktrees/feed-fragment-reassembled-tcp`.
+The previous handoff below is historical and is not the current task.
 
-- RED: `cargo test --locked tcp_segment_rebuilt_from_ip_fragments_continues_with_a_later_tcp_segment -- --nocapture` failed because the later ordinary segment produced `L7Info::None` instead of completing HTTP.
-- `cargo test --locked`: 338 library + 65 binary + 12 control-auth + 2 disk-invariant + 4 pcapng + 1 protocol-regression tests passed; 8 ignored.
-- `cargo clippy --all-targets --locked -- -D warnings`: passed.
-- `cargo build --release --locked`: passed.
-- `git diff --check`: passed.
-- `cargo fmt --all -- --check`: reports extensive formatting differences in untouched existing Rust files; this is not a CI step. New code was formatted to rustfmt's output by inspection.
+---
 
-## JAM-189 replay binary follow-up — verified 2026-10-07
+# Session Handoff
 
-In `.worktrees/flow-table-replay-clock`, added an opt-in authenticated binary replay test using a classic-pcap fixture with the same UDP tuple at capture times 61 seconds apart. It checks a connection snapshot observed after replay EOF contains only one packet's bytes after the stale flow is replaced.
+## JAM-130 remaining issues (JAM-8, JAM-163, JAM-180, JAM-181) — 2026-10-04, merged
 
-- Negative control: temporarily routed replay packets through the live `observe` path; the binary test failed as intended (142 accumulated bytes vs. the expected 71). Restored the production path afterward.
-- `cargo test --locked --test replay_compatibility -- --ignored`: 2 passed under Cargo's default parallel runner; the fixed-port tests now share a mutex, and the new test waits for replay EOF before asserting its final snapshot.
-- `cargo test --locked`: 339 library + 67 binary + 12 control-auth + 2 disk-invariant + 4 pcapng + 1 protocol-regression tests passed; 8 ignored.
-- `cargo build --release --locked`: passed.
-- `cargo clippy --all-targets --locked -- -D warnings`: passed.
-- `git diff --check`: passed.
+Worked JAM-130's open children under James's `/loop` in chat. Each PR had an independent review against source, and the review findings were fixed before merge. All four Linear issues are Done, and every JAM-130 child is now Done.
 
-## JAM-203 — replay capture-time timestamps (2026-10-07)
+| PR | Merge | Issue | Change |
+|---|---|---|---|
+| #253 | `76ec774` | JAM-8 | `docs/security.md`: operator guidance on capture sensitivity, storage and the law (promiscuous mode, snap length, deletion, legal note), linked from `getting-started.md`. Corrected the old claim that ring rotation overwrites the oldest file: it never deletes any file. |
+| #254 | `7650794` | JAM-163 | `CONTRIBUTING.md` names Linear as the task source of truth. `docs/wire-protocol.md` describes the real packet-event limiter (100/s, no burst), separately from aggregate accounting, and the per-code finding budgets. |
+| #255 | `3afc68e` | JAM-180 | `ring duration` rotation measures from the current file's start. Before, it measured from run start, so it rotated every ~1 s after the first rotation. Found by the #253 review. |
+| #256 | `6ac15a7` | JAM-181 | `validate_capture_file_path` rejects `..` and compares symlink-resolved paths, so a capture can't be placed inside the agent's working directory. Found by the #253 review. |
 
-In `.worktrees/replay-capture-time-timestamps`. The focused binary replay regression checks capture timestamps at fast and realtime speeds for findings and transaction outcomes, checks an emitted packet timestamp, and verifies packet/finding IDs remain unique. The fast-speed packet event is intentionally rate-limited, so packet timestamp is asserted in realtime only; `relativeTimeMs` remains agent elapsed time.
+Decided by James on 2026-10-04:
+- JAM-130 epic stays open. Two of its "Done when" items are unmet, and both are owner actions in repo Settings → Code security: JAM-187 (record the decision on the `github-advanced-security` check from GitHub #67, whose decision PR #106 was never merged) and JAM-188 (confirm and record the secret scanning and push protection state).
+- Filed as JAM-186: `docs/usage.md`'s `capture ~/captures/…` example doesn't work, because nothing expands `~`.
 
-- `cargo test --locked --bin capture-agent unanswered_finding_timestamp_uses_the_expiry_capture_time`: passed (1 test).
-- `cargo test --locked --test replay_compatibility replay_packet_and_unanswered_timestamps_are_capture_time_at_both_speeds -- --ignored --test-threads=1`: passed (1 test; 9.33s). An initial sandbox attempt could not bind `127.0.0.1:9990` (`Operation not permitted`); the same command passed when rerun with local-network permission.
-- `cargo test --locked`: passed (339 library, 68 binary, 12 control-auth, 2 disk-invariant, 4 pcapng, 1 protocol-regression; 9 ignored).
-- `cargo build --release --locked`: passed.
-- `cargo clippy --all-targets --locked -- -D warnings`: passed.
-- `git diff --check`: passed.
-- `cargo fmt --check`: not clean because rustfmt reports extensive pre-existing differences across unrelated Rust files; no repository-wide formatting was applied.
-- Independent Codex and Claude Code code/security reviews of the worktree diff: no blocking findings. Documented the `u64::MAX` microsecond saturation edge noted by Claude; no timer clamp was added (JAM-190 scope).
+## Security review fixes (JAM-175 to JAM-179) — 2026-10-04, merged
 
-## JAM-204 TLS record-layer review fixes — 2026-10-08
+A repo-wide review found two High and three Low issues. They were filed under JAM-130, fixed one PR each, and squash-merged in severity order. All five Linear issues are Done:
 
-In `.worktrees/tls-decrypt-record-layer` on `jamesmbrownjr/jam-204-tls-decrypt-record-layer`.
+| PR | Merge | Issue | Fix |
+|---|---|---|---|
+| #247 | `fed1e1e` | JAM-175 | The agent's control socket closes a connection on its first non-JSON line, which blocks browser cross-protocol POSTs to `127.0.0.1:9990`. |
+| #248 | `664472c` | JAM-176 | `middleware.ts` returns 421 unless `Host` is a loopback name or listed in `ALLOWED_HOSTS` (blocks DNS rebinding). Malformed entries are skipped with one warning. |
+| #249 | `bbd7ed4` | JAM-177 | `/api/install` JSON-encodes the Host-derived origin in the generated script. |
+| #250 | `8b444fc` | JAM-178 | `/api/enrichment/lookup` rejects cross-site requests. |
+| #251 | `b0a866a` | JAM-179 | CSV export prefixes formula-like string cells with `'` and quotes them, and quotes fields that contain `;` or tab. |
 
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml -- --test-threads=1`: passed (370 library, 81 binary, 12 control-auth, 2 no-disk, 4 pcapng, and 1 protocol-regression tests; 11 ignored across live/opt-in suites).
-- `cargo test --locked --manifest-path capture-agent/vendor/fluke-hpack/Cargo.toml`: passed (59 unit + 6 doc tests).
-- `npx vitest run --maxWorkers=1 --no-file-parallelism`: passed (82 files, 602 tests).
-- `npx tsc --noEmit` and `npm run lint`: passed.
-- `cargo clippy --locked --manifest-path capture-agent/Cargo.toml --all-targets -- -D warnings`: passed after replacing needless references and aliasing the derived key/IV tuple.
-- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
-- `rustfmt --edition 2021 --check --config skip_children=true` on the five changed Rust source files and `git diff --check`: passed. Rustfmt without `skip_children` reports pre-existing formatting in the nested third-party capture fixture; that unrelated fixture was not changed.
-- Added regressions for plaintext sequence advancement, late-key replay before expiry, ring-budget accounting/eviction, header-string zeroization, bounded key-log polling and newline handling, and oversized handshake rejection. Focused module tests and full Rust suite passed.
-- CI/security review on the newly pushed PR head remains pending.
+Dependency audits were clean apart from the allowlisted lint-only `braces` advisory.
 
-## JAM-173 packet-event builder follow-up — verified 2026-10-08
+Operator impact: a step-5 LAN deployment that uses a real hostname must start the relay with `ALLOWED_HOSTS=<mac-hostname>.local`. Otherwise those requests get 421.
 
-In `.worktrees/fragment-packet-event-builder-test` on `jamesmbrownjr/jam-173-fragment-packet-event-builder-test`. Extracted the capture loop's `PacketJson` construction into `build_packet_json`; the two-fragment DNS regression now calls the same builder and asserts the returned event is layer 3 / `OTHER` with the physical fragment's `:0` endpoints and no `dns.*` fields.
+Follow-ups, now filed: JAM-184 (a per-launch token on the agent socket) and JAM-185 (the fake throughput and uptime figures that `/api/install`'s `osi-mon` prints).
 
-- RED: the updated focused test failed to compile because `build_packet_json` did not exist; after extraction it passed.
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml`: passed (371 library tests, 82 binary tests, 12 control-auth, 2 no-disk, 4 pcapng, and 1 protocol-regression; live/replay integration cases ignored as configured).
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml a_tls_client_hello_split_across_two_segments_decodes_once_rejoined`: passed.
-- `cargo test --locked --manifest-path capture-agent/Cargo.toml packet_fields_keep_sni_range_for_unsplit_client_hello`: passed.
-- `cargo clippy --all-targets --locked --manifest-path capture-agent/Cargo.toml -- -D warnings`: passed.
-- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: passed.
-- `git diff --check`: passed.
-- PR and CI review are pending.
+## JAM-172 fix and JAM-16 merge — 2026-10-04, merged
 
+JAM-16 (#239) merged to `main` as `886d4b4`. CI passed on the PR head `cfc8c19` and on `main`. Two more Codex findings on #239 were confirmed in the merged code and filed under JAM-16: JAM-182 `[P1]` (replay reassembly uses wall-clock time) and JAM-183 `[P2]` (an interface switch doesn't reset reassembly). JAM-130 stays open for JAM-187 and JAM-188. New issues: JAM-184 (agent socket token), JAM-185 (`osi-mon` made-up metrics) and JAM-186 (`~` in `docs/usage.md`).
 
-## JAM-255 architecture spike — 2026-10-13
 
-Documentation and measurement evidence only; source baseline `fce195e0d87dac6fb3d14cec5b459ab3b7efc141`. Three original synthetic runs (60k/600k/6m packets) retained with hashes/methodology in `docs/superpowers/specs/2026-10-11-local-query-service-measurements.md` and raw JSON. No production capacity or worker enforcement claim.
+JAM-172 is fixed in #257 (squash `276ec80`, merged into this branch). A last fragment whose declared end conflicts with the group's known end, or ends before bytes already held, is dropped before any of it is written, and counted in `conflicting_terminal_fragments`. James approved merging #239 with JAM-167, JAM-168 and JAM-170 left as follow-ups. `main` was merged into this branch; only the `.ai/` notes conflicted.
 
-- Evidence validation: raw-copy/harness hashes, deterministic counts, source-size/import math, p50/p95/max, cancellation flags and all 4096 template checksums pass; Markdown local links resolve. No fresh performance or database integrity run.
-- Focused seven-file Vitest security/filter command in measurement record: 88 passed.
-- `cargo test --locked --test no_disk_write_invariant --test pcapng_roundtrip`: 6 passed.
-- `cargo test --locked -- --test-threads=1`: 487 passed, 10 ignored (live privileges/fixed-port opt-ins not run).
-- `npx vitest run --maxWorkers=1` and `npx vitest run`: both exit 1 despite 82 files/602 assertions passing, due to unhandled `read ECONNRESET` in `enrichment-whois-client.test.ts`. Focused `npx vitest run lib/__tests__/enrichment-whois-client.test.ts --maxWorkers=1` reproduces the error with 6 passing assertions. Full TypeScript is not green.
-- Read-only diagnosis: fixture accepted sockets lack an error listener; client has one. A loopback Node timeout probe (approved after sandbox EPERM) did not reproduce the error. Root cause not conclusively established; no out-of-scope fix applied.
-- Independent source/security/evidence review: missing plaintext-at-rest disclosure fixed and re-review found no remaining issues. Claude Code cross-review pending.
-- `git diff --check` and final scope/link checks pass. No commit, push, PR, service, dependency or recording-policy change.
+## Verified State — 2026-09-28
 
-JAM-255 review delta: Claude's three MUST items addressed without changing scope: corrected retained evidence links and explicit non-reproducibility from a clean clone; measured-cost quota/rate arithmetic and high-rate selection/rollup follow-up; admin installation cost and same-user sandbox comparison with explicit deny-case proof. Two SHOULD items documented (unmeasured post-load indexing; high-cardinality risk). Independent delta review verified numbers and found only a contradictory OS-identity requirement sentence; qualified it to the recommended path. Re-review requested from Claude. JAM-18/19/117 received the high-rate consequence update.
+JAM-16 (stream reassembly: IP fragments and TCP segments) was dispatched to an Opus-backed agent given its security-sensitive-design profile (this repo's own Model Routing guidance). It wrote a design spec, implemented both reassemblers, ran its own security review (found and fixed two robustness issues), and verified build/test/clippy/fuzz/TS locally — all real command output, reproduced independently by the orchestrating session with matching results (see `TEST_STATUS.md`).
 
-JAM-255 cross-review checked on 2026-10-13: Claude approved the corrected record at 11:50 EDT (Slack `1791906618.440619`), resolving all three MUST items and accepting both SHOULD responses. Verified those corrections in the current files; no new test run was needed for this review-state update. Optional harness attachment to Linear remains unapproved/not performed. Local Vitest error is reported separately as JAM-261; full local TS validation remains non-green.
+## What Shipped
 
-JAM-255 publication continuation: James authorized finishing the reviewed spike on 2026-10-13. No production changes were added. Final evidence, local-link, whitespace, JSON and owned-file checks plus `git diff --check` are rerun before commit; local suites above are retained as executed evidence, with JAM-261's full-Vitest failure disclosed. PR CI/review will supply publication checks.
+- `capture-agent/src/reassembly.rs` (new): `FragmentReassembler` (IP, keyed on src/dst/id/protocol) and `StreamReassembler` (TCP, keyed on the flow table's own `FlowKey` + direction via newly-public `FlowTable::key_for`). Overlap policy: first-seen-bytes-win (documented security rationale: prevents an attacker from retroactively rewriting bytes already reported). Caps: 8 MiB worst case combined; enforced inside `feed`, not only at eviction.
+- `capture-agent/src/l7.rs`: `sniff_l7_desegmenting`/`L7Sniff` (Decided/NeedMoreBytes/Undecided) alongside the unchanged `sniff_l7`. `sniff_http`/`sniff_http_response` now require a terminated start line — fixes a real bug where a truncated request line (e.g. `GET /index.h` with no segment boundary yet) decoded as a complete, wrong request.
+- `capture-agent/src/parse.rs`: two new internal `ParsedPacket` fields (`ip_declared_payload_len`, `ip_fragment`) — no wire exposure.
+- `capture-agent/fuzz/fuzz_targets/stream_reassembly.rs` (new) + CI wiring (`.github/workflows/ci.yml`, hand-listed fuzz steps + path filter).
+- `docs/superpowers/specs/2026-09-28-stream-reassembly-design.md`: the reviewable record of the overlap-policy, cap-size, and desegmentation-interface decisions.
+
+## Two Real Bugs Found While Implementing (Not JAM-16's Own Scope)
+
+1. **`parse_packet` silently drops any frame shorter than its declared IP header length** — meaning a narrowed `snaplen` today makes affected frames disappear entirely rather than show as truncated, so JAM-16's `incomplete — frames truncated at capture` status is correct-but-currently-unreachable from the live capture loop for that specific case (it does fire via a separate signal: the capture loop knows when pcap itself cut a frame at the active snap length, and attributes gaps to that for 5s). Root-causing this needs a separate, larger change to how `parse_packet` handles truncation, with its own wire-surface questions. This is direct, concrete evidence for **JAM-165** ("confirm whether JAM-16 explains the climbing 'frames could not be parsed' counter"), already filed and blocked on this task — added as a comment there rather than filing a duplicate issue.
+2. Fixed directly as part of this task (not filed separately, since it's a precondition for the desegmentation hand-off): the truncated-start-line detector bug above.
+
+## Independent Verification (Orchestrating Session)
+
+Reproduced, not just trusted: `cargo build --release --locked`, `cargo test --locked` (315 passing, matches reported counts exactly), `cargo clippy --all-targets --locked -- -D warnings` (clean), `npx vitest run` (497/497). Spot-checked `first_complete_line`/`unterminated_http_start_line` in `l7.rs` directly — bounded (2048-byte probe cap), no panics, correct method-token-boundary handling. Read the full design spec.
+
+## Review Findings and Resolution Status — 2026-10-03
+
+PR #239's independent review found 5 issues required before merge, each filed as a Linear sub-issue of JAM-16:
+
+- **JAM-166 `[P1]`** — reconstructed transport identity lost for flow tracking. **Fixed and merged** via PR #242 (squashed into this branch as commit `1dd1999`, verified independently: `cargo test --locked` 318 passed/0 failed, clippy clean).
+- **JAM-169 `[P1]`** — TCP overlap policy can be bypassed by a standalone L7 decision on an already-held stream (`reassembly.rs:1029-1033` at review time). Not started.
+- **JAM-167 `[P2]`** — IP-reassembled TCP segments bypass TCP stream reassembly (`reassembly.rs:999-1002`). Not started.
+- **JAM-168 `[P2]`** — reassembled L7 field offsets attached to the wrong packet bytes (`main.rs:1611-1613`). Not started.
+- **JAM-170 `[P2]`** — stated memory budget omits `filled: Vec<bool>` coverage-map storage (`reassembly.rs:770-772`). Not started.
+- **JAM-172 `[P1]`** — found on a second independent review pass (2026-10-03), not part of the original 5: `IpFragmentReassembler::feed` unconditionally overwrites `group.total_len` on any fragment with `more_fragments=false` (`reassembly.rs:441-448`), with no first-seen-wins protection on that field. A single forged last-fragment packet can retroactively truncate an already-buffered datagram to an attacker-chosen length (`take_group` emits `prefix_len.min(total)`) — the same evasion class the data-byte overlap policy defends against, except this field isn't covered by it. Verified directly against the code, not just the subagent's report. **Fixed in #257 (`276ec80`).**
+- **JAM-169 `[P1]`** — **fixed and merged** via PR #246 (3 commits squashed onto this branch): `StreamReassembler::sniff`'s standalone-decision fast path now only fires when `TcpReassembler::has_buffer` (entry existence, not `!finished`) reports no buffer at all. Two further gaps were found and fixed during two independent review rounds on that PR itself: (1) a `finished`-but-not-yet-released stream (hit cap) still has real `data`, so checking `!finished` alone reopened the bypass — fixed by checking entry existence; (2) that fix then caused a *new* regression — `feed()` released a finished stream's buffer in place without removing the entry, so a busy, long-lived connection's `has_buffer` kept reporting true forever (idle eviction never fires on live traffic), permanently blinding that direction to all future decisions after any single cap/timeout event — fixed by having `feed()` remove the entry outright on the finished branch. Two novel, non-blocking findings from the same review rounds filed separately: JAM-173 (fragment-completing packet event shows contradictory layer/protocol fields) and JAM-174 (snap-length truncation detector dead during replay, pre-existing).
+
+A separate, already-fixed finding (TCP `rebase()` truncation, commit `1b925ab`) predates this list and is not one of the 5 (now 6, with JAM-172).
+
+Branch rebased onto `main` at `539f055` on 2026-10-03 to clear PR #239's merge conflict — `.ai/` state-file conflicts (resolved by keeping this branch's own entries). `capture-agent/src/main.rs` auto-merged **without a CONFLICT marker but produced broken code**: the `use capture_agent::{...}` import list silently lost its `l7` import (still needed by `packet_osi_layer`), caught by `cargo build` (`error[E0433]`), not by git. Fixed by re-adding `l7` to the import list; re-verified clean (see `TEST_STATUS.md`'s "Post-rebase re-verification" entry — 320 passed, 0 failed, clippy clean). Don't trust a rebase/merge that reports success for a file touched by multiple commits without rebuilding.
+
+## Publication and Continuation
+
+PR #239 is open. Do not merge until JAM-169/167/168/170 are resolved (JAM-169 is the highest-severity remaining item — a documented security guarantee, first-seen-bytes-win, that can currently be silently bypassed). Push the rebase (`git push --force-with-lease`, safe since nothing unmerged is lost — the only non-rebased commits were already squash-merged via #242) before further work. Independent code-review and security-review passes run before merge, per this repo's standing convention.
+
+## Known Limits and Follow-ups
+
+- Live capture against a real interface was not exercised (no `CAP_NET_RAW` in this environment).
+- Wire-visible reassembly status (a `reassembly-incomplete` finding code) is deliberately deferred — needs the Rust + TS + docs + both-sides-test treatment this repo requires for any wire change.
+- The `parse_packet`-truncation bug above needs its own tracked follow-up if JAM-165 (already filed, blocked on this task) doesn't fully cover it once re-diagnosed post-merge.
+
+## JAM-166 Follow-on — Reconstructed Flow Attribution
+
+JAM-166 adds the parsed transport packet to `SniffOutcome` when an IP fragment group completes. The capture loop now calls `FlowTable::observe_reassembled`: each physical fragment contributes once to the protocol hierarchy, while the completed TCP/UDP datagram contributes once to its correctly keyed flow and L7 classification. The packet event and capture-file writer continue to use the original captured frame. Regression coverage verifies two physical fragments are counted as two frames while the flow and endpoint rollup count one reconstructed datagram. Full verification on the child branch based on PR #239 head `1b925abd`: `cargo test --locked` (318 passed, 2 live-loopback ignored), clippy clean, release build clean; independent Codex review found no actionable regressions. The child PR targets the PR #239 branch, and JAM-166 remains a blocker until that fix is integrated.
+
+## JAM-193 — Capture-file rejection UI
+
+Implemented in `.worktrees/p2-capture_file_error-sse-event-has-no-ui-handler-rejected` on `jamesmbrownjr/jam-193-p2-capture_file_error-sse-event-has-no-ui-handler-rejected`. The page now consumes the existing `capture_file_error` SSE event and displays its rejection message in a dismissible banner. A new `start_capture_file` request clears a previous rejection so a retry does not leave stale error UI; a fresh error event displays again. Tests cover rejected start, malformed non-string message, display, retry, repeat rejection and dismissal. No wire/agent changes.
+
+Verified: focused Vitest 12/12; full Vitest 82 files / 601 tests; `npm run lint`; `npm run build`; `git diff --check`. One intermediate full Vitest run hit existing timing-related teardown errors in unrelated enrichment tests; rerunning the standard suite passed all 601 tests. PR #268 CI passed before this final retry refinement; a refreshed CI run is required after the next push. Independent code/security reviews found no blocking issue. James declined Chrome automation and said he can perform the required real-browser check; merge is waiting for that result. The final build after rebase showed the existing middleware deprecation warning.
+
+## JAM-170 — reassembly coverage accounting
+
+Implemented in `.worktrees/reassembly-coverage-memory-accounting` on `jamesmbrownjr/jam-170-p2-account-for-reassembly-coverage-storage-in-memory-limits`. The memory counter includes retained capacities of the data and coverage vectors; regression tests and fuzz checks verify aggregate and per-direction bounds. PR #269 is open. JAM-198 merged as PR #270 at `13695b5`, and the post-merge `main` CI run 37410349067 passed, resolving the npm-audit blocker. PR #269 is being updated to the new main base; its checks must pass again before merge.
+
+## JAM-198 — npm audit source-map-js fix
+
+Updated `.worktrees/npm-audit-source-map-js` on `jamesmbrownjr/jam-198-p1-ci-npm-audit-gate-fails-on-source-map-js-ghsa-68fv-2mgg`. `package-lock.json` now resolves `source-map-js` 1.2.2, the patched version for GHSA-68fv-2mgg-jv7q. No manifest range or application code change. Lockfile dependency paths include the root `postcss` and Next.js's nested `postcss`, in addition to development tooling; patching the transitive dependency is preferable to suppressing the advisory.
+
+Verified the npm audit gate using `npm audit --json` plus `.github/scripts/check-npm-audit.mjs`: no `source-map-js` finding remains; the only reported high-severity item is the repository's pre-existing allowlisted GHSA-vfj7-8cjw-p6xm. `npm run lint`, `npm run build`, and `npx vitest run` passed (82 files, 601 tests). Build emitted the existing middleware and Edge Runtime warnings. PR and CI/review state are recorded in the coordination task contract.
+
+## JAM-199 — sharp advisory
+
+JAM-199 was implemented in `.worktrees/npm-audit-sharp` on `jamesmbrownjr/jam-199-p1-ci-npm-audit-gate-fails-on-sharp-ghsa-wq5f-xc86-pv6w-new` and merged as PR #272 (`b4744a8`). Next's existing optional `sharp` dependency now resolves to patched 0.35.5 via `^0.35.4`; no manifest or application-code change was needed. The audit gate, lint, build, all 601 Vitest tests, and PR checks passed. Codex and Claude Code reviews found no findings. Decision recorded: keep fixable high/critical advisories as immediate blockers; do not add a grace period. PR #271 is being updated to the merged main base and needs fresh CI.
+
+## JAM-203 — replay finding timestamps
+
+Implementation and focused/full Rust verification are complete in `.worktrees/replay-capture-time-timestamps`. Replay packet events and packet-triggered findings now use the source frame timestamp; unanswered findings use the expiry timestamp already passed by capture-time replay expiry. Live packet and idle-expiry behavior remain wall-clock based. JAM-190 still owns replay timer clamping. Relative time remains agent elapsed time.
+
+Codex and Claude Code independently reviewed the uncommitted diff and found no blocking issues. Claude noted that a timestamp saturating at `u64::MAX` microseconds can expire all pending transactions; the conversion comment now records this extreme-value behavior and leaves timer hardening with JAM-190. The opt-in replay test asserts fast/realtime finding timestamps and transaction outcomes; only realtime emits the rate-limited target packet event, which is called out for the PR. The worktree is ready for commit and PR; it has not been merged.
+
+## JAM-204 — TLS record-layer review fixes (2026-10-08)
+
+PR #276 is open in `.worktrees/tls-decrypt-record-layer` on `jamesmbrownjr/jam-204-tls-decrypt-record-layer`. Actionable reviewer findings were fixed: plaintext sequence advancement now uses the length before zeroization; periodic key polling replays queued TLS records before expiry; retained ring allocations count against the aggregate TLS buffer budget and are zeroized on eviction; header strings are formatted in zeroizing storage; key-log polling is bounded and consumes only newline-terminated records; and handshake parsing caps messages at 64 KiB and compacts once while zeroing stale bytes. Review follow-up and the reason unused-key TTL remains monotonic wall time are in the implementation plan. Full Rust (serialized), vendored HPACK, full Vitest, TypeScript, lint, strict Clippy, release build, targeted rustfmt, and diff checks pass. Push these changes, request fresh PR/security review, then merge only after required checks and review gates are green. See `.ai/TEST_STATUS.md` for exact commands.
+
+## JAM-173 — packet-event builder regression follow-up (2026-10-08)
+
+PR #279 merged as `00ef54f`; James authorized a follow-up PR after the reviewer asked for the test to exercise actual event construction. In `.worktrees/fragment-packet-event-builder-test` on `jamesmbrownjr/jam-173-fragment-packet-event-builder-test`, extracted `PacketJson` assembly to `build_packet_json` and changed the two-fragment DNS regression to assert the returned event's physical fields and absence of reassembled `dns.*` fields. Full locked Rust tests, the split and unsplit ClientHello regressions, warnings-denied Clippy, release build, and `git diff --check` pass. Follow-up PR review and CI are pending.
+
+Independent local diff review: no actionable regression in preserved jobs/checks/permissions/timeouts/live-capture setup, direct binaries, existing install policy or Dependabot scope. Reviewer identified unresolved master-history durability of Rust generated-channel candidates; root verified upstream requirement/API and corrected both references to master-history e2a55d2. Narrow re-review confirmed both refs/explicit stable+clippy/nightly inputs and manual-refresh comments; no actionable finding remains. Reviewer read diff/saved provenance/action files and did not independently query GitHub or rerun suites. Final static/YAML/scope/diff checks pass.
