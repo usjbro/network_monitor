@@ -8,7 +8,7 @@ Verification: baseline static check failed, edited check passes; upstream tags/c
 
 Independent review found no regression; its unresolved durability check was addressed by verified master-history Rust pins and a passing narrow re-review.
 
-James approved commit/push/PR publication directly in chat on 2026-10-13. Next: publish the verified result and obtain CI/review evidence. The complete task Slack thread was read and early Claude notes addressed. PR must prove full CI with --ignore-scripts and verify main Sonar findings after reviewer merge. Do not commit/push/merge without authorization; do not merge own branch. No scope expansion to JAM-258/259/260/261. Temporary check/provenance scripts/data are /private/tmp/jam257-* and not committed. Main checkout untouched.
+James approved commit/push/PR publication directly in chat on 2026-10-13. PR #283 published at 801be0b; code review caught historical test-status loss, now restored with only a new JAM-257 evidence entry. Obtain final-head CI/review evidence. The complete task Slack thread was read and early Claude notes addressed. PR must prove full CI with --ignore-scripts and verify main Sonar findings after reviewer merge. Do not commit/push/merge without authorization; do not merge own branch. No scope expansion to JAM-258/259/260/261. Temporary check/provenance scripts/data are /private/tmp/jam257-* and not committed. Main checkout untouched.
 
 ---
 
