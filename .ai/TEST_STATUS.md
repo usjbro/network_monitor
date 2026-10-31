@@ -1,3 +1,34 @@
+# JAM-258 — publication authorized (2026-10-31)
+
+James explicitly approved “Take over JAM-258 here” in this live chat. Worktree: `/workspace/network_monitor/.worktrees/floating-promises-control-errors`; branch: `jamesmbrownjr/jam-258-floating-promises-control-errors`; base: `f4239b6`. A new local gate records the authorized takeover; the original Mac checkout was not modified.
+
+## Result
+
+- Pause/resume, ownership-enrichment and GeoIP controls catch rejected requests and non-OK responses. A dismissible banner uses fixed text plus HTTP status, never response bodies or exception details. A retry clears the previous error.
+- Failed enrichment preserves mode, pending/unavailable lookups and timers; successful repeated enable still shows disclosure. Header pause state changes only after successful control responses.
+- Clipboard success follows a resolved write. An attempt counter prevents stale completions and timers from indicating success for a newer pending/failed write.
+- Verified intentional queue/CLI background calls are explicitly marked. The GeoIP stream side effect catches unexpected rejection with fixed logging; PID registration ordering is unchanged.
+- No API-route, agent, wire, dependency/lockfile, bind/deployment or separate JAM-261 changes.
+
+## Verification
+
+- Tests-first failures reproduced missing error handling, false enrichment/clipboard state, HTTP status/retry issues, failed header state and clipboard completion/timer races. Exact evidence: `/workspace/jam258-implementation-report.md` and `/workspace/jam258-evidence/`.
+- Final `npm test -- --maxWorkers=2`: **83 files, 649 tests passed**, exit0. The complete test suite ran with permitted loopback networking. Earlier restricted-sandbox CLI failures did not recur.
+- Final `npm run lint`, `npm run build`, and `./node_modules/.bin/tsc --noEmit`: all exit0. Logs: `/tmp/jam258-final-{full-tests,lint,build,typecheck}.log`.
+- Independent review found a clipboard race; reproduced with three failing tests, fixed with an attempt guard, and cleared on scoped re-review. Final focused tests: **56 passed**. Review: `/workspace/jam258-review-report.md`.
+- `git diff --check`: passed.
+
+## Remaining limits / next step
+
+- Real-agent browser verification is **blocked**. A real capture-agent binary was built successfully for offline replay, but its fixed loopback port9990 was occupied (`Address already in use`). The browser could not reach a replaying-agent state. Existing listeners were preserved. A follow-up relay-only browser attempt was interrupted and is not claimed as passing. Evidence: `/workspace/jam258-agent.log`, `/workspace/jam258-browser-real-agent-attempt.json`, `/workspace/jam258-browser.log`; temporary verification tools/assets live outside the repository in `/workspace/jam258-runtime/` and `/workspace/jam258-browser-check.cjs`.
+- Required Slack statuses are in this chat because no bot/webhook is configured. AGENTS.md prohibits connector-posted coordination messages. Complete gate and started threads were reread before handoff; no additional replies were present.
+- Linear reads repeatedly requested authentication despite accepting reconnection. No tracker state or generated branch name is claimed verified, and no tracker update was made. Local branch follows the repository task script.
+- James has now authorized commit, push and PR publication in this live chat. Publish the reviewed changes with the blocked real-agent browser check explicitly disclosed. Do not merge this branch. Do not start separate JAM-261 without its own applicable approval/claim.
+
+---
+
+## Historical evidence retained below
+
 # JAM-257 — CI supply-chain hardening (2026-10-13)
 
 Worktree `.worktrees/ci-pin-actions-and-npx`; PR https://github.com/usjbro/network_monitor/pull/283. All 13 Action references pinned to verified upstream SHAs. Both Rust steps use durable master-history SHA `e2a55d2ffb04f378e9626c28d38b36d230d1e12f` with explicit stable/nightly inputs, following upstream guidance. CI tools use installed local binaries; explicit scripts-disabled installs preserve `.npmrc` policy.
