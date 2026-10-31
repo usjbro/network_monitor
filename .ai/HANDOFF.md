@@ -1,6 +1,9 @@
-# JAM-258 — publication authorized (2026-10-31)
+# JAM-258 — PR #291 published (2026-10-31)
 
 James explicitly approved “Take over JAM-258 here” in this live chat. Worktree: `/workspace/network_monitor/.worktrees/floating-promises-control-errors`; branch: `jamesmbrownjr/jam-258-floating-promises-control-errors`; base: `f4239b6`. A new local gate records the authorized takeover; the original Mac checkout was not modified.
+
+PR: https://github.com/usjbro/network_monitor/pull/291
+Code commit: `a338218a0fb0bf882720c0513f7ad3097db0f7bb`. Branch pushed to origin; PR is open for review. No merge performed.
 
 ## Result
 
@@ -21,9 +24,9 @@ James explicitly approved “Take over JAM-258 here” in this live chat. Worktr
 ## Remaining limits / next step
 
 - Real-agent browser verification is **blocked**. A real capture-agent binary was built successfully for offline replay, but its fixed loopback port9990 was occupied (`Address already in use`). The browser could not reach a replaying-agent state. Existing listeners were preserved. A follow-up relay-only browser attempt was interrupted and is not claimed as passing. Evidence: `/workspace/jam258-agent.log`, `/workspace/jam258-browser-real-agent-attempt.json`, `/workspace/jam258-browser.log`; temporary verification tools/assets live outside the repository in `/workspace/jam258-runtime/` and `/workspace/jam258-browser-check.cjs`.
-- Required Slack statuses are in this chat because no bot/webhook is configured. AGENTS.md prohibits connector-posted coordination messages. Complete gate and started threads were reread before handoff; no additional replies were present.
+- No Slack bot/webhook is configured. James subsequently directly requested the coordinated Slack update in this live chat; a clearly labeled agent-authored PR/review update was posted in the original task thread: https://me-hem6828.slack.com/archives/C0C39FJT9DX/p1793418932808479?thread_ts=1791918731.464049&cid=C0C39FJT9DX. This specific user-requested update does not grant background Slack posting permission. Complete task threads were reread before publication.
 - Linear reads repeatedly requested authentication despite accepting reconnection. No tracker state or generated branch name is claimed verified, and no tracker update was made. Local branch follows the repository task script.
-- James has now authorized commit, push and PR publication in this live chat. Publish the reviewed changes with the blocked real-agent browser check explicitly disclosed. Do not merge this branch. Do not start separate JAM-261 without its own applicable approval/claim.
+- James authorized commit, push, PR publication and the coordinated task-thread update in this live chat. PR #291 is published with blocked browser verification explicitly disclosed; Claude review was requested. CI is running; no CI pass is claimed. Address review/CI findings, and do not merge this branch. Do not start separate JAM-261 without its own applicable approval/claim.
 
 ---
 
