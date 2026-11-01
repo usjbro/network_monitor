@@ -195,7 +195,11 @@ export function buildStreamResponse(deps: StreamRouteDeps = {}): Response {
         if (hop.hopIp) {
           hopContextByIp.set(hop.hopIp, { targetIp: hop.targetIp, hopNumber: hop.hopNumber });
           if (geoIpClient.getMode() === 'on') {
-            geoIpClient.lookup(hop.hopIp);
+            // Provider failures normally emit a null result; contain unexpected
+            // lookup rejections here so they cannot escape this SSE side effect.
+            void Promise.resolve(geoIpClient.lookup(hop.hopIp)).catch(() => {
+              console.error('GeoIP lookup failed.');
+            });
           }
         }
       };

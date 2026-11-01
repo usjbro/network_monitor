@@ -42,7 +42,8 @@ export class RequestQueue {
   enqueue<T>(fn: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.queue.push({ run: fn, resolve: resolve as (v: unknown) => void, reject });
-      this.drain();
+      // drain routes task failures to each enqueue promise.
+      void this.drain();
     });
   }
 

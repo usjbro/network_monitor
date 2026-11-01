@@ -80,6 +80,7 @@ export default function TerminalApp() {
   const [selectedLayerNum, setSelectedLayerNum] = useState<OSILayerNumber>(7);
   const [selectedTheme, setSelectedTheme] = useState<TerminalTheme>('sophisticated');
   const [isPaused, setIsPaused] = useState(false);
+  const pausePending = useRef(false);
   const [crtEnabled, setCrtEnabled] = useState(false);
   const [isInstallOpen, setIsInstallOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
@@ -148,6 +149,7 @@ export default function TerminalApp() {
   // A rejected capture-to-file request is an explicit one-off agent signal;
   // keep it visible until the user dismisses it.
   const [captureFileError, setCaptureFileError] = useState<string | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
 
   // Connections & Packets State (populated from the live capture stream)
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
@@ -384,39 +386,59 @@ export default function TerminalApp() {
   }, []);
 
   // Sends a pause/resume control message to the capture agent via the relay.
-  const sendControl = (type: 'pause' | 'resume') => {
-    fetch('/api/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type }),
-    });
+  const sendControl = async (type: 'pause' | 'resume') => {
+    setControlError(null);
+    try {
+      const res = await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type }),
+      });
+      if (!res.ok) {
+        setControlError(`Capture control request failed (HTTP ${res.status}).`);
+        return false;
+      }
+      return true;
+    } catch {
+      setControlError('Capture control request failed.');
+      return false;
+    }
   };
 
   // Toggles ownership enrichment mode via /api/enrichment/control (Task 9's
   // route, backed by Task 8's EnrichmentClient). Re-shows the disclosure
   // banner on every enable (on-demand or background), per spec §1.
   const enrichmentControl = async (action: string) => {
-    const res = await fetch('/api/enrichment/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    });
-    const body = await res.json();
-    if (body.disclosureText) setDisclosureText(body.disclosureText); // re-shown on every enable, per spec §1
-    if (action === 'enable') setEnrichmentMode('on-demand');
-    if (action === 'enable_background') setEnrichmentMode('background');
-    if (action === 'disable') setEnrichmentMode('off');
-    if (action === 'disable_background') setEnrichmentMode('on-demand');
-    if (action === 'clear') {
-      setEnrichmentMode('off');
-      // Wipe any in-flight/unavailable bookkeeping along with the
-      // server-side cache+log clear — a stale "Looking up…" or
-      // "Unavailable" badge left over from before the clear would be
-      // misleading once enrichment is off and the cache is gone.
-      for (const timer of lookupTimers.current.values()) clearTimeout(timer);
-      lookupTimers.current.clear();
-      setLookingUpIds(new Set());
-      setUnavailableIds(new Set());
+    setControlError(null);
+    try {
+      const res = await fetch('/api/enrichment/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      if (!res.ok) {
+        setControlError(`Enrichment control request failed (HTTP ${res.status}).`);
+        return;
+      }
+      const body = await res.json();
+      if (body.disclosureText) setDisclosureText(body.disclosureText); // re-shown on every enable, per spec §1
+      if (action === 'enable') setEnrichmentMode('on-demand');
+      if (action === 'enable_background') setEnrichmentMode('background');
+      if (action === 'disable') setEnrichmentMode('off');
+      if (action === 'disable_background') setEnrichmentMode('on-demand');
+      if (action === 'clear') {
+        setEnrichmentMode('off');
+        // Wipe any in-flight/unavailable bookkeeping along with the
+        // server-side cache+log clear — a stale "Looking up…" or
+        // "Unavailable" badge left over from before the clear would be
+        // misleading once enrichment is off and the cache is gone.
+        for (const timer of lookupTimers.current.values()) clearTimeout(timer);
+        lookupTimers.current.clear();
+        setLookingUpIds(new Set());
+        setUnavailableIds(new Set());
+      }
+    } catch {
+      setControlError('Enrichment control request failed.');
     }
   };
 
@@ -483,12 +505,18 @@ export default function TerminalApp() {
 
   // GeoIP mode is opt-in and runtime-only (never persisted) — see
   // lib/geoip.ts and docs/geoip-protocol.md.
-  const sendGeoIpControl = (action: 'enable' | 'disable' | 'clear') => {
-    fetch('/api/geoip/control', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    });
+  const sendGeoIpControl = async (action: 'enable' | 'disable' | 'clear') => {
+    setControlError(null);
+    try {
+      const res = await fetch('/api/geoip/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      if (!res.ok) setControlError(`GeoIP control request failed (HTTP ${res.status}).`);
+    } catch {
+      setControlError('GeoIP control request failed.');
+    }
   };
 
   // Capture-time controls (issue #68) — routed through the same
@@ -574,6 +602,7 @@ export default function TerminalApp() {
     });
   };
 
+  // These async control handlers report their own failures in the banner.
   // Command Line Handler
   const handleExecuteCommand = (cmdStr: string) => {
     const parts = cmdStr.toLowerCase().split(' ');
@@ -599,35 +628,35 @@ export default function TerminalApp() {
         setSelectedTheme(arg1 as TerminalTheme);
       }
     } else if (mainCmd === 'pause') {
-      sendControl('pause');
+      void sendControl('pause');
     } else if (mainCmd === 'resume') {
-      sendControl('resume');
+      void sendControl('resume');
     } else if (mainCmd === 'reset') {
       setConnections([]);
       setPackets([]);
       setDecryptedSegments([]);
       setFindings([]);
     } else if (mainCmd === 'geoip' && arg1 === 'enable') {
-      sendGeoIpControl('enable');
+      void sendGeoIpControl('enable');
     } else if (mainCmd === 'geoip' && arg1 === 'disable') {
-      sendGeoIpControl('disable');
+      void sendGeoIpControl('disable');
     } else if (mainCmd === 'geoip' && arg1 === 'clear') {
-      sendGeoIpControl('clear');
+      void sendGeoIpControl('clear');
     } else if (['install', 'macos', 'brew', 'curl', 'sw_vers'].includes(mainCmd)) {
       setIsInstallOpen(true);
     } else if (mainCmd === 'enrich' && arg1 === 'on') {
-      enrichmentControl('enable');
+      void enrichmentControl('enable');
     } else if (mainCmd === 'enrich' && arg1 === 'off') {
-      enrichmentControl('disable');
+      void enrichmentControl('disable');
     } else if (mainCmd === 'enrich' && arg1 === 'background' && parts[2] === 'on') {
       // `parts` comes from cmdStr.toLowerCase().split(' ') above, so this
       // three-token form is reachable — a two-token-only mainCmd/arg1 check
       // would silently drop the "on"/"off" token here.
-      enrichmentControl('enable_background');
+      void enrichmentControl('enable_background');
     } else if (mainCmd === 'enrich' && arg1 === 'background' && parts[2] === 'off') {
-      enrichmentControl('disable_background');
+      void enrichmentControl('disable_background');
     } else if (mainCmd === 'enrich' && arg1 === 'clear') {
-      enrichmentControl('clear');
+      void enrichmentControl('clear');
     } else if (mainCmd === 'display') {
       const expression = cmdStr.includes(' ') ? cmdStr.slice(cmdStr.indexOf(' ') + 1).trim() : '';
       if (expression.toLowerCase() === 'clear') {
@@ -834,6 +863,19 @@ export default function TerminalApp() {
         </div>
       )}
 
+      {controlError && (
+        <div className="w-full bg-red-900/40 border-b border-red-700 text-red-200 text-sm px-4 py-2 flex items-start justify-between gap-3">
+          <span>{controlError}</span>
+          <button
+            onClick={() => setControlError(null)}
+            className="shrink-0 text-red-200 hover:text-white font-bold"
+            aria-label="Dismiss control error"
+          >
+            [CLOSE]
+          </button>
+        </div>
+      )}
+
       {/* Ownership enrichment disclosure — re-shown on every "enrich on" /
           "enrich background on", per spec §1. Simple dismissible banner,
           consistent with the "agent not connected" banner's styling above,
@@ -866,10 +908,15 @@ export default function TerminalApp() {
           theme={themeConfig}
           onSelectTheme={setSelectedTheme}
           isPaused={isPaused}
-          onTogglePause={() => {
-            const next = !isPaused;
-            setIsPaused(next);
-            sendControl(next ? 'pause' : 'resume');
+          onTogglePause={async () => {
+            if (pausePending.current) return;
+            pausePending.current = true;
+            try {
+              const next = !isPaused;
+              if (await sendControl(next ? 'pause' : 'resume')) setIsPaused(next);
+            } finally {
+              pausePending.current = false;
+            }
           }}
           onReset={() => {
             setConnections([]);

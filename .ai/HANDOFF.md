@@ -1,3 +1,24 @@
+# JAM-258 — PR #291 review follow-up (2026-10-31)
+
+PR: https://github.com/usjbro/network_monitor/pull/291
+Branch: `jamesmbrownjr/jam-258-floating-promises-control-errors` (base `f4239b6`).
+
+James approved takeover and publication in this chat. Original Mac checkout was not modified. No merge is authorized.
+
+Controls show fixed failure messages and HTTP status, preserve enrichment state on failure, and confirm clipboard writes only after success. Clipboard completion/timer races are guarded. Unexpected background GeoIP rejections are contained; CLI PID-registration ordering is unchanged.
+
+Review follow-up addresses [the header race](https://github.com/usjbro/network_monitor/pull/291#discussion_r4430338056): a synchronous pending guard serializes header pause/resume, with deferred-response tests for success, rejection and non-OK responses. The CLI unreachable-relay regression now verifies the failed-registration warning after stdio closes. Scratch state was removed and test evidence separated from this handoff.
+
+Validation: the prior full suite passed 649 tests and lint/build/typecheck. The correction passes 59 focused tests, lint and TypeScript, with independent review clear. Fresh full tests and build encountered runtime restrictions; no final full-suite/build pass is claimed. See TEST_STATUS.md for commands and results.
+
+Remaining: real-agent browser verification was blocked by occupied port9990; no browser pass is claimed. CI's Web audit gate fails on18 high/critical advisories tracked separately as JAM-262; downstream web checks are skipped, while prior-head Rust and Playwright passed. Linear authentication prevented confirmed tracker sync.
+
+Publication: correction `b4978d4` is on the existing PR; the retained local branch matches it. The [existing review thread reply](https://github.com/usjbro/network_monitor/pull/291#discussion_r4434385619) records the fix and evidence. Code-head CI passed Rust and Playwright, but Web still stops at the audit gate.
+
+Next: re-run full tests, CLI regression and build where loopback listeners and child-process output work, then obtain external review/CI. Background Slack writes remain prohibited; the earlier publication reply was a specific user-requested exception. Do not merge or start another issue without applicable approval/claim.
+
+---
+
 # JAM-257 — prepared implementation (2026-10-13)
 
 Claimed existing approved gate `jam-257__ci-pin-actions-and-npx` under James's direct chat instruction; delegated to Codex. Linear In Progress. Worktree `.worktrees/ci-pin-actions-and-npx`; exact Linear branch `jamesmbrownjr/jam-257-p3-ci-supply-chain-pin-github-actions-to-commit-shas-and-pin`; fresh base `c73a0b0`.

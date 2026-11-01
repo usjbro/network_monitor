@@ -1,3 +1,20 @@
+# JAM-258 — verification (2026-10-31)
+
+PR: https://github.com/usjbro/network_monitor/pull/291
+
+- Original full web suite: `npm test -- --maxWorkers=2` —83 files/649 tests passed. Original lint, production build and TypeScript passed.
+- Review regression: the delayed/out-of-order pause response reproduced incorrect header state. A serialization test then failed in3 outcome cases before the pending guard was added.
+- Follow-up focused suite: `./node_modules/.bin/vitest run lib/__tests__/page-control-errors.test.tsx lib/__tests__/install-modal.test.tsx lib/__tests__/traceroute-stream.test.ts` —3 files/59 tests passed on the final source.
+- Follow-up `npm run lint`, `./node_modules/.bin/tsc --noEmit` and `git diff --check`: passed. Independent scoped review approved the serialization, CLI assertion and documentation cleanup.
+- Fresh `npm test -- --maxWorkers=2`: 623 passed, 29 failed across 5 files, with 27 unhandled listener errors. Loopback binds fail with `listen EPERM`; spawned-process assertions also fail because child stdout is empty. A minimal child running `console.log(42)` exits 0 with empty stdout. Network-enabled rerun attempts never returned an execution result; no successful final full run is claimed.
+- `npm run build`: failed parsing empty TypeScript `--showConfig` output from a child process. The same Next.js configuration helper independently reproduces this, while direct `tsc --showConfig` produces valid JSON. Build must be rerun in a working runtime.
+- CLI regression asserts the existing failed-registration stderr warning after process `close`. Its filtered run fails in the loopback-listener setup hook before reaching the assertion; execution remains unverified here.
+- Real-agent browser run: blocked by occupied loopback port9990. No browser pass claimed. GitHub Playwright smoke uses a fake agent and does not replace this check.
+- CI head7849426: Rust (including live/replay/Clippy/audit) and Playwright passed; fuzz execution was path-filtered; Web failed at the existing JAM-262 npm-audit gate and skipped downstream checks.
+- Correction CI head `b4978d4`: [run 41272518561](https://github.com/usjbro/network_monitor/actions/runs/41272518561) passed Rust (including live/replay/Clippy/audit) and Playwright. Fuzz execution was path-filtered. Web failed at npm audit and skipped TypeScript, lint, tests and build. No final web CI pass is claimed.
+
+---
+
 # JAM-257 — CI supply-chain hardening (2026-10-13)
 
 Worktree `.worktrees/ci-pin-actions-and-npx`; PR https://github.com/usjbro/network_monitor/pull/283. All 13 Action references pinned to verified upstream SHAs. Both Rust steps use durable master-history SHA `e2a55d2ffb04f378e9626c28d38b36d230d1e12f` with explicit stable/nightly inputs, following upstream guidance. CI tools use installed local binaries; explicit scripts-disabled installs preserve `.npmrc` policy.
