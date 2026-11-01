@@ -1,36 +1,21 @@
-# JAM-258 — PR #291 published (2026-10-31)
-
-James explicitly approved “Take over JAM-258 here” in this live chat. Worktree: `/workspace/network_monitor/.worktrees/floating-promises-control-errors`; branch: `jamesmbrownjr/jam-258-floating-promises-control-errors`; base: `f4239b6`. A new local gate records the authorized takeover; the original Mac checkout was not modified.
+# JAM-258 — PR #291 review follow-up (2026-10-31)
 
 PR: https://github.com/usjbro/network_monitor/pull/291
-Code commit: `a338218a0fb0bf882720c0513f7ad3097db0f7bb`. Branch pushed to origin; PR is open for review. No merge performed.
+Branch: `jamesmbrownjr/jam-258-floating-promises-control-errors` (base `f4239b6`).
 
-## Result
+James approved takeover and publication in this chat. Original Mac checkout was not modified. No merge is authorized.
 
-- Pause/resume, ownership-enrichment and GeoIP controls catch rejected requests and non-OK responses. A dismissible banner uses fixed text plus HTTP status, never response bodies or exception details. A retry clears the previous error.
-- Failed enrichment preserves mode, pending/unavailable lookups and timers; successful repeated enable still shows disclosure. Header pause state changes only after successful control responses.
-- Clipboard success follows a resolved write. An attempt counter prevents stale completions and timers from indicating success for a newer pending/failed write.
-- Verified intentional queue/CLI background calls are explicitly marked. The GeoIP stream side effect catches unexpected rejection with fixed logging; PID registration ordering is unchanged.
-- No API-route, agent, wire, dependency/lockfile, bind/deployment or separate JAM-261 changes.
+Controls show fixed failure messages and HTTP status, preserve enrichment state on failure, and confirm clipboard writes only after success. Clipboard completion/timer races are guarded. Unexpected background GeoIP rejections are contained; CLI PID-registration ordering is unchanged.
 
-## Verification
+Review follow-up addresses [the header race](https://github.com/usjbro/network_monitor/pull/291#discussion_r4430338056): a synchronous pending guard serializes header pause/resume, with deferred-response tests for success, rejection and non-OK responses. The CLI unreachable-relay regression now verifies the failed-registration warning after stdio closes. Scratch state was removed and test evidence separated from this handoff.
 
-- Tests-first failures reproduced missing error handling, false enrichment/clipboard state, HTTP status/retry issues, failed header state and clipboard completion/timer races. Exact evidence: `/workspace/jam258-implementation-report.md` and `/workspace/jam258-evidence/`.
-- Final `npm test -- --maxWorkers=2`: **83 files, 649 tests passed**, exit0. The complete test suite ran with permitted loopback networking. Earlier restricted-sandbox CLI failures did not recur.
-- Final `npm run lint`, `npm run build`, and `./node_modules/.bin/tsc --noEmit`: all exit0. Logs: `/tmp/jam258-final-{full-tests,lint,build,typecheck}.log`.
-- Independent review found a clipboard race; reproduced with three failing tests, fixed with an attempt guard, and cleared on scoped re-review. Final focused tests: **56 passed**. Review: `/workspace/jam258-review-report.md`.
-- `git diff --check`: passed.
+Validation: the prior full suite passed 649 tests and lint/build/typecheck. The correction passes 59 focused tests, lint and TypeScript, with independent review clear. Fresh full tests and build encountered runtime restrictions; no final full-suite/build pass is claimed. See TEST_STATUS.md for commands and results.
 
-## Remaining limits / next step
+Remaining: real-agent browser verification was blocked by occupied port9990; no browser pass is claimed. CI's Web audit gate fails on18 high/critical advisories tracked separately as JAM-262; downstream web checks are skipped, while prior-head Rust and Playwright passed. Linear authentication prevented confirmed tracker sync.
 
-- Real-agent browser verification is **blocked**. A real capture-agent binary was built successfully for offline replay, but its fixed loopback port9990 was occupied (`Address already in use`). The browser could not reach a replaying-agent state. Existing listeners were preserved. A follow-up relay-only browser attempt was interrupted and is not claimed as passing. Evidence: `/workspace/jam258-agent.log`, `/workspace/jam258-browser-real-agent-attempt.json`, `/workspace/jam258-browser.log`; temporary verification tools/assets live outside the repository in `/workspace/jam258-runtime/` and `/workspace/jam258-browser-check.cjs`.
-- No Slack bot/webhook is configured. James subsequently directly requested the coordinated Slack update in this live chat; a clearly labeled agent-authored PR/review update was posted in the original task thread: https://me-hem6828.slack.com/archives/C0C39FJT9DX/p1793418932808479?thread_ts=1791918731.464049&cid=C0C39FJT9DX. This specific user-requested update does not grant background Slack posting permission. Complete task threads were reread before publication.
-- Linear reads repeatedly requested authentication despite accepting reconnection. No tracker state or generated branch name is claimed verified, and no tracker update was made. Local branch follows the repository task script.
-- James authorized commit, push, PR publication and the coordinated task-thread update in this live chat. PR #291 is published with blocked browser verification explicitly disclosed; Claude review was requested. CI is running; no CI pass is claimed. Address review/CI findings, and do not merge this branch. Do not start separate JAM-261 without its own applicable approval/claim.
+Next: publish the reviewed correction and reply on the existing GitHub review thread. Re-run full tests, CLI regression and build where loopback listeners and child-process output work, then obtain external review/CI. Background Slack writes remain prohibited; the earlier publication reply was a specific user-requested exception. Do not merge or start another issue without applicable approval/claim.
 
 ---
-
-## Historical evidence retained below
 
 # JAM-257 — prepared implementation (2026-10-13)
 

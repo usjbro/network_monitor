@@ -1,36 +1,18 @@
-# JAM-258 — PR #291 published (2026-10-31)
-
-James explicitly approved “Take over JAM-258 here” in this live chat. Worktree: `/workspace/network_monitor/.worktrees/floating-promises-control-errors`; branch: `jamesmbrownjr/jam-258-floating-promises-control-errors`; base: `f4239b6`. A new local gate records the authorized takeover; the original Mac checkout was not modified.
+# JAM-258 — verification (2026-10-31)
 
 PR: https://github.com/usjbro/network_monitor/pull/291
-Code commit: `a338218a0fb0bf882720c0513f7ad3097db0f7bb`. Branch pushed to origin; PR is open for review. No merge performed.
 
-## Result
-
-- Pause/resume, ownership-enrichment and GeoIP controls catch rejected requests and non-OK responses. A dismissible banner uses fixed text plus HTTP status, never response bodies or exception details. A retry clears the previous error.
-- Failed enrichment preserves mode, pending/unavailable lookups and timers; successful repeated enable still shows disclosure. Header pause state changes only after successful control responses.
-- Clipboard success follows a resolved write. An attempt counter prevents stale completions and timers from indicating success for a newer pending/failed write.
-- Verified intentional queue/CLI background calls are explicitly marked. The GeoIP stream side effect catches unexpected rejection with fixed logging; PID registration ordering is unchanged.
-- No API-route, agent, wire, dependency/lockfile, bind/deployment or separate JAM-261 changes.
-
-## Verification
-
-- Tests-first failures reproduced missing error handling, false enrichment/clipboard state, HTTP status/retry issues, failed header state and clipboard completion/timer races. Exact evidence: `/workspace/jam258-implementation-report.md` and `/workspace/jam258-evidence/`.
-- Final `npm test -- --maxWorkers=2`: **83 files, 649 tests passed**, exit0. The complete test suite ran with permitted loopback networking. Earlier restricted-sandbox CLI failures did not recur.
-- Final `npm run lint`, `npm run build`, and `./node_modules/.bin/tsc --noEmit`: all exit0. Logs: `/tmp/jam258-final-{full-tests,lint,build,typecheck}.log`.
-- Independent review found a clipboard race; reproduced with three failing tests, fixed with an attempt guard, and cleared on scoped re-review. Final focused tests: **56 passed**. Review: `/workspace/jam258-review-report.md`.
-- `git diff --check`: passed.
-
-## Remaining limits / next step
-
-- Real-agent browser verification is **blocked**. A real capture-agent binary was built successfully for offline replay, but its fixed loopback port9990 was occupied (`Address already in use`). The browser could not reach a replaying-agent state. Existing listeners were preserved. A follow-up relay-only browser attempt was interrupted and is not claimed as passing. Evidence: `/workspace/jam258-agent.log`, `/workspace/jam258-browser-real-agent-attempt.json`, `/workspace/jam258-browser.log`; temporary verification tools/assets live outside the repository in `/workspace/jam258-runtime/` and `/workspace/jam258-browser-check.cjs`.
-- No Slack bot/webhook is configured. James subsequently directly requested the coordinated Slack update in this live chat; a clearly labeled agent-authored PR/review update was posted in the original task thread: https://me-hem6828.slack.com/archives/C0C39FJT9DX/p1793418932808479?thread_ts=1791918731.464049&cid=C0C39FJT9DX. This specific user-requested update does not grant background Slack posting permission. Complete task threads were reread before publication.
-- Linear reads repeatedly requested authentication despite accepting reconnection. No tracker state or generated branch name is claimed verified, and no tracker update was made. Local branch follows the repository task script.
-- James authorized commit, push, PR publication and the coordinated task-thread update in this live chat. PR #291 is published with blocked browser verification explicitly disclosed; Claude review was requested. CI is running; no CI pass is claimed. Address review/CI findings, and do not merge this branch. Do not start separate JAM-261 without its own applicable approval/claim.
+- Original full web suite: `npm test -- --maxWorkers=2` —83 files/649 tests passed. Original lint, production build and TypeScript passed.
+- Review regression: the delayed/out-of-order pause response reproduced incorrect header state. A serialization test then failed in3 outcome cases before the pending guard was added.
+- Follow-up focused suite: `./node_modules/.bin/vitest run lib/__tests__/page-control-errors.test.tsx lib/__tests__/install-modal.test.tsx lib/__tests__/traceroute-stream.test.ts` —3 files/59 tests passed on the final source.
+- Follow-up `npm run lint`, `./node_modules/.bin/tsc --noEmit` and `git diff --check`: passed. Independent scoped review approved the serialization, CLI assertion and documentation cleanup.
+- Fresh `npm test -- --maxWorkers=2`: 623 passed, 29 failed across 5 files, with 27 unhandled listener errors. Loopback binds fail with `listen EPERM`; spawned-process assertions also fail because child stdout is empty. A minimal child running `console.log(42)` exits 0 with empty stdout. Network-enabled rerun attempts never returned an execution result; no successful final full run is claimed.
+- `npm run build`: failed parsing empty TypeScript `--showConfig` output from a child process. The same Next.js configuration helper independently reproduces this, while direct `tsc --showConfig` produces valid JSON. Build must be rerun in a working runtime.
+- CLI regression asserts the existing failed-registration stderr warning after process `close`. Its filtered run fails in the loopback-listener setup hook before reaching the assertion; execution remains unverified here.
+- Real-agent browser run: blocked by occupied loopback port9990. No browser pass claimed. GitHub Playwright smoke uses a fake agent and does not replace this check.
+- CI head7849426: Rust (including live/replay/Clippy/audit) and Playwright passed; fuzz execution was path-filtered; Web failed at the existing JAM-262 npm-audit gate and skipped downstream checks.
 
 ---
-
-## Historical evidence retained below
 
 # JAM-257 — CI supply-chain hardening (2026-10-13)
 

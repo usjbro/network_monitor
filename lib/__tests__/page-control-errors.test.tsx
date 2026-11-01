@@ -126,6 +126,32 @@ it.each(['rejected', 'non-OK'] as const)('preserves the header pause state after
   ]);
 });
 
+it.each(['success', 'rejected', 'non-OK'] as const)('serializes header toggles until a pending request settles with %s', async (outcome) => {
+  let finishPending!: (response: Response) => void;
+  let rejectPending!: (reason: Error) => void;
+  vi.mocked(fetch).mockReturnValueOnce(new Promise<Response>((resolve, reject) => {
+    finishPending = resolve;
+    rejectPending = reject;
+  }));
+  render(<TerminalApp />);
+  const button = screen.getByTitle('Pause/Resume Realtime Monitor');
+  fireEvent.click(button);
+  fireEvent.click(button);
+  fireEvent.click(button);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(button).toHaveTextContent('PAUSE');
+  await act(async () => {
+    if (outcome === 'rejected') rejectPending(new Error('request failed'));
+    else finishPending(outcome === 'success' ? success() as Response : { ok: false, status: 503 } as Response);
+  });
+  expect(button).toHaveTextContent(outcome === 'success' ? 'RESUMED' : 'PAUSE');
+  await act(async () => { fireEvent.click(button); });
+  expect(vi.mocked(fetch).mock.calls.map(([, init]) => JSON.parse(init!.body as string))).toEqual([
+    { type: 'pause' }, { type: outcome === 'success' ? 'resume' : 'pause' },
+  ]);
+  expect(button).toHaveTextContent(outcome === 'success' ? 'PAUSE' : 'RESUMED');
+});
+
 it('keeps enrichment disabled when enabling fails', async () => {
   vi.mocked(fetch).mockResolvedValueOnce({ ok: false, json: async () => ({ disclosureText: 'PRIVATE_RESPONSE_BODY' }) } as Response);
   render(<TerminalApp />);

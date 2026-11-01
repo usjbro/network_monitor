@@ -80,6 +80,7 @@ export default function TerminalApp() {
   const [selectedLayerNum, setSelectedLayerNum] = useState<OSILayerNumber>(7);
   const [selectedTheme, setSelectedTheme] = useState<TerminalTheme>('sophisticated');
   const [isPaused, setIsPaused] = useState(false);
+  const pausePending = useRef(false);
   const [crtEnabled, setCrtEnabled] = useState(false);
   const [isInstallOpen, setIsInstallOpen] = useState(false);
   const [agentConnected, setAgentConnected] = useState(false);
@@ -908,8 +909,14 @@ export default function TerminalApp() {
           onSelectTheme={setSelectedTheme}
           isPaused={isPaused}
           onTogglePause={async () => {
-            const next = !isPaused;
-            if (await sendControl(next ? 'pause' : 'resume')) setIsPaused(next);
+            if (pausePending.current) return;
+            pausePending.current = true;
+            try {
+              const next = !isPaused;
+              if (await sendControl(next ? 'pause' : 'resume')) setIsPaused(next);
+            } finally {
+              pausePending.current = false;
+            }
           }}
           onReset={() => {
             setConnections([]);

@@ -1,16 +1,10 @@
 # Current Task
 
-JAM-258 — handle floating promises and surface relay/control failures.
+JAM-258 — handle control-request failures and false clipboard success.
 
-James explicitly approved “Take over JAM-258 here” in this live chat on 2026-10-31. The original Mac checkout is inaccessible and unchanged. This cloud checkout has a new local approved/claimed/delegated gate documenting the takeover.
+PR: https://github.com/usjbro/network_monitor/pull/291
+Branch: `jamesmbrownjr/jam-258-floating-promises-control-errors`.
 
-Worktree: `/workspace/network_monitor/.worktrees/floating-promises-control-errors`.
-Branch: `jamesmbrownjr/jam-258-floating-promises-control-errors` (repository task script). Base: `f4239b6`.
+Takeover and publication were approved by James in this chat; retain the existing worktree and claim. Current work addresses PR review: serialize pending header toggles, test failed-registration stderr, and remove scratch/duplicate state notes. No API, wire, agent, dependency or deployment changes; JAM-261 remains separate.
 
-Scope: pause/resume, ownership-enrichment and GeoIP request failures in `app/page.tsx`; clipboard confirmation in `components/InstallModal.tsx`; verified intentional background promises in queue, stream side effect and CLI PID registration. Use fixed errors plus HTTP status for failed HTTP responses. Preserve enrichment mode/bookkeeping on failure and repeated successful-enable disclosure. No wire, agent, API-route, dependency, bind or deployment changes. JAM-261 remains separate.
-
-Implementation and independent review are complete, with real-agent browser verification blocked by occupied port9990. Final full-suite649 tests, lint, production build and typecheck passed; see `docs/superpowers/plans/2026-10-31-floating-promises-control-errors.md` and `.ai/JAM258_PROGRESS.md`. PR #291 is open: https://github.com/usjbro/network_monitor/pull/291. Code commit `a338218` is pushed. Independent review is clear; Claude review requested in the original Slack task thread. No merge performed.
-
-James authorized commit/push/PR publication and directly requested the coordinated Slack update in this live chat. Publication and a clearly marked agent-authored task-thread update are complete. This specific request does not grant background Slack posting permission. Do not merge this branch. No Slack bot/webhook is configured; the specific user-requested publication update is linked in HANDOFF.md. Linear calls repeatedly requested authentication despite acceptance; its live state and generated branch are unverified, and no tracker update was made.
-
-Main's older JAM-257 CURRENT_TASK is stale: merged PR #283 commit `0abf7cb` is present in current main. The root main checkout's tracked files are unchanged.
+Review correction is implemented and independently approved. All 59 focused tests, lint and TypeScript pass. Fresh full tests and build are blocked by runtime restrictions; see TEST_STATUS.md. Publish the correction to the existing PR and await external review/CI. Web CI is blocked by the separate JAM-262 audit failure; real-agent browser validation and Linear sync remain unverified for the recorded reasons. Do not merge. Background Slack writes are not authorized.
