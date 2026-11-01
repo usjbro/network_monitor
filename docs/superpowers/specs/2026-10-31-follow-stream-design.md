@@ -3,7 +3,7 @@
 **Issue:** JAM-17 — "Follow Stream: read a conversation as reassembled text" (GitHub #84)
 **Epic:** JAM-127 (analysis surfaces)
 **Depends on:** JAM-16 stream reassembly (shipped; `2026-09-28-stream-reassembly-design.md`, "Deferred, explicitly"). JAM-184 agent socket authentication (shipped).
-**Status:** APPROVED by James in chat on 2026-11-01 (revision 6). Next: an implementation plan under `docs/superpowers/plans/`, implemented through its own approved gate.
+**Status:** APPROVED by James in chat on 2026-11-01 (revision 6), with a post-approval amendment in revision 7 (D4a HTTP-egress bound; see the revision log). Next: an implementation plan under `docs/superpowers/plans/`, implemented through its own approved gate.
 
 Written spec-first at James's direction (chat, 2026-10-11). Revisions 2–5 address the review threads on PR #290 (Codex reviews of `35b2f22`, `ebd62fc`, `6039379`, `2fe7629` and `ee6c125`, and the `usjbro` review). Each decision says which finding it answers. Where a number is a judgment, it says why, so the reviewer can change it without archaeology.
 
@@ -137,13 +137,16 @@ Answers the aggregate-pending-work finding. A per-tab rule cannot bound a server
 **Relay** (`AgentClient` plus the route):
 - At most **4** `get_stream` requests in flight relay-wide, and at most **1** per `connectionId`. Beyond either, the route answers **429** immediately and allocates no pending state.
 - Before writing a request, the relay checks the agent socket's `writableLength`; above 64 KiB it answers **503** instead of queueing. `request()` honours `socket.write()`'s return value and never queues more than one unsent `get_stream`.
-- Each pending entry is removed on exactly one of: the matching response; a **5 s** timeout (504); agent disconnect or re-authentication (all pending fail with 503); or the HTTP request's `AbortSignal` (client gone, entry removed, a late response is dropped as unknown). Pending state is therefore bounded by 4 entries plus at most 4 × 192 KiB of response being parsed.
+- Each pending entry is removed on exactly one of: the matching response; a **5 s** timeout (504); agent disconnect or re-authentication (all pending fail with 503); or the HTTP request's `AbortSignal` (client gone, entry removed, a late response is dropped as unknown). The correlation entry is only half of the lifetime, so it is not what the admission bound counts.
+- **Admission slots are held until the HTTP response is done.** Each admitted request holds one of the 4 relay-wide slots (and its `connectionId` slot) plus a byte reservation of 192 KiB, from admission until its HTTP response body has been **fully written or the request ends** (client abort, stream cancel or error, or the write deadline below). Removing the correlation entry when the agent replies does not release the slot. The route returns the body as a stream and releases the reservation exactly once, from its close/cancel/error path. Aggregate in-flight output is therefore bounded at 4 × 192 KiB = 768 KiB across correlation, parsing and undrained HTTP bodies.
+- **Slow-reader write deadline:** once the agent has replied, the HTTP body must be fully written within **10 s**; otherwise the relay aborts the response stream, drops its buffers and releases the slot. A client that stops reading cannot hold a slot indefinitely.
+- **Error and busy output is bounded too:** 429, 503, 504 and 502 responses are fixed JSON bodies of at most 256 bytes containing no captured content, and a request rejected at admission holds no slot.
 
 **Agent:**
 - `get_stream` is answered synchronously from memory with bounded work (one response ≤ 192 KiB, built into one reusable buffer). The agent tracks unflushed `stream_data` bytes on the relay connection; if they exceed 512 KiB, or 4 responses are still unflushed, it answers `{"busy": true}` (relay → 503) instead of building another.
 - `stream_data` is never subject to the packet-event rate limiter (that would drop responses), and it does not count against the 100/s discrete-event budget.
 
-**Tests that ignore the UI convention:** 20 concurrent `fetch`es to the route with a fake agent (≤ 4 forwarded, the rest 429, one per `connectionId`); timeout cleanup; abort cleanup with a late response; disconnect failing all pending; a slow-reading fake agent driving the 503 path; agent-side `busy` when unflushed bytes exceed the threshold.
+**Tests that ignore the UI convention:** 20 concurrent `fetch`es to the route with a fake agent (≤ 4 forwarded, the rest 429, one per `connectionId`); timeout cleanup; abort cleanup with a late response; disconnect failing all pending; a slow-reading fake agent driving the 503 path; a fast fake agent with slow HTTP readers that never drain (4 admitted, a 5th still gets 429 after all four agent replies have arrived, slots release only on drain, abort or the 10 s write deadline, and the deadline path releases its reservation); agent-side `busy` when unflushed bytes exceed the threshold.
 
 ### D5. Live and replay
 
@@ -270,6 +273,7 @@ James agreed with every recommendation in chat on 2026-11-01. Recorded here so t
 
 ## Revision log
 
+- **Revision 7** (post-approval amendment): from the `usjbro` review of `5c28733`: D4a admission slots and a 192 KiB byte reservation are held until the HTTP response body is fully written or the request ends, not released when the agent replies; a 10 s slow-reader write deadline; bounded error/busy bodies; a fast-agent / slow-reader concurrency test. Tightens a bound; no decision changes.
 - **Approved** by James in chat on 2026-11-01, at revision 6.
 - **Revision 6**: James's decisions on the six open questions recorded (2026-11-01); D6a set to option A; D6 records the LAN policy pending JAM-196. No design change.
 - **Revision 5** (`1100291`): from the Codex review of `ee6c125`: turn paging resumes from the client's last held index, so a final turn that grew before being superseded is refreshed (D4).
