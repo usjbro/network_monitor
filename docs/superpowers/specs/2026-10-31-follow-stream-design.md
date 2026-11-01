@@ -3,7 +3,7 @@
 **Issue:** JAM-17 — "Follow Stream: read a conversation as reassembled text" (GitHub #84)
 **Epic:** JAM-127 (analysis surfaces)
 **Depends on:** JAM-16 stream reassembly (shipped; `2026-09-28-stream-reassembly-design.md`, "Deferred, explicitly"). JAM-184 agent socket authentication (shipped).
-**Status:** DRAFT, revision 5, for James's review. No wire, agent or UI code until this is approved.
+**Status:** DRAFT, revision 6. James's product decisions are recorded (2026-11-01, chat); awaiting spec approval. No wire, agent or UI code until the spec is approved.
 
 Written spec-first at James's direction (chat, 2026-10-11). Revisions 2–5 address the review threads on PR #290 (Codex reviews of `35b2f22`, `ebd62fc`, `6039379`, `2fe7629` and `ee6c125`, and the `usjbro` review). Each decision says which finding it answers. Where a number is a judgment, it says why, so the reviewer can change it without archaeology.
 
@@ -25,7 +25,7 @@ Stated up front because two review findings were about promises the first draft 
 
 ## Decisions
 
-### D1. Retention is opt-in at agent startup — **James to confirm**
+### D1. Retention is opt-in at agent startup — **decided (James, 2026-11-01)**
 
 `FOLLOW_STREAM=1` (agent environment, read once at startup, like the other opt-ins). When off: no store is allocated, `get_stream` answers `enabled: false`, and the UI button explains how to enable it. When on: the agent retains the **head** of each TCP flow that is not classified as TLS (D2, D3).
 
@@ -155,7 +155,7 @@ The relay applies a gate to `/api/follow-stream` that is **the same predicate** 
 
 Honest limit: JAM-255's review notes that an absent mTLS header on the local path is not caller authentication, and JAM-196 (authenticated callers) is open. Follow Stream inherits that limit as `decrypted_payload` and the packet `hexDump` do. A full conversation is more content than a sampled packet, so **D1's opt-in is the real control, and JAM-196 is a recommended prerequisite for enabling this on a LAN**. Say so in `docs/security.md`.
 
-### D6a. Recapture of the relay's own responses — **James to choose**
+### D6a. Recapture of the relay's own responses — **decided: option A (James, 2026-11-01)**
 
 Answers the recapture finding. When the capture interface is loopback, the relay's HTTP response to `/api/follow-stream` (and the Caddy → relay hop on a LAN deployment, which is loopback plaintext) crosses the captured interface. Today `exclude_live_control_capture` (`main.rs`) excludes only `127.0.0.1:9990`, so those response bytes would re-enter the pipeline: sampled `packet` events carry payload in `hexDump`, which `lib/stream-response.ts` forwards to every SSE viewer without the content gate, and `FollowStore` would ingest them as a new conversation. The SSE feed itself is already recaptured this way today, which is pre-existing and harmless-looking, but conversation content is not.
 
@@ -166,7 +166,7 @@ Delivering content only through the HTTP route does **not** fix this by itself: 
 
 Either way, an end-to-end test captures loopback with the relay running, requests a stream containing a sentinel string, and asserts that no `packet` event, no `FollowStore` entry and no capture file contains the sentinel.
 
-### D7. Redaction: stream-relative, conservative, same-length — **James to confirm**
+### D7. Redaction: stream-relative, conservative, same-length — **decided (James, 2026-11-01)**
 
 Answers the redaction-before-slicing and fail-closed-on-gaps findings. Revision 1 scanned only the bytes about to be emitted, which leaks when a page or request offset starts inside a header line. Revision 2 computes masks over the **stored stream at ingest**, records them as stream-relative ranges, and intersects them with each page at emission.
 
@@ -202,7 +202,7 @@ Data chunks and emission buffers use `zeroize::Zeroizing` (the crate is already 
 
 UDP and QUIC are out of scope for v1. The issue's title names UDP, but its acceptance criteria and every dependency are TCP/HTTP, and UDP has no stream identity or ordering to follow. IPv6 TCP is in scope to the extent the flow table keys it.
 
-### D9. Live vs recorded — relationship to JAM-255 — **James to confirm**
+### D9. Live vs recorded — relationship to JAM-255 — **decided (James, 2026-11-01)**
 
 This spec delivers **live-and-replay** Follow Stream only. JAM-255's proposal would add recorded Follow Stream and notes that it needs "a separate, bounded reassembly contract preserving direction, gaps, conflicts and truncation". The `stream_data` contract above (per-direction bytes, gaps with reasons, conflicts, truncation, classification, generations) is deliberately source-agnostic so a recorded source could fill the same contract later. Nothing here depends on JAM-255 being adopted.
 
@@ -222,7 +222,7 @@ New pure module `lib/stream-render.ts` (no React), unit-tested with a hostile fi
 
 ### D11. UI
 
-A "Follow Stream" button in `ConnectionsView`'s selected-connection panel, next to "Trace Route" (same affordance, same on-demand rule: never automatic). The view is direction-coloured (client and server distinct, with a `→` / `←` prefix so it does not depend on colour alone), has Text / Hex / Save, and a header banner with exactly these states (wording lives in one place, in the spirit of `ReassemblyStatus::label()`): `complete so far`, `gaps: frames missing`, `gaps: snap length likely too small`, `head only` (with the stop reason), `flow start not captured`, `classifying…`, `encrypted (TLS)`, `switched to TLS`, `not enabled`, `unavailable on loopback capture` (option B only), `no longer retained`, `restarted: flow was replaced` (stale generation), `busy, try again`. `app/page.tsx` gains one handler; it does not take over state ownership.
+A "Follow Stream" button in `ConnectionsView`'s selected-connection panel, next to "Trace Route" (same affordance, same on-demand rule: never automatic). The view is direction-coloured (client and server distinct, with a `→` / `←` prefix so it does not depend on colour alone), has Text / Hex / Save, and a header banner with exactly these states (wording lives in one place, in the spirit of `ReassemblyStatus::label()`): `complete so far`, `gaps: frames missing`, `gaps: snap length likely too small`, `head only` (with the stop reason), `flow start not captured`, `classifying…`, `encrypted (TLS)`, `switched to TLS`, `not enabled`, `no longer retained`, `restarted: flow was replaced` (stale generation), `busy, try again`. `app/page.tsx` gains one handler; it does not take over state ownership.
 
 ## Acceptance criteria → how each is met and tested
 
@@ -257,18 +257,21 @@ Marked from this design; the implementing PR must re-mark them against the diff.
 
 No verdicts about whether traffic is normal or malicious (epic non-goal). No search, no export beyond Raw save, no HTTP body parsing or decompression, no object extraction (JAM-209), no UDP/QUIC, no recorded-file source (JAM-255), no persistence of any kind, no detection of non-TLS encryption.
 
-## Open questions for James
+## Decisions recorded
 
-1. **D1:** is opt-in at agent startup (`FOLLOW_STREAM=1`) the right retention control?
-2. **D7:** is conservative same-length masking of credential header lines the right reading of "redaction applies", given that bodies and non-HTTP credentials stay visible?
-3. **D9:** live-and-replay now, with recorded Follow Stream left to the JAM-255 decision?
-4. **Caps (D2):** are 256 KiB per direction and 16 MiB global acceptable, or should the global cap be smaller on a small host?
-5. **Prerequisite:** should JAM-196 (authenticated callers) block enabling this off loopback, or is documenting the limit enough?
-6. **D6a:** option A (exclude `RELAY_PORT` traffic on loopback, recommended) or option B (disable Follow Stream on loopback captures)?
+James agreed with every recommendation in chat on 2026-11-01. Recorded here so the implementation plan does not reopen them:
+
+1. **D1 retention:** opt-in at agent startup with `FOLLOW_STREAM=1`. No per-flow arm mode and no always-on mode in v1.
+2. **D7 redaction:** conservative same-length masking of credential header lines as specified. Bodies and non-HTTP credentials (FTP `PASS`, SMTP `AUTH`, Telnet) stay visible and are labelled as such; masking for those protocols is a possible follow-up, not v1.
+3. **D9 scope:** live and replay now. Recorded-file Follow Stream is left to the JAM-255 decision.
+4. **D2 caps:** 256 KiB per direction, 256 retained flows, 16 MiB global, as constants that can be tuned later.
+5. **D6 / JAM-196:** document the caller-authentication limit now (in `docs/security.md`), and do not enable Follow Stream on a LAN deployment until JAM-196 (authenticated relay callers) is done. Local loopback use relies on the D1 opt-in.
+6. **D6a recapture:** option A. The agent excludes loopback TCP on `RELAY_PORT` (default 3000) at the same point it excludes port 9990. Option B is not adopted.
 
 ## Revision log
 
-- **Revision 5** (this): from the Codex review of `ee6c125`: turn paging resumes from the client's last held index, so a final turn that grew before being superseded is refreshed (D4).
+- **Revision 6** (this): James's decisions on the six open questions recorded (2026-11-01); D6a set to option A; D6 records the LAN policy pending JAM-196. No design change.
+- **Revision 5** (`1100291`): from the Codex review of `ee6c125`: turn paging resumes from the client's last held index, so a final turn that grew before being superseded is refreshed (D4).
 - **Revision 4** (`ee6c125`): from the Codex review of `2fe7629`: `uncertain` masking carries through folded continuation lines after gaps, uncaptured starts and other uncertain points (D7); the mutable final turn is returned as `lastTurn` on every response and replaced by the client (D4).
 - **Revision 3** (`2fe7629`): from the Codex review of `6039379`: `turnsFrom` added to both request contracts with an end-to-end >256-turn test (D4); trailing partial-header holdback on the upgrade path (D3); obs-fold continuations mask the whole logical value, with the header line's value withheld until the next line starts (D7); a direction whose start was not captured begins in the `uncertain` state (D7).
 - **Revision 2** (`6039379`): D2 snaplen attribution from the pre-parse signal, metadata caps, fixed-size chunks, generations; D3 replaced (structural TLS classifier, `pending` withholding, upgrade detection, narrowed promise); D4 request/response machinery stated as new, interception before the SSE emitter, generation handling, whole-line encoded ceiling with metadata paging; new D4a admission control and backpressure; new D6a recapture exclusion with options; D7 stream-relative ranges computed at ingest, fail-closed rules; new D7a mandatory zeroization; D10 category-based character policy shared with `osi-mon`; acceptance table, checklist and questions updated.
