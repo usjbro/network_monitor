@@ -3,7 +3,7 @@
 **Issue:** JAM-17 — "Follow Stream: read a conversation as reassembled text" (GitHub #84)
 **Epic:** JAM-127 (analysis surfaces)
 **Depends on:** JAM-16 stream reassembly (shipped; `2026-09-28-stream-reassembly-design.md`, "Deferred, explicitly"). JAM-184 agent socket authentication (shipped).
-**Status:** APPROVED by James in chat on 2026-11-01 (revision 6), with a post-approval amendment in revision 7 (D4a HTTP-egress bound; see the revision log). Next: an implementation plan under `docs/superpowers/plans/`, implemented through its own approved gate.
+**Status:** APPROVED by James in chat on 2026-11-01 (revision 6; the revision 7 D4a HTTP-egress amendment was also approved by James in chat on 2026-11-01 — see the revision log). Next: an implementation plan under `docs/superpowers/plans/`, implemented through its own approved gate.
 
 Written spec-first at James's direction (chat, 2026-10-11). Revisions 2–5 address the review threads on PR #290 (Codex reviews of `35b2f22`, `ebd62fc`, `6039379`, `2fe7629` and `ee6c125`, and the `usjbro` review). Each decision says which finding it answers. Where a number is a judgment, it says why, so the reviewer can change it without archaeology.
 
