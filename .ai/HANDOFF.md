@@ -13,7 +13,9 @@ Validation: the prior full suite passed 649 tests and lint/build/typecheck. The 
 
 Remaining: real-agent browser verification was blocked by occupied port9990; no browser pass is claimed. CI's Web audit gate fails on18 high/critical advisories tracked separately as JAM-262; downstream web checks are skipped, while prior-head Rust and Playwright passed. Linear authentication prevented confirmed tracker sync.
 
-Next: publish the reviewed correction and reply on the existing GitHub review thread. Re-run full tests, CLI regression and build where loopback listeners and child-process output work, then obtain external review/CI. Background Slack writes remain prohibited; the earlier publication reply was a specific user-requested exception. Do not merge or start another issue without applicable approval/claim.
+Publication: correction `b4978d4` is on the existing PR; the retained local branch matches it. The [existing review thread reply](https://github.com/usjbro/network_monitor/pull/291#discussion_r4434385619) records the fix and evidence. Code-head CI passed Rust and Playwright, but Web still stops at the audit gate.
+
+Next: re-run full tests, CLI regression and build where loopback listeners and child-process output work, then obtain external review/CI. Background Slack writes remain prohibited; the earlier publication reply was a specific user-requested exception. Do not merge or start another issue without applicable approval/claim.
 
 ---
 

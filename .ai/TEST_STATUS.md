@@ -11,6 +11,7 @@ PR: https://github.com/usjbro/network_monitor/pull/291
 - CLI regression asserts the existing failed-registration stderr warning after process `close`. Its filtered run fails in the loopback-listener setup hook before reaching the assertion; execution remains unverified here.
 - Real-agent browser run: blocked by occupied loopback port9990. No browser pass claimed. GitHub Playwright smoke uses a fake agent and does not replace this check.
 - CI head7849426: Rust (including live/replay/Clippy/audit) and Playwright passed; fuzz execution was path-filtered; Web failed at the existing JAM-262 npm-audit gate and skipped downstream checks.
+- Correction CI head `b4978d4`: [run 41272518561](https://github.com/usjbro/network_monitor/actions/runs/41272518561) passed Rust (including live/replay/Clippy/audit) and Playwright. Fuzz execution was path-filtered. Web failed at npm audit and skipped TypeScript, lint, tests and build. No final web CI pass is claimed.
 
 ---
 

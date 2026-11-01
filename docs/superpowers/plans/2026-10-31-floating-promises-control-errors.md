@@ -15,4 +15,4 @@
 - [x] Run follow-up checks and independently review the delta; record passes and runtime failures in TEST_STATUS.md.
 - [ ] Re-run full tests, CLI warning regression and build in a runtime allowing loopback listeners and working child-process output.
 - [ ] Exercise the UI with a real capture agent when port9990 is available; retain the disclosed verification limit meanwhile.
-- [ ] Publish the review correction and record results in TEST_STATUS.md/HANDOFF.md.
+- [x] Publish the review correction and record results in TEST_STATUS.md/HANDOFF.md.
