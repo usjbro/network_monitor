@@ -3,7 +3,7 @@
 **Issue:** JAM-17 — "Follow Stream: read a conversation as reassembled text" (GitHub #84)
 **Epic:** JAM-127 (analysis surfaces)
 **Depends on:** JAM-16 stream reassembly (shipped; `2026-09-28-stream-reassembly-design.md`, "Deferred, explicitly"). JAM-184 agent socket authentication (shipped).
-**Status:** DRAFT, revision 6. James's product decisions are recorded (2026-11-01, chat); awaiting spec approval. No wire, agent or UI code until the spec is approved.
+**Status:** APPROVED by James in chat on 2026-11-01 (revision 6). Next: an implementation plan under `docs/superpowers/plans/`, implemented through its own approved gate.
 
 Written spec-first at James's direction (chat, 2026-10-11). Revisions 2–5 address the review threads on PR #290 (Codex reviews of `35b2f22`, `ebd62fc`, `6039379`, `2fe7629` and `ee6c125`, and the `usjbro` review). Each decision says which finding it answers. Where a number is a judgment, it says why, so the reviewer can change it without archaeology.
 
@@ -270,7 +270,8 @@ James agreed with every recommendation in chat on 2026-11-01. Recorded here so t
 
 ## Revision log
 
-- **Revision 6** (this): James's decisions on the six open questions recorded (2026-11-01); D6a set to option A; D6 records the LAN policy pending JAM-196. No design change.
+- **Approved** by James in chat on 2026-11-01, at revision 6.
+- **Revision 6**: James's decisions on the six open questions recorded (2026-11-01); D6a set to option A; D6 records the LAN policy pending JAM-196. No design change.
 - **Revision 5** (`1100291`): from the Codex review of `ee6c125`: turn paging resumes from the client's last held index, so a final turn that grew before being superseded is refreshed (D4).
 - **Revision 4** (`ee6c125`): from the Codex review of `2fe7629`: `uncertain` masking carries through folded continuation lines after gaps, uncaptured starts and other uncertain points (D7); the mutable final turn is returned as `lastTurn` on every response and replaced by the client (D4).
 - **Revision 3** (`2fe7629`): from the Codex review of `6039379`: `turnsFrom` added to both request contracts with an end-to-end >256-turn test (D4); trailing partial-header holdback on the upgrade path (D3); obs-fold continuations mask the whole logical value, with the header line's value withheld until the next line starts (D7); a direction whose start was not captured begins in the `uncertain` state (D7).
