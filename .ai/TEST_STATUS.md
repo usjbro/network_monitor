@@ -5,7 +5,7 @@
 - Fresh manifest/lock root consistency, expected versions, unchanged scripts/dependency keysets, no overrides, exact five-file staged scope and `git diff --cached --check` pass. Independent publication review: no MUST source finding; one native libc metadata SHOULD remains in HANDOFF.
 - Online audit/install requests previously stalled without execution results; no candidate audit report or node_modules exists. Build, lint, TypeScript, full Vitest and Playwright have not run on these installed candidate versions.
 - Offline npm audit returned0/empty vulnerabilities on the known-bad baseline and is discarded as evidence. A fresh usable online audit is required.
-- James explicitly authorized commit, push and draft PR publication on2026-11-02. Publication/CI results must be verified separately; this record does not claim audit green, tests passing or readiness to merge.
+- Published code commit `8b94b15` to draft [PR #294](https://github.com/usjbro/network_monitor/pull/294) under James's explicit authorization. Remote ref and PR head verified; code-head CI run41458131362 was in progress at publication. This does not claim audit green, tests passing or readiness to merge.
 
 ---
 
