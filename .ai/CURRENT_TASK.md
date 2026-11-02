@@ -1,11 +1,19 @@
 # Current Task
 
-JAM-257 — CI supply-chain hardening. James directly instructed claim/start in chat on 2026-10-13; existing approved gate claimed/delegated to Codex. Linear In Progress.
+JAM-262 — dependency candidate; draft publication authorized, validation pending.
 
-Worktree: `.worktrees/ci-pin-actions-and-npx`; branch: `jamesmbrownjr/jam-257-p3-ci-supply-chain-pin-github-actions-to-commit-shas-and-pin` (Linear's exact gitBranchName). Fresh base `c73a0b0dc404c1978af8150d9420d1f9b4a3ae0b`.
+James approved implementation directly in this chat on 2026-11-01 and explicitly authorized commit, push and PR publication on 2026-11-02. Gate remains approved, claimed and delegated in-session. JAM-258 stays in its separate retained review worktree.
 
-Scope: `.github/workflows/*.yml`, optional Dependabot github-actions configuration, task .ai state only. Pin Actions to verified full SHAs with truthful source-version/channel comments; preserve Rust stable/nightly selection via inputs. Replace on-demand CI tooling with locked local executables. Investigate explicit npm ci --ignore-scripts using source/lockfile and fresh install/type/lint/test/build evidence. Preserve every job, timeout, test/audit/live-capture check, application file and dependency version.
+Worktree: `.worktrees/audit-gate-advisories`; branch: `jamesmbrownjr/jam-262-audit-gate-advisories`; fresh main base `dc698aa4aaa531e13067b2e4c670ebc75e6c6eca`.
 
-Prepared workflow/Dependabot changes pass local static/provenance/YAML-preservation checks, fresh script-disabled install/native smoke, typecheck/lint/build/full602-tests and unchanged audit gate. Independent review completed; generated Rust channel candidates were corrected to verified durable master SHA e2a55d2 after upstream guidance check, and narrow re-review passed. PR #283 is published; final-head CI and reviews plus post-merge Sonar-main checks are pending.
+The npm-generated candidate adopts PR #293's patched Next16.4.1, Vitest/mocker5.0.5 and undici7.30.1 updates, then updates transitive Zod to4.6.7 within existing ranges. Scope is package.json/package-lock.json and task state. No new dependency or override; audit policy, scripts, Webpack configuration/flags, binds, deployment and application code are preserved.
 
-James approved commit, push and PR publication directly in chat on 2026-10-13. Publish the verified result and obtain PR CI/review evidence. Do not merge own branch. Baseline local WHOIS Vitest error is separately JAM-261; do not silently expand scope to fix it.
+- [x] Verify current-main red audit CI and dependency provenance.
+- [x] Apply targeted dependency updates with npm and independently review source.
+- [x] Fresh manifest/lock consistency, version, script, keyset, scope and diff checks.
+- [ ] Publish the authorized draft and inspect its actual head and CI.
+- [ ] Regenerate with official npm12.2.1 to retain native libc metadata, then re-review.
+- [ ] Obtain a usable online audit through the unchanged checker and clean scripts-disabled install.
+- [ ] Run build, lint, TypeScript, full Vitest and Playwright smoke.
+
+Network-enabled audit/install requests previously stalled; no installed candidate or runtime pass is claimed. Linear sync is unavailable. Preserve the claim, do not merge, and do not write Slack. See HANDOFF.md for continuation evidence.
