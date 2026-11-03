@@ -1,3 +1,14 @@
+# JAM-262 — draft candidate verification (2026-11-02)
+
+- Baseline current-main `dc698aa` [CI run41200617279](https://github.com/usjbro/network_monitor/actions/runs/41200617279) fails the unchanged npm audit gate.
+- npm-generated candidate: Next16.4.1, Vitest/mocker5.0.5, undici7.30.1 and Zod4.6.7, within existing dependency ranges.
+- Fresh manifest/lock root consistency, expected versions, unchanged scripts/dependency keysets, no overrides, exact five-file staged scope and `git diff --cached --check` pass. Independent publication review: no MUST source finding; one native libc metadata SHOULD remains in HANDOFF.
+- Online audit/install requests previously stalled without execution results; no candidate audit report or node_modules exists. Build, lint, TypeScript, full Vitest and Playwright have not run on these installed candidate versions.
+- Offline npm audit returned0/empty vulnerabilities on the known-bad baseline and is discarded as evidence. A fresh usable online audit is required.
+- Published code commit `8b94b15` to draft [PR #294](https://github.com/usjbro/network_monitor/pull/294) under James's explicit authorization. Remote ref and PR head verified; code-head CI run41458131362 was in progress at publication. This does not claim audit green, tests passing or readiness to merge.
+
+---
+
 # JAM-257 — CI supply-chain hardening (2026-10-13)
 
 Worktree `.worktrees/ci-pin-actions-and-npx`; PR https://github.com/usjbro/network_monitor/pull/283. All 13 Action references pinned to verified upstream SHAs. Both Rust steps use durable master-history SHA `e2a55d2ffb04f378e9626c28d38b36d230d1e12f` with explicit stable/nightly inputs, following upstream guidance. CI tools use installed local binaries; explicit scripts-disabled installs preserve `.npmrc` policy.
