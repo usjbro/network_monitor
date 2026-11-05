@@ -69,7 +69,7 @@ For an `in-session` gate delegation, which James must assign, record one of thes
 | Cross-subsystem design or ambiguous requirements | `architect` |
 | Security-sensitive design | `security-engineer` |
 | Approved, scoped implementation | `general-purpose` |
-| Reviewing a diff before merge | `pr-review-toolkit:code-reviewer` |
+| Reviewing a diff before merge | `pr-review-toolkit:code-reviewer`, recorded as `code-reviewer` because the script rejects colons |
 | Checking acceptance criteria with tests | `qa-engineer` |
 
 ## Review add-ons
