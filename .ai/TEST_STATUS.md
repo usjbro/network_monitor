@@ -1,3 +1,24 @@
+# JAM-261 — WHOIS fixture reset/lifecycle correction (2026-11-05)
+
+Runtime: macOS 26.6.2 (25G83), Node v26.12.1, Vitest 5.0.5. Base e78fd32. No production WHOIS, dependency or runner changes.
+
+Root-cause evidence: 20 baseline runs of `./node_modules/.bin/vitest run lib/__tests__/enrichment-whois-client.test.ts --maxWorkers=1`, with an external NODE_OPTIONS emit observer labeling both client and accepted sockets. 8/20 exited 1 while all six assertions passed. Every failure showed accepted server socket #4 (the oversized-response fixture) emitting ECONNRESET after client socket #3 closed; Vitest attributed the late error to the following timeout test. Expected client #7 ECONNREFUSED was already handled. The observer added no error listener and did not suppress errors. Timeout fixture's accepted socket also lacked awaited teardown. Logs `/private/tmp/jam261-baseline-{01..20}.log`, observer `/private/tmp/jam261-instrument.cjs`, summary `/private/tmp/jam261-baseline-summary.json`.
+
+Correction: test-only loopback fixture tracks accepted sockets, allows ECONNRESET only for fixtures explicitly testing intentional client abort, collects all unexpected socket errors and fails awaited teardown with AggregateError, and destroys/awaits accepted sockets plus server close. Original response, 64KiB-abort, timeout and refused-connection assertions are preserved. New real resetAndDestroy regression is independent of timing in the oversized-response race; cleanup regression covers a never-responding connection; unexpected EIO (with/without reset allowance) and unexpected reset still reject teardown. No global runner suppression or empty error listener.
+
+Verified:
+- New fixture regression first failed with missing helper; reproduced baseline above is the actual failing behavior.
+- Mutation check disabled the expected-reset branch: real-reset regression failed (count 0 vs 1) and teardown surfaced ECONNRESET, exit 1; original helper restored. `/private/tmp/jam261-mutation.log`. The initial mutation checker expected an AggregateError label, while Vitest printed nested errors; actual failing assertions were inspected and independently checked.
+- `./node_modules/.bin/vitest run lib/__tests__/enrichment-whois-client.test.ts lib/__tests__/whois-server-fixture.test.ts --maxWorkers=1`: 20 consecutive passes, 2 files / 11 tests each, exit 0, no unhandled errors. `/private/tmp/jam261-focused-{01..20}.log`.
+- `./node_modules/.bin/vitest run`: 84 files / 657 tests pass, exit 0, no unhandled errors. `/private/tmp/jam261-full-standard.log`.
+- `./node_modules/.bin/vitest run --maxWorkers=1`: 84 files / 657 tests pass, exit 0, no unhandled errors. `/private/tmp/jam261-full-single-worker.log`.
+- `./node_modules/.bin/tsc --noEmit`, `npm run lint`, `git diff --check`: pass.
+- Independent code review: no actionable findings, and reviewer independently ran 2 files / 11 focused tests. Independent security review: no findings; reviewer independently passed the same 11 focused tests after sandbox socket access was allowed. Cross-platform Linux behavior remains CI evidence, not a local claim.
+
+No build/Rust/audit rerun for a test-only change with unchanged manifests/production source. Existing Vite native-config/Node module.register deprecation warnings remain. JAM-255 already merged/Done, so its historic validation-blocker relation is no longer an active blocker; preserve that history while recording resolution.
+
+---
+
 # JAM-258 — fresh main-refresh verification (2026-11-05)
 
 Source: main ace0d40 merged into prior PR head f11ad5f; main manifests/spec/contract exact and JAM-258 application/tests byte-identical to prior reviewed source. Independent staged merge review: no findings. No new test code or audit policy change.

@@ -1,3 +1,13 @@
+# JAM-261 — corrected WHOIS fixture lifecycle, ready for PR (2026-11-05)
+
+James explicitly approved JAM-17 plan then JAM-261. Plan PR #295 is published at7903094 with code/security and Claude rechecks clear; do not implement Follow Stream or merge own PR. JAM-261 worktree `.worktrees/whois-test-econnreset`, branch `jamesmbrownjr/jam-261-whois-client-tests-emit-unhandled-econnreset-on-macos`, base e78fd32.
+
+Confirmed accepted peer reset in oversized-response fixture: 8/20 baseline failures on current macOS, all assertions passed but late ECONNRESET was unhandled. Test-only helper now scopes the expected reset, rejects unexpected errors on teardown, and destroys/awaits all accepted sockets/server. Meaningful real-reset and cleanup regressions plus error-rejection cases added; no production/dependency/config change. All 20 corrected focused runs, full657 normal/single-worker, tsc/lint/diff pass; mutation proves deterministic regression catches missing handling. See TEST_STATUS.md for exact evidence.
+
+Independent code and security reviews clear; each reviewer independently passed the 11 focused tests. Publish authorized task PR, request Claude/code/security reviews, inspect final-head CI and hand off without merging. Update Linear InReview only after publication; do not claim CI or tracker closure before actual verification. Preserve all unrelated worktrees/main changes; continue Slack monitoring.
+
+---
+
 # JAM-258 — verified main refresh for PR #291 (2026-11-05)
 
 James explicitly authorized bringing main's dependency fix into this PR and pushing the branch. Existing gate/claim/worktree retained; no takeover, own-PR merge or Slack post is authorized by this refresh.
