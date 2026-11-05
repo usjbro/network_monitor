@@ -9,7 +9,7 @@ This file only picks tools. [`AGENTS.md`](../AGENTS.md) still owns gates, approv
 Skills are generic, so a skill step can conflict with this repo. When it does, this repo wins:
 
 - **Worktrees and branches:** use `coordination/scripts/new-task.sh`, not the worktree step in `using-git-worktrees` or the branch step in `epic-task-cycle`.
-- **Merging:** James merges. Stop `finishing-a-development-branch` at the open PR, and stop `epic-task-cycle` before its merge step, even though that step says merging needs no confirmation.
+- **Merging:** James merges, or an agent he tells to in chat. Stop `finishing-a-development-branch` at the open PR.
 - **Commits and pushes:** only when James asks or the assignment authorizes them, as `AGENTS.md` says. A skill's checklist doesn't authorize them.
 - **Design and plan approval:** a skill's "user approved" step means James typing in chat. A Slack reply never counts.
 - **Slack:** post only through `slack-notify.sh`.
