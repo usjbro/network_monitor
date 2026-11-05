@@ -81,6 +81,12 @@ slack_ts:
 
 ${GOAL}
 
+## Route
+
+Skills, goal or loop, and agent, from \`coordination/work-routing.md\`.
+
+- <fill in>
+
 ## Owned files
 
 - <fill in>

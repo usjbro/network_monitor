@@ -12,6 +12,7 @@ For normal development:
 2. Read `.ai/HANDOFF.md` only when continuing previous work.
 3. Inspect relevant implementation and tests.
 4. Read relevant subsystem documentation only when necessary.
+5. Use the route the assignment names, or pick one from `coordination/work-routing.md`.
 
 Do not read the entire repository or all documentation by default.
 
@@ -29,7 +30,7 @@ Do not assume documentation proves implementation exists. Verify against code an
 - `macos-app/` — the native SwiftUI/WKWebView viewer.
 - `docs/` — user-facing docs; `docs/superpowers/specs/` and `docs/superpowers/plans/` hold design specs and implementation plans for nontrivial work (see `CONTRIBUTING.md`).
 - `.ai/` — `CURRENT_TASK.md`, `HANDOFF.md`, `DECISIONS.md`, `PROJECT_STATE.md`, `TEST_STATUS.md` (see Sources of Truth below).
-- `.claude/agents/`, `.codex/agents/` — per-tool subagent definitions (architect/developer/reviewer/tester), present in some local checkouts as of this writing but not yet committed to the repo — don't assume they exist in a fresh clone.
+- `~/.claude/agents/`, `~/.codex/agents/` — user-level role agents (see `coordination/work-routing.md`), not committed to the repo — don't assume they exist in a fresh clone.
 - `.agents/skills/` — shared skills, e.g. `epic-task-cycle` (the Linear branch → PR → merge cycle).
 - `coordination/` — cross-agent task contracts and Slack coordination for parallel sub-work; see Multi-Agent Coordination below.
 
@@ -142,6 +143,8 @@ Use the least expensive model capable of reliably completing the task. Route arc
 
 Use agents only when work is genuinely parallel, specialization helps, or independent verification has material value. Keep agent scopes narrow; there is no fixed pipeline.
 
+`coordination/work-routing.md` names the skill, loop, goal and agent for each kind of work: starting an issue, writing, updating, debugging and reviewing.
+
 ## Git & Commits
 
 - One task = one git worktree, under `.worktrees/<slug>/` in this repo (see the `using-git-worktrees` skill).
@@ -194,7 +197,7 @@ For the agent that sequences work for others (assigning tasks, watching threads,
 When the user asks for ongoing Slack monitoring, monitor the entire designated channel for new top-level posts and replies in active threads while the session remains active. Poll every 30 seconds unless the user sets another interval. Track the last-read message, not the last-sent message; on rate limits, back off and avoid repeating the same error notification. Review replies against task scope and repository guidance: implement correct, authorized decisions, and post concise clarification questions in the relevant thread.
 
 0. **Check the Slack channel for pending questions from other agents/sessions before starting work** — not just when posting your own updates. Other agents (Codex, ChatGPT, another Claude session) may already be active in this repo and waiting on a decision; a question can sit unanswered for a long time if nobody's actively watching. This is a real, observed failure mode, not a hypothetical: a JAM-10/PR scope question from another agent sat unaddressed for 45+ minutes in one session because polling only checked messages after the checker's *own* last-sent message rather than the last message actually read — track "last read," never "last sent," when polling.
-1. Write one `coordination/tasks/<task-slug>.md` contract per parallel sub-task, giving its owned files, do-not-edit boundaries, and validation — the same role `.ai/CURRENT_TASK.md` plays for a single task, scoped to one concurrent piece of work. If the sub-task contributes to a Linear-tracked epic task, record that issue id in the contract.
+1. Write one `coordination/tasks/<task-slug>.md` contract per parallel sub-task, giving its route, owned files, do-not-edit boundaries, and validation — the same role `.ai/CURRENT_TASK.md` plays for a single task, scoped to one concurrent piece of work. If the sub-task contributes to a Linear-tracked epic task, record that issue id in the contract.
 2. Create it with `coordination/scripts/new-task.sh <slug> <claude-code|codex> "<goal>" [linear-id]` — it creates the contract, a `.worktrees/<slug>/` worktree (sibling to the others, at the main repo root regardless of the script's own cwd), a branch matching the convention above, and (if Slack is configured) posts a 🟡 started message, including the worktree path, to the shared Slack channel; without one, the task is still created, just without a Slack post. A session may start in the main checkout to read state and run `new-task.sh` itself, but must create or enter the task's worktree before editing any tracked file, and do all edits, tests, and commits there — the main checkout stays on `main` with no local changes.
 3. Discuss blockers, interface questions, and plan changes in that Slack thread rather than guessing at another task's interface. See `coordination/router-checklist.md` (main repo root) for whether a piece suits Claude Code or Codex better.
 4. On finish, run `coordination/scripts/complete-task.sh <slug> review "<summary>"` (updates the contract and posts to Slack), fill in its Handoff section by hand, and update the corresponding Linear issue's status per `epic-task-cycle` §2 steps 8-11 — the contract and Linear must agree, not just one of them.

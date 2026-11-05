@@ -10,6 +10,7 @@ Build and maintain Network Monitor according to repository code, approved requir
 2. Read `.ai/HANDOFF.md` only when continuing previous work.
 3. Inspect relevant code and tests; read subsystem docs only as needed.
 4. Do not load all of `docs/` or the repository by default.
+5. Use the route the assignment names, or pick one from `coordination/work-routing.md`.
 
 `AGENTS.md` is the cross-agent source of truth for the newer operational conventions shared by every coding agent in this repo — project structure, boundaries, git/commit conventions, multi-agent coordination, and testing expectations. This file stays the detailed architecture and Claude-Code-specific guidance. Some older sections (Mission, Sources of Truth, Required Workflow, Model Routing, Context Discipline, Session Completion) still exist independently in both files rather than being deduplicated — read both, and if you edit one of those overlapping sections, check whether the other needs the same change.
 
@@ -111,6 +112,8 @@ User-facing docs also live under `docs/`: [getting-started.md](docs/getting-star
 - **Haiku:** formatting, renaming, simple documentation/mechanical changes, and tiny well-defined fixes.
 
 Escalate Haiku → Sonnet → Opus based on actual complexity. A test failure alone is not a reason to escalate; first check whether its cause is straightforward. Use the least expensive model that can reliably complete the task; return to a cheaper model for mechanical follow-up.
+
+`coordination/work-routing.md` names the skill, loop, goal and agent for each kind of work: starting an issue, writing, updating, debugging and reviewing.
 
 ## Context and Orchestration Cost Control
 
