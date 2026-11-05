@@ -169,11 +169,14 @@ describe('decrypt-eligibility registration', () => {
       env: { ...process.env, OSI_INSPECT_RELAY_URL: 'http://127.0.0.1:1' },
     });
     let stdout = '';
+    let stderr = '';
     child.stdout.on('data', (d) => (stdout += d.toString()));
-    const exitCode: number = await new Promise((resolve) => child.on('exit', (code) => resolve(code ?? -1)));
+    child.stderr.on('data', (d) => (stderr += d.toString()));
+    const exitCode: number = await new Promise((resolve) => child.on('close', (code) => resolve(code ?? -1)));
     expect(exitCode).toBe(0);
     const keylogFile = stdout.trim().split('\n').find((l) => l.includes('.keylog'));
     expect(keylogFile).toBeTruthy();
     expect(existsSync(keylogFile!)).toBe(false);
+    expect(stderr).toMatch(/osi-inspect: could not reach relay at http:\/\/127\.0\.0\.1:1 for register_decrypt_eligible .*decryption will not be active for this run\./);
   }, 10_000);
 });

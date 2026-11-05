@@ -1,3 +1,38 @@
+# JAM-258 — fresh main-refresh verification (2026-11-05)
+
+Source: main ace0d40 merged into prior PR head f11ad5f; main manifests/spec/contract exact and JAM-258 application/tests byte-identical to prior reviewed source. Independent staged merge review: no findings. No new test code or audit policy change.
+
+- `npm ci --ignore-scripts --no-audit --no-fund --cache /workspace/.npm-cache --fetch-retries=0 --fetch-timeout=15000`: passed,481packages installed; manifest/lock unchanged.
+- Online `npm audit --package-lock-only --json` plus unchanged `node .github/scripts/check-npm-audit.mjs <report>`: passed;0high/0critical,10moderate. Usable online report retained externally; offline audit is not evidence.
+- `./node_modules/.bin/tsc --noEmit`: passed.
+- `npm run lint`: passed.
+- `npm test -- --maxWorkers=2`:83files/652tests passed in48s.
+- `npm run build`: passed; existing middleware/Edge Runtime warnings remain.
+- First `npm run test:e2e`: browser launch failed because Chromium executable was missing, before browser behavior ran. Installed the pinned Playwright headless Chromium/FFmpeg into `/workspace/pr291-refresh-evidence/pw-browsers`; no project/config changes.
+- `PLAYWRIGHT_BROWSERS_PATH=/workspace/pr291-refresh-evidence/pw-browsers npm run test:e2e`:1Chromium smoke test passed in18.9s.
+- Generated AGENTS.md/next-env.d.ts dev side effects restored from the merge index; fresh diff/manifest/source preservation checks pass.
+
+Logs: `/workspace/pr291-refresh-evidence/`. Local checks do not establish new remote CI success; inspect the exact pushed head. The fake-agent smoke test is separate from the still-unverified original real-capture-agent browser condition. No local Rust/fuzz rerun was needed for unchanged Rust source; GitHub CI remains required. Do not merge PR #291.
+
+---
+
+# JAM-258 — verification (2026-10-31)
+
+PR: https://github.com/usjbro/network_monitor/pull/291
+
+- Original full web suite: `npm test -- --maxWorkers=2` —83 files/649 tests passed. Original lint, production build and TypeScript passed.
+- Review regression: the delayed/out-of-order pause response reproduced incorrect header state. A serialization test then failed in3 outcome cases before the pending guard was added.
+- Follow-up focused suite: `./node_modules/.bin/vitest run lib/__tests__/page-control-errors.test.tsx lib/__tests__/install-modal.test.tsx lib/__tests__/traceroute-stream.test.ts` —3 files/59 tests passed on the final source.
+- Follow-up `npm run lint`, `./node_modules/.bin/tsc --noEmit` and `git diff --check`: passed. Independent scoped review approved the serialization, CLI assertion and documentation cleanup.
+- Fresh `npm test -- --maxWorkers=2`: 623 passed, 29 failed across 5 files, with 27 unhandled listener errors. Loopback binds fail with `listen EPERM`; spawned-process assertions also fail because child stdout is empty. A minimal child running `console.log(42)` exits 0 with empty stdout. Network-enabled rerun attempts never returned an execution result; no successful final full run is claimed.
+- `npm run build`: failed parsing empty TypeScript `--showConfig` output from a child process. The same Next.js configuration helper independently reproduces this, while direct `tsc --showConfig` produces valid JSON. Build must be rerun in a working runtime.
+- CLI regression asserts the existing failed-registration stderr warning after process `close`. Its filtered run fails in the loopback-listener setup hook before reaching the assertion; execution remains unverified here.
+- Real-agent browser run: blocked by occupied loopback port9990. No browser pass claimed. GitHub Playwright smoke uses a fake agent and does not replace this check.
+- CI head7849426: Rust (including live/replay/Clippy/audit) and Playwright passed; fuzz execution was path-filtered; Web failed at the existing JAM-262 npm-audit gate and skipped downstream checks.
+- Correction CI head `b4978d4`: [run 41272518561](https://github.com/usjbro/network_monitor/actions/runs/41272518561) passed Rust (including live/replay/Clippy/audit) and Playwright. Fuzz execution was path-filtered. Web failed at npm audit and skipped TypeScript, lint, tests and build. No final web CI pass is claimed.
+
+---
+
 # JAM-262 — draft candidate verification (2026-11-02)
 
 - Baseline current-main `dc698aa` [CI run41200617279](https://github.com/usjbro/network_monitor/actions/runs/41200617279) fails the unchanged npm audit gate.

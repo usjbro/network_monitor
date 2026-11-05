@@ -1,3 +1,38 @@
+# JAM-258 — verified main refresh for PR #291 (2026-11-05)
+
+James explicitly authorized bringing main's dependency fix into this PR and pushing the branch. Existing gate/claim/worktree retained; no takeover, own-PR merge or Slack post is authorized by this refresh.
+
+Branch `jamesmbrownjr/jam-258-floating-promises-control-errors`, worktree `.worktrees/floating-promises-control-errors`, prior head f11ad5f. This merge imports main `ace0d401592587c1fcb3e3c8945c6616e5834a0e`, including JAM-262 #294 dependency fixes and Follow Stream spec #290. Main changed only manifests, task evidence, spec and its contract. Exact-byte checks preserve all reviewed JAM-258 code/tests and main's manifests/spec/contract; no application/agent source changes were introduced by the refresh.
+
+Only `.ai/CURRENT_TASK.md`, HANDOFF and TEST_STATUS conflicted. JAM-258 remains active; both prior JAM-258 and imported JAM-262 records plus identical older historical tails are retained below. Separate JAM-262 worktree and three uncommitted handoff documents are untouched.
+
+Fresh local validation passed on the merged dependency tree: `npm ci --ignore-scripts --no-audit --no-fund`; usable online audit through the unchanged checker (0 high/critical,10moderate); TypeScript; lint; all83files/652Vitest tests; production build;1Chromium Playwright smoke test. The first browser attempt could not launch because the executable was absent; downloading the pinned headless browser into an external workspace cache and rerunning passed. Generated AGENTS/next-env side effects were restored. Independent staged review is clear. Full logs are outside the repository at `/workspace/pr291-refresh-evidence/`.
+
+The previous head's CI41273133268 failed npm audit and skipped downstream web checks. Publish this reviewed merge under James's explicit authorization, then inspect the actual new PR head and its CI; no new remote CI pass is claimed at commit creation. Retain real-agent browser verification and Linear sync as separate outstanding conditions. Do not merge PR #291 or send background Slack messages.
+
+---
+
+# JAM-258 — PR #291 review follow-up (2026-10-31)
+
+PR: https://github.com/usjbro/network_monitor/pull/291
+Branch: `jamesmbrownjr/jam-258-floating-promises-control-errors` (base `f4239b6`).
+
+James approved takeover and publication in this chat. Original Mac checkout was not modified. No merge is authorized.
+
+Controls show fixed failure messages and HTTP status, preserve enrichment state on failure, and confirm clipboard writes only after success. Clipboard completion/timer races are guarded. Unexpected background GeoIP rejections are contained; CLI PID-registration ordering is unchanged.
+
+Review follow-up addresses [the header race](https://github.com/usjbro/network_monitor/pull/291#discussion_r4430338056): a synchronous pending guard serializes header pause/resume, with deferred-response tests for success, rejection and non-OK responses. The CLI unreachable-relay regression now verifies the failed-registration warning after stdio closes. Scratch state was removed and test evidence separated from this handoff.
+
+Validation: the prior full suite passed 649 tests and lint/build/typecheck. The correction passes 59 focused tests, lint and TypeScript, with independent review clear. Fresh full tests and build encountered runtime restrictions; no final full-suite/build pass is claimed. See TEST_STATUS.md for commands and results.
+
+Remaining: real-agent browser verification was blocked by occupied port9990; no browser pass is claimed. CI's Web audit gate fails on18 high/critical advisories tracked separately as JAM-262; downstream web checks are skipped, while prior-head Rust and Playwright passed. Linear authentication prevented confirmed tracker sync.
+
+Publication: correction `b4978d4` is on the existing PR; the retained local branch matches it. The [existing review thread reply](https://github.com/usjbro/network_monitor/pull/291#discussion_r4434385619) records the fix and evidence. Code-head CI passed Rust and Playwright, but Web still stops at the audit gate.
+
+Next: re-run full tests, CLI regression and build where loopback listeners and child-process output work, then obtain external review/CI. Background Slack writes remain prohibited; the earlier publication reply was a specific user-requested exception. Do not merge or start another issue without applicable approval/claim.
+
+---
+
 # JAM-262 — draft PR #294 published; verification pending (2026-11-02)
 
 James approved implementation directly in this live chat on 2026-11-01 and explicitly instructed "Commit the change push it open a PR" on 2026-11-02. Gate `jam-262__audit-gate-advisories` remains approved, claimed and delegated in-session. Worktree `.worktrees/audit-gate-advisories`, branch `jamesmbrownjr/jam-262-audit-gate-advisories`, base `dc698aa`. JAM-258's separate worktree and claim are preserved. No further task or publication approval is needed.

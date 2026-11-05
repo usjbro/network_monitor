@@ -1,20 +1,11 @@
 # Current Task
 
-JAM-262 — draft PR #294 open; validation pending.
+JAM-258 — PR #291 main refresh locally verified; publish and inspect new CI.
 
-James approved implementation directly in this chat on 2026-11-01 and explicitly authorized commit, push and PR publication on 2026-11-02. Gate remains approved, claimed and delegated in-session. JAM-258 stays in its separate retained review worktree.
+James explicitly requested on2026-11-05: bring the fix from main and push the code. Existing takeover/publication authorization and approved claim apply. Retained worktree `.worktrees/floating-promises-control-errors`, branch `jamesmbrownjr/jam-258-floating-promises-control-errors`, PR https://github.com/usjbro/network_monitor/pull/291 .
 
-Worktree: `.worktrees/audit-gate-advisories`; branch: `jamesmbrownjr/jam-262-audit-gate-advisories`; fresh main base `dc698aa4aaa531e13067b2e4c670ebc75e6c6eca`.
+This refresh merges main `ace0d401592587c1fcb3e3c8945c6616e5834a0e`, containing JAM-262 #294 dependency fixes and reviewed Follow Stream spec #290. Main's manifest/lock/spec/contract are exact; reviewed JAM-258 application code/tests remain byte-identical to f11ad5f. Only the three task-state conflicts were resolved, retaining both histories.
 
-The npm-generated candidate adopts PR #293's patched Next16.4.1, Vitest/mocker5.0.5 and undici7.30.1 updates, then updates transitive Zod to4.6.7 within existing ranges. Scope is package.json/package-lock.json and task state. No new dependency or override; audit policy, scripts, Webpack configuration/flags, binds, deployment and application code are preserved.
+Fresh checks passed: clean scripts-disabled install with unchanged lockfile; online unchanged audit gate (0 high/critical); TypeScript; lint; all83 files/652 Vitest tests; production build; one Chromium Playwright smoke test. Independent staged merge review found no issues.
 
-- [x] Verify current-main red audit CI and dependency provenance.
-- [x] Apply targeted dependency updates with npm and independently review source.
-- [x] Fresh manifest/lock consistency, version, script, keyset, scope and diff checks.
-- [x] Commit/push `8b94b15` and open draft [PR #294](https://github.com/usjbro/network_monitor/pull/294); actual remote head verified.
-- [ ] Verify exact-head CI; code-head run41458131362 started and was in progress at publication.
-- [ ] Regenerate with official npm12.2.1 to retain native libc metadata, then re-review.
-- [ ] Obtain a usable online audit through the unchanged checker and clean scripts-disabled install.
-- [ ] Run build, lint, TypeScript, full Vitest and Playwright smoke.
-
-Network-enabled audit/install requests previously stalled; no installed candidate or runtime pass is claimed. Linear sync is unavailable. Preserve the claim, do not merge, and do not write Slack. See HANDOFF.md for continuation evidence.
+Publish the authorized merge on the same branch and inspect actual new exact-head CI; local results do not establish remote CI success. The original real-agent browser condition and Linear sync remain separately unverified. Keep JAM-262's separate retained worktree/three handoff changes intact. Background Slack writes remain prohibited. Do not merge PR #291.

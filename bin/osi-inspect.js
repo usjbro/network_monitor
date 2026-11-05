@@ -185,7 +185,8 @@ async function main() {
   // primitive for. Registering immediately (not deferred to next tick)
   // keeps that window as small as this API allows.
   if (child.pid !== undefined) {
-    sendControlMessage(relayUrl, {
+    // sendControlMessage logs relay failures without rejecting.
+    void sendControlMessage(relayUrl, {
       type: 'register_decrypt_eligible',
       pid: child.pid,
       keylogPath: keylog,

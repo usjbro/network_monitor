@@ -26,6 +26,27 @@ class FakeGeoIpClient extends EventEmitter implements StreamGeoIpClient {
 }
 
 describe('traceroute_hop and geo_hop_update relay', () => {
+  it('logs a fixed message for a rejected GeoIP lookup and continues forwarding hops', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const agent = new FakeAgentClient();
+    const geoip = new FakeGeoIpClient();
+    geoip.lookup.mockRejectedValueOnce(new Error('PRIVATE_PROVIDER_DETAIL'));
+    const response = buildStreamResponse({ agent, enrichment: new FakeEnrichmentClient(), geoip });
+    const reader = response.body!.getReader();
+    try {
+      await reader.read();
+      agent.emit('event', { type: 'traceroute_hop', hop: { targetIp: '93.184.216.34', hopNumber: 4, hopIp: '12.122.1.1', rttMs: 18.4 } });
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('"hopNumber":4');
+      await Promise.resolve();
+      expect(log).toHaveBeenCalledExactlyOnceWith('GeoIP lookup failed.');
+      agent.emit('event', { type: 'traceroute_hop', hop: { targetIp: '93.184.216.34', hopNumber: 5, hopIp: '12.122.1.2', rttMs: 19 } });
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain('"hopNumber":5');
+    } finally {
+      await reader.cancel();
+      log.mockRestore();
+    }
+  });
+
   it('forwards a traceroute_hop event from the agent unmodified, and triggers a geoIP lookup for its hopIp', async () => {
     const agent = new FakeAgentClient();
     const enrichment = new FakeEnrichmentClient();

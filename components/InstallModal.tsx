@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Terminal,
   Download,
@@ -24,6 +24,7 @@ interface InstallModalProps {
 
 export const InstallModal: React.FC<InstallModalProps> = ({ isOpen, onClose, theme }) => {
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const copyAttempt = useRef(0);
   const [activeTab, setActiveTab] = useState<'cli' | 'pwa'>('cli');
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [isInstalled, setIsInstalled] = useState(() => {
@@ -71,10 +72,19 @@ export const InstallModal: React.FC<InstallModalProps> = ({ isOpen, onClose, the
     },
   ];
 
-  const handleCopy = (code: string, index: number) => {
-    navigator.clipboard.writeText(code);
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex(null), 2000);
+  const handleCopy = async (code: string, index: number) => {
+    const attempt = ++copyAttempt.current;
+    setCopiedIndex(null);
+    try {
+      await navigator.clipboard.writeText(code);
+      if (attempt !== copyAttempt.current) return;
+      setCopiedIndex(index);
+      setTimeout(() => {
+        if (attempt === copyAttempt.current) setCopiedIndex(null);
+      }, 2000);
+    } catch {
+      // A denied clipboard write must not show a copied confirmation.
+    }
   };
 
   const handleDownloadCommandFile = () => {
@@ -200,7 +210,7 @@ exec $SHELL
                     <div className="flex items-center justify-between bg-slate-900 rounded border border-slate-800 px-3 py-2 text-slate-200 font-mono text-[11px] overflow-x-auto">
                       <code className="text-emerald-400 select-all">{cmd.code}</code>
                       <button
-                        onClick={() => handleCopy(cmd.code, idx)}
+                        onClick={() => { void handleCopy(cmd.code, idx); }}
                         className="ml-2 text-slate-400 hover:text-slate-100 p-1 rounded transition shrink-0"
                         title="Copy command"
                       >
