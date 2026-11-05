@@ -62,7 +62,7 @@ Default to none. Use one only under `AGENTS.md` "Model / Agent Routing": paralle
 - **Role agents don't edit files in Claude Code.** Their tools there are read-only plus Bash, so use them to analyse and advise.
 - **Claude Code coordinates and doesn't implement.** It uses agents for review and analysis, not to write task code, unless James assigns it the implementation.
 
-For an `in-session` gate delegation, which James must assign, record one of these as the `agent-type` in `mark-gate-delegated.sh`:
+For an `in-session` gate delegation in Claude Code, which James must assign, record one of these as the `agent-type` in `mark-gate-delegated.sh`. Codex doesn't expose `general-purpose` or the plugin reviewer, so it picks from its own session list:
 
 | Task nature | Agent |
 |---|---|
