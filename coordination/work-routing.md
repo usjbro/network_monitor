@@ -20,24 +20,26 @@ Skill names are bare here. Claude Code prefixes the Superpowers ones, as in `sup
 
 | Work | Owner | Skill, in order | Loop or goal | Agent |
 |---|---|---|---|---|
-| Start a Linear issue | Codex | `epic-task-cycle` when it belongs to an epic | Codex `/goal`, set after the gate is approved (see below) | None |
+| Start a Linear issue | Codex | `epic-task-cycle` when it belongs to an epic | Contract `## Goal`; Codex `/goal` only if James asks (see below) | None |
 | Work the queue | Codex, Claude Code for coordination | `epic-task-cycle` per issue | `AGENTS.md` "Continuous Work Queue", only under James's standing instruction | None |
 | Write a spec | Claude Code | `brainstorming` | None; James approves | `architect` when subsystems compete; `security-engineer` for security-sensitive work |
 | Write a plan | Codex, or Claude Code | `writing-plans` | None; the other agent reviews and gives the verdict. James approves a plan that lands in a PR | None |
-| Write new code from an approved plan | Codex | `executing-plans`, or `subagent-driven-development` when tasks are independent; `test-driven-development`; `verification-before-completion` | Codex `/goal` | Optional, see "Agents" |
-| Update existing behaviour or fix a small bug | Codex | `test-driven-development`; `verification-before-completion` | Codex `/goal` when the change has several steps | None |
+| Write new code from an approved plan | Codex | `executing-plans`, or `subagent-driven-development` when tasks are independent; `test-driven-development`; `verification-before-completion` | Contract `## Goal`; Codex `/goal` only if James asks | Optional, see "Agents" |
+| Update existing behaviour or fix a small bug | Codex | `test-driven-development`; `verification-before-completion` | Contract `## Goal`; Codex `/goal` only if James asks | None |
 | Refactor without changing behaviour | Codex | Existing tests must pass before and after; `verification-before-completion` | None | None |
 | Update docs | Whoever owns the task | `verification-before-completion`: check each claim against the code | None | None |
-| Debug a failure | Codex; Claude Code for read-only triage | `systematic-debugging`, then `test-driven-development` for the regression test | Codex `/goal` once the cause is known; none while still exploring | `sre` for CI or infrastructure |
+| Debug a failure | Codex; Claude Code for read-only triage | `systematic-debugging`, then `test-driven-development` for the regression test | None while exploring; once the cause is known, as for a fix | `sre` for CI or infrastructure |
 | Debug an intermittent failure | Codex | `systematic-debugging` | A fixed repeat count, such as 20 runs before and after. Never loop until it passes | None |
 | Review a plan | The agent that didn't write it, normally Claude Code | `docs/security-plan-review-checklist.md` for security-sensitive work; playbook section 4 | None | `security-engineer` for a second read when material |
-| Review a PR | The agent that didn't write it | `code-review`, plus `security-review` as the PR hook reminds; on Codex, `codex review` or `review-agent` meet that reminder | None. Re-review when the head changes | See "Review add-ons" |
+| Review a PR | The agent that didn't write it | `code-review`, plus `security-review` as the PR hook reminds; on Codex, `codex review` meets that reminder | None. Re-review when the head changes | See "Review add-ons" |
 | Answer review feedback | PR author | `receiving-code-review` | None | None |
 | Watch tasks and PRs | Claude Code | `loop`; playbook section 2 | `/loop`, with Monitor for GitHub events | None |
 
 ## Goals
 
-A goal keeps an agent working until a stated condition is true, so it fits work with a clear end. Set one only after the gate is approved.
+The contract's `## Goal` and `## Validation` are the normal way to state where a task ends. Codex's `/goal` goes further: it keeps a thread working until the condition is true.
+
+Codex creates a goal only when explicitly asked, and doesn't infer one from an ordinary task. A gate approval or an assignment doesn't count, so `/goal` needs James to run it or ask for it, after the gate is approved. These rules apply either way.
 
 - **Write it from the acceptance criteria.** For example: "JAM-123: all acceptance tests pass, PR open, CI green at the PR head, `review` posted."
 - **End with the PR ready for James.** That's the end state in the example. A goal never includes merging, approving a gate or changing scope.
@@ -72,7 +74,7 @@ For an `in-session` gate delegation, which James must assign, record one of thes
 
 ## Review add-ons
 
-Add these to a PR review when the diff calls for them. They're confirmed for Claude Code. The plugins are enabled on Codex, but it isn't confirmed that their agents load there, so Codex uses `review-agent` with the same focus.
+Add these to a PR review when the diff calls for them. They're confirmed for Claude Code. On Codex the plugin agents aren't exposed, so use `codex review` with that focus, or a `default` or `security-engineer` reviewer. Check the session's agent list before naming a plugin agent there.
 
 | The diff has | Add |
 |---|---|
