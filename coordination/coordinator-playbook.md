@@ -43,7 +43,7 @@ Read the failed or cancelled job's steps before drawing a conclusion (`gh run vi
 
 ## 5. Merging and closing
 
-Merge only when the human asks, with squash, CI green, review passed and merge state clean (`AGENTS.md` "Git & Commits"). After a merge, check that Linear shows the issue Done and that CI on `main` for the merge commit goes green, then start the next item from the queue. Do not start a new item while the previous one's merge CI is unexplained.
+Merge only as `AGENTS.md` "Git & Commits" allows, with squash, CI green, review passed and merge state clean (`AGENTS.md` "Git & Commits"). After a merge, check that Linear shows the issue Done and that CI on `main` for the merge commit goes green, then start the next item from the queue. Do not start a new item while the previous one's merge CI is unexplained.
 
 ## 6. Linear hygiene
 

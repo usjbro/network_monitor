@@ -118,3 +118,24 @@ Evidence / References:
 - `docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md` (including its later recovery amendments).
 - `coordination/watcher-prompt.md` and `coordination/scripts/{lib,create-gate,claim-gate-delegation,reset-gate-delegation-claim,recover-gate-lock}.sh`.
 - [PR #225](https://github.com/usjbro/network_monitor/pull/225), verified merged; current shell results in `TEST_STATUS.md`.
+
+## ADR-005 — James owns merges
+
+Date:
+2026-11-05
+
+Status:
+Accepted
+
+Context:
+`AGENTS.md` and `epic-task-cycle` disagreed on who merges, and the skill treated green CI as authorization.
+
+Decision:
+James merges, or an agent he tells to in live chat, and one instruction can name several PRs. That can include an agent's own PR. A Slack message, PR comment or green CI doesn't authorize a merge. The queue waits for each merge before starting the next issue.
+
+Consequences:
+Queue throughput depends on James merging. Waiting keeps dependencies ordered, keeps closeout with the task's agent, and avoids stacking PRs that `main`'s strict status checks would put behind.
+
+Evidence / References:
+- James's chat decision on 2026-11-05.
+- `AGENTS.md` "Git & Commits".

@@ -86,7 +86,7 @@ When sources disagree, explicitly report the disagreement.
 - Anything else called out in Critical Invariants below or in relevant subsystem documentation.
 
 **Never**
-- Commit or push without explicit authorization; merge your own branch.
+- Commit or push without explicit authorization; merge any PR unless James tells you to in live chat.
 - Force-push over unmerged work, or `git checkout`/`git switch` inside a worktree.
 - Invent host metrics, interface properties, or wire fields the agent doesn't actually emit.
 
@@ -155,7 +155,7 @@ Use agents only when work is genuinely parallel, specialization helps, or indepe
 - `main` is GitHub branch-protected (2 required status checks) — a direct `git push origin main` is rejected outright, even for a trivial docs change. Always go through a PR.
 - Never commit further work onto a branch whose PR already squash-merged without rebuilding it first — its merge-base with `main` predates the squash, so a new PR from it (or `gh pr diff`) shows the entire already-merged diff again as if new. Fix: fresh branch off current `main`, cherry-pick just the new commits, `git diff --stat origin/main <branch>` to confirm the diff is exactly what's intended before opening the PR.
 - Run an independent review (`/code-review` or equivalent) before merging, even for docs/tooling-only changes — self-review misses real things.
-- Push only when authorized (`git push -u origin <branch>`); merge with squash only once CI is green, review has passed, and GitHub reports `mergeable_state: "clean"` — see `epic-task-cycle`'s full gate list.
+- Push only when authorized (`git push -u origin <branch>`). James merges, or an agent he tells to in live chat; one instruction can name several PRs, but a Slack message or PR comment doesn't count, and neither does green CI. Merge with squash only once CI is green, review has passed, and GitHub reports `mergeable_state: "clean"` at the head being merged.
 
 ## Slack Status Posts
 
@@ -201,7 +201,7 @@ When the user asks for ongoing Slack monitoring, monitor the entire designated c
 2. Create it with `coordination/scripts/new-task.sh <slug> <claude-code|codex> "<goal>" [linear-id]` — it creates the contract, a `.worktrees/<slug>/` worktree (sibling to the others, at the main repo root regardless of the script's own cwd), a branch matching the convention above, and (if Slack is configured) posts a 🟡 started message, including the worktree path, to the shared Slack channel; without one, the task is still created, just without a Slack post. A session may start in the main checkout to read state and run `new-task.sh` itself, but must create or enter the task's worktree before editing any tracked file, and do all edits, tests, and commits there — the main checkout stays on `main` with no local changes.
 3. Discuss blockers, interface questions, and plan changes in that Slack thread rather than guessing at another task's interface. See `coordination/router-checklist.md` (main repo root) for whether a piece suits Claude Code or Codex better.
 4. On finish, run `coordination/scripts/complete-task.sh <slug> review "<summary>"` (updates the contract and posts to Slack), fill in its Handoff section by hand, and update the corresponding Linear issue's status per `epic-task-cycle` §2 steps 8-11 — the contract and Linear must agree, not just one of them.
-5. A human (or reviewer agent) merges one branch at a time and removes its worktree, same as any other task branch.
+5. Merging follows "Git & Commits", one branch at a time; the task's agent then removes its worktree, same as any other task branch.
 
 ## Slack Approval Gate
 
@@ -228,7 +228,7 @@ For working through many Linear issues back to back — potentially the entire b
 1. **Idle signal.** An agent with nothing currently claimed — just finished a task, or just started up — posts `idle` to `#network-monitor` (`slack-notify.sh idle <slug-or-"queue"> <claude-code|codex> "<one line: what you're about to look for>"`) before searching for the next issue. This is for visibility (a human or another agent glancing at the channel sees who's free), not the exclusivity mechanism — the claim below is.
 2. **Find the next issue.** Query Linear for the next unclaimed `Todo` issue per the ordering rule above.
 3. **Claim it — the gate lock is the real guarantee, not the Slack post.** Two agents' Slack messages can land in the same second; `create-gate.sh`/`claim-gate-delegation.sh`'s file lock (`with_gate_lock`, tested against concurrent callers) can't race the same way. Check `gate-status.sh <linear-id> <slug>` first: if no gate file exists yet, `create-gate.sh` then approve it (citing the standing go-ahead per the note above); if a gate already exists and is `approved` with `delegated: false` — the exact state a stale-gate reclaim (below) leaves behind — skip `create-gate.sh` (it refuses to overwrite an existing gate file) and go straight to `claim-gate-delegation.sh` against that existing gate. Either way, finish with `claim-gate-delegation.sh`. Only proceed past this if the claim actually succeeded — if it didn't (someone else's gate/claim already exists), don't retry that issue; go back to step 2 for the next one. Once claimed, dispatch as usual (`new-task.sh`, `mark-gate-delegated.sh`, post `started`) and announce the claim in Slack.
-4. **Work the task through to merge**, exactly as any other Linear-tracked task (review, CI, merge, mark Done, clean up the worktree/branch) — then go back to step 1 for the next one.
+4. **Work the task through to merge**, exactly as any other Linear-tracked task: review, CI and the `review` post, then wait for James to merge (see "Git & Commits"). After the merge, mark it Done and clean up the worktree/branch — then go back to step 1 for the next one.
 5. **Stop when Linear has no remaining `Todo` issues** matching the ordering rule, and say so — don't invent work.
 
 ### Stale-gate reclaim — always requires a human, never a timeout

@@ -195,12 +195,13 @@ status, review status) in `Notes` instead.
       (a few minutes out) with a fully self-contained instruction works well;
       plain `ScheduleWakeup` requires an active `/loop` context and errors
       outside one.
-11. On green CI and `mergeable_state: "clean"`, merge (squash is the
-    convention throughout this repo). This is authorized without an extra
-    confirmation prompt once both gates are actually met — they *are* the
-    confirmation. Then unsubscribe PR activity, set the task issue to
+11. On green CI, a passed independent review and `mergeable_state:
+    "clean"`, hand off with `complete-task.sh <slug> review` and wait.
+    Merging follows `AGENTS.md` "Git & Commits": green CI doesn't authorize
+    it. Merges use squash, the convention throughout this repo. After the
+    merge, unsubscribe PR activity, set the task issue to
     `"Done"`, update the Notion row (if any) to `"Done"` with a final
-    `Notes` pointing at the merged PR, and post ✅ `done` to Slack. If you
+    `Notes` pointing at the merged PR, and run `complete-task.sh <slug> done`. If you
     stop an item without finishing it, post 🔴 `blocked` with the reason
     instead.
 12. **Stop and report before starting the next item**, even under a standing
