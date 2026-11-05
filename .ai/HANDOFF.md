@@ -1,3 +1,17 @@
+# JAM-258 — verified main refresh for PR #291 (2026-11-05)
+
+James explicitly authorized bringing main's dependency fix into this PR and pushing the branch. Existing gate/claim/worktree retained; no takeover, own-PR merge or Slack post is authorized by this refresh.
+
+Branch `jamesmbrownjr/jam-258-floating-promises-control-errors`, worktree `.worktrees/floating-promises-control-errors`, prior head f11ad5f. This merge imports main `ace0d401592587c1fcb3e3c8945c6616e5834a0e`, including JAM-262 #294 dependency fixes and Follow Stream spec #290. Main changed only manifests, task evidence, spec and its contract. Exact-byte checks preserve all reviewed JAM-258 code/tests and main's manifests/spec/contract; no application/agent source changes were introduced by the refresh.
+
+Only `.ai/CURRENT_TASK.md`, HANDOFF and TEST_STATUS conflicted. JAM-258 remains active; both prior JAM-258 and imported JAM-262 records plus identical older historical tails are retained below. Separate JAM-262 worktree and three uncommitted handoff documents are untouched.
+
+Fresh local validation passed on the merged dependency tree: `npm ci --ignore-scripts --no-audit --no-fund`; usable online audit through the unchanged checker (0 high/critical,10moderate); TypeScript; lint; all83files/652Vitest tests; production build;1Chromium Playwright smoke test. The first browser attempt could not launch because the executable was absent; downloading the pinned headless browser into an external workspace cache and rerunning passed. Generated AGENTS/next-env side effects were restored. Independent staged review is clear. Full logs are outside the repository at `/workspace/pr291-refresh-evidence/`.
+
+The previous head's CI41273133268 failed npm audit and skipped downstream web checks. Publish this reviewed merge under James's explicit authorization, then inspect the actual new PR head and its CI; no new remote CI pass is claimed at commit creation. Retain real-agent browser verification and Linear sync as separate outstanding conditions. Do not merge PR #291 or send background Slack messages.
+
+---
+
 # JAM-258 — PR #291 review follow-up (2026-10-31)
 
 PR: https://github.com/usjbro/network_monitor/pull/291
@@ -16,6 +30,26 @@ Remaining: real-agent browser verification was blocked by occupied port9990; no 
 Publication: correction `b4978d4` is on the existing PR; the retained local branch matches it. The [existing review thread reply](https://github.com/usjbro/network_monitor/pull/291#discussion_r4434385619) records the fix and evidence. Code-head CI passed Rust and Playwright, but Web still stops at the audit gate.
 
 Next: re-run full tests, CLI regression and build where loopback listeners and child-process output work, then obtain external review/CI. Background Slack writes remain prohibited; the earlier publication reply was a specific user-requested exception. Do not merge or start another issue without applicable approval/claim.
+
+---
+
+# JAM-262 — draft PR #294 published; verification pending (2026-11-02)
+
+James approved implementation directly in this live chat on 2026-11-01 and explicitly instructed "Commit the change push it open a PR" on 2026-11-02. Gate `jam-262__audit-gate-advisories` remains approved, claimed and delegated in-session. Worktree `.worktrees/audit-gate-advisories`, branch `jamesmbrownjr/jam-262-audit-gate-advisories`, base `dc698aa`. JAM-258's separate worktree and claim are preserved. No further task or publication approval is needed.
+
+Published [draft PR #294](https://github.com/usjbro/network_monitor/pull/294) from code commit `8b94b152ba5d7e82e6b12c779534491e88714f7e`; actual remote branch and PR head were verified. Code-head [CI run41458131362](https://github.com/usjbro/network_monitor/actions/runs/41458131362) was in progress at publication; no CI pass is claimed.
+
+This branch contains the npm-generated dependency candidate: exact PR293 inputs followed by `npm update zod --package-lock-only --offline --ignore-scripts --no-fund --no-audit --cache /workspace/.npm-cache`. Versions: Next16.4.1, Vitest/mocker5.0.5, undici7.30.1 and Zod4.6.7. Existing Zod ranges permit the update; there is no new direct dependency or override. Audit checker/allowlist, scripts, Webpack configuration/flags, binds, application/agent/wire and deployment are unchanged.
+
+Fresh verification on2026-11-02: manifest/lock root consistency, expected versions, unchanged scripts/dependency keysets, no overrides, exact five-file scope and `git diff --cached --check` pass. Independent publication review found no MUST source finding. No candidate audit, install, build, lint, TypeScript, full Vitest or Playwright pass is claimed.
+
+**Remaining source concern:** npm11.9's serializer removes14 native `libc` selectors relative to PR293, six already present on main. OS/CPU filters remain, but GNU/musl optional-package filtering/downloads may change. Regenerate from exact PR293 inputs using official npm12.2.1 (supports Node24.19 and preserves `libc`) when execution works, inspect and re-review the delta. Do not hand-edit the lockfile or patch the CLI.
+
+**Validation blocker:** network-enabled npm audit/install requests previously failed to return execution results; no candidate `node_modules` or audit report was created. A prior GitHub tree request likewise did not return and its expected tree GET was404. These are execution stalls, not an explicit automatic approval-review denial. The user explicitly authorized publication with these limitations. Git push succeeded and the connector subsequently created draft PR #294; the previous publication blocker is resolved. Validation remains unverified.
+
+Baseline [CI run41200617279](https://github.com/usjbro/network_monitor/actions/runs/41200617279) on current-main `dc698aa` fails the unchanged audit gate. Offline npm audit returned an empty report on that known-vulnerable baseline and is explicitly excluded as security evidence.
+
+Resume: preserve this implementation/claim, inspect actual CI on draft PR #294, resolve the native metadata concern, obtain fresh usable online baseline/final audit through the unchanged checker, clean scripts-disabled install and all required web checks. Draft status must remain until readiness is verified. Do not merge. Slack writes remain prohibited; Linear sync is unavailable.
 
 ---
 

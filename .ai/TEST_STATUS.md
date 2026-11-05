@@ -1,3 +1,21 @@
+# JAM-258 — fresh main-refresh verification (2026-11-05)
+
+Source: main ace0d40 merged into prior PR head f11ad5f; main manifests/spec/contract exact and JAM-258 application/tests byte-identical to prior reviewed source. Independent staged merge review: no findings. No new test code or audit policy change.
+
+- `npm ci --ignore-scripts --no-audit --no-fund --cache /workspace/.npm-cache --fetch-retries=0 --fetch-timeout=15000`: passed,481packages installed; manifest/lock unchanged.
+- Online `npm audit --package-lock-only --json` plus unchanged `node .github/scripts/check-npm-audit.mjs <report>`: passed;0high/0critical,10moderate. Usable online report retained externally; offline audit is not evidence.
+- `./node_modules/.bin/tsc --noEmit`: passed.
+- `npm run lint`: passed.
+- `npm test -- --maxWorkers=2`:83files/652tests passed in48s.
+- `npm run build`: passed; existing middleware/Edge Runtime warnings remain.
+- First `npm run test:e2e`: browser launch failed because Chromium executable was missing, before browser behavior ran. Installed the pinned Playwright headless Chromium/FFmpeg into `/workspace/pr291-refresh-evidence/pw-browsers`; no project/config changes.
+- `PLAYWRIGHT_BROWSERS_PATH=/workspace/pr291-refresh-evidence/pw-browsers npm run test:e2e`:1Chromium smoke test passed in18.9s.
+- Generated AGENTS.md/next-env.d.ts dev side effects restored from the merge index; fresh diff/manifest/source preservation checks pass.
+
+Logs: `/workspace/pr291-refresh-evidence/`. Local checks do not establish new remote CI success; inspect the exact pushed head. The fake-agent smoke test is separate from the still-unverified original real-capture-agent browser condition. No local Rust/fuzz rerun was needed for unchanged Rust source; GitHub CI remains required. Do not merge PR #291.
+
+---
+
 # JAM-258 — verification (2026-10-31)
 
 PR: https://github.com/usjbro/network_monitor/pull/291
@@ -12,6 +30,17 @@ PR: https://github.com/usjbro/network_monitor/pull/291
 - Real-agent browser run: blocked by occupied loopback port9990. No browser pass claimed. GitHub Playwright smoke uses a fake agent and does not replace this check.
 - CI head7849426: Rust (including live/replay/Clippy/audit) and Playwright passed; fuzz execution was path-filtered; Web failed at the existing JAM-262 npm-audit gate and skipped downstream checks.
 - Correction CI head `b4978d4`: [run 41272518561](https://github.com/usjbro/network_monitor/actions/runs/41272518561) passed Rust (including live/replay/Clippy/audit) and Playwright. Fuzz execution was path-filtered. Web failed at npm audit and skipped TypeScript, lint, tests and build. No final web CI pass is claimed.
+
+---
+
+# JAM-262 — draft candidate verification (2026-11-02)
+
+- Baseline current-main `dc698aa` [CI run41200617279](https://github.com/usjbro/network_monitor/actions/runs/41200617279) fails the unchanged npm audit gate.
+- npm-generated candidate: Next16.4.1, Vitest/mocker5.0.5, undici7.30.1 and Zod4.6.7, within existing dependency ranges.
+- Fresh manifest/lock root consistency, expected versions, unchanged scripts/dependency keysets, no overrides, exact five-file staged scope and `git diff --cached --check` pass. Independent publication review: no MUST source finding; one native libc metadata SHOULD remains in HANDOFF.
+- Online audit/install requests previously stalled without execution results; no candidate audit report or node_modules exists. Build, lint, TypeScript, full Vitest and Playwright have not run on these installed candidate versions.
+- Offline npm audit returned0/empty vulnerabilities on the known-bad baseline and is discarded as evidence. A fresh usable online audit is required.
+- Published code commit `8b94b15` to draft [PR #294](https://github.com/usjbro/network_monitor/pull/294) under James's explicit authorization. Remote ref and PR head verified; code-head CI run41458131362 was in progress at publication. This does not claim audit green, tests passing or readiness to merge.
 
 ---
 
