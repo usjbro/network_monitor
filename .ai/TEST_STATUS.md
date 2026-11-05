@@ -1,3 +1,13 @@
+# JAM-17 implementation-plan validation (2026-11-05)
+
+Plan-only change against main e78fd32. Source/spec cross-check and self-review complete; relative spec link and seven PR/task sections validated by Python; `git diff --check` passed. No feature implementation exists or is claimed. Existing application suites were not rerun for this documentation-only change.
+
+Throwaway Next 16.4.1 probe outside repository: `next build --webpack` passed; `next start -H 127.0.0.1 -p 3137`; `node /private/tmp/jam17-egress-client.cjs` exited 0. With a synthetic 32MiB body and paused HTTP reader, default producer pulled twice/released early; highWaterMark:0 held at one pull until drain. All responses were identity encoded, including gzip requests; no compression-path result claimed. This tests stream mechanics, not production 192KiB cap compliance or a complete transport guarantee. Evidence `/private/tmp/jam17-egress-results.log` and build/server logs. Probe server stopped.
+
+Plan proposes explicit corrections requiring James approval: Node Pages API finish/close lifetime with shared gates and middleware tests; actual bound relayPort carried in get_stream and checked before content generation. Full independent Claude checklist review requested on publication. No Follow Stream execution is authorized by plan publication.
+
+---
+
 # JAM-258 — fresh main-refresh verification (2026-11-05)
 
 Source: main ace0d40 merged into prior PR head f11ad5f; main manifests/spec/contract exact and JAM-258 application/tests byte-identical to prior reviewed source. Independent staged merge review: no findings. No new test code or audit policy change.
