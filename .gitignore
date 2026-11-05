@@ -8,6 +8,9 @@ coverage/
 *.tsbuildinfo
 .worktrees/
 /coordination/gates/
+# Task contracts are local state, like gates; the coordination scripts read them.
+/coordination/tasks/*.md
+!/coordination/tasks/TEMPLATE.md
 .data/
 /test-results/
 /playwright-report/
