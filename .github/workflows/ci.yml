@@ -38,7 +38,7 @@ jobs:
       # Pin the action implementation from master history for durable SHA refs;
       # refresh it manually while keeping the compiler channel explicit.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (2026-10-09); toolchain selected below
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (2026-10-09); toolchain selected below
         with:
           toolchain: stable
           components: clippy
@@ -178,7 +178,7 @@ jobs:
       # Use the same durable master-history action; select nightly via the input.
       - name: Install nightly Rust toolchain
         if: steps.filter.outputs.run_fuzz == 'true'
-        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master (2026-10-09); toolchain selected below
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (2026-10-09); toolchain selected below
         with:
           toolchain: nightly
 
