@@ -12,11 +12,11 @@ a planning session) tags each task with an owner using this checklist.
    - No / requirements will get clarified as you go → Claude Code.
 
 2. **Does it require reasoning across many files or subsystems at once**
-   (e.g. changing an event schema that the detection engine, the
-   location-agents, and the Slack formatter all consume)?
-   - Yes → Claude Code. Better suited to holding a large, tangled context
-     and making coordinated cross-file edits, and can spawn subagents to
-     explore different parts of the project in parallel.
+   (e.g. changing a wire event that the capture agent, the relay and the
+   UI all consume)?
+   - Yes → Claude Code for the plan, then Codex implements against it.
+     Claude Code is better suited to holding a large, tangled context and
+     can spawn subagents to explore parts of the project in parallel.
    - No, it's contained to one module/file → either; prefer Codex to free up
      Claude Code for the harder work.
 
@@ -29,7 +29,7 @@ a planning session) tags each task with an owner using this checklist.
    task?**
    - Yes → Codex.
 
-5. **Is it an architectural decision, a new detection-rule design, or
+5. **Is it an architectural decision, a new protocol design, or
    anything where you'd want a subagent to go investigate before writing
    code?**
    - Yes → Claude Code.
@@ -38,25 +38,20 @@ a planning session) tags each task with an owner using this checklist.
 
 | Task | Owner | Why |
 |---|---|---|
-| Add a new correlation rule for lateral-movement detection, design unclear | Claude Code | needs judgment calls on what signal to correlate |
-| Refactor the Slack status-formatter to a shared template function | Codex | fully specified, single-module |
-| Change the location-agent → Slack event schema everywhere it's used | Claude Code | cross-cutting, multiple subsystems |
-| Migrate the alert queue from polling to webhooks per attached spec | Codex | scoped, async, sandboxable |
-| Investigate why probing detection has false positives at Location B | Claude Code | exploratory, needs judgment |
+| Design a new capture-file feature whose scope is unclear | Claude Code | needs judgment calls before any code |
+| Implement an approved plan task with its tests | Codex | fully specified, bounded |
+| Change a wire event in the Rust agent and `lib/agent-mapping.ts` | Codex, after Claude Code reviews the plan | crosses subsystems, so the plan comes first |
+| Fix a flaky test once the failing fixture is known | Codex | scoped, with a clear done condition |
+| Work out why a metric disagrees with the capture | Claude Code | exploratory, needs judgment |
+
+Today's default is that Claude Code coordinates, specs and reviews, and Codex implements. Use the questions above when James asks for a different split.
 
 ## When in doubt
 
-Default to Claude Code for the first pass on anything new or ambiguous, and
+Default to Claude Code for the spec or plan on anything new or ambiguous, and
 move to Codex once the task has been broken down into scoped, well-specified
 pieces.
 
-## Choosing an Agent-tool subagent (in-session delegation)
+## Choosing the skill, loop, goal and agent
 
-Once a gate's delegation target is `in-session` (see `docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md`), pick the subagent type with the same read as the checklist above:
-
-| Task nature | Subagent |
-|---|---|
-| Cross-subsystem design, ambiguous requirements, security-sensitive architecture | `network-monitor-architect` |
-| Approved, scoped implementation — bug fixes, tests, refactors, docs | `network-monitor-developer` |
-| Reviewing a diff for correctness/regressions/security before merge | `network-monitor-reviewer` |
-| Verifying acceptance criteria via focused unit/integration/e2e tests | `network-monitor-tester` |
+Once a task has an owner, use [`work-routing.md`](work-routing.md). It also lists the role agents for an `in-session` gate delegation (see `docs/superpowers/specs/2026-09-25-slack-approval-gate-design.md`).

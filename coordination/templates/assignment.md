@@ -15,6 +15,12 @@ Scope (from the Linear issue: <url>):
 Constraints that must not change:
 - <security model, invariants from CLAUDE.md that apply, files that must not be edited>
 
+Route (from coordination/work-routing.md):
+- Skills: <in order>
+- Goal: <the contract Goal, ending with the PR ready for James, or at the posted plan for PLAN FIRST. Codex /goal only if James asked for it>
+- Commit and push: <authorized for this task, or ask James first>
+- Agent: <role agent and why, or none>
+
 Tests first (they must fail before the change):
 - <the Linear acceptance checklist, one line each>
 
