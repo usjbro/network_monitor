@@ -1,3 +1,11 @@
+# JAM-261 — corrected WHOIS fixture lifecycle, ready for PR (2026-11-05)
+
+James explicitly approved JAM-17 plan then JAM-261. Plan PR #295 is published at7903094 with code/security and Claude rechecks clear; do not implement Follow Stream or merge own PR. JAM-261 worktree `.worktrees/whois-test-econnreset`, branch `jamesmbrownjr/jam-261-whois-client-tests-emit-unhandled-econnreset-on-macos`, base e78fd32.
+
+Confirmed accepted peer reset in oversized-response fixture: 8/20 baseline failures on current macOS, all assertions passed but late ECONNRESET was unhandled. Test-only helper now scopes the expected reset, rejects unexpected errors on teardown, and destroys/awaits all accepted sockets/server. Meaningful real-reset and cleanup regressions plus error-rejection cases added; no production/dependency/config change. All 20 corrected focused runs, full657 normal/single-worker, tsc/lint/diff pass; mutation proves deterministic regression catches missing handling. See TEST_STATUS.md for exact evidence.
+
+Independent code and security reviews clear; each reviewer independently passed the 11 focused tests. Publish authorized task PR, request Claude/code/security reviews, inspect final-head CI and hand off without merging. Update Linear InReview only after publication; do not claim CI or tracker closure before actual verification. Preserve all unrelated worktrees/main changes; continue Slack monitoring.
+
 # JAM-17 plan ready for independent review (2026-11-05)
 
 James approved writing JAM-17's plan, then investigating JAM-261 after the plan PR is up. Worktree `.worktrees/follow-stream-plan`; branch `jamesmbrownjr/jam-17-follow-stream-read-a-conversation-as-reassembled-text`; base main e78fd32. Deliverable `docs/superpowers/plans/2026-11-05-follow-stream.md`: seven independently reviewed PRs; exact contracts/limits; full D3/D4/D4a/D7/D10 and acceptance mapping; actual-port mismatch guard; no default enablement. No feature source changes.
