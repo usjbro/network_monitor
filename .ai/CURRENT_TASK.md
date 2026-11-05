@@ -1,11 +1,7 @@
 # Current Task
 
-JAM-258 — PR #291 main refresh locally verified; publish and inspect new CI.
+JAM-261 — test-only WHOIS reset/lifecycle correction verified locally; publish PR and inspect CI/reviews.
 
-James explicitly requested on2026-11-05: bring the fix from main and push the code. Existing takeover/publication authorization and approved claim apply. Retained worktree `.worktrees/floating-promises-control-errors`, branch `jamesmbrownjr/jam-258-floating-promises-control-errors`, PR https://github.com/usjbro/network_monitor/pull/291 .
+James approved JAM-17 plan then JAM-261 directly in chat on 2026-11-05. Plan PR #295 is now up and under code/security/Claude review. This task's existing approved gate has been claimed and delegated in-session. Worktree `.worktrees/whois-test-econnreset`; branch `jamesmbrownjr/jam-261-whois-client-tests-emit-unhandled-econnreset-on-macos`, base e78fd32.
 
-This refresh merges main `ace0d401592587c1fcb3e3c8945c6616e5834a0e`, containing JAM-262 #294 dependency fixes and reviewed Follow Stream spec #290. Main's manifest/lock/spec/contract are exact; reviewed JAM-258 application code/tests remain byte-identical to f11ad5f. Only the three task-state conflicts were resolved, retaining both histories.
-
-Fresh checks passed: clean scripts-disabled install with unchanged lockfile; online unchanged audit gate (0 high/critical); TypeScript; lint; all83 files/652 Vitest tests; production build; one Chromium Playwright smoke test. Independent staged merge review found no issues.
-
-Publish the authorized merge on the same branch and inspect actual new exact-head CI; local results do not establish remote CI success. The original real-agent browser condition and Linear sync remain separately unverified. Keep JAM-262's separate retained worktree/three handoff changes intact. Background Slack writes remain prohibited. Do not merge PR #291.
+Use Linear issue acceptance criteria: instrument accepted and client sockets, reproduce before correcting, deterministic regression, unexpected errors still fail, 20 focused passes and both ordinary/single-worker full Vitest pass. Keep timeout/size/refused-connection assertions. Test-fixture scope unless production defect demonstrated. No global suppression. Preserve unrelated worktrees and main changes; monitor Slack. Original report Node 25.4.0/Vitest 5.0.1; current Node 26.12.1/Vitest 5.0.5 on macOS 26.6.2; one fresh full-suite pass does not disprove intermittent failure.
