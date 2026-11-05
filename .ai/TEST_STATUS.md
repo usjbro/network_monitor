@@ -17,6 +17,18 @@ Verified:
 
 No build/Rust/audit rerun for a test-only change with unchanged manifests/production source. Existing Vite native-config/Node module.register deprecation warnings remain. JAM-255 already merged/Done, so its historic validation-blocker relation is no longer an active blocker; preserve that history while recording resolution.
 
+# JAM-17 independent review corrections (2026-11-05)
+
+Independent code review found missing client/local role metadata; independent security review found unbounded authenticated control-line allocation before serde. Verified source confirms both: FlowKey/NetworkConnection expose local/remote while c2s orientation is SYN-derived; main.rs uses reader.lines().next_line() after authentication. Plan now adds proposed generation-scoped clientIsLocal plus selected endpoint props and inbound/outbound/midstream tests, and explicitly assigns a pre-allocation 32KiB control-line reader with legacy-control compatibility/boundary tests to the wire PR. All amendments still require James plan approval before feature implementation. Re-review requested; no runtime code changed.
+
+# JAM-17 implementation-plan validation (2026-11-05)
+
+Plan-only change against main e78fd32. Source/spec cross-check and self-review complete; relative spec link and seven PR/task sections validated by Python; `git diff --check` passed. No feature implementation exists or is claimed. Existing application suites were not rerun for this documentation-only change.
+
+Throwaway Next 16.4.1 probe outside repository: `next build --webpack` passed; `next start -H 127.0.0.1 -p 3137`; `node /private/tmp/jam17-egress-client.cjs` exited 0. With a synthetic 32MiB body and paused HTTP reader, default producer pulled twice/released early; highWaterMark:0 held at one pull until drain. All responses were identity encoded, including gzip requests; no compression-path result claimed. This tests stream mechanics, not production 192KiB cap compliance or a complete transport guarantee. Evidence `/private/tmp/jam17-egress-results.log` and build/server logs. Probe server stopped.
+
+Plan proposes explicit corrections requiring James approval: Node Pages API finish/close lifetime with shared gates and middleware tests; actual bound relayPort carried in get_stream and checked before content generation. Full independent Claude checklist review requested on publication. No Follow Stream execution is authorized by plan publication.
+
 ---
 
 # JAM-258 — fresh main-refresh verification (2026-11-05)

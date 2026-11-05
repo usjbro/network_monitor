@@ -6,6 +6,14 @@ Confirmed accepted peer reset in oversized-response fixture: 8/20 baseline failu
 
 Independent code and security reviews clear; each reviewer independently passed the 11 focused tests. Publish authorized task PR, request Claude/code/security reviews, inspect final-head CI and hand off without merging. Update Linear InReview only after publication; do not claim CI or tracker closure before actual verification. Preserve all unrelated worktrees/main changes; continue Slack monitoring.
 
+# JAM-17 plan ready for independent review (2026-11-05)
+
+James approved writing JAM-17's plan, then investigating JAM-261 after the plan PR is up. Worktree `.worktrees/follow-stream-plan`; branch `jamesmbrownjr/jam-17-follow-stream-read-a-conversation-as-reassembled-text`; base main e78fd32. Deliverable `docs/superpowers/plans/2026-11-05-follow-stream.md`: seven independently reviewed PRs; exact contracts/limits; full D3/D4/D4a/D7/D10 and acceptance mapping; actual-port mismatch guard; no default enablement. No feature source changes.
+
+Claude confirmed HTTP producer-close/egress and missing port-mismatch detection gaps. Plan labels proposed Pages API finish/close transport and get_stream relayPort/unavailable amendments for explicit James approval before implementation. Throwaway production probe reproduced eager release; zero-prefetch delayed release under backpressure but does not prove full finish semantics. See TEST_STATUS.md and plan for limits.
+
+Publish plan PR under the approved sequence, request Claude's full security checklist review, resolve findings, and wait for James's plan approval before Follow Stream implementation. JAM-17 remains In Progress as feature work is incomplete. Proceed with separately authorized JAM-261 only after plan PR publication. Keep original dirty JAM-258 and PR291 test worktrees intact; monitor Slack.
+
 ---
 
 # JAM-258 — verified main refresh for PR #291 (2026-11-05)
