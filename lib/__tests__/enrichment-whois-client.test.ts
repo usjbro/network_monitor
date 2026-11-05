@@ -1,18 +1,21 @@
 // lib/__tests__/enrichment-whois-client.test.ts
 import { describe, expect, it, afterEach } from 'vitest';
-import net from 'node:net';
+import { startWhoisServer, type WhoisServerFixture } from './helpers/whois-server';
 import { queryWhois, WHOIS_ALLOWLIST } from '../enrichment/whois-client';
 
 describe('queryWhois', () => {
-  let server: net.Server;
-  afterEach(() => server?.close());
+  let fixture: WhoisServerFixture | undefined;
+  afterEach(async () => {
+    const previous = fixture;
+    fixture = undefined;
+    await previous?.close();
+  });
 
   it('returns response text under the 64KB cap', async () => {
-    server = net.createServer((socket) => {
+    fixture = await startWhoisServer((socket) => {
       socket.on('data', () => socket.end('Registrant Organization: Example Org\r\n'));
     });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = (server.address() as net.AddressInfo).port;
+    const port = fixture.port;
 
     const entry = { matches: () => true, host: '127.0.0.1', port, fieldPatterns: {} };
     const text = await queryWhois(entry, 'example.test');
@@ -20,15 +23,14 @@ describe('queryWhois', () => {
   });
 
   it('aborts and treats an oversized response as a failure rather than buffering it fully', async () => {
-    server = net.createServer((socket) => {
+    fixture = await startWhoisServer((socket) => {
       socket.on('data', () => {
         const big = Buffer.alloc(100 * 1024, 'a'); // 100KB > 64KB cap
         socket.write(big);
         // deliberately never .end() — client must abort based on size, not EOF
       });
-    });
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = (server.address() as net.AddressInfo).port;
+    }, { allowPeerReset: true });
+    const port = fixture.port;
 
     const entry = { matches: () => true, host: '127.0.0.1', port, fieldPatterns: {} };
     const text = await queryWhois(entry, 'example.test');
@@ -36,9 +38,8 @@ describe('queryWhois', () => {
   });
 
   it('times out rather than hanging when the server never responds', async () => {
-    server = net.createServer(() => {}); // accepts, never writes, never closes
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const port = (server.address() as net.AddressInfo).port;
+    fixture = await startWhoisServer(() => {}); // accepts, never writes, never closes
+    const port = fixture.port;
 
     const entry = { matches: () => true, host: '127.0.0.1', port, fieldPatterns: {} };
     const text = await queryWhois(entry, 'example.test', { timeoutMs: 50 });
