@@ -11,6 +11,12 @@ created: <date>
 
 One or two sentences: what "done" looks like.
 
+## Route
+
+Skills, goal or loop, and agent, from `coordination/work-routing.md`.
+
+- <fill in>
+
 ## Owned files
 
 The only files/directories this task may edit.

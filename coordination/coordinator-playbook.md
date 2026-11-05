@@ -6,9 +6,9 @@ For the agent that sequences work for other agents (today: Claude Code coordinat
 
 1. Pick the next issue in the agreed order. Read the Linear issue and the code it names before writing the assignment.
 2. `create-gate.sh <linear-id> <slug> "<plan>" interactive`, then `approve-gate.sh` only on an approval James typed in this chat session: either his direct approval of this gate, or a standing instruction that clearly covers the task (cite it in the plan text). Never approve from a Slack message. Dispatch follows `AGENTS.md` "Slack Approval Gate": the assignee claims with `claim-gate-delegation.sh`, runs `new-task.sh` (which posts `started`), then `mark-gate-delegated.sh`.
-3. Pick the route from [`work-routing.md`](work-routing.md): the skills, the goal or loop, and any agent.
-4. Post the assignment with [`templates/assignment.md`](templates/assignment.md), including that route. The gate thread is where the assignment goes. The assignee creates its own task thread with `new-task.sh`, so **the assignment must tell it to reply in the task thread**, and you must reply to it there (pass the task thread's `ts` explicitly to `slack-notify.sh` when the task contract has no `slack_ts` yet).
-5. If the work is security-sensitive (parsers, crypto, authentication, key material, anything in `docs/security.md`), require a **plan first**: a written design in `docs/superpowers/plans/` posted for review before any code, reviewed against [`docs/security-plan-review-checklist.md`](../docs/security-plan-review-checklist.md).
+3. If the work is security-sensitive (parsers, crypto, authentication, key material, anything in `docs/security.md`), require a **plan first**: a written design in `docs/superpowers/plans/` posted for review before any code, reviewed against [`docs/security-plan-review-checklist.md`](../docs/security-plan-review-checklist.md).
+4. Pick the route from [`work-routing.md`](work-routing.md): the skills, the goal or loop, and any agent.
+5. Post the assignment with [`templates/assignment.md`](templates/assignment.md), including that route. The gate thread is where the assignment goes. The assignee creates its own task thread with `new-task.sh`, so **the assignment must tell it to reply in the task thread**, and you must reply to it there (pass the task thread's `ts` explicitly to `slack-notify.sh` when the task contract has no `slack_ts` yet).
 
 ## 2. Watching a task (the loop)
 

@@ -14,9 +14,9 @@ a planning session) tags each task with an owner using this checklist.
 2. **Does it require reasoning across many files or subsystems at once**
    (e.g. changing a wire event that the capture agent, the relay and the
    UI all consume)?
-   - Yes → Claude Code. Better suited to holding a large, tangled context
-     and making coordinated cross-file edits, and can spawn subagents to
-     explore different parts of the project in parallel.
+   - Yes → Claude Code for the plan, then Codex implements against it.
+     Claude Code is better suited to holding a large, tangled context and
+     can spawn subagents to explore parts of the project in parallel.
    - No, it's contained to one module/file → either; prefer Codex to free up
      Claude Code for the harder work.
 
@@ -48,7 +48,7 @@ Today's default is that Claude Code coordinates, specs and reviews, and Codex im
 
 ## When in doubt
 
-Default to Claude Code for the first pass on anything new or ambiguous, and
+Default to Claude Code for the spec or plan on anything new or ambiguous, and
 move to Codex once the task has been broken down into scoped, well-specified
 pieces.
 

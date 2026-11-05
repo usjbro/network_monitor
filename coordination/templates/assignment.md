@@ -17,7 +17,8 @@ Constraints that must not change:
 
 Route (from coordination/work-routing.md):
 - Skills: <in order>
-- Goal: <the /goal text, ending at the open PR, or none>
+- Goal: <the /goal text, ending with the PR ready for James, or at the posted plan for PLAN FIRST; or none>
+- Commit and push: <authorized for this task, or ask James first>
 - Agent: <role agent and why, or none>
 
 Tests first (they must fail before the change):
