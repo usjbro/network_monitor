@@ -6,8 +6,10 @@ export type DisplayFilterRecord =
 export type DisplayFilterError = { message: string; token: string; position: number };
 export type CompiledDisplayFilter = (record: DisplayFilterRecord) => boolean;
 
-type Value = { type: 'number' | 'boolean' | 'string' | 'address' | 'group'; value?: number | boolean | string };
-type Literal = { type: 'number' | 'boolean' | 'string'; value: number | boolean | string };
+// A uint the agent sent as a decimal string (above 2^53 - 1) is held as a bigint so it compares exactly.
+type Value = { type: 'number' | 'boolean' | 'string' | 'address' | 'group'; value?: number | boolean | string | bigint };
+// `exact` is a number literal's exact integer value, for comparing against a bigint Value.
+type Literal = { type: 'number' | 'boolean' | 'string'; value: number | boolean | string; exact?: bigint };
 type Token = { kind: 'word' | 'number' | 'string' | 'symbol' | 'error' | 'end'; text: string; position: number; value?: string; message?: string };
 
 const MAX_SOURCE_LENGTH = 2048;
@@ -62,6 +64,7 @@ function valueAt(record: DisplayFilterRecord, path: string): Value | undefined {
     if (!field) return undefined;
     if (field.type === 'group') return { type: 'group' };
     if (field.type === 'uint' && typeof field.value === 'number') return { type: 'number', value: field.value };
+    if (field.type === 'uint' && typeof field.value === 'string' && /^[0-9]+$/.test(field.value)) return { type: 'number', value: BigInt(field.value) };
     if (field.type === 'bool' && typeof field.value === 'boolean') return { type: 'boolean', value: field.value };
     if ((field.type === 'str' || field.type === 'addr') && typeof field.value === 'string') return { type: field.type === 'str' ? 'string' : 'address', value: field.value };
     return { type: 'group' };
@@ -89,6 +92,19 @@ function compare(value: Value | undefined, operator: string, literal: Literal): 
     return false;
   }
   if (value.type !== literal.type) return false;
+  if (typeof value.value === 'bigint') {
+    const right = literal.exact;
+    if (right === undefined) return false;
+    switch (operator) {
+      case '==': return value.value === right;
+      case '!=': return value.value !== right;
+      case '>': return value.value > right;
+      case '<': return value.value < right;
+      case '>=': return value.value >= right;
+      case '<=': return value.value <= right;
+      default: return false;
+    }
+  }
   if (operator === '==') return value.value === literal.value;
   if (operator === '!=') return value.value !== literal.value;
   if (value.type !== 'number') return false;
@@ -118,7 +134,7 @@ class Parser {
   private expectSymbol(symbol: string): void { if (!this.symbol(symbol)) this.fail(); this.take(); }
   private literal(): Literal {
     const token = this.take();
-    if (token.kind === 'number') return { type: 'number', value: Number(token.text) };
+    if (token.kind === 'number') return { type: 'number', value: Number(token.text), exact: BigInt(token.text) };
     if (token.kind === 'string') return { type: 'string', value: token.value! };
     if (token.kind === 'word' && /^(true|false)$/i.test(token.text)) return { type: 'boolean', value: token.text.toLowerCase() === 'true' };
     return this.fail(token);
@@ -193,11 +209,12 @@ class Parser {
       this.expectSymbol('}');
       const numbers = new Set(literals.filter((literal) => literal.type === 'number').map((literal) => literal.value as number));
       const booleans = new Set(literals.filter((literal) => literal.type === 'boolean').map((literal) => literal.value as boolean));
+      const exacts = new Set(literals.filter((literal) => literal.type === 'number').map((literal) => literal.exact as bigint));
       const strings = new Set(literals.filter((literal) => literal.type === 'string').map((literal) => (literal.value as string).toLowerCase()));
       predicate = record => {
         const value = valueAt(record, path.text.toLowerCase());
         if (!value || value.value === undefined) return false;
-        if (value.type === 'number') return numbers.has(value.value as number);
+        if (value.type === 'number') return typeof value.value === 'bigint' ? exacts.has(value.value) : numbers.has(value.value as number);
         if (value.type === 'boolean') return booleans.has(value.value as boolean);
         if (value.type === 'string' || value.type === 'address') return strings.has((value.value as string).toLowerCase());
         return false;
