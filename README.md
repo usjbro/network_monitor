@@ -10,7 +10,7 @@ Built with Next.js 16 (App Router), React 19, and Tailwind v4 on the frontend, a
 
 - **Dashboard** — per-layer throughput and active-connection counts, sourced from the capture agent's flow table
 - **Layer detail view** — drill into any of the 7 OSI layers for protocol breakdowns and health status
-- **Connections view** — live active socket table (TCP/UDP) with per-connection speed, latency, process attribution, encryption info, and JA3 TLS-client fingerprint (informational only, not an auth signal)
+- **Connections view** — observed-flow table (TCP/UDP) with per-connection speed, latency, process attribution, encryption info, and JA3 TLS-client fingerprint (informational only, not an auth signal)
 - **Packet stream** — a scrolling feed of real captured packets with header breakdowns and hex dumps
 - **Protocol matrix / topology view**
 - **Network path visualization** — on-demand ICMP traceroute per connection, rendered as a hop table, with opt-in per-hop geoIP lookups
@@ -57,6 +57,7 @@ npx osi-inspect <command> [args...]
 
 - **[Getting Started](docs/getting-started.md)** — prerequisites, one-time setup, running it, verifying it's really live
 - **[Usage](docs/usage.md)** — every view, the command bar, themes
+- **[Analysis guide](docs/analysis-guide.md)** — investigate hosts, processes and packets; filter, record, replay and export with measurement limits
 - **[Architecture](docs/architecture.md)** — how the capture agent, relay, and UI fit together
 - **[Wire Protocol](docs/wire-protocol.md)** — the JSON contract between the Rust agent and the TypeScript relay
 - **[Enrichment Protocol](docs/enrichment-protocol.md)** — the ownership-enrichment (WHOIS/RDAP) wire/control contract

@@ -88,7 +88,9 @@ not yet applied. The session's interface label comes from the first
 supported interface description; packet decoding uses each packet's own
 interface.
 
-    REPLAY_FILE=~/captures/incident.pcapng cargo run --release
+    REPLAY_FILE="/tmp/network-monitor-captures/incident.pcapng" cargo run --release
+
+Record that file first using the [analysis guide](../docs/analysis-guide.md#record-open-and-replay-a-capture), or substitute an existing capture. This environment assignment runs in a shell, unlike browser command-bar capture paths; shell quoting supports spaces here.
 
 `REPLAY_FILE` is mutually exclusive with `CAPTURE_INTERFACE`; setting both
 is a startup error naming both values rather than a silent precedence rule.
@@ -121,9 +123,11 @@ with `pid: 0`.
 | `REPLAY_SPEED` | `realtime` to pace by recorded timestamps; otherwise as fast as possible | Startup |
 | `MAX_FLOWS` | Flow-table capacity ceiling (default 10,000) | Startup |
 
-All five are read once, at startup, and fail loudly on a value that is set
-but unusable rather than silently falling back. An empty or whitespace-only
-value is treated as unset. See [../docs/architecture.md](../docs/architecture.md)'s
+All five are read once at startup. Invalid `CAPTURE_INTERFACE` and
+nonpositive/non-numeric `MAX_FLOWS` fail startup; blank values are unset.
+`REPLAY_FILE` must name a readable supported file. `REPLAY_LOCAL_ADDRS` only
+splits/trims strings, and only exact `REPLAY_SPEED=realtime` selects pacing;
+other speed values select fast mode. See [../docs/architecture.md](../docs/architecture.md)'s
 Resource limits table for every cap in the system, not just the
 configurable ones.
 

@@ -8,7 +8,31 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { existsSync, readFileSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 import TerminalApp from '@/app/page';
+
+const captureDocuments = [
+  ['docs/analysis-guide.md', { type: 'start_capture_file', path: '/tmp/network-monitor-captures/incident.pcapng' }],
+  ['docs/usage.md', {
+    type: 'start_capture_file',
+    path: '/tmp/network-monitor-captures/incident.pcapng',
+    ring: { mode: 'size', threshold: 104857600 },
+    autostop: { mode: 'duration', threshold: 3600 },
+  }],
+] as const;
+
+function readDocument(document: string): string {
+  const path = resolve(document);
+  return existsSync(path) ? readFileSync(path, 'utf8') : '';
+}
+
+function fencedCaptureCommands(source: string): string[] {
+  return [...source.matchAll(/^```[^\r\n]*\r?\n([\s\S]*?)^```[ \t]*$/gm)]
+    .flatMap((block) => block[1].split(/\r?\n/))
+    .map((line) => line.trim())
+    .filter((line) => /^capture\s+/.test(line));
+}
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -88,6 +112,31 @@ describe('command bar: capture / buffer verbs', () => {
     cleanup();
     global.EventSource = originalEventSource;
     global.fetch = originalFetch;
+  });
+
+  it.each(captureDocuments)('uses literal absolute capture paths in %s', (document) => {
+    const source = readDocument(document);
+    const commands = [
+      ...fencedCaptureCommands(source),
+      ...[...source.matchAll(/`([^`\r\n]+)`/g)].map((match) => match[1]),
+    ].filter((command) => /^capture\s+(?!<|stop(?:\s|$))/.test(command));
+
+    expect(commands, `${document} must include a concrete capture example`).not.toHaveLength(0);
+    for (const command of commands) {
+      const path = command.split(/\s+/)[1];
+      expect(isAbsolute(path), `${document}: ${command} must not need shell expansion`).toBe(true);
+      expect(path, `${document}: ${command} must be a literal path`).not.toMatch(/[~$'"`]/);
+    }
+  });
+
+  it.each(captureDocuments)('routes the fenced capture workflow in %s through the command bar', (document, expectedStart) => {
+    const commands = fencedCaptureCommands(readDocument(document));
+    expect(commands, `${document} must document starting and stopping a capture`).toContain('capture stop');
+    render(<TerminalApp />);
+
+    for (const command of commands) runCommand(command);
+
+    expect(controlBodies()).toEqual([expectedStart, { type: 'stop_capture_file' }]);
   });
 
   it('sends start_capture_file with the path case preserved and ring/autostop parsed', () => {
