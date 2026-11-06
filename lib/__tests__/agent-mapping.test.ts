@@ -360,12 +360,14 @@ describe('mapCaptureStatsEvent', () => {
     expect(mapped.observedNameEvictions).toBe(5);
   });
 
-  it('throws when observedNameEvictions is missing', () => {
+  it('maps observedNameEvictions to undefined (not 0) when an older agent omits it, keeping the other stats', () => {
     const event = {
       type: 'capture_stats',
-      stats: { received: 1, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0, totalConnectionsObserved: 1, capacityEvictions: 0, idleEvictions: 0 },
+      stats: { received: 1, dropped: 2, ifDropped: 3, relayLaggedEvents: 4, unparseableFrames: 5, totalConnectionsObserved: 6, capacityEvictions: 7, idleEvictions: 8 },
     };
-    expect(() => mapCaptureStatsEvent(event)).toThrow('missing required field "observedNameEvictions"');
+    const mapped = mapCaptureStatsEvent(event);
+    expect(mapped.observedNameEvictions).toBeUndefined();
+    expect(mapped).toMatchObject({ received: 1, dropped: 2, ifDropped: 3, relayLaggedEvents: 4, unparseableFrames: 5, totalConnectionsObserved: 6, capacityEvictions: 7, idleEvictions: 8 });
   });
 
   it('throws when a horizon/eviction counter is missing, same as any other required field', () => {

@@ -176,7 +176,9 @@ export interface CaptureStats {
   idleEvictions: number;
   // Observed DNS names dropped because the agent's name table was full
   // (not expired); nonzero means `Endpoint.observedName` may be missing.
-  observedNameEvictions: number;
+  // Optional, unlike the counters above: an older agent does not send it, and
+  // undefined means unknown, not zero.
+  observedNameEvictions?: number;
 }
 
 // Measured protocol hierarchy (JAM-13), from the agent's
@@ -335,8 +337,9 @@ export interface Endpoint {
   // PTR name comes from relay-side connection_enrichment, not the agent rollup wire event.
   remoteHostname?: string;
   // JAM-21: the name an answered DNS response gave this address, observed
-  // passively by the agent. Not a reverse lookup, and forgeable by an on-path
-  // attacker, so it stays separate from remoteHostname.
+  // passively by the agent. Not a reverse lookup. It is whatever the queried
+  // server said: any process able to send a query, or anyone who owns a zone,
+  // can choose it, so it stays separate from remoteHostname.
   observedName?: string;
   rxBytesTotal: number;
   txBytesTotal: number;
