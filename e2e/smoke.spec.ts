@@ -84,6 +84,7 @@ test('real browser sees live agent data flow through the whole relay pipeline', 
       totalConnectionsObserved: 1,
       capacityEvictions: 0,
       idleEvictions: 0,
+      observedNameEvictions: 0,
     },
   });
   await expect(page.getByText(/capture degraded/i)).toBeVisible({ timeout: 10_000 });
