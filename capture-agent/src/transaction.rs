@@ -320,7 +320,7 @@ impl TransactionTracker {
                 self.dns_response(key, is_outbound, query_name, *id, ts_us)
             }
             L7Info::Http { method, path } => self.http_request(key, is_outbound, method, path, ts_us),
-            L7Info::HttpResponse { status } => self.http_response(key, is_outbound, status, ts_us),
+            L7Info::HttpResponse { status, .. } => self.http_response(key, is_outbound, status, ts_us),
             L7Info::TlsClientHello { .. } | L7Info::None => TxnEvent::None,
         }
     }
@@ -579,7 +579,7 @@ mod tests {
     }
 
     fn http_resp(status: &str) -> L7Info {
-        L7Info::HttpResponse { status: status.into() }
+        L7Info::HttpResponse { status: status.into(), reason: None, content_type: None, content_length: None }
     }
 
     fn answered_time(event: TxnEvent) -> u64 {
@@ -741,6 +741,21 @@ mod tests {
         assert_eq!(answered_time(t.observe(Some((&flow, false)), &http_resp("200"), 100)), 100);
         assert_eq!(answered_time(t.observe(Some((&flow, false)), &http_resp("404"), 150)), 140);
         assert_eq!(t.pending_len(), 0);
+    }
+
+    #[test]
+    fn http_service_time_is_unchanged_by_response_fields() {
+        let with_headers = L7Info::HttpResponse {
+            status: "200".into(), reason: Some("OK".into()),
+            content_type: Some("text/html".into()), content_length: Some(12),
+        };
+        for response in [http_resp("200"), with_headers] {
+            let (mut t, _) = tracker();
+            let flow = tcp_flow();
+            t.observe(Some((&flow, true)), &http_req("/a"), 0);
+            assert_eq!(answered_time(t.observe(Some((&flow, false)), &response, 100)), 100);
+            assert_eq!(t.pending_len(), 0);
+        }
     }
 
     #[test]

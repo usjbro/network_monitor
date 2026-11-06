@@ -331,10 +331,24 @@ fn app_fields(l7: &L7Info, payload_len: u32, dns_offset: u32) -> Vec<Field> {
             Field::leaf("http.request.method", "Request Method", "http", FieldType::Str, FieldValue::Str(method.clone()), ByteRegion::Payload, 0, payload_len),
             Field::leaf("http.request.uri", "Request URI", "http", FieldType::Str, FieldValue::Str(path.clone()), ByteRegion::Payload, 0, payload_len),
         ],
-        L7Info::HttpResponse { status } => vec![
-            Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
-            Field::leaf("http.response.code", "Status Code", "http", FieldType::Uint, FieldValue::Uint(status.parse().unwrap_or(0)), ByteRegion::Payload, 0, payload_len),
-        ],
+        L7Info::HttpResponse { status, reason, content_type, content_length } => {
+            let mut fields = vec![
+                Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
+                Field::leaf("http.response.code", "Status Code", "http", FieldType::Uint, FieldValue::Uint(status.parse().unwrap_or(0)), ByteRegion::Payload, 0, payload_len),
+            ];
+            // Each leaf is present only when decoded: absent means "not
+            // observed in this segment", not "the response had none".
+            if let Some(reason) = reason {
+                fields.push(Field::leaf("http.response.phrase", "Response Phrase", "http", FieldType::Str, FieldValue::Str(reason.clone()), ByteRegion::Payload, 0, payload_len));
+            }
+            if let Some(content_type) = content_type {
+                fields.push(Field::leaf("http.content_type", "Content-Type", "http", FieldType::Str, FieldValue::Str(content_type.clone()), ByteRegion::Payload, 0, payload_len));
+            }
+            if let Some(content_length) = content_length {
+                fields.push(Field::leaf("http.content_length", "Content-Length", "http", FieldType::Uint, FieldValue::Uint(*content_length), ByteRegion::Payload, 0, payload_len));
+            }
+            fields
+        }
         L7Info::Dns { query_name, id, qtype } => vec![
             Field::group("dns", "Domain Name System", None, ByteRegion::Payload, 0, payload_len),
             Field::leaf("dns.id", "Transaction ID", "dns", FieldType::Uint, FieldValue::Uint((*id).into()), ByteRegion::Payload, dns_offset, 2),
@@ -710,7 +724,7 @@ mod tests {
     fn app_fields_cover_the_existing_application_decodes() {
         let cases = [
             (L7Info::Http { method: "GET".into(), path: "/index.html".into() }, "http.request.uri", FieldValue::Str("/index.html".into())),
-            (L7Info::HttpResponse { status: "404".into() }, "http.response.code", FieldValue::Uint(404)),
+            (L7Info::HttpResponse { status: "404".into(), reason: None, content_type: None, content_length: None }, "http.response.code", FieldValue::Uint(404)),
             (L7Info::Dns { query_name: "example.com".into(), id: 1, qtype: 1 }, "dns.qry.name", FieldValue::Str("example.com".into())),
         ];
         for (l7, path, value) in cases {
@@ -721,6 +735,25 @@ mod tests {
             assert_eq!((field.offset, field.len), (0, 50));
         }
         assert!(app_fields(&L7Info::None, 50, 0).is_empty());
+    }
+
+    #[test]
+    fn http_response_fields_are_present_only_when_decoded() {
+        let paths = |l7: &L7Info| app_fields(l7, 50, 0).into_iter().map(|f| f.path).collect::<Vec<_>>();
+        let bare = L7Info::HttpResponse { status: "200".into(), reason: None, content_type: None, content_length: None };
+        let bare = paths(&bare);
+        for absent in ["http.response.phrase", "http.content_type", "http.content_length"] {
+            assert!(!bare.iter().any(|p| p == absent), "{absent}");
+        }
+        let full = L7Info::HttpResponse {
+            status: "200".into(), reason: Some("OK".into()),
+            content_type: Some("text/html".into()), content_length: Some(12),
+        };
+        let fields = app_fields(&full, 50, 0);
+        let value = |path: &str| fields.iter().find(|f| f.path == path).expect(path).value.clone();
+        assert_eq!(value("http.response.phrase"), Some(FieldValue::Str("OK".into())));
+        assert_eq!(value("http.content_type"), Some(FieldValue::Str("text/html".into())));
+        assert_eq!(value("http.content_length"), Some(FieldValue::Uint(12)));
     }
 
     #[test]

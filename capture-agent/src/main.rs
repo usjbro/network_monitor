@@ -4243,7 +4243,10 @@ mod tests {
             packet_osi_layer(
                 TransportProtocol::Tcp,
                 &L7Info::HttpResponse {
-                    status: "200".into()
+                    status: "200".into(),
+                    reason: None,
+                    content_type: None,
+                    content_length: None,
                 }
             ),
             7

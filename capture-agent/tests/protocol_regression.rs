@@ -131,7 +131,7 @@ fn protocol_classification_regression_corpus() {
         (
             "http11_response",
             Box::new(|| match sniff_l7(&fixtures::http11_response(), Some(51000)) {
-                L7Info::HttpResponse { status } => require(status == "200", "wrong status"),
+                L7Info::HttpResponse { status, .. } => require(status == "200", "wrong status"),
                 other => Err(format!("expected HttpResponse, got {other:?}")),
             }),
         ),

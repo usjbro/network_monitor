@@ -133,6 +133,11 @@ describe('agent wire contract: real captured agent output maps without throwing'
     expect(mapped.fields).toContainEqual(expect.objectContaining({
       path: 'http.response.code', type: 'uint', region: 'payload', value: 200,
     }));
+    // JAM-21: the sample's response has no headers, so only the phrase is present.
+    expect(mapped.fields).toContainEqual(expect.objectContaining({
+      path: 'http.response.phrase', type: 'str', value: 'OK',
+    }));
+    expect(mapped.fields.map((f) => f.path)).not.toContain('http.content_length');
     expect(evt.packet).not.toHaveProperty('headerBreakdown');
   });
 

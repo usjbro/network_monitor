@@ -15,7 +15,17 @@ pub enum L7Info {
     /// Request/response *correlation* (matching this to the request it
     /// answers, service-time timing) is explicitly out of scope here; that
     /// is epic #57's #82.
-    HttpResponse { status: String },
+    ///
+    /// `reason`, `content_type` and `content_length` come from the bytes in
+    /// this one segment. A header in a later segment is absent here, and
+    /// absent means "not observed", not "the response had no such header".
+    HttpResponse {
+        status: String,
+        reason: Option<String>,
+        /// Media type only, lowercased, parameters dropped.
+        content_type: Option<String>,
+        content_length: Option<u64>,
+    },
     /// A DNS query (QR bit clear). `id` is the transaction ID and `qtype` the
     /// first question's type (`0` when the question is truncated before its
     /// type field). Both exist for JAM-15's request/response matching
@@ -97,12 +107,11 @@ fn sniff_http(payload: &[u8]) -> Option<L7Info> {
 }
 
 /// Recognizes an HTTP response's status line — `HTTP/<version> <3-digit
-/// status> <reason phrase>` — e.g. `HTTP/1.1 200 OK`. Deliberately narrow:
-/// only the status code is extracted, not the reason phrase, headers, or
-/// body, and this makes no attempt to associate the response with the
-/// request it answers (that's #82's job). A response line is what a
-/// request line is not — this and `sniff_http` above never both match the
-/// same payload.
+/// status> <reason phrase>` — e.g. `HTTP/1.1 200 OK` — and reads the reason
+/// phrase and the `Content-Type` / `Content-Length` headers from the bytes
+/// present. It makes no attempt to associate the response with the request
+/// it answers (that's #82's job). A response line is what a request line is
+/// not — this and `sniff_http` above never both match the same payload.
 fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
     let first_line = first_complete_line(payload)?;
     let mut parts = first_line.split_whitespace();
@@ -112,10 +121,158 @@ fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
     }
     let status = parts.next()?;
     if status.len() == 3 && status.bytes().all(|b| b.is_ascii_digit()) {
-        Some(L7Info::HttpResponse { status: status.to_string() })
+        // `first_complete_line` found a newline, so this position exists.
+        let headers = payload.iter().position(|b| *b == b'\n').map_or(&[][..], |n| &payload[n + 1..]);
+        let (content_type, content_length) = parse_response_headers(headers);
+        let reason = parse_reason(first_line, status);
+        let (reason, content_type) = redact_response_text(reason, content_type);
+        Some(L7Info::HttpResponse { status: status.to_string(), reason, content_type, content_length })
     } else {
         None
     }
+}
+
+/// The reason phrase: what follows the status code on the status line, as
+/// printable ASCII within `MAX_HTTP_REASON_BYTES`. Anything else, or an empty
+/// phrase, is absent.
+fn parse_reason(first_line: &str, status: &str) -> Option<String> {
+    let after_version = first_line.trim_start().split_once(char::is_whitespace)?.1;
+    let reason = after_version.trim_start().strip_prefix(status)?.trim();
+    if reason.is_empty()
+        || reason.len() > MAX_HTTP_REASON_BYTES
+        || !reason.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    {
+        return None;
+    }
+    Some(reason.to_string())
+}
+
+/// Runs both free-text fields through the shared header redaction before
+/// they leave the parser, so a credential in a reason phrase or a
+/// pathological `Content-Type` never reaches the wire.
+fn redact_response_text(reason: Option<String>, content_type: Option<String>) -> (Option<String>, Option<String>) {
+    let mut pairs = Vec::with_capacity(2);
+    let has_reason = reason.is_some();
+    if let Some(r) = reason {
+        pairs.push(("reason".to_string(), r));
+    }
+    if let Some(c) = content_type {
+        pairs.push(("content-type".to_string(), c));
+    }
+    redact_headers(&mut pairs);
+    let mut values = pairs.into_iter().map(|(_, v)| v);
+    let reason = if has_reason { values.next() } else { None };
+    (reason, values.next())
+}
+
+/// What one header has shown so far. A second, different value — or one that
+/// does not parse, or a folded continuation line — makes the header
+/// unreadable rather than letting either value win.
+enum Seen<T> {
+    Unseen,
+    Value(T),
+    Conflict,
+}
+
+impl<T: PartialEq> Seen<T> {
+    fn record(&mut self, value: Option<T>) {
+        *self = match (std::mem::replace(self, Seen::Conflict), value) {
+            (Seen::Unseen, Some(v)) => Seen::Value(v),
+            (Seen::Value(old), Some(v)) if old == v => Seen::Value(old),
+            _ => Seen::Conflict,
+        };
+    }
+
+    fn into_option(self) -> Option<T> {
+        match self {
+            Seen::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// Reads `Content-Type` and `Content-Length` from the lines after the status
+/// line. Scans at most `MAX_HTTP_HEADER_SCAN_BYTES` bytes and
+/// `MAX_HTTP_HEADER_LINES` lines, stops at the blank line, and ignores a final
+/// line with no terminator (its value may be cut short). Works on bytes: the
+/// body after the headers need not be UTF-8.
+fn parse_response_headers(after_status_line: &[u8]) -> (Option<String>, Option<u64>) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Last {
+        Type,
+        Length,
+        Other,
+    }
+    let window = &after_status_line[..after_status_line.len().min(MAX_HTTP_HEADER_SCAN_BYTES)];
+    let mut content_type = Seen::Unseen;
+    let mut content_length = Seen::Unseen;
+    let mut last = Last::Other;
+    for line in window.split_inclusive(|b| *b == b'\n').take(MAX_HTTP_HEADER_LINES) {
+        let Some(line) = line.strip_suffix(b"\n") else { break };
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            break;
+        }
+        if line[0] == b' ' || line[0] == b'\t' {
+            // obs-fold: the previous header's value continues here, and we
+            // do not unfold it.
+            match last {
+                Last::Type => content_type.record(None),
+                Last::Length => content_length.record(None),
+                Last::Other => {}
+            }
+            continue;
+        }
+        last = Last::Other;
+        let Some(colon) = line.iter().position(|b| *b == b':') else { continue };
+        let (name, value) = (&line[..colon], trim_ows(&line[colon + 1..]));
+        if name.eq_ignore_ascii_case(b"content-type") {
+            last = Last::Type;
+            content_type.record(media_type(value));
+        } else if name.eq_ignore_ascii_case(b"content-length") {
+            last = Last::Length;
+            content_length.record(parse_content_length(value));
+        }
+    }
+    (content_type.into_option(), content_length.into_option())
+}
+
+fn trim_ows(mut bytes: &[u8]) -> &[u8] {
+    while let [b' ' | b'\t', rest @ ..] = bytes {
+        bytes = rest;
+    }
+    while let [rest @ .., b' ' | b'\t'] = bytes {
+        bytes = rest;
+    }
+    bytes
+}
+
+fn parse_content_length(value: &[u8]) -> Option<u64> {
+    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(value).ok()?.parse().ok()
+}
+
+fn is_http_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// The `type/subtype` of a `Content-Type` value, lowercased, with parameters
+/// dropped. Anything that is not exactly `token/token` is absent.
+fn media_type(value: &[u8]) -> Option<String> {
+    let end = value.iter().position(|b| *b == b';').unwrap_or(value.len());
+    let media = trim_ows(&value[..end]);
+    if media.len() > MAX_HTTP_CONTENT_TYPE_BYTES {
+        return None;
+    }
+    let slash = media.iter().position(|b| *b == b'/')?;
+    let (kind, subtype) = (&media[..slash], &media[slash + 1..]);
+    let token = |t: &[u8]| !t.is_empty() && t.iter().all(|b| is_http_token_byte(*b));
+    if !token(kind) || !token(subtype) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(media).to_ascii_lowercase())
 }
 
 /// One decoded resource record from a DNS response's answer section.
@@ -557,6 +714,14 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
 /// `unterminated_http_start_line` below so the "is this a plausible partial
 /// request line" probe can never recognize a method the real detector
 /// wouldn't, or miss one it would.
+/// How far past the status line the header scan reads, and how many lines it
+/// counts. A response whose headers run longer is decoded without them.
+pub const MAX_HTTP_HEADER_SCAN_BYTES: usize = 8192;
+pub const MAX_HTTP_HEADER_LINES: usize = 100;
+/// Longest reason phrase and media type kept; longer ones are absent.
+pub const MAX_HTTP_REASON_BYTES: usize = 128;
+pub const MAX_HTTP_CONTENT_TYPE_BYTES: usize = 255;
+
 const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"];
 
 /// The outcome of sniffing a buffer that may or may not hold a complete
@@ -861,7 +1026,7 @@ mod tests {
     fn detects_http_response_status_line() {
         let payload = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html></html>";
         match sniff_l7(payload, Some(51000)) {
-            L7Info::HttpResponse { status } => assert_eq!(status, "200"),
+            L7Info::HttpResponse { status, .. } => assert_eq!(status, "200"),
             other => panic!("expected HttpResponse, got {other:?}"),
         }
     }
@@ -870,7 +1035,7 @@ mod tests {
     fn detects_http_error_response_status_line() {
         let payload = b"HTTP/1.1 404 Not Found\r\n\r\n";
         match sniff_l7(payload, Some(51000)) {
-            L7Info::HttpResponse { status } => assert_eq!(status, "404"),
+            L7Info::HttpResponse { status, .. } => assert_eq!(status, "404"),
             other => panic!("expected HttpResponse, got {other:?}"),
         }
     }
@@ -1237,7 +1402,7 @@ mod tests {
         let mut payload = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n".to_vec();
         payload.extend_from_slice(&[0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x80, 0x00]);
         match sniff_l7(&payload, Some(51000)) {
-            L7Info::HttpResponse { status } => assert_eq!(status, "200"),
+            L7Info::HttpResponse { status, .. } => assert_eq!(status, "200"),
             other => panic!("expected HttpResponse, got {other:?}"),
         }
     }
@@ -1543,5 +1708,203 @@ mod tests {
             sniff_for_transport(&msg, tcp_t, Some(51000), Some(80)),
             sniff_l7_desegmenting(&msg, Some(80))
         );
+    }
+
+    // ---- HTTP response reason phrase and headers --------------------------
+
+    fn http_fields(payload: &[u8]) -> (Option<String>, Option<String>, Option<u64>) {
+        match sniff_l7(payload, Some(51000)) {
+            L7Info::HttpResponse { reason, content_type, content_length, .. } => (reason, content_type, content_length),
+            other => panic!("expected HttpResponse, got {other:?}"),
+        }
+    }
+
+    fn http_length(headers: &str) -> Option<u64> {
+        http_fields(format!("HTTP/1.1 200 OK\r\n{headers}\r\n").as_bytes()).2
+    }
+
+    fn http_type(headers: &str) -> Option<String> {
+        http_fields(format!("HTTP/1.1 200 OK\r\n{headers}\r\n").as_bytes()).1
+    }
+
+    #[test]
+    fn http_response_decodes_all_fields() {
+        let payload = b"HTTP/1.1 404 Not Found\r\nContent-Type: Text/HTML; charset=utf-8\r\nContent-Length: 12\r\n\r\n";
+        assert_eq!(
+            http_fields(payload),
+            (Some("Not Found".into()), Some("text/html".into()), Some(12))
+        );
+    }
+
+    #[test]
+    fn http_header_names_are_case_insensitive() {
+        assert_eq!(http_length("content-LENGTH: 1\r\n"), Some(1));
+        assert_eq!(http_type("CONTENT-type: a/b\r\n"), Some("a/b".into()));
+    }
+
+    #[test]
+    fn http_empty_reason_is_absent() {
+        assert_eq!(http_fields(b"HTTP/1.1 200 \r\n\r\n").0, None);
+        assert_eq!(http_fields(b"HTTP/1.1 200\r\n\r\n").0, None);
+    }
+
+    #[test]
+    fn http_reason_at_limit_is_kept() {
+        let reason = "r".repeat(128);
+        let payload = format!("HTTP/1.1 200 {reason}\r\n\r\n");
+        assert_eq!(http_fields(payload.as_bytes()).0, Some(reason));
+    }
+
+    #[test]
+    fn http_reason_over_limit_is_absent() {
+        let payload = format!("HTTP/1.1 200 {}\r\n\r\n", "r".repeat(129));
+        assert_eq!(http_fields(payload.as_bytes()).0, None);
+    }
+
+    #[test]
+    fn http_non_ascii_reason_is_absent() {
+        for payload in [
+            &b"HTTP/1.1 200 O\x01K\r\n\r\n"[..],
+            "HTTP/1.1 200 Caf\u{e9}\r\n\r\n".as_bytes(),
+        ] {
+            match sniff_l7(payload, Some(51000)) {
+                L7Info::HttpResponse { status, reason, .. } => {
+                    assert_eq!(status, "200");
+                    assert_eq!(reason, None);
+                }
+                other => panic!("expected HttpResponse, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn http_bearer_reason_is_redacted() {
+        assert_eq!(http_fields(b"HTTP/1.1 200 Bearer abc\r\n\r\n").0, Some("[REDACTED]".into()));
+    }
+
+    #[test]
+    fn http_status_alone_when_headers_arrive_later() {
+        let sniff = sniff_l7_desegmenting(b"HTTP/1.1 200 OK\r\n", Some(51000));
+        match sniff {
+            L7Sniff::Decided(L7Info::HttpResponse { reason, content_type, content_length, .. }) => {
+                assert_eq!(reason.as_deref(), Some("OK"));
+                assert_eq!((content_type, content_length), (None, None));
+            }
+            other => panic!("expected Decided HttpResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_unterminated_final_header_is_ignored() {
+        let payload = b"HTTP/1.1 200 OK\r\nContent-Length: 12";
+        assert_eq!(http_fields(payload).2, None);
+    }
+
+    #[test]
+    fn http_conflicting_content_lengths_are_absent() {
+        assert_eq!(http_length("Content-Length: 5\r\nContent-Length: 6\r\n"), None);
+        assert_eq!(http_type("Content-Type: a/b\r\nContent-Type: c/d\r\n"), None);
+    }
+
+    #[test]
+    fn http_identical_content_lengths_are_kept() {
+        assert_eq!(http_length("Content-Length: 5\r\nContent-Length: 5\r\n"), Some(5));
+        assert_eq!(http_type("Content-Type: a/b\r\ncontent-type: A/B; x=1\r\n"), Some("a/b".into()));
+    }
+
+    #[test]
+    fn http_content_length_rejects_non_digits() {
+        for value in ["+5", "-1", "5, 5", "0x10", "", "5 5"] {
+            assert_eq!(http_length(&format!("Content-Length: {value}\r\n")), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn http_content_length_zero_is_kept() {
+        assert_eq!(http_length("Content-Length: 0\r\n"), Some(0));
+    }
+
+    #[test]
+    fn http_content_length_max_u64() {
+        assert_eq!(http_length(&format!("Content-Length: {}\r\n", u64::MAX)), Some(u64::MAX));
+    }
+
+    #[test]
+    fn http_content_length_overflow_is_absent() {
+        assert_eq!(http_length(&format!("Content-Length: {}\r\n", u64::MAX as u128 + 1)), None);
+    }
+
+    #[test]
+    fn http_space_before_colon_does_not_match() {
+        assert_eq!(http_length("Content-Length : 5\r\n"), None);
+    }
+
+    #[test]
+    fn http_obs_fold_discards_the_header() {
+        assert_eq!(http_length("Content-Length: 5\r\n 6\r\n"), None);
+        assert_eq!(http_type("Content-Type: a/b;\r\n\tcharset=x\r\n"), None);
+    }
+
+    #[test]
+    fn http_malformed_content_type_is_absent() {
+        for value in ["text", "Bearer abc", "/b", "a/", "a/b/c", "a b/c"] {
+            assert_eq!(http_type(&format!("Content-Type: {value}\r\n")), None, "{value:?}");
+        }
+        let long = format!("a/{}", "b".repeat(254));
+        assert_eq!(http_type(&format!("Content-Type: {long}\r\n")), None);
+        let at_limit = format!("a/{}", "b".repeat(253));
+        assert_eq!(http_type(&format!("Content-Type: {at_limit}\r\n")), Some(at_limit));
+    }
+
+    /// `n - 1` filler header lines, then the target as line `n`.
+    fn http_with_target_on_line(n: usize) -> Vec<u8> {
+        let mut payload = b"HTTP/1.1 200 OK\r\n".to_vec();
+        for i in 0..n - 1 {
+            payload.extend_from_slice(format!("X-{i}: v\r\n").as_bytes());
+        }
+        payload.extend_from_slice(b"Content-Length: 7\r\n\r\n");
+        payload
+    }
+
+    #[test]
+    fn http_header_at_line_limit_is_read() {
+        assert_eq!(http_fields(&http_with_target_on_line(100)).2, Some(7));
+    }
+
+    #[test]
+    fn http_header_past_line_limit_is_not() {
+        assert_eq!(http_fields(&http_with_target_on_line(101)).2, None);
+    }
+
+    #[test]
+    fn http_header_past_byte_limit_is_not_read() {
+        let mut payload = b"HTTP/1.1 200 OK\r\nX-Pad: ".to_vec();
+        payload.extend(std::iter::repeat_n(b'a', 8192));
+        payload.extend_from_slice(b"\r\nContent-Length: 7\r\n\r\n");
+        assert_eq!(http_fields(&payload).2, None);
+    }
+
+    #[test]
+    fn http_header_inside_byte_limit_is_read() {
+        let mut payload = b"HTTP/1.1 200 OK\r\nX-Pad: ".to_vec();
+        payload.extend(std::iter::repeat_n(b'a', 8000));
+        payload.extend_from_slice(b"\r\nContent-Length: 7\r\n\r\n");
+        assert_eq!(http_fields(&payload).2, Some(7));
+    }
+
+    #[test]
+    fn http_binary_body_does_not_matter() {
+        let mut payload = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 4\r\n\r\n".to_vec();
+        payload.extend_from_slice(&[0xff, 0xfe, 0x00, 0x80]);
+        assert_eq!(
+            http_fields(&payload),
+            (Some("OK".into()), Some("image/png".into()), Some(4))
+        );
+    }
+
+    #[test]
+    fn http_headers_after_the_blank_line_are_body() {
+        let payload = b"HTTP/1.1 200 OK\r\n\r\nContent-Length: 5\r\n\r\n";
+        assert_eq!(http_fields(payload).2, None);
     }
 }
