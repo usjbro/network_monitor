@@ -612,9 +612,37 @@ describe('mapEndpointUpdateEvent', () => {
         processName: 'Safari',
         pid: 1234,
         ja3Label: undefined,
+        observedName: undefined,
         enrichment: undefined,
       },
     ]);
+  });
+
+  it('keeps observedName when it is a string, separate from remoteHostname', () => {
+    const base = {
+      host: '93.184.216.34', rxBytesTotal: 0, txBytesTotal: 0, rxPacketsTotal: 0,
+      txPacketsTotal: 0, rxSpeed: 0, txSpeed: 0, flowCount: 1, firstSeenMs: 0,
+      lastSeenMs: 0, processName: 'unknown', pid: 0,
+    };
+    const [named] = mapEndpointUpdateEvent({
+      type: 'endpoint_update',
+      endpoints: [{ ...base, observedName: 'example.com' }],
+    });
+    expect(named.observedName).toBe('example.com');
+    expect(named.remoteHostname).toBeUndefined();
+  });
+
+  it('leaves observedName undefined when missing or not a string, without throwing', () => {
+    const base = {
+      host: '93.184.216.34', rxBytesTotal: 0, txBytesTotal: 0, rxPacketsTotal: 0,
+      txPacketsTotal: 0, rxSpeed: 0, txSpeed: 0, flowCount: 1, firstSeenMs: 0,
+      lastSeenMs: 0, processName: 'unknown', pid: 0,
+    };
+    const mapped = mapEndpointUpdateEvent({
+      type: 'endpoint_update',
+      endpoints: [base, { ...base, observedName: 42 }, { ...base, observedName: null }],
+    });
+    expect(mapped.map((e) => e.observedName)).toEqual([undefined, undefined, undefined]);
   });
 
   it('maps an empty list without throwing (nothing captured yet)', () => {

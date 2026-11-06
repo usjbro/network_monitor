@@ -1,4 +1,5 @@
-use crate::l7::L7Info;
+use crate::dns_names::{ObservedDnsNames, DEFAULT_MAX_OBSERVED_DNS_NAMES};
+use crate::l7::{DnsAnswer, L7Info};
 use crate::parse::{ParsedPacket, TransportProtocol};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
@@ -147,6 +148,11 @@ pub struct FlowTable {
     conversation_rollups: HashMap<(String, String), RollupState>,
     last_endpoint_snapshot_ms: u64,
     last_conversation_snapshot_ms: u64,
+    /// JAM-21: names seen in answered DNS responses. Lives here because the
+    /// periodic emitter already holds this table's lock when it builds
+    /// `EndpointSnapshot`, so reading a name needs no second lock. Cleared
+    /// by `reset()`: the addresses belonged to the interface just left.
+    observed_names: ObservedDnsNames,
 }
 
 /// `evict_stale`'s result, split by eviction reason so a caller (the
@@ -278,6 +284,9 @@ pub struct EndpointSnapshot {
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
     pub ja3_label: Option<&'static str>,
+    /// JAM-21: the name an answered DNS response gave this address, when one
+    /// is still live. Not a reverse lookup.
+    pub observed_name: Option<String>,
 }
 
 /// One (local, remote) pair's cumulative traffic rollup (JAM-14) — see
@@ -406,7 +415,21 @@ impl FlowTable {
             conversation_rollups: HashMap::new(),
             last_endpoint_snapshot_ms: 0,
             last_conversation_snapshot_ms: 0,
+            observed_names: ObservedDnsNames::new(DEFAULT_MAX_OBSERVED_DNS_NAMES),
         }
+    }
+
+    /// Replaces the observed-name table with one of `capacity` entries
+    /// (`MAX_OBSERVED_DNS_NAMES`, resolved at startup).
+    pub fn with_observed_name_capacity(mut self, capacity: usize) -> Self {
+        self.observed_names = ObservedDnsNames::new(capacity);
+        self
+    }
+
+    /// Records the addresses an answered DNS response gave `query_name`.
+    /// `now_ms` is the same clock `endpoint_snapshot` is called with.
+    pub fn learn_dns_response(&mut self, query_name: &str, answers: &[DnsAnswer], now_ms: u64) {
+        self.observed_names.learn_response(query_name, answers, now_ms);
     }
 
     /// The measured protocol hierarchy accumulated since capture start —
@@ -953,6 +976,7 @@ impl FlowTable {
                 first_seen_ms: state.first_seen_ms.unwrap_or(0),
                 last_seen_ms: state.last_seen_ms,
                 ja3_label: state.ja3_label,
+                observed_name: self.observed_names.lookup(host, now_ms).map(str::to_string),
             });
             state.rx_bytes_this_tick = 0;
             state.tx_bytes_this_tick = 0;
@@ -1003,6 +1027,7 @@ impl FlowTable {
     /// removed flow — same contract as `evict_stale`.
     pub fn reset(&mut self, local_addrs: Vec<String>) -> Vec<FlowKey> {
         self.local_addrs = local_addrs;
+        self.observed_names.clear();
         self.flows.drain().map(|(key, _)| key).collect()
     }
 }
@@ -2678,6 +2703,46 @@ mod tests {
 
         let endpoints = table.endpoint_snapshot(1000);
         assert_eq!(endpoints[0].ja3_label, Some("matches Chrome 12x"));
+    }
+
+    fn dns_answer(name: &str, ip: &str) -> DnsAnswer {
+        DnsAnswer { name: name.into(), rtype: 1, ttl: 300, data: ip.into(), data_truncated: false }
+    }
+
+    fn table_with_remote_93_184_216_34() -> FlowTable {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
+        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 0);
+        table
+    }
+
+    #[test]
+    fn endpoint_snapshot_carries_a_live_observed_name() {
+        let mut table = table_with_remote_93_184_216_34();
+        table.learn_dns_response("example.com", &[dns_answer("example.com", "93.184.216.34")], 0);
+        let endpoints = table.endpoint_snapshot(1000);
+        assert_eq!(endpoints[0].observed_name.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn endpoint_snapshot_omits_an_expired_name() {
+        let mut table = table_with_remote_93_184_216_34();
+        table.learn_dns_response("example.com", &[dns_answer("example.com", "93.184.216.34")], 0);
+        let endpoints = table.endpoint_snapshot(crate::dns_names::MIN_NAME_RETENTION_MS);
+        assert_eq!(endpoints[0].observed_name, None);
+    }
+
+    #[test]
+    fn reset_clears_observed_names() {
+        let mut table = table_with_remote_93_184_216_34();
+        table.learn_dns_response("example.com", &[dns_answer("example.com", "93.184.216.34")], 0);
+        assert_eq!(
+            table.endpoint_snapshot(500)[0].observed_name.as_deref(),
+            Some("example.com")
+        );
+        table.reset(vec!["192.168.1.10".to_string()]);
+        table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 1);
+        let endpoints = table.endpoint_snapshot(1000);
+        assert_eq!(endpoints[0].observed_name, None);
     }
 
     #[test]

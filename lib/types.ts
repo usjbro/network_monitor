@@ -331,6 +331,10 @@ export interface Endpoint {
   host: string;
   // PTR name comes from relay-side connection_enrichment, not the agent rollup wire event.
   remoteHostname?: string;
+  // JAM-21: the name an answered DNS response gave this address, observed
+  // passively by the agent. Not a reverse lookup, and forgeable by an on-path
+  // attacker, so it stays separate from remoteHostname.
+  observedName?: string;
   rxBytesTotal: number;
   txBytesTotal: number;
   rxPacketsTotal: number;

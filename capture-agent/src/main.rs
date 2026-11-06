@@ -14,7 +14,7 @@ use capture_agent::{
     tls_decrypt::{self, DecryptOutcome},
     tls_handshake::{HandshakeEvent, TlsHandshakeParser},
     tls_stream::{first_data_sequence, TlsDirectionStream, TlsStreamError},
-    transaction::{ServiceTimeStats, TransactionTracker, TxnEvent, Unanswered},
+    transaction::{ServiceTimeStats, TransactionTracker, TxnEvent, TxnProtocol, Unanswered},
     wire,
 };
 use std::collections::{HashMap, VecDeque};
@@ -1399,6 +1399,39 @@ fn parse_max_flows(raw: Option<String>) -> usize {
     }
 }
 
+/// Startup-only capacity of the observed DNS name table (JAM-21). Same
+/// parsing rules as `MAX_FLOWS`, for the same reasons.
+fn resolve_max_observed_dns_names() -> usize {
+    parse_max_observed_dns_names(std::env::var("MAX_OBSERVED_DNS_NAMES").ok())
+}
+
+fn parse_max_observed_dns_names(raw: Option<String>) -> usize {
+    let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
+        return capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n > 0 => n,
+        _ => panic!("MAX_OBSERVED_DNS_NAMES={raw} is not a valid positive integer"),
+    }
+}
+
+/// The only responses that feed the observed name table: a UDP/53 response
+/// the tracker matched to its query (`Answered`) with rcode 0. An unmatched
+/// or duplicate response could be injected without a query behind it, and DNS
+/// over TCP is never `Answered`, so neither teaches a name.
+fn learnable_dns_response<'a>(
+    l7: &'a l7::L7Info,
+    event: &TxnEvent,
+) -> Option<(&'a str, &'a [l7::DnsAnswer])> {
+    match (l7, event) {
+        (
+            l7::L7Info::DnsResponse { query_name, rcode: 0, answers, .. },
+            TxnEvent::Answered { protocol: TxnProtocol::Dns, .. },
+        ) => Some((query_name, answers)),
+        _ => None,
+    }
+}
+
 fn detect_interface() -> pcap::Device {
     if let Some(raw) = std::env::var_os("CAPTURE_INTERFACE") {
         let name = raw.into_string().unwrap_or_else(|invalid| {
@@ -2564,7 +2597,8 @@ async fn main() -> std::io::Result<()> {
     let flow_table = Arc::new(Mutex::new(FlowTable::new_with_capacity(
         local_addrs,
         resolve_max_flows(),
-    )));
+    )
+    .with_observed_name_capacity(resolve_max_observed_dns_names())));
     // JAM-15: written by the capture thread's `TransactionTracker`, read by
     // the periodic emitter for `service_time_update`.
     let service_time_stats = Arc::new(Mutex::new(ServiceTimeStats::default()));
@@ -3136,6 +3170,14 @@ async fn main() -> std::io::Result<()> {
                             capture_ts_us,
                             observe_result.as_ref().is_some_and(|r| r.is_retransmit),
                         );
+                        if let Some((query_name, answers)) =
+                            learnable_dns_response(&l7_info, &txn_event)
+                        {
+                            flow_table
+                                .lock()
+                                .unwrap()
+                                .learn_dns_response(query_name, answers, flow_now_ms);
+                        }
                         emit_unanswered_findings(
                             transactions.expire(capture_ts_us),
                             now_ms,
@@ -3488,6 +3530,7 @@ async fn main() -> std::io::Result<()> {
                             process_name,
                             pid,
                             ja3_label: endpoint.ja3_label.map(|s| s.to_string()),
+                            observed_name: endpoint.observed_name,
                         }
                     })
                     .collect();
@@ -4020,15 +4063,16 @@ mod tests {
     use super::{
         build_capture_stats_json, build_packet_json, build_system_stats_json, datalink_to_link_type,
         emit_unanswered_findings, find_device_by_name, flow_aging_now_ms, is_capturable,
-        is_meaningful_override, looks_like_pcapng, malformed_frame_summary,
-        note_capture_truncation, packet_osi_layer, parse_max_flows, parse_replay_local_addrs,
+        is_meaningful_override, learnable_dns_response, looks_like_pcapng, malformed_frame_summary,
+        note_capture_truncation, packet_osi_layer, parse_max_flows,
+        parse_max_observed_dns_names, parse_replay_local_addrs,
         parse_replay_speed, protocol_node_to_json, reassembly_now_ms, resolve_link_type,
         validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, with_flow_observation, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN,
         MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::flow::FlowTable;
-    use capture_agent::l7::L7Info;
+    use capture_agent::l7::{DnsAnswer, L7Info};
     use capture_agent::parse::{parse_packet, LinkType, TransportProtocol};
     use capture_agent::reassembly::StreamReassembler;
     use capture_agent::rate_limit::PacketEventLimiter;
@@ -4933,6 +4977,86 @@ mod tests {
             validate_capture_file_path(captures.join("run1.pcapng").to_str().unwrap(), &cwd);
         std::fs::remove_dir_all(&root).ok();
         assert!(result.is_ok(), "got: {result:?}");
+    }
+
+    // --- MAX_OBSERVED_DNS_NAMES (JAM-21) ---
+
+    #[test]
+    fn parse_max_observed_dns_names_falls_back_to_default_when_unset() {
+        assert_eq!(
+            parse_max_observed_dns_names(None),
+            capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES
+        );
+        assert_eq!(
+            parse_max_observed_dns_names(Some("  ".to_string())),
+            capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES
+        );
+        assert_eq!(parse_max_observed_dns_names(Some(" 64 ".to_string())), 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "MAX_OBSERVED_DNS_NAMES=0")]
+    fn parse_max_observed_dns_names_rejects_zero() {
+        parse_max_observed_dns_names(Some("0".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "MAX_OBSERVED_DNS_NAMES=lots")]
+    fn parse_max_observed_dns_names_rejects_non_numeric() {
+        parse_max_observed_dns_names(Some("lots".to_string()));
+    }
+
+    // --- learnable_dns_response (JAM-21) ---
+
+    fn dns_response(rcode: u8) -> L7Info {
+        L7Info::DnsResponse {
+            query_name: "example.com".into(),
+            id: 1,
+            qtype: 1,
+            rcode,
+            answer_count: 1,
+            answers: vec![DnsAnswer {
+                name: "example.com".into(),
+                rtype: 1,
+                ttl: 60,
+                data: "93.184.216.34".into(),
+                data_truncated: false,
+            }],
+        }
+    }
+
+    fn answered(protocol: TxnProtocol) -> TxnEvent {
+        TxnEvent::Answered { protocol, service_time_us: 1, request_frame_id: None }
+    }
+
+    #[test]
+    fn answered_noerror_dns_is_learnable() {
+        let info = dns_response(0);
+        let (name, answers) = learnable_dns_response(&info, &answered(TxnProtocol::Dns)).unwrap();
+        assert_eq!(name, "example.com");
+        assert_eq!(answers.len(), 1);
+    }
+
+    #[test]
+    fn nxdomain_is_not_learnable() {
+        assert!(learnable_dns_response(&dns_response(3), &answered(TxnProtocol::Dns)).is_none());
+    }
+
+    #[test]
+    fn unmatched_response_is_not_learnable() {
+        assert!(learnable_dns_response(&dns_response(0), &TxnEvent::Unmatched).is_none());
+    }
+
+    #[test]
+    fn duplicate_response_is_not_learnable() {
+        assert!(
+            learnable_dns_response(&dns_response(0), &TxnEvent::DuplicateResponse).is_none()
+        );
+    }
+
+    #[test]
+    fn answered_http_is_not_learnable() {
+        assert!(learnable_dns_response(&dns_response(0), &answered(TxnProtocol::Http)).is_none());
     }
 
     // --- MAX_FLOWS (JAM-6/GitHub #73) ---

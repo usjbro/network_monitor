@@ -7,8 +7,9 @@
 //! never exceeds its documented bound however the messages arrive.
 use std::sync::{Arc, Mutex};
 
+use capture_agent::dns_names::ObservedDnsNames;
 use capture_agent::flow::FlowKey;
-use capture_agent::l7::{sniff_dns_tcp, sniff_for_transport, sniff_l7};
+use capture_agent::l7::{sniff_dns_tcp, sniff_for_transport, sniff_l7, L7Info};
 use capture_agent::parse::TransportProtocol;
 use capture_agent::transaction::{ServiceTimeStats, TransactionTracker, MAX_PENDING};
 use libfuzzer_sys::fuzz_target;
@@ -17,6 +18,9 @@ fuzz_target!(|data: &[u8]| {
     let stats = Arc::new(Mutex::new(ServiceTimeStats::default()));
     let mut tracker = TransactionTracker::new(stats.clone());
     let mut ts_us: u64 = 0;
+    // JAM-21: the observed name table, fed every decoded response on the
+    // fuzzed clock; its bound must hold whatever arrives.
+    let mut names = ObservedDnsNames::new(64);
     let mut rest = data;
     // Each record: control byte, then a 1-byte length, then that many bytes
     // of message. The control byte picks the flow, the direction, the
@@ -50,6 +54,10 @@ fuzz_target!(|data: &[u8]| {
             let _ = sniff_for_transport(&framed, TransportProtocol::Tcp, Some(src), Some(dst));
         }
         ts_us = ts_us.saturating_add(u64::from(control >> 3) * 250_000);
+        if let L7Info::DnsResponse { query_name, answers, .. } = &l7 {
+            names.learn_response(query_name, answers, ts_us / 1_000);
+            assert!(names.len() <= 64);
+        }
         let _ = tracker.observe_frame(Some((&flow, outbound)), &l7, ts_us, retransmit);
         let _ = tracker.expire(ts_us);
         assert!(tracker.pending_len() <= MAX_PENDING);

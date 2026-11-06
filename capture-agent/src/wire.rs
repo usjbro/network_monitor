@@ -54,6 +54,10 @@ pub struct EndpointJson {
     pub pid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ja3_label: Option<String>,
+    /// JAM-21: the name an answered DNS response gave this host, when one is
+    /// still live. Separate from any reverse-lookup hostname.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_name: Option<String>,
 }
 
 /// One (local, remote) pair's cumulative traffic rollup (JAM-14) — see
@@ -1432,6 +1436,7 @@ mod tests {
                 process_name: "Safari".to_string(),
                 pid: 1234,
                 ja3_label: None,
+                observed_name: None,
             }],
         };
         let line = encode_event(&event);
@@ -1445,6 +1450,33 @@ mod tests {
             !line.contains("ja3Label"),
             "absent JA3 label must be omitted, not null: {line}"
         );
+        assert!(
+            !line.contains("observedName"),
+            "absent observed name must be omitted, not null: {line}"
+        );
+    }
+
+    #[test]
+    fn encodes_observed_name_on_an_endpoint_when_present() {
+        let event = AgentEvent::EndpointUpdate {
+            endpoints: vec![EndpointJson {
+                host: "93.184.216.34".to_string(),
+                rx_bytes_total: 0,
+                tx_bytes_total: 0,
+                rx_packets_total: 0,
+                tx_packets_total: 0,
+                rx_speed: 0.0,
+                tx_speed: 0.0,
+                flow_count: 1,
+                first_seen_ms: 0,
+                last_seen_ms: 0,
+                process_name: "unknown".to_string(),
+                pid: 0,
+                ja3_label: None,
+                observed_name: Some("example.com".to_string()),
+            }],
+        };
+        assert!(encode_event(&event).contains("\"observedName\":\"example.com\""));
     }
 
     #[test]

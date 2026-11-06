@@ -153,7 +153,7 @@ jobs:
           changed="$(git diff --name-only "$merge_base" ${{ github.sha }})"
           echo "Changed files vs merge-base:"
           echo "$changed"
-          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|src/pcapng\.rs|src/reassembly\.rs|src/l7\.rs|src/transaction\.rs|fuzz/)'; then
+          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|src/pcapng\.rs|src/reassembly\.rs|src/l7\.rs|src/transaction\.rs|src/dns_names\.rs|fuzz/)'; then
             echo "run_fuzz=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_fuzz=false" >> "$GITHUB_OUTPUT"

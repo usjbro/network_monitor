@@ -310,6 +310,7 @@ export function mapEndpointUpdateEvent(json: unknown): Endpoint[] {
       processName: requireField<string>(e, 'processName'),
       pid: requireField<number>(e, 'pid'),
       ja3Label: e.ja3Label as string | undefined,
+      observedName: typeof e.observedName === 'string' ? e.observedName : undefined,
       enrichment: undefined,
     };
   });
