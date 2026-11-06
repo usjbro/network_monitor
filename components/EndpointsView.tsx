@@ -52,6 +52,12 @@ function endpointToRow(e: Endpoint): Row {
         <span className="font-bold text-slate-200">{e.host}</span>
         {e.observedName && (
           <span className="block break-all text-[10px] text-slate-500" title="Learned from observed DNS">
+            <span
+              className="mr-1 rounded border border-slate-600 px-1 text-[9px] font-semibold uppercase text-slate-400"
+              title="Learned from observed DNS"
+            >
+              DNS
+            </span>
             {e.observedName}
           </span>
         )}

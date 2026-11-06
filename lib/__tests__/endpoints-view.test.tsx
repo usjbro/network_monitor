@@ -181,6 +181,29 @@ describe('EndpointsView', () => {
       renderOne({ observedName: 'example.com' });
       const el = screen.getByText('example.com');
       expect(el).toHaveAttribute('title', 'Learned from observed DNS');
+      const host = screen.getByText('93.184.216.34');
+      // The name follows the host inside the same cell, as a later sibling line.
+      expect(host.closest('td')).toBe(el.closest('td'));
+      expect(host.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('shows_a_visible_DNS_tag_beside_an_observed_name', () => {
+      renderOne({ observedName: 'example.com' });
+      const tag = screen.getByText('DNS');
+      expect(tag).toBeVisible();
+      expect(tag).toHaveAttribute('title', 'Learned from observed DNS');
+      expect(tag.closest('td')).toBe(screen.getByText('example.com').closest('td'));
+    });
+
+    it('shows_no_DNS_tag_for_a_ptr_name_alone', () => {
+      renderOne({ remoteHostname: 'edge.example.net' });
+      expect(screen.queryByText('DNS')).not.toBeInTheDocument();
+    });
+
+    it('the_DNS_tag_does_not_enter_the_search_text', () => {
+      renderOne({ observedName: 'example.com' });
+      fireEvent.change(screen.getByPlaceholderText(/filter by host or process/i), { target: { value: 'dns' } });
+      expect(screen.queryByText('example.com')).not.toBeInTheDocument();
     });
 
     it('shows_the_ptr_name_too_when_it_differs', () => {
