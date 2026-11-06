@@ -1,3 +1,11 @@
+# JAM-256 + JAM-186 — combined documentation verification (2026-11-06)
+
+User authorised one coordinated branch/PR for both issues in live chat. Branch `jamesmbrownjr/jam-256-docs-task-oriented-analysis-guide-querying-packets-and`, worktree `.worktrees/docs-task-oriented-analysis-guide-querying-packets-and`, base `6066372`. Both local gates recorded/approved/claimed; no Slack credentials in this cloud checkout, so required statuses reported in chat. Separate read-only source audits and independent review found no blocking findings; documentation and tests only, no application changes.
+
+New analysis guide and reconciled usage/README/getting-started/replay/security guidance are verified against source. Both Linear issues remain In Progress pending PR publication, CI and James's merge. Do not mark Done before merge. See TEST_STATUS and HANDOFF for evidence/limits. Earlier task records below are preserved as historical context, not instructions to resume unrelated work.
+
+---
+
 # Current Task
 
 JAM-261 — test-only WHOIS reset/lifecycle correction verified locally; publish PR and inspect CI/reviews.

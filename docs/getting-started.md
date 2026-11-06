@@ -4,7 +4,7 @@
 
 - **Node.js** (for the web app)
 - **Rust** (for the capture agent) — install via [rustup](https://rustup.rs) if you don't have it: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- **macOS**, currently — the capture agent's privilege model (`access_bpf` group) and interface detection (`route -n get default`) are macOS-specific. Linux/Windows support isn't implemented.
+- **macOS** for the user setup below (`access_bpf` group and `route -n get default`). Linux live-loopback capture is tested in CI with explicit capabilities (see [Contributing](../CONTRIBUTING.md#live-loopback-packet-capture-integration-test-issue-114)); these macOS permission commands do not apply there. No Windows setup is provided.
 
 ## Agent credential handoff
 
@@ -104,6 +104,7 @@ Ctrl-C both processes. Nothing runs in the background or as a system service —
 
 ## Next steps
 
+- [analysis-guide.md](analysis-guide.md) — practical investigations, filtering, capture/replay, export and measurement limits
 - [usage.md](usage.md) — what each view shows, the command bar, themes
 - [architecture.md](architecture.md) — how the pieces fit together
 - [enrichment-protocol.md](enrichment-protocol.md) / [geoip-protocol.md](geoip-protocol.md) — the wire/control contracts for the two opt-in features above

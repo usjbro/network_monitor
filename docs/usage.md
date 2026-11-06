@@ -1,5 +1,7 @@
 # Usage
 
+For step-by-step investigations, start with the [analysis guide](analysis-guide.md). This page is the command/view reference. Commands below run in the browser command bar, not a shell.
+
 ## Views
 
 Switch between views with the tab bar, or the command bar (see below).
@@ -17,9 +19,9 @@ Drill into one of the 7 OSI layers (1 = Physical, 7 = Application) for its proto
 
 ### Connections (`conn` / `sockets` / `connections`)
 
-The live socket table: every active flow the agent has observed, with local/remote address and port, the owning process (name + PID, via `lsof`), transport protocol, throughput, RTT, retransmission-based loss %, and status (`ESTABLISHED`, `SYN_SENT`, `TIME_WAIT`, `CLOSE_WAIT`).
+The observed-flow table (UI label **F3: SOCKETS**), with local/remote address and port, the owning process (name + PID, via `lsof`), transport protocol, RX/TX speed, Latency, `% loss`, and inferred status (`ESTABLISHED`, `SYN_SENT`, `TIME_WAIT`, `CLOSE_WAIT`). It is not a complete OS socket inventory. Latency is observed TCP handshake RTT; an unobserved handshake/UDP shows `—`, not zero. `% loss` is a payload-segment retransmission heuristic, not measured end-to-end loss; see [measurement interpretation](analysis-guide.md#diagnose-connection-problems-without-inventing-measurements) and the active-measurement follow-up [JAM-70](https://linear.app/shmishmorshin/issue/JAM-70/packet-loss-measurement).
 
-Note: flows currently never expire from this list for the lifetime of the agent process (tracked as [issue #28](https://github.com/usjbro/network_monitor/issues/28)) — a long-running agent will accumulate stale entries.
+Flows expire after state-dependent idle periods and can be evicted for capacity (default `MAX_FLOWS=10000`, configured at agent startup). The browser separately retains 200 connections by default. The capacity-eviction warning distinguishes agent pressure from ordinary idle turnover. Quick search matches protocol, process, addresses and available hostnames; use display filters for ports despite the search placeholder. **EXPORT CSV** downloads displayed rows.
 
 Three additional pieces of detail live here, all read-only until you interact with them:
 
@@ -29,13 +31,21 @@ Three additional pieces of detail live here, all read-only until you interact wi
 
 ### Packet stream (`pcap` / `packets`)
 
-A scrolling feed of the last 100 captured packets, with a hex dump of the first 64 bytes of payload. Per-layer header breakdown (parsed MACs, TLS SNI, HTTP method/path, DNS query name) is captured internally by the agent but not yet wired to this view — see [issue #29](https://github.com/usjbro/network_monitor/issues/29).
+A scrolling feed of the latest 100 retained packet events by default. The agent samples packet events at most once every 10 ms; this is not a complete capture. Click a frame to expand the decoded field tree, header bytes and first 64 payload bytes. Application fields include decoded TLS SNI, HTTP method/path and DNS metadata when available. Field abbreviations map to [wire paths](wire-protocol.md#packet). Quick search matches protocol/source/destination/summary; the layer selector refines rows. **EXPORT JSON** downloads displayed frames; **COPY HEX** copies a selected frame's available payload hex. Decrypted TLS segments are excluded from exports.
 
-**Decrypted content**: normally TLS payloads only ever show as ciphertext. If you launched the process generating this traffic through the bundled `osi-inspect` CLI (see [getting-started.md](getting-started.md#optional-features)), packets for that process's connections render their actual decrypted HTTP/HTTP2 content here instead, behind a persistent "decrypting" banner so it's always obvious when you're looking at plaintext rather than the normal ciphertext view.
+**Decrypted content**: normally TLS payloads only ever show as ciphertext. If you launched the process generating this traffic through the bundled `osi-inspect` CLI (see [getting-started.md](getting-started.md#optional-features)), eligible connections can show separate decrypted HTTP/HTTP2 segments alongside the raw packet inspector, behind a persistent "decrypting" banner so it's always obvious when you're looking at plaintext rather than the normal ciphertext view.
 
 ### Protocol matrix (`matrix` / `topology`)
 
-A cross-tab of layers vs. protocols currently in use.
+A cross-tab of layers vs. protocols currently in use, plus **SERVICE RESPONSE TIME** for matched UDP DNS and plaintext HTTP/1.x transactions. Missing timing shows `—`, not zero. The interval includes the network path visible at the capture point; it is not pure server processing time. See the [DNS/HTTP recipe](analysis-guide.md#inspect-dnshttp-metadata-and-response-time) for matching limits, counters and sample windows.
+
+### Hosts (click `F7: HOSTS`)
+
+**Endpoints** and **Conversations** modes roll up traffic per host and per address pair. Search by address/hostname/process, sort bytes/packets/rate to find top talkers, and select a row for ownership/available JA3 detail. Totals can outlive individual flow eviction. There is no `hosts` command.
+
+### Findings (click `F6: FINDINGS`)
+
+Grouped diagnostic observations such as retransmissions, resets, malformed frames and unanswered requests, with severity and related frame/flow markers. Clicking a navigable finding switches to its view; it does not select the target frame/flow. These are observations, not diagnoses of intent or root cause. There is no `findings` command. The F-number tab labels are clickable buttons, not implemented function-key shortcuts.
 
 ## Command bar
 
@@ -51,7 +61,7 @@ Type a command and press enter. Available commands:
 | `theme <name>` | Switch color theme (see theme list below) |
 | `pause` | Tell the agent to pause capture (also available as a button in the header) |
 | `resume` | Tell the agent to resume capture |
-| `reset` | Clear the local connections/packets buffers (does not affect the agent) |
+| `reset` | Clear local connections, packets, decrypted segments and findings (does not reset agent counters, Hosts rollups or service-time statistics) |
 | `enrich on` / `enrich off` / `enrich clear` | Turn on-demand ownership (WHOIS/RDAP) lookups on/off for the current relay session (never persisted — off again after every relay restart), or wipe the local enrichment cache and query log |
 | `enrich background on` / `enrich background off` | Turn whole-table background ownership lookups on/off, instead of only on-demand per-connection |
 | `geoip enable` / `geoip disable` / `geoip clear` | Turn per-hop geoIP location lookups on/off for Trace Route (separate opt-in from `enrich`, also session-only), or wipe the on-disk geoIP cache |
@@ -59,8 +69,8 @@ Type a command and press enter. Available commands:
 | `filter <bpf expression>` / `filter clear` | Set (or clear) a BPF capture filter at the agent, e.g. `filter tcp port 443` — narrows what's captured at the source, applied live with no interruption. An invalid expression is rejected with libpcap's own error shown in a dismissible banner; the previous filter keeps running. Active filter always shown in the header. |
 | `snaplen <bytes>` / `snaplen full` | Set (or restore, via `full`) the capture snap length in bytes, e.g. `snaplen 96` — truncates each captured frame past this many bytes, keeping headers while discarding payload. Applying this briefly reopens the capture (logged, expected). Active snap length always shown in the header. |
 | `iface list` / `iface <name>` | List capturable interfaces (also available from the header's interface picker, which lazily loads the same list), or switch capture to one at runtime — no agent restart needed. Switching resets the active filter/snap length to their defaults and clears tracked connections (every existing flow belonged to the interface that just stopped being captured). An interface with no assigned address, or one this agent can't parse the link type of, is rejected rather than silently accepted. |
-| `capture <path> [ring <mode> <n>] [autostop <mode> <n>]` / `capture stop` | Start (or stop) writing captured traffic to a pcapng file on disk at the agent, e.g. `capture ~/captures/incident.pcapng ring size 104857600 autostop duration 3600`. The path keeps its case exactly as typed. `ring` rotates to a new file after `<n>` bytes (`size`), seconds (`duration`), or packets (`count`); `autostop` ends the whole run after `<n>` seconds (`duration`) or bytes written (`totalSize`) — both optional and independent, and a bare `capture <path>` just writes one file until stopped. The agent refuses an unsafe path (anything under `.data/`, or inside its own working directory), a run started while one is already active, or a start with free space already below its 500MB floor. Active capture file always shown in the header. |
-| `buffer packets <n>` / `buffer connections <n>` / `buffer decrypted <n>` | Adjust how many recent items *this browser tab* keeps for each view (defaults: 100 / 200 / 100). Purely client-side — nothing is sent to the agent, and the agent's own flow-table ceiling is the separate `MAX_FLOWS` environment variable below. Lowering a limit discards the excess immediately rather than waiting for the next event. Each view shows a "showing N of M observed" line so a capped list never silently stands in for far more traffic than it lists. |
+| `capture <path> [ring <mode> <n>] [autostop <mode> <n>]` / `capture stop` | Start/stop writing pcapng on the agent machine. Use an existing absolute directory outside the repository, with no spaces or shell expansion; see [capture paths, rotation and replay](#capture-files-and-offline-replay). The path preserves case. Active file/status appears in the header; rejected requests show a capture-file error banner. |
+| `buffer packets <n>` / `buffer connections <n>` / `buffer decrypted <n>` | Adjust how many recent items *this browser tab* keeps for each view (defaults: 100 / 200 / 100). Purely client-side — nothing is sent to the agent, and the agent's own flow-table ceiling is the separate startup `MAX_FLOWS` environment variable (see [agent README](../capture-agent/README.md#flow-table-capacity-max_flows)). Lowering a limit discards the excess immediately rather than waiting for the next event. Each view shows a "showing N of M observed" line so a capped list never silently stands in for far more traffic than it lists. |
 | `install` / `macos` / `brew` / `curl` / `sw_vers` | Open the Install modal (see below) |
 
 ## Display filters
@@ -88,6 +98,28 @@ An absent field does not match a comparison, including `!=`; an unknown field pa
 Display expressions are limited to 2,048 source characters, 512 non-end tokens, 64 nested `not` operators/parentheses, and 128 values in an `in` set. Oversized filters are rejected locally with an error at the first disallowed position, leaving the last valid display filter active. The token allowance accommodates a full 128-value set.
 
 `display` only changes what this browser tab shows. Use `filter <bpf expression>` and `filter clear` to control what the capture agent receives at the source. A BPF expression such as `tcp port 443` is not display-filter syntax.
+
+## Capture files and offline replay
+
+In a terminal on the agent machine, prepare the example directory. For an existing directory, inspect its ownership/permissions before reuse:
+
+```bash
+umask 077
+mkdir -p /tmp/network-monitor-captures
+```
+
+Then enter these in the **browser command bar** (stop when finished):
+
+```text
+capture /tmp/network-monitor-captures/incident.pcapng ring size 104857600 autostop duration 3600
+capture stop
+```
+
+The first command rotates numbered files around 100 MiB and stops the run after 3,600 seconds unless stopped earlier. `ring` supports `size` (bytes), `duration` (seconds), and `count` (packets); `autostop` supports `duration` (seconds) and `totalSize` (bytes). Both are optional and independent; `capture <path>` writes one file until stopped. Rotation retains all earlier members; it does not bound disk usage. The agent refuses a second concurrent run and stops/refuses recording below its 500 MiB free-space floor. Active names end in `.partial`; clean stop/rotation renames them to final names. Use fresh names: existing partials fail creation and final rename may replace an old final file. `/tmp` is temporary storage.
+
+No shell processes these commands: `~` and `$HOME` are literal, quotes do not group spaces, and backslashes do not escape them. Use an absolute path without spaces, unquoted in the command bar. Parent directories are not created by the agent. Paths with `..`, `.data/`, or resolving inside the agent's working directory (including via symlinks) are rejected.
+
+There is no UI file-open dialog. Restart the agent with `REPLAY_FILE`, optional `REPLAY_LOCAL_ADDRS` and `REPLAY_SPEED` to open pcapng/classic pcap in the same UI. Use the [record/replay recipe](analysis-guide.md#record-open-and-replay-a-capture) for exact terminal commands, expected status and limitations; [Troubleshooting](troubleshooting.md#replaying-a-capture-file-instead-of-live-traffic) covers replay configuration. Raw files avoid UI event sampling but remain subject to capture/writer drops, snap length and decoder exclusions. They never include opt-in decrypted TLS output; ordinary plaintext traffic remains sensitive.
 
 ## Themes
 

@@ -1,3 +1,18 @@
+# JAM-256 + JAM-186 — documentation verification (2026-11-06)
+
+Linux cloud checkout; Node v24.22.1, Vitest 5.0.5, base main `6066372`.
+
+- Tests first: docs/compiler + command-bar capture suites failed 5 checks for the missing guide and original literal `~/captures` example (13 passed). After documentation changes, 2 files / 18 tests pass. Temporarily replacing a guide filter with `display tcp.dst_port ==` made the compiler check fail; restored exact bytes, then 18/18 passed again.
+- `./node_modules/.bin/vitest run`: 85 files / 663 tests pass with network permission (`/tmp/nm-vitest-network.log`). Initial sandbox-only baseline had 34 failures / 24 errors, including socket `listen EPERM`; enabling networking resolves those without test/app changes.
+- `npm run lint`, `./node_modules/.bin/tsc --noEmit`, `npm run build`: pass. Build-only generated changes to AGENTS.md/next-env.d.ts restored after inspection.
+- `npm audit --json` + `node .github/scripts/check-npm-audit.mjs /tmp/nm-audit.json`: pass, no high/critical advisories.
+- `PLAYWRIGHT_BROWSERS_PATH=/tmp/nm-pw-browsers ./node_modules/.bin/playwright test`: 1/1 browser/SSE smoke test passes with network permission (`/tmp/nm-e2e.log`).
+- Local-link/heading-anchor validation: 65 links in seven changed documentation files pass. Independent reviewer separately checked paths, all filter fields against producers/resolver, commands/tabs/env vars, path validation/writer semantics, measurement/security claims, and both issues' criteria; no blocking findings. Reviewer independently ran focused 18/18 tests and links.
+- `cargo test --locked --bin capture-agent validate_capture_file_path`: unable to execute locally. Rust installed under /tmp; dependency fetch failed HTTP 403 from static.crates.io for cfg-if 1.0.4 (`No approved upstream IPv4 address`). No network-policy bypass or production workaround. PR CI must supply Rust build/test/clippy/audit/live-loopback evidence.
+- No manual macOS live capture, privileged local capture or local Rust replay executed. Source+existing Rust fixture/test inspection and real UI command-routing tests support documented path/record/replay semantics; do not claim local end-to-end Rust capture proof. No capture-agent source, UI source, dependencies or CI/security configuration changed.
+
+---
+
 # JAM-261 — WHOIS fixture reset/lifecycle correction (2026-11-05)
 
 Runtime: macOS 26.6.2 (25G83), Node v26.12.1, Vitest 5.0.5. Base e78fd32. No production WHOIS, dependency or runner changes.

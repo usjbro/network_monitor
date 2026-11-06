@@ -1,3 +1,13 @@
+# JAM-256 + JAM-186 — documentation ready for combined PR (2026-11-06)
+
+One user-authorised goal, one branch: `jamesmbrownjr/jam-256-docs-task-oriented-analysis-guide-querying-packets-and`, base main `6066372`. New docs/analysis-guide.md covers implemented packet/socket/host/service-time workflows, measurements, recording/replay/export and failures. Usage reconciles stale #28/#29 notes, missing views, search, exports and replay. Capture examples use literal absolute paths plus directory preparation; command bar is explicitly not a shell. Nearby replay/security claims corrected narrowly. New tests extract/compile display examples and drive documented capture commands through the real UI router.
+
+Independent review: both issues' documentation criteria pass; 18 focused checks, links and source claims independently verified. Full Vitest663, lint, tsc, build, npm audit and Playwright1 pass; see TEST_STATUS. Local cargo execution blocked by dependency HTTP403; await CI Rust evidence. No macOS live walkthrough claimed. No runtime changes.
+
+Next: publish one PR for JAM-256/JAM-186, inspect required/security CI and reviews, link each issue with independent acceptance evidence and set In Review. James owns merge (ADR-005); do not merge or close issues until authorised and actually merged. Slack unavailable (no bot/webhook credentials); statuses reported in chat. Preserve unrelated historical task records below.
+
+---
+
 # JAM-261 — corrected WHOIS fixture lifecycle, ready for PR (2026-11-05)
 
 James explicitly approved JAM-17 plan then JAM-261. Plan PR #295 is published at7903094 with code/security and Claude rechecks clear; do not implement Follow Stream or merge own PR. JAM-261 worktree `.worktrees/whois-test-econnreset`, branch `jamesmbrownjr/jam-261-whois-client-tests-emit-unhandled-econnreset-on-macos`, base e78fd32.
