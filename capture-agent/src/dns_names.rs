@@ -91,20 +91,19 @@ impl ObservedDnsNames {
             }
             let retention = (u64::from(answer.ttl) * 1000)
                 .clamp(MIN_NAME_RETENTION_MS, MAX_NAME_RETENTION_MS);
-            self.insert(&answer.data, name.clone(), now_ms.saturating_add(retention), now_ms);
+            self.insert(&answer.data, name.clone(), now_ms.saturating_add(retention));
         }
     }
 
-    fn insert(&mut self, addr: &str, name: String, expires_ms: u64, now_ms: u64) {
+    /// `learn_response` has already purged, so a full table has no expired
+    /// entry left to take the slot.
+    fn insert(&mut self, addr: &str, name: String, expires_ms: u64) {
         if let Some(old) = self.entries.remove(addr) {
             self.by_expiry.remove(&(old.expires_ms, old.seq, addr.to_string()));
         } else if self.entries.len() >= self.capacity {
-            self.purge_expired(now_ms);
-            if self.entries.len() >= self.capacity {
-                if let Some((_, _, victim)) = self.by_expiry.pop_first() {
-                    self.entries.remove(&victim);
-                    self.evictions += 1;
-                }
+            if let Some((_, _, victim)) = self.by_expiry.pop_first() {
+                self.entries.remove(&victim);
+                self.evictions += 1;
             }
         }
         if self.capacity == 0 {
