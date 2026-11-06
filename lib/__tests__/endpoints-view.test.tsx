@@ -173,6 +173,48 @@ describe('EndpointsView', () => {
     expect(screen.getByText('4,200 ms')).toBeInTheDocument();
   });
 
+  describe('observed DNS names', () => {
+    const renderOne = (e: Partial<Endpoint>) =>
+      render(<EndpointsView endpoints={[endpoint(e)]} conversations={[]} theme={theme} />);
+
+    it('shows_the_observed_name_under_the_host', () => {
+      renderOne({ observedName: 'example.com' });
+      const el = screen.getByText('example.com');
+      expect(el).toHaveAttribute('title', 'Learned from observed DNS');
+    });
+
+    it('shows_the_ptr_name_too_when_it_differs', () => {
+      renderOne({ observedName: 'example.com', remoteHostname: 'edge.example.net' });
+      expect(screen.getByText('example.com')).toBeInTheDocument();
+      expect(screen.getByText('edge.example.net')).toBeInTheDocument();
+    });
+
+    it('shows_one_line_when_observed_and_ptr_names_match', () => {
+      renderOne({ observedName: 'example.com', remoteHostname: 'example.com' });
+      expect(screen.getAllByText('example.com')).toHaveLength(1);
+    });
+
+    it('search_matches_the_observed_name', () => {
+      render(
+        <EndpointsView
+          endpoints={[endpoint({ host: '10.0.0.1', observedName: 'wanted.example' }), endpoint({ host: '10.0.0.2' })]}
+          conversations={[]}
+          theme={theme}
+        />,
+      );
+      fireEvent.change(screen.getByPlaceholderText(/filter by host or process/i), { target: { value: 'wanted' } });
+      expect(screen.getByText('10.0.0.1')).toBeInTheDocument();
+      expect(screen.queryByText('10.0.0.2')).not.toBeInTheDocument();
+    });
+
+    it('renders_markup_in_a_name_as_text', () => {
+      const evil = '<img src=x onerror=alert(1)>';
+      const { container } = renderOne({ observedName: evil });
+      expect(screen.getByText(evil)).toBeInTheDocument();
+      expect(container.querySelector('img')).toBeNull();
+    });
+  });
+
   it('filters rows by the search box', () => {
     render(
       <EndpointsView

@@ -42,15 +42,23 @@ interface Row {
 }
 
 function endpointToRow(e: Endpoint): Row {
+  // Names are attacker-controlled packet content: rendered only as React text.
+  // The PTR line is dropped when it repeats the observed name.
+  const showPtr = e.remoteHostname && e.remoteHostname.toLowerCase() !== e.observedName?.toLowerCase();
   return {
     key: e.host,
     name: (
       <span>
         <span className="font-bold text-slate-200">{e.host}</span>
-        {e.remoteHostname && <span className="block text-[10px] text-slate-500">{e.remoteHostname}</span>}
+        {e.observedName && (
+          <span className="block text-[10px] text-slate-500" title="Learned from observed DNS">
+            {e.observedName}
+          </span>
+        )}
+        {showPtr && <span className="block text-[10px] text-slate-500">{e.remoteHostname}</span>}
       </span>
     ),
-    searchText: `${e.host} ${e.remoteHostname ?? ''} ${e.processName}`,
+    searchText: `${e.host} ${e.observedName ?? ''} ${e.remoteHostname ?? ''} ${e.processName}`,
     rxBytesTotal: e.rxBytesTotal,
     txBytesTotal: e.txBytesTotal,
     rxPacketsTotal: e.rxPacketsTotal,
