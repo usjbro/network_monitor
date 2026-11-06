@@ -62,7 +62,7 @@ Redaction: pass the text through `redact_headers` with the part before the first
 
 **6. Fuzz.** Extend `l7_transactions` (framed DNS, name table bound) and `stream_reassembly` (TCP/53 across segments, including sequence wraparound). Both already run in CI. Add `src/dns_names\.rs` to the path filter at `.github/workflows/ci.yml:156`, or a change to the new file alone would skip fuzzing.
 
-**On-path attacker.** A forged response that wins the race with a correct ID and question gets a wrong label for up to 24 h, the same thing it does to the client. That is misleading display, not a confidentiality issue, and the UI marks the name as learned from DNS. Holding back a TCP message only costs that message's fields.
+**Who can set a name.** The name is whatever the queried server said. A response needs only a matching query on the same flow from any remote on port 53, so any process able to send a query, or any zone owner, can relabel an address for up to 24 h, overwriting a correct name; no on-path attacker is needed. That is misleading display, not a confidentiality issue, and the UI marks the name as learned from DNS. Holding back a TCP message only costs that message's fields.
 
 ## Confirmed by James (2026-11-05)
 

@@ -71,7 +71,7 @@ Writing a live capture to disk, or replaying one, is the point at which this too
 
 ## Observed DNS names (JAM-21)
 
-`endpoint_update.observedName` comes from a table of names seen in answered DNS responses. It is passive (the agent sends no queries), bounded (`MAX_OBSERVED_DNS_NAMES` entries, 1 h to 24 h retention, ASCII hostname bytes only, in memory and cleared on interface switch), and forgeable: an on-path attacker who can inject a response that matches a pending query can make an address show any name. It is therefore labelled as observed, kept apart from reverse DNS, and never used for a trust or policy decision.
+`endpoint_update.observedName` comes from a table of names seen in answered DNS responses. It is passive (the agent sends no queries), bounded (`MAX_OBSERVED_DNS_NAMES` entries, 1 h to 24 h retention, ASCII hostname bytes only, in memory and cleared on interface switch), and not authenticated: the name is whatever the queried server said. The agent accepts a response from any remote on port 53 that matches a query on the same flow, so any process able to send a query (a local process can query its own server for a well-known name and get any answer) or anyone who owns a zone can choose the name shown for an address, overwriting a correct one for up to 24 hours. An on-path attacker is not required. It is therefore labelled as observed, kept apart from reverse DNS, and never used for a trust or policy decision.
 
 ## Dependency hygiene
 
