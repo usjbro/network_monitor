@@ -1471,9 +1471,10 @@ mod tests {
     }
 
     #[test]
-    fn tcp_dns_at_declared_exactly_the_header_size_decodes_or_not_by_content() {
-        // 12 is the smallest declared length that is not rejected outright:
-        // a bare header declares no question, so it stays Undecided.
+    fn tcp_dns_declared_exactly_12_cannot_decode() {
+        // 12 passes the length check, so a short stream still asks for more,
+        // but a message that is only a header has no room for the question
+        // it declares, so it never decodes.
         let mut header = vec![0u8; 12];
         header[5] = 1; // QDCOUNT 1, but no question bytes follow
         assert_eq!(sniff_dns_tcp(&framed(&header)), L7Sniff::Undecided);

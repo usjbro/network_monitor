@@ -1136,40 +1136,84 @@ pub struct StreamReassembler {
 /// `TCP_STREAM_IDLE_MS` on the capture clock is dropped.
 #[derive(Default)]
 struct DnsTcpFraming {
-    /// `(next_message_seq, last_seen_ms)`.
-    entries: HashMap<TcpStreamKey, (u32, u64)>,
+    entries: HashMap<TcpStreamKey, DnsBoundary>,
+}
+
+#[derive(Clone, Copy)]
+struct DnsBoundary {
+    /// Where the next message starts, or, with `pending_high`, the sequence
+    /// number of the low byte of its length prefix.
+    next_message_seq: u32,
+    /// The high byte of a length prefix split across segments.
+    pending_high: Option<u8>,
+    last_seen_ms: u64,
 }
 
 impl DnsTcpFraming {
-    /// Whether `seq` lies before the recorded boundary, by a wraparound-safe
-    /// signed delta, i.e. inside a message already seen the start of.
-    fn is_inside_message(&mut self, key: &TcpStreamKey, seq: u32, now_ms: u64) -> bool {
-        let Some(&(boundary, last_seen_ms)) = self.entries.get(key) else {
+    /// Whether this segment is inside a message already seen the start of, so
+    /// must not be read as a new message. `seq` before the boundary is inside
+    /// it, by a wraparound-safe signed delta; so is the segment that begins
+    /// with the low byte of a split prefix.
+    ///
+    /// A skipped segment that reaches past the boundary is walked from the
+    /// boundary over its suffix, since a message may start inside it, and
+    /// that is a record. One that does not reach it changes nothing and
+    /// deliberately does not refresh `last_seen_ms`: a crafted prefix could
+    /// otherwise be kept alive by the very traffic it hides. A legitimate
+    /// message that takes longer than `TCP_STREAM_IDLE_MS` lets its boundary
+    /// lapse, and segments inside it are then read as starts, as before JAM-21.
+    fn skip_inside_message(&mut self, key: &TcpStreamKey, seq: u32, payload: &[u8], response_only: bool, now_ms: u64) -> bool {
+        let Some(&entry) = self.entries.get(key) else {
             return false;
         };
-        if now_ms.saturating_sub(last_seen_ms) > TCP_STREAM_IDLE_MS {
+        if now_ms.saturating_sub(entry.last_seen_ms) > TCP_STREAM_IDLE_MS {
             self.entries.remove(key);
             return false;
         }
-        // A skipped segment deliberately does not refresh `last_seen_ms`: a
-        // crafted prefix could otherwise be kept alive by the very traffic it
-        // hides. Only `record` refreshes it. A legitimate message that takes
-        // longer than `TCP_STREAM_IDLE_MS` lets its boundary lapse, and
-        // segments inside it are then read as starts, as before JAM-21.
-        (seq.wrapping_sub(boundary) as i32) < 0
+        let delta = seq.wrapping_sub(entry.next_message_seq) as i32;
+        if delta > 0 || (delta == 0 && entry.pending_high.is_none()) {
+            return false;
+        }
+        // `offset` bytes of this segment precede the boundary.
+        let offset = delta.unsigned_abs() as usize;
+        if let Some(suffix) = payload.get(offset..).filter(|suffix| !suffix.is_empty()) {
+            let base = entry.next_message_seq.wrapping_sub(u32::from(entry.pending_high.is_some()));
+            self.walk_and_record(key, base, entry.pending_high, suffix, response_only, now_ms);
+        }
+        true
     }
 
-    fn record(&mut self, key: &TcpStreamKey, next_message_seq: u32, now_ms: u64) {
+    /// A segment the reassembler consumed without sniffing (a window release,
+    /// a cleanup, a retransmission): keep the boundary moving over its bytes.
+    fn note_consumed(&mut self, key: &TcpStreamKey, seq: u32, payload: &[u8], response_only: bool, now_ms: u64) {
+        if !self.skip_inside_message(key, seq, payload, response_only, now_ms) {
+            self.walk_and_record(key, seq, None, payload, response_only, now_ms);
+        }
+    }
+
+    fn record(&mut self, key: &TcpStreamKey, boundary: DnsBoundary) {
         if !self.entries.contains_key(key) && self.entries.len() >= MAX_TCP_STREAMS {
-            if let Some(oldest) = self.entries.iter().min_by_key(|(_, (_, seen))| *seen).map(|(k, _)| k.clone()) {
+            if let Some(oldest) =
+                self.entries.iter().min_by_key(|(_, entry)| entry.last_seen_ms).map(|(k, _)| k.clone())
+            {
                 self.entries.remove(&oldest);
             }
         }
-        self.entries.insert(key.clone(), (next_message_seq, now_ms));
+        self.entries.insert(key.clone(), boundary);
     }
 
     fn forget(&mut self, key: &TcpStreamKey) {
         self.entries.remove(key);
+    }
+
+    fn drop_flow(&mut self, flow: &FlowKey) {
+        for from_local in [true, false] {
+            self.entries.remove(&TcpStreamKey { flow: flow.clone(), from_local });
+        }
+    }
+
+    fn evict_stale(&mut self, now_ms: u64) {
+        self.entries.retain(|_, entry| now_ms.saturating_sub(entry.last_seen_ms) <= TCP_STREAM_IDLE_MS);
     }
 
     /// Records where the message starting at `base_seq` in `bytes` ends, or
@@ -1177,9 +1221,8 @@ impl DnsTcpFraming {
     ///
     /// `response_only` is for a direction from port 53 to a port that is not
     /// 53, which may be an ordinary connection that merely uses 53 as its
-    /// source port: it records only for a message that shows a response (QR
-    /// set in the byte after the ID) and sniffed as DNS or not at all, so
-    /// `GET /`, `HTTP/` and TLS records never create a boundary.
+    /// source port: see `dns_tcp_walk`. It also records nothing when the sniff
+    /// decided something other than DNS.
     fn record_message(
         &mut self,
         key: &TcpStreamKey,
@@ -1189,56 +1232,73 @@ impl DnsTcpFraming {
         response_only: bool,
         now_ms: u64,
     ) {
-        if response_only {
-            let shows_response = bytes.get(4).is_some_and(|flags| flags & 0x80 != 0);
-            let other_protocol = matches!(sniffed, L7Sniff::Decided(info) if !matches!(info, L7Info::Dns { .. } | L7Info::DnsResponse { .. }));
-            if !shows_response || other_protocol {
-                self.forget(key);
-                return;
-            }
+        let other_protocol = matches!(sniffed, L7Sniff::Decided(info) if !matches!(info, L7Info::Dns { .. } | L7Info::DnsResponse { .. }));
+        if response_only && other_protocol {
+            self.forget(key);
+            return;
         }
-        match dns_tcp_next_message_seq(bytes, base_seq) {
-            Some(next) => self.record(key, next, now_ms),
+        self.walk_and_record(key, base_seq, None, bytes, response_only, now_ms);
+    }
+
+    fn walk_and_record(
+        &mut self,
+        key: &TcpStreamKey,
+        base_seq: u32,
+        carry: Option<u8>,
+        bytes: &[u8],
+        response_only: bool,
+        now_ms: u64,
+    ) {
+        match dns_tcp_walk(bytes, base_seq, carry, response_only) {
+            Some((next_message_seq, pending_high)) => {
+                self.record(key, DnsBoundary { next_message_seq, pending_high, last_seen_ms: now_ms })
+            }
             None => self.forget(key),
         }
     }
-
-    fn drop_flow(&mut self, flow: &FlowKey) {
-        self.entries.retain(|key, _| &key.flow != flow);
-    }
-
-    fn evict_stale(&mut self, now_ms: u64) {
-        self.entries.retain(|_, (_, seen)| now_ms.saturating_sub(*seen) <= TCP_STREAM_IDLE_MS);
-    }
 }
 
-/// The sequence number where the next DNS-over-TCP message starts, walking
-/// the length prefixes in `bytes`, which begin a message at `base_seq`. The
-/// walk is bounded by `bytes.len()`, and a message that runs past the bytes
-/// yields the sequence number of its end, so a segment holding one message
-/// and part of the next marks the end of the next. A buffer ending on one
-/// byte of a prefix gives the sequence just past the whole prefix: the length
-/// is unknown, and the segment that follows starts mid-prefix, so it must not
-/// be read as a message start.
+/// Walks the DNS-over-TCP length prefixes in `bytes`, which begin a message
+/// at `base_seq` (preceded by `carry`, the high byte of a prefix split across
+/// segments, in which case `base_seq` is the carried byte's sequence number).
+/// Returns the sequence number where the next message starts and any pending
+/// high prefix byte.
+///
+/// The walk is bounded by the bytes available, and a message that runs past
+/// them yields the sequence number of its end, so a segment holding one
+/// message and part of the next marks the end of the next. A buffer ending on
+/// one byte of a prefix yields the sequence number of the missing low byte and
+/// that high byte as pending.
 ///
 /// A declared length below the 12-byte header cannot be a DNS message, so the
 /// walk stops there: a crafted tiny prefix records no boundary of its own
 /// (`None` when it is the first). Lengths above `MAX_DNS_TCP_MESSAGE_BYTES`
 /// still do, because an over-limit message is exactly what the boundary
-/// exists to skip.
-fn dns_tcp_next_message_seq(bytes: &[u8], base_seq: u32) -> Option<u32> {
+/// exists to skip. With `response_only` the first message must show a
+/// response (QR set in the byte after the ID), so `GET /`, `HTTP/` and TLS
+/// records from source port 53 never create a boundary.
+fn dns_tcp_walk(bytes: &[u8], base_seq: u32, carry: Option<u8>, response_only: bool) -> Option<(u32, Option<u8>)> {
+    let skip = usize::from(carry.is_some());
+    let len = bytes.len() + skip;
+    let at = |i: usize| match (carry, i) {
+        (Some(high), 0) => Some(high),
+        _ => bytes.get(i - skip).copied(),
+    };
+    if response_only && !at(4).is_some_and(|flags| flags & 0x80 != 0) {
+        return None;
+    }
     let mut pos = 0usize;
-    while pos < bytes.len() {
-        let (Some(&hi), Some(&lo)) = (bytes.get(pos), bytes.get(pos + 1)) else {
-            return Some(base_seq.wrapping_add((pos + 2) as u32));
+    while pos < len {
+        let (Some(hi), Some(lo)) = (at(pos), at(pos + 1)) else {
+            return Some((base_seq.wrapping_add((pos + 1) as u32), at(pos)));
         };
         let declared = usize::from(u16::from_be_bytes([hi, lo]));
         if declared < 12 {
-            return (pos > 0).then(|| base_seq.wrapping_add(pos as u32));
+            return (pos > 0).then(|| (base_seq.wrapping_add(pos as u32), None));
         }
         pos += 2 + declared;
     }
-    Some(base_seq.wrapping_add(pos as u32))
+    Some((base_seq.wrapping_add(pos as u32), None))
 }
 
 impl StreamReassembler {
@@ -1454,7 +1514,9 @@ impl StreamReassembler {
             if packet.tcp_flags.is_some_and(|flags| flags.syn) {
                 // A new connection reusing the four-tuple restarts the sequence space.
                 self.dns_framing.forget(key);
-            } else if !self.segments.has_buffer(key) && self.dns_framing.is_inside_message(key, *seq, now_ms) {
+            } else if !self.segments.has_buffer(key)
+                && self.dns_framing.skip_inside_message(key, *seq, &packet.payload, response_only, now_ms)
+            {
                 return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None, reassembled_packet: None };
             }
         }
@@ -1510,7 +1572,12 @@ impl StreamReassembler {
 
         let declared = packet.ip_declared_payload_len.saturating_sub(packet.transport_header_len);
         let Some(raw_status) = self.segments.feed(&key, seq, &packet.payload, declared, now_ms) else {
-            // Nothing changed — e.g. a retransmission of bytes already held.
+            // Nothing changed — e.g. a retransmission of bytes already held,
+            // or a segment consumed by a window release or cleanup. Its bytes
+            // still say where DNS messages start.
+            if dns_tcp {
+                self.dns_framing.note_consumed(&key, seq, &packet.payload, response_only, now_ms);
+            }
             return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None, reassembled_packet: None };
         };
         let status = self.attribute(raw_status, now_ms);
@@ -3311,6 +3378,77 @@ mod tests {
         // ...but that skip did not refresh it, so one millisecond later it lapsed.
         let after = sniff_out(&mut r, inside, &dns_query_stream(0x666, "forged.example"), TCP_STREAM_IDLE_MS + 1);
         assert!(is_forged(&after), "a skipped segment must not keep the entry alive: {:?}", after.info);
+    }
+
+    // ---- Messages that start inside a skipped segment (JAM-21 round 3) ----
+
+    #[test]
+    fn tcp_dns_back_to_back_over_limit_messages_hide_a_query_inside_message_two() {
+        let mut base = Vec::new();
+        for _ in 0..2 {
+            base.extend_from_slice(&60_000u16.to_be_bytes());
+            base.resize(base.len() + 60_000, 0xaa);
+        }
+        let forged = dns_query_stream(0x666, "forged.example");
+        // Whichever segment-aligned spot inside message two the query lands on.
+        for k in 44..85 {
+            let mut stream = base.clone();
+            stream[k * 1400..k * 1400 + forged.len()].copy_from_slice(&forged);
+            let mut r = StreamReassembler::new();
+            for (i, chunk) in stream.chunks(1400).enumerate() {
+                let outcome = sniff_out(&mut r, 1 + (i * 1400) as u32, chunk, 0);
+                assert!(!is_forged(&outcome), "query at segment {k}, seen at {i}: {:?}", outcome.info);
+            }
+        }
+    }
+
+    #[test]
+    fn tcp_dns_message_starting_inside_a_skipped_segment_moves_the_boundary() {
+        let mut r = StreamReassembler::new();
+        let mut seg1 = dns_query_stream(1, "a.com");
+        seg1.extend_from_slice(&partial_message(50, 10));
+        assert!(matches!(sniff_out(&mut r, 100, &seg1, 0).info, L7Info::Dns { id: 1, .. }));
+        // The rest of message two, then a prefix declaring 60,000.
+        let mut seg2 = vec![0xaa; 40];
+        seg2.extend_from_slice(&60_000u16.to_be_bytes());
+        seg2.resize(seg2.len() + 100, 0xaa);
+        let seq2 = 100 + seg1.len() as u32;
+        assert_eq!(sniff_out(&mut r, seq2, &seg2, 0).info, L7Info::None);
+        let seq3 = seq2 + seg2.len() as u32;
+        let third = sniff_out(&mut r, seq3, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&third), "{:?}", third.info);
+    }
+
+    #[test]
+    fn tcp_dns_prefix_split_across_a_skipped_segment_still_completes() {
+        let mut r = StreamReassembler::new();
+        let mut seg1 = dns_query_stream(1, "a.com");
+        seg1.push(0xea); // high byte of a 60,000-byte declaration
+        assert!(matches!(sniff_out(&mut r, 100, &seg1, 0).info, L7Info::Dns { id: 1, .. }));
+        let mut seg2 = vec![0x60];
+        seg2.resize(100, 0xaa);
+        let seq2 = 100 + seg1.len() as u32;
+        assert_eq!(sniff_out(&mut r, seq2, &seg2, 0).info, L7Info::None);
+        let third = sniff_out(&mut r, seq2 + 100, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&third), "{:?}", third.info);
+    }
+
+    #[test]
+    fn tcp_dns_a_segment_consumed_by_window_release_still_advances_the_boundary() {
+        let mut r = StreamReassembler::new();
+        // An undecodable but complete message: held, undecided.
+        let junk = framed_dns(&[0u8; 20]);
+        sniff_out(&mut r, 100, &junk, 0);
+        let mut declaring = 60_000u16.to_be_bytes().to_vec();
+        declaring.resize(100, 0xaa);
+        let seq2 = 100 + junk.len() as u32;
+        // Past the window: released, so the segment itself is not decoded.
+        sniff_out(&mut r, seq2, &declaring, 3_000);
+        let seq3 = seq2 + declaring.len() as u32;
+        let filler = sniff_out(&mut r, seq3, &[0xaa; 100], 3_001);
+        assert_eq!(filler.info, L7Info::None);
+        let forged = sniff_out(&mut r, seq3 + 100, &dns_query_stream(0x666, "forged.example"), 3_002);
+        assert!(!is_forged(&forged), "{:?}", forged.info);
     }
 
     #[test]

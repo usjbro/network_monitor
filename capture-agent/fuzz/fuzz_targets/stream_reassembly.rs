@@ -20,16 +20,18 @@ fn flow() -> FlowKey {
     }
 }
 
-/// A minimal IPv4/TCP packet to port 53 around `payload`.
-fn tcp53_packet(payload: &[u8], seq: u32) -> Vec<u8> {
+/// A minimal IPv4/TCP packet around `payload`: to port 53, or, with
+/// `from_server`, from port 53 to an ephemeral port. `syn` sets the SYN flag.
+fn tcp53_packet(payload: &[u8], seq: u32, from_server: bool, syn: bool) -> Vec<u8> {
     let total = (40 + payload.len()) as u16;
+    let (src_port, dst_port) = if from_server { (53u16, 51000u16) } else { (51000, 53) };
     let mut p = vec![0x45, 0];
     p.extend_from_slice(&total.to_be_bytes());
     p.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0, 10, 0, 0, 2, 10, 0, 0, 1]);
-    p.extend_from_slice(&51000u16.to_be_bytes());
-    p.extend_from_slice(&53u16.to_be_bytes());
+    p.extend_from_slice(&src_port.to_be_bytes());
+    p.extend_from_slice(&dst_port.to_be_bytes());
     p.extend_from_slice(&seq.to_be_bytes());
-    p.extend_from_slice(&[0, 0, 0, 0, 0x50, 0x10, 0xff, 0xff, 0, 0, 0, 0]);
+    p.extend_from_slice(&[0, 0, 0, 0, 0x50, if syn { 0x12 } else { 0x10 }, 0xff, 0xff, 0, 0, 0, 0]);
     p.extend_from_slice(payload);
     p
 }
@@ -186,8 +188,12 @@ fuzz_target!(|data: &[u8]| {
         let seq = base.wrapping_add(cursor).wrapping_add_signed(if control & 0x03 == 0 { step } else { 0 });
         cursor = cursor.wrapping_add(payload.len() as u32);
         dns_now_ms = dns_now_ms.saturating_add(u64::from(control & 0x03) * 1_000 + u64::from(control >> 5) * 400);
-        if let Some(parsed) = parse_packet(&tcp53_packet(&payload, seq), LinkType::Raw) {
-            let _ = dns.sniff(&parsed, Some((&dns_key, true)), dns_now_ms);
+        // Two more control bits: the direction (a response from source port
+        // 53, which tries HTTP and TLS first) and SYN, which forgets a boundary.
+        let from_server = control & 0x40 != 0;
+        let syn = control & 0x01 != 0 && control & 0x20 != 0;
+        if let Some(parsed) = parse_packet(&tcp53_packet(&payload, seq, from_server, syn), LinkType::Raw) {
+            let _ = dns.sniff(&parsed, Some((&dns_key, !from_server)), dns_now_ms);
         }
         dns.maybe_evict(dns_now_ms);
         assert!(dns.dns_framing_len() <= MAX_TCP_STREAMS, "DNS framing table breached its bound: {}", dns.dns_framing_len());

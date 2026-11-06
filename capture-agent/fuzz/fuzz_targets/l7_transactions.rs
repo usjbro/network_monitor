@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use capture_agent::flow::FlowKey;
-use capture_agent::l7::{sniff_dns_tcp, sniff_l7};
+use capture_agent::l7::{sniff_dns_tcp, sniff_for_transport, sniff_l7};
 use capture_agent::parse::TransportProtocol;
 use capture_agent::transaction::{ServiceTimeStats, TransactionTracker, MAX_PENDING};
 use libfuzzer_sys::fuzz_target;
@@ -43,6 +43,12 @@ fuzz_target!(|data: &[u8]| {
         let mut framed = (message.len() as u16).to_be_bytes().to_vec();
         framed.extend_from_slice(message);
         let _ = sniff_dns_tcp(&framed);
+        // JAM-21: TCP/53 in each direction, including source 53 to a port
+        // that is not an HTTP or TLS port, which tries HTTP and TLS first.
+        for (src, dst) in [(40_000, 53), (53, 40_000), (53, 8_443), (53, 80), (53, 53)] {
+            let _ = sniff_for_transport(message, TransportProtocol::Tcp, Some(src), Some(dst));
+            let _ = sniff_for_transport(&framed, TransportProtocol::Tcp, Some(src), Some(dst));
+        }
         ts_us = ts_us.saturating_add(u64::from(control >> 3) * 250_000);
         let _ = tracker.observe_frame(Some((&flow, outbound)), &l7, ts_us, retransmit);
         let _ = tracker.expire(ts_us);
