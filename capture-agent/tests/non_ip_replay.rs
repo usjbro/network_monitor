@@ -448,3 +448,125 @@ fn non_ip_replay_counts_only_malformed_frames_and_emits_only_their_findings() {
     );
     assert!(summaries[0].starts_with("4-byte frame"));
 }
+
+fn ethernet_udp(src: [u8; 4], dst: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::new();
+    etherparse::PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
+        .ipv4(src, dst, 64)
+        .udp(src_port, dst_port)
+        .write(&mut frame, payload)
+        .unwrap();
+    frame
+}
+
+/// A DNS message for test.example: a query, or with `answer` a response
+/// carrying one A record.
+fn dns_message(id: u16, answer: Option<[u8; 4]>) -> Vec<u8> {
+    let mut bytes = Vec::from(id.to_be_bytes());
+    bytes.extend((if answer.is_some() { 0x8180u16 } else { 0x0100u16 }).to_be_bytes());
+    bytes.extend(1u16.to_be_bytes()); // questions
+    bytes.extend(u16::from(answer.is_some()).to_be_bytes());
+    bytes.extend(0u32.to_be_bytes()); // authority and additional
+    bytes.extend([4, b't', b'e', b's', b't', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0]);
+    bytes.extend(1u16.to_be_bytes()); // A
+    bytes.extend(1u16.to_be_bytes()); // IN
+    if let Some(addr) = answer {
+        bytes.extend([0xc0, 0x0c]); // owner: the question name
+        bytes.extend(1u16.to_be_bytes()); // A
+        bytes.extend(1u16.to_be_bytes()); // IN
+        bytes.extend(300u32.to_be_bytes());
+        bytes.extend(4u16.to_be_bytes());
+        bytes.extend(addr);
+    }
+    bytes
+}
+
+/// JAM-21: the only test of the capture loop's call into the observed name
+/// table, which unit tests on either side of it can't see. Lives here because
+/// CI runs this file's replay tests.
+#[test]
+#[ignore = "requires exclusive 127.0.0.1:9990; run with --ignored --test-threads=1"]
+fn a_matched_dns_exchange_names_the_endpoint_and_an_unmatched_response_does_not() {
+    // Refuse to connect to an operator's agent if the port is occupied.
+    drop(TcpListener::bind("127.0.0.1:9990").expect("exclusive test port required"));
+    let auth = agent_auth::AuthFixture::new();
+    let path = auth.token_path().with_extension("pcap");
+    let local = [192, 0, 2, 1];
+    let server = [198, 51, 100, 53];
+    let (named, unnamed) = ([203, 0, 113, 7], [203, 0, 113, 8]);
+    let frames = [
+        ethernet_udp(local, server, 53000, 53, &dns_message(0x1234, None)),
+        ethernet_udp(server, local, 53, 53000, &dns_message(0x1234, Some(named))),
+        // No query went out for this one, so it teaches nothing.
+        ethernet_udp(server, local, 53, 53001, &dns_message(0x4321, Some(unnamed))),
+        ethernet_udp(local, named, 40000, 443, b"traffic to the named host"),
+        ethernet_udp(local, unnamed, 40001, 443, b"traffic to the other host"),
+    ];
+    let mut pcap = Vec::new();
+    pcap.extend(0xa1b2c3d4u32.to_le_bytes());
+    pcap.extend(2u16.to_le_bytes());
+    pcap.extend(4u16.to_le_bytes());
+    pcap.extend([0; 8]);
+    pcap.extend(65535u32.to_le_bytes());
+    pcap.extend(1u32.to_le_bytes()); // LINKTYPE_ETHERNET
+    for (i, frame) in frames.iter().enumerate() {
+        pcap.extend(100u32.to_le_bytes());
+        pcap.extend((i as u32 * 1000).to_le_bytes());
+        pcap.extend((frame.len() as u32).to_le_bytes());
+        pcap.extend((frame.len() as u32).to_le_bytes());
+        pcap.extend(frame);
+    }
+    std::fs::write(&path, pcap).unwrap();
+
+    let _agent = Agent(
+        Command::new(env!("CARGO_BIN_EXE_capture-agent"))
+            .env("AGENT_TOKEN_FILE", auth.token_path())
+            .env("REPLAY_FILE", &path)
+            .env("REPLAY_SPEED", "fast")
+            .env("REPLAY_LOCAL_ADDRS", "192.0.2.1")
+            .env_remove("CAPTURE_INTERFACE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let stream = loop {
+        match TcpStream::connect("127.0.0.1:9990") {
+            Ok(stream) => break stream,
+            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!("agent did not listen: {error}"),
+        }
+    };
+    let mut reader = auth.authenticate(stream);
+    reader.get_mut().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+
+    // Each host's latest observed name, read until both hosts are listed and
+    // the named one has its name, or the deadline passes.
+    let mut names = serde_json::Map::new();
+    let mut line = String::new();
+    while Instant::now() < deadline
+        && !(names.contains_key("203.0.113.8") && names.get("203.0.113.7").is_some_and(|name| !name.is_null()))
+    {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if event["type"] != "endpoint_update" {
+                    continue;
+                }
+                for endpoint in event["endpoints"].as_array().into_iter().flatten() {
+                    if let Some(host) = endpoint["host"].as_str() {
+                        names.insert(host.to_string(), endpoint["observedName"].clone());
+                    }
+                }
+            }
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(error) => panic!("wire read failed: {error}"),
+        }
+    }
+
+    assert_eq!(names.get("203.0.113.7"), Some(&serde_json::json!("test.example")), "{names:?}");
+    assert_eq!(names.get("203.0.113.8"), Some(&serde_json::Value::Null), "{names:?}");
+}
