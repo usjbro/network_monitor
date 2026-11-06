@@ -817,18 +817,28 @@ mod tests {
         use crate::l7::{dns_test_support::response, sniff_l7};
         let txt = |len: usize| {
             let mut rdata = Vec::new();
-            for _ in 0..len.div_ceil(255) {
-                rdata.push(255.min(len) as u8);
-                rdata.extend(std::iter::repeat_n(b'a', 255.min(len)));
+            let mut left = len;
+            while left > 0 {
+                let n = left.min(255);
+                rdata.push(n as u8);
+                rdata.extend(std::iter::repeat_n(b'a', n));
+                left -= n;
             }
             rdata
         };
-        let truncated_of = |len: usize| {
-            let msg = response(1, "t.example.com", 16, 0, &[(16, 60, txt(len))]);
+        let field = |rdatas: &[Vec<u8>], i: usize, leaf: &str| {
+            let answers: Vec<_> = rdatas.iter().map(|r| (16u16, 60u32, r.clone())).collect();
+            let msg = response(1, "t.example.com", 16, 0, &answers);
             let fields = app_fields(&sniff_l7(&msg, None), msg.len() as u32);
-            fields.iter().find(|f| f.path == "dns.answer.0.truncated").and_then(|f| f.value.clone())
+            let path = format!("dns.answer.{i}.{leaf}");
+            fields.iter().find(|f| f.path == path).and_then(|f| f.value.clone())
         };
-        assert_eq!(truncated_of(510), None);
-        assert_eq!(truncated_of(765), Some(FieldValue::Bool(true)));
+        assert_eq!(field(&[txt(500)], 0, "truncated"), None);
+        assert_eq!(field(&[txt(513)], 0, "truncated"), Some(FieldValue::Bool(true)));
+        // Once the response budget is spent an answer has no data at all,
+        // yet still says it was cut.
+        let spent = [txt(512), txt(512), txt(512), txt(512), txt(10)];
+        assert_eq!(field(&spent, 4, "data"), None);
+        assert_eq!(field(&spent, 4, "truncated"), Some(FieldValue::Bool(true)));
     }
 }

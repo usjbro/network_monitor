@@ -206,53 +206,94 @@ fn read_dns_name(msg: &[u8], offset: usize) -> Option<(String, usize)> {
 /// concatenated with no separator. Bytes outside printable ASCII, and the
 /// backslash, use the RFC 1035 §5.1 escapes (`\DDD`, `\\`).
 ///
-/// The text is redacted whole, before it is capped, so a redacted value is
-/// never a truncated one. The cap then cuts at a whole escape and reports
-/// it. A character-string that overruns its RDATA is malformed: the result
-/// is empty, never a partial value.
+/// `budget` is what is left of the response's TXT allowance. Output never
+/// exceeds `min(budget, MAX_DNS_TXT_ANSWER_BYTES)` and always ends on a whole
+/// escape; `true` is returned when text was cut at either cap. A
+/// character-string that overruns its RDATA is malformed anywhere in the
+/// record: the result is empty, never a partial value.
 fn dns_txt_text(rdata: &[u8], budget: usize) -> (String, bool) {
-    let mut text = String::new();
+    // Validate the structure first, without allocating, so that an overrun
+    // past the cap still gives empty data.
     let mut pos = 0;
+    let mut content = 0usize;
     while pos < rdata.len() {
         let len = rdata[pos] as usize;
-        let Some(chunk) = rdata.get(pos + 1..pos + 1 + len) else { return (String::new(), false) };
-        for &b in chunk {
-            match b {
-                b'\\' => text.push_str("\\\\"),
-                0x20..=0x7e => text.push(b as char),
-                _ => text.push_str(&format!("\\{b:03}")),
+        if pos + 1 + len > rdata.len() {
+            return (String::new(), false);
+        }
+        content += len;
+        pos += 1 + len;
+    }
+    if budget == 0 {
+        return (String::new(), content > 0);
+    }
+
+    // Escape only as much as the answer cap allows.
+    let mut text = String::new();
+    let mut cut = false;
+    let mut pos = 0;
+    'strings: while pos < rdata.len() {
+        let len = rdata[pos] as usize;
+        for &b in &rdata[pos + 1..pos + 1 + len] {
+            let mut token = [0u8; 4];
+            let n = match b {
+                b'\\' => {
+                    token[..2].copy_from_slice(b"\\\\");
+                    2
+                }
+                0x20..=0x7e => {
+                    token[0] = b;
+                    1
+                }
+                _ => {
+                    token = [b'\\', b'0' + b / 100, b'0' + b / 10 % 10, b'0' + b % 10];
+                    4
+                }
+            };
+            if text.len() + n > MAX_DNS_TXT_ANSWER_BYTES {
+                cut = true;
+                break 'strings;
             }
+            // Tokens are ASCII by construction.
+            text.push_str(std::str::from_utf8(&token[..n]).unwrap_or_default());
         }
         pos += 1 + len;
     }
 
-    // A TXT value is often `key=value`; the part before the first `=` is the
-    // name the header redactor judges, as for an HTTP header.
-    let name = text.split('=').next().unwrap_or_default().to_string();
+    // Sensitive names and the bearer prefix sit at the start of the text, so
+    // redacting the capped text judges it exactly as the whole would be. A
+    // `key=value` TXT is judged on its key like an HTTP header; no sensitive
+    // name is anywhere near 64 bytes, so a longer key is not copied.
+    let key = text.split('=').next().unwrap_or_default();
+    let name = if key.len() <= 64 { key.to_string() } else { String::new() };
+    let was_redaction = text == "[REDACTED]";
     let mut pair = [(name, text)];
     redact_headers(&mut pair);
-    let [(_, text)] = pair;
+    let [(_, mut text)] = pair;
+    if !was_redaction && text == "[REDACTED]" {
+        cut = false;
+    }
 
-    let limit = budget.min(MAX_DNS_TXT_ANSWER_BYTES);
-    if text.len() <= limit {
-        return (text, false);
-    }
-    // Back up to a whole escape: `\\` followed by a digit starts a 4-byte
-    // `\DDD`, otherwise `\\` is a 2-byte `\\\\`.
-    let bytes = text.as_bytes();
-    let mut end = 0;
-    while end < bytes.len() {
-        let step = match bytes[end] {
-            b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_digit) => 4,
-            b'\\' => 2,
-            _ => 1,
-        };
-        if end + step > limit {
-            break;
+    if text.len() > budget {
+        // Back up to a whole escape: `\` followed by a digit starts a
+        // 4-byte `\DDD`, otherwise `\` is the 2-byte `\\`.
+        let bytes = text.as_bytes();
+        let mut end = 0;
+        while end < bytes.len() {
+            let step = match bytes[end] {
+                b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_digit) => 4,
+                b'\\' => 2,
+                _ => 1,
+            };
+            if end + step > budget {
+                break;
+            }
+            end += step;
         }
-        end += step;
+        text.truncate(end);
+        cut = true;
     }
-    (text[..end].to_string(), true)
+    (text, cut)
 }
 
 fn dns_rdata_text(msg: &[u8], rtype: u16, rdata_offset: usize, rdata: &[u8]) -> String {
@@ -913,6 +954,44 @@ mod tests {
     fn txt_bearer_value_is_redacted() {
         let r = txt_data(&[txt_rdata(b"Bearer abc")]);
         assert_eq!(r, vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_partly_spent_budget_takes_the_remainder() {
+        let big = txt_rdata(&[b'a'; 500]);
+        let r = txt_data(&[big.clone(), big.clone(), big.clone(), big, txt_rdata(&[b'b'; 100])]);
+        assert_eq!(r[4], ("b".repeat(48), true));
+    }
+
+    #[test]
+    fn txt_budget_cut_lands_on_whole_escapes() {
+        let big = txt_rdata(&[b'a'; 500]);
+        let with_tail = |tail: &[u8]| {
+            let mut text = vec![b'a'; 46];
+            text.extend_from_slice(tail);
+            let r = txt_data(&[big.clone(), big.clone(), big.clone(), big.clone(), txt_rdata(&text)]);
+            r[4].clone()
+        };
+        // 46 + `\\` is exactly the 48 left: kept whole, rest cut.
+        assert_eq!(with_tail(b"\\b"), (format!("{}\\\\", "a".repeat(46)), true));
+        // 46 + `\DDD` would be 50: dropped whole, never `\0` or `\00`.
+        assert_eq!(with_tail(b"\x00b"), ("a".repeat(46), true));
+        // 47 + `\\` would be 49.
+        assert_eq!(with_tail(b"a\\"), ("a".repeat(47), true));
+    }
+
+    #[test]
+    fn txt_long_sensitive_value_is_redacted_not_truncated() {
+        let mut text = b"authorization=".to_vec();
+        text.extend_from_slice(&[b'a'; 600]);
+        assert_eq!(txt_data(&[txt_rdata(&text)]), vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_overrun_after_the_cap_still_gives_empty_data() {
+        let mut rdata = txt_rdata(&[b'a'; 600]);
+        rdata.extend_from_slice(&[9, b'x']);
+        assert_eq!(txt_data(&[rdata]), vec![(String::new(), false)]);
     }
 
     #[test]
