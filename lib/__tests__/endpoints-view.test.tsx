@@ -207,6 +207,15 @@ describe('EndpointsView', () => {
       expect(screen.queryByText('10.0.0.2')).not.toBeInTheDocument();
     });
 
+    it('wraps_a_long_name_instead_of_widening_the_table', () => {
+      const long = `${'a'.repeat(60)}.${'b'.repeat(60)}.${'c'.repeat(60)}.example.com`;
+      renderOne({ observedName: long });
+      const span = screen.getByText(long);
+      expect(span).toHaveClass('break-all');
+      expect(span).not.toHaveClass('truncate');
+      expect(span.closest('td')).toHaveClass('max-w-xs');
+    });
+
     it('renders_markup_in_a_name_as_text', () => {
       const evil = '<img src=x onerror=alert(1)>';
       const { container } = renderOne({ observedName: evil });

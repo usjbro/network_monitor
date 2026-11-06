@@ -51,7 +51,7 @@ function endpointToRow(e: Endpoint): Row {
       <span>
         <span className="font-bold text-slate-200">{e.host}</span>
         {e.observedName && (
-          <span className="block text-[10px] text-slate-500" title="Learned from observed DNS">
+          <span className="block break-all text-[10px] text-slate-500" title="Learned from observed DNS">
             {e.observedName}
           </span>
         )}
@@ -271,7 +271,7 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
                   selectedKey === row.key ? 'bg-slate-900/90 font-semibold' : ''
                 }`}
               >
-                <td className="p-2.5">{row.name}</td>
+                <td className="p-2.5 max-w-xs">{row.name}</td>
                 <td className="p-2.5 text-slate-300">
                   <div className="font-bold">{row.processName}</div>
                   <div className="text-[10px] text-slate-500">PID: {row.pid}</div>
