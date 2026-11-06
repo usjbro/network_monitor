@@ -367,6 +367,9 @@ fn app_fields(l7: &L7Info, payload_len: u32) -> Vec<Field> {
                     let data_type = if matches!(answer.rtype, 1 | 28) { FieldType::Addr } else { FieldType::Str };
                     fields.push(Field::leaf(&format!("{base}.data"), "Data", &base, data_type, FieldValue::Str(answer.data.clone()), ByteRegion::Payload, 0, payload_len));
                 }
+                if answer.data_truncated {
+                    fields.push(Field::leaf(&format!("{base}.truncated"), "Data Truncated", &base, FieldType::Bool, FieldValue::Bool(true), ByteRegion::Payload, 0, payload_len));
+                }
             }
             fields
         }
@@ -807,5 +810,25 @@ mod tests {
         let paths: std::collections::HashSet<_> = fields.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths.len(), fields.len());
         assert!(fields.iter().all(|f| f.group.as_deref().is_none_or(|g| paths.contains(g))));
+    }
+
+    #[test]
+    fn truncated_txt_answer_reports_the_truncated_field() {
+        use crate::l7::{dns_test_support::response, sniff_l7};
+        let txt = |len: usize| {
+            let mut rdata = Vec::new();
+            for _ in 0..len.div_ceil(255) {
+                rdata.push(255.min(len) as u8);
+                rdata.extend(std::iter::repeat_n(b'a', 255.min(len)));
+            }
+            rdata
+        };
+        let truncated_of = |len: usize| {
+            let msg = response(1, "t.example.com", 16, 0, &[(16, 60, txt(len))]);
+            let fields = app_fields(&sniff_l7(&msg, None), msg.len() as u32);
+            fields.iter().find(|f| f.path == "dns.answer.0.truncated").and_then(|f| f.value.clone())
+        };
+        assert_eq!(truncated_of(510), None);
+        assert_eq!(truncated_of(765), Some(FieldValue::Bool(true)));
     }
 }

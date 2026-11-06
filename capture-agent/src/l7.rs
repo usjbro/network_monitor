@@ -1,4 +1,5 @@
 use crate::ja3::{compute_ja3, label_for_ja3, ClientHelloFields};
+use crate::redact::redact_headers;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum L7Info {
@@ -119,14 +120,24 @@ fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
 ///
 /// `data` is the record's value in text form: dotted IPv4 for A, standard
 /// IPv6 notation for AAAA, the target name for CNAME/NS/PTR, and empty for
-/// any other type, whose RDATA is not decoded.
+/// any other type except TXT, whose RDATA is not decoded. For TXT it is the
+/// record's character-strings, joined and escaped, and redacted; see
+/// `dns_txt_text`. `data_truncated` is set when a TXT value was cut at a cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsAnswer {
     pub name: String,
     pub rtype: u16,
     pub ttl: u32,
     pub data: String,
+    pub data_truncated: bool,
 }
+
+/// Longest TXT text kept for one answer, in output bytes (after escaping).
+pub const MAX_DNS_TXT_ANSWER_BYTES: usize = 512;
+
+/// Longest TXT text kept across all answers of one response, so that sixteen
+/// large records cannot multiply the per-answer cap.
+pub const MAX_DNS_TXT_RESPONSE_BYTES: usize = 2048;
 
 /// Upper bound on the answer records decoded from one response. A response
 /// can declare up to 65,535 answers in ANCOUNT. Decoding is linear in the
@@ -191,6 +202,59 @@ fn read_dns_name(msg: &[u8], offset: usize) -> Option<(String, usize)> {
     }
 }
 
+/// Decodes TXT RDATA (RFC 1035 §3.3.14): length-prefixed character-strings,
+/// concatenated with no separator. Bytes outside printable ASCII, and the
+/// backslash, use the RFC 1035 §5.1 escapes (`\DDD`, `\\`).
+///
+/// The text is redacted whole, before it is capped, so a redacted value is
+/// never a truncated one. The cap then cuts at a whole escape and reports
+/// it. A character-string that overruns its RDATA is malformed: the result
+/// is empty, never a partial value.
+fn dns_txt_text(rdata: &[u8], budget: usize) -> (String, bool) {
+    let mut text = String::new();
+    let mut pos = 0;
+    while pos < rdata.len() {
+        let len = rdata[pos] as usize;
+        let Some(chunk) = rdata.get(pos + 1..pos + 1 + len) else { return (String::new(), false) };
+        for &b in chunk {
+            match b {
+                b'\\' => text.push_str("\\\\"),
+                0x20..=0x7e => text.push(b as char),
+                _ => text.push_str(&format!("\\{b:03}")),
+            }
+        }
+        pos += 1 + len;
+    }
+
+    // A TXT value is often `key=value`; the part before the first `=` is the
+    // name the header redactor judges, as for an HTTP header.
+    let name = text.split('=').next().unwrap_or_default().to_string();
+    let mut pair = [(name, text)];
+    redact_headers(&mut pair);
+    let [(_, text)] = pair;
+
+    let limit = budget.min(MAX_DNS_TXT_ANSWER_BYTES);
+    if text.len() <= limit {
+        return (text, false);
+    }
+    // Back up to a whole escape: `\\` followed by a digit starts a 4-byte
+    // `\DDD`, otherwise `\\` is a 2-byte `\\\\`.
+    let bytes = text.as_bytes();
+    let mut end = 0;
+    while end < bytes.len() {
+        let step = match bytes[end] {
+            b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_digit) => 4,
+            b'\\' => 2,
+            _ => 1,
+        };
+        if end + step > limit {
+            break;
+        }
+        end += step;
+    }
+    (text[..end].to_string(), true)
+}
+
 fn dns_rdata_text(msg: &[u8], rtype: u16, rdata_offset: usize, rdata: &[u8]) -> String {
     match (rtype, rdata.len()) {
         (1, 4) => std::net::Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]).to_string(),
@@ -246,6 +310,7 @@ fn sniff_dns(payload: &[u8]) -> Option<L7Info> {
     // first question and the answers. Skip them; give up on the answers
     // rather than misread them if a question can't be skipped.
     let mut answers = Vec::new();
+    let mut txt_budget = MAX_DNS_TXT_RESPONSE_BYTES;
     let mut questions_skipped = true;
     for _ in 1..qdcount.min(16) {
         match read_dns_name(payload, pos) {
@@ -265,8 +330,14 @@ fn sniff_dns(payload: &[u8]) -> Option<L7Info> {
             let rdlength = u16::from_be_bytes([fixed[8], fixed[9]]) as usize;
             let rdata_offset = after + 10;
             let Some(rdata) = payload.get(rdata_offset..rdata_offset + rdlength) else { break };
-            let data = dns_rdata_text(payload, rtype, rdata_offset, rdata);
-            answers.push(DnsAnswer { name, rtype, ttl, data });
+            let (data, data_truncated) = if rtype == 16 {
+                let (text, truncated) = dns_txt_text(rdata, txt_budget);
+                txt_budget -= text.len();
+                (text, truncated)
+            } else {
+                (dns_rdata_text(payload, rtype, rdata_offset, rdata), false)
+            };
+            answers.push(DnsAnswer { name, rtype, ttl, data, data_truncated });
             pos = rdata_offset + rdlength;
         }
     }
@@ -754,13 +825,94 @@ mod tests {
                 assert_eq!(
                     answers,
                     vec![
-                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 300, data: "93.184.216.34".into() },
-                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 60, data: "93.184.216.35".into() },
+                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 300, data: "93.184.216.34".into(), data_truncated: false },
+                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 60, data: "93.184.216.35".into(), data_truncated: false },
                     ]
                 );
             }
             other => panic!("expected DnsResponse, got {other:?}"),
         }
+    }
+
+    fn txt_data(rdatas: &[Vec<u8>]) -> Vec<(String, bool)> {
+        let answers: Vec<(u16, u32, Vec<u8>)> = rdatas.iter().map(|r| (16u16, 60u32, r.clone())).collect();
+        let msg = response(1, "t.example.com", 16, 0, &answers);
+        let L7Info::DnsResponse { answers, .. } = sniff_l7(&msg, None) else { panic!("expected DnsResponse") };
+        answers.into_iter().map(|a| (a.data, a.data_truncated)).collect()
+    }
+
+    /// RDATA of character-strings carrying `text`, split at 255 bytes.
+    fn txt_rdata(text: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in text.chunks(255) {
+            out.push(chunk.len() as u8);
+            out.extend_from_slice(chunk);
+        }
+        out
+    }
+
+    #[test]
+    fn txt_joins_character_strings() {
+        assert_eq!(txt_data(&[b"\x03v=s\x03pf1".to_vec()]), vec![("v=spf1".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_escapes_non_printable_and_backslash() {
+        assert_eq!(txt_data(&[b"\x03a\x00\\".to_vec()]), vec![("a\\000\\\\".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_at_answer_limit_is_not_truncated() {
+        let r = txt_data(&[txt_rdata(&[b'a'; 512])]);
+        assert_eq!(r[0].0.len(), 512);
+        assert!(!r[0].1);
+    }
+
+    #[test]
+    fn txt_over_answer_limit_is_truncated() {
+        let r = txt_data(&[txt_rdata(&[b'a'; 513])]);
+        assert_eq!(r[0].0.len(), 512);
+        assert!(r[0].1);
+    }
+
+    #[test]
+    fn txt_truncation_never_splits_an_escape() {
+        let mut text = vec![b'a'; 511];
+        text.push(0);
+        let r = txt_data(&[txt_rdata(&text)]);
+        assert_eq!(r[0].0.len(), 511);
+        assert!(r[0].1);
+    }
+
+    #[test]
+    fn txt_response_budget_is_shared_across_answers() {
+        let rdata = txt_rdata(&[b'a'; 512]);
+        let r = txt_data(&[rdata.clone(), rdata.clone(), rdata.clone(), rdata.clone(), rdata]);
+        assert_eq!(r.iter().map(|(d, _)| d.len()).sum::<usize>(), 2048);
+        assert!(r[..4].iter().all(|(d, t)| d.len() == 512 && !t));
+        assert_eq!(r[4], (String::new(), true));
+    }
+
+    #[test]
+    fn txt_overrunning_character_string_gives_empty_data() {
+        assert_eq!(txt_data(&[b"\x05ab".to_vec()]), vec![(String::new(), false)]);
+    }
+
+    #[test]
+    fn txt_zero_rdata_gives_empty_data() {
+        assert_eq!(txt_data(&[Vec::new()]), vec![(String::new(), false)]);
+    }
+
+    #[test]
+    fn txt_sensitive_key_is_redacted() {
+        let r = txt_data(&[txt_rdata(b"authorization=abc")]);
+        assert_eq!(r, vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_bearer_value_is_redacted() {
+        let r = txt_data(&[txt_rdata(b"Bearer abc")]);
+        assert_eq!(r, vec![("[REDACTED]".to_string(), false)]);
     }
 
     #[test]
