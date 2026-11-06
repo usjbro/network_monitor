@@ -421,8 +421,9 @@ impl TransactionTracker {
     /// Only unicast DNS over UDP to port 53 is matched. mDNS (5353) and
     /// LLMNR (5355) queries go to a multicast group and are answered on a
     /// different flow, so tracking them would turn every one into a false
-    /// unanswered finding. DNS over TCP carries a length prefix the parser
-    /// doesn't decode.
+    /// unanswered finding. DNS over TCP is decoded (JAM-21) but deliberately
+    /// not matched: JAM-15 scoped matching to UDP, and a TCP stream can carry
+    /// several messages per frame.
     fn is_dns_service(key: &FlowKey, server_is_remote: bool) -> bool {
         let server_port = if server_is_remote { key.remote_port } else { key.local_port };
         key.protocol == TransportProtocol::Udp && server_port == 53
@@ -875,5 +876,15 @@ mod tests {
         let summary = ProtocolStats::default().summary(TxnProtocol::Dns);
         assert_eq!((summary.min_us, summary.median_us, summary.p95_us, summary.max_us), (None, None, None, None));
         assert_eq!(nearest_rank(&[7], 95), Some(7));
+    }
+
+    #[test]
+    fn dns_over_tcp_is_decoded_but_never_tracked() {
+        let (mut t, stats) = tracker();
+        let flow = FlowKey { remote_port: 53, ..tcp_flow() };
+        assert_eq!(t.observe(Some((&flow, true)), &dns_q(7, "example.com"), 0), TxnEvent::None);
+        assert_eq!(t.observe(Some((&flow, false)), &dns_r(7, "example.com"), 1_000), TxnEvent::None);
+        assert_eq!(t.pending_len(), 0);
+        assert_eq!(stats.lock().unwrap().snapshot()[0].answered, 0);
     }
 }

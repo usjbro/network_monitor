@@ -10,13 +10,13 @@ use libfuzzer_sys::fuzz_target;
 /// One flow identity, reused for every segment so the fuzzer's inputs pile
 /// into the same stream buffer rather than each getting a fresh one — that is
 /// where overlap, reordering, and the per-stream cap actually interact.
-fn flow(remote_port: u16) -> FlowKey {
+fn flow() -> FlowKey {
     FlowKey {
         protocol: TransportProtocol::Tcp,
         local_addr: "192.168.1.10".to_string(),
         local_port: 51000,
         remote_addr: "93.184.216.34".to_string(),
-        remote_port,
+        remote_port: 80,
     }
 }
 
@@ -54,9 +54,6 @@ fuzz_target!(|data: &[u8]| {
     // Driven through the real `parse_packet`, so this is the same path the
     // capture loop takes: arbitrary bytes in, and only what genuinely parses
     // as an IPv4 fragment reaches the reassembler.
-    // JAM-21: one control bit moves the remote end to port 53, so segmented
-    // TCP/53 takes the same sequence-wraparound and overlap cases.
-    let remote_port = if data.first().is_some_and(|b| b & 0x80 != 0) { 53 } else { 80 };
     let mut fragments = IpFragmentReassembler::new();
     let mut now_ms = 0u64;
     for (i, chunk) in data.chunks(64).enumerate().take(64) {
@@ -100,7 +97,7 @@ fuzz_target!(|data: &[u8]| {
     // wrapping offsets densely. Every one of those is a bounds-arithmetic
     // path, which is exactly what needs fuzzing.
     let mut segments = TcpReassembler::new();
-    let key = TcpStreamKey { flow: flow(remote_port), from_local: true };
+    let key = TcpStreamKey { flow: flow(), from_local: true };
     let mut now_ms = 0u64;
     for chunk in data.chunks(16).take(256) {
         // Derive a sequence number from the bytes so the fuzzer can steer
@@ -138,7 +135,7 @@ fuzz_target!(|data: &[u8]| {
     let mut many = TcpReassembler::new();
     for (i, chunk) in data.chunks(8).enumerate().take(512) {
         let key = TcpStreamKey {
-            flow: FlowKey { remote_port: i as u16, ..flow(remote_port) },
+            flow: FlowKey { remote_port: i as u16, ..flow() },
             from_local: i % 2 == 0,
         };
         let _ = many.feed(&key, i as u32, chunk, chunk.len() as u32, i as u64);
@@ -151,15 +148,9 @@ fuzz_target!(|data: &[u8]| {
     // Exercises the fragment path, the per-frame fallback, and the
     // desegmenting L7 hand-off together, as `main.rs` calls them.
     let mut whole = StreamReassembler::new();
-    let key = flow(remote_port);
+    let key = flow();
     for (i, chunk) in data.chunks(128).enumerate().take(32) {
         if let Some(parsed) = parse_packet(chunk, LinkType::Raw) {
-            let _ = whole.sniff(&parsed, Some((&key, i % 2 == 0)), i as u64);
-        }
-        // A TCP/53 segment carrying the chunk, so the framed-DNS path is
-        // reached however the fuzzer shaped the bytes. The headers are
-        // hand-built because `parse_packet` rarely gets random bytes this far.
-        if let Some(parsed) = parse_packet(&tcp53_packet(chunk, i as u32), LinkType::Raw) {
             let _ = whole.sniff(&parsed, Some((&key, i % 2 == 0)), i as u64);
         }
         if i % 3 == 0 {
@@ -168,5 +159,42 @@ fuzz_target!(|data: &[u8]| {
         whole.maybe_evict(i as u64 * 1_000);
         assert!(whole.bytes_held() <= MAX_FRAGMENT_BYTES_TOTAL + MAX_TCP_BYTES_TOTAL);
     }
+
+    // ---- DNS over TCP through the facade (JAM-21) -------------------------
+    //
+    // `TcpReassembler::feed` never sees a port, so the framed-DNS path is only
+    // reached through `StreamReassembler::sniff` with real TCP/53 packets. The
+    // sequence numbers start near `u32::MAX` so message boundaries wrap, move
+    // backwards and forwards by small amounts so segments reorder, overlap and
+    // leave gaps, and the clock steps past the 2 s decision window and, over a
+    // long input, the idle timeout.
+    let mut dns = StreamReassembler::new();
+    let dns_key = FlowKey { remote_port: 53, ..flow() };
+    let base = u32::MAX - u32::from(data.first().copied().unwrap_or(0));
+    let mut cursor = 0u32;
+    let mut dns_now_ms = 0u64;
+    for chunk in data.chunks(24).take(256) {
+        let control = chunk.first().copied().unwrap_or(0);
+        // Half the segments start a message with a correct length prefix, so
+        // the fuzzer reaches `sniff_dns` past the length check.
+        let mut payload = Vec::new();
+        if control & 0x80 != 0 {
+            payload.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
+        }
+        payload.extend_from_slice(chunk);
+        let step = i32::from(control >> 2 & 0x1f) - 16;
+        let seq = base.wrapping_add(cursor).wrapping_add_signed(if control & 0x03 == 0 { step } else { 0 });
+        cursor = cursor.wrapping_add(payload.len() as u32);
+        dns_now_ms = dns_now_ms.saturating_add(u64::from(control & 0x03) * 1_000 + u64::from(control >> 5) * 400);
+        if let Some(parsed) = parse_packet(&tcp53_packet(&payload, seq), LinkType::Raw) {
+            let _ = dns.sniff(&parsed, Some((&dns_key, true)), dns_now_ms);
+        }
+        dns.maybe_evict(dns_now_ms);
+        assert!(dns.dns_framing_len() <= MAX_TCP_STREAMS, "DNS framing table breached its bound: {}", dns.dns_framing_len());
+        assert!(dns.bytes_held() <= MAX_FRAGMENT_BYTES_TOTAL + MAX_TCP_BYTES_TOTAL);
+    }
+    dns.reset();
+    assert_eq!(dns.dns_framing_len(), 0);
+
     whole.drop_flow(&key);
 });

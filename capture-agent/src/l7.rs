@@ -616,8 +616,8 @@ pub fn sniff_l7_desegmenting(payload: &[u8], dst_port: Option<u16>) -> L7Sniff {
 }
 
 /// The longest DNS message a TCP stream buffer can hold behind its two-byte
-/// length prefix. A message declaring more is `Undecided` so nothing is
-/// buffered for it: a message is either fully buffered or never buffered.
+/// length prefix. A message declaring more is `Undecided`: it can never be
+/// fully buffered, so it never decodes.
 pub const MAX_DNS_TCP_MESSAGE_BYTES: usize = MAX_TCP_STREAM_BYTES - 2;
 
 /// Sniffs a DNS-over-TCP stream buffer (RFC 1035 4.2.2): each message is
@@ -647,16 +647,25 @@ pub fn sniff_dns_tcp(stream: &[u8]) -> L7Sniff {
     }
 }
 
-/// `sniff_l7_desegmenting`, but aware of the transport: TCP traffic on port
-/// 53 in either direction is length-framed DNS, which `sniff_l7_desegmenting`
-/// cannot see because it knows only the destination port.
+/// Whether a packet is DNS over TCP: TCP to port 53, or from port 53 unless
+/// the other end is 80 or 443. A response comes from port 53 to an ephemeral
+/// port, but a client whose ephemeral port is 53 would otherwise hide its
+/// HTTP or TLS to those well-known ports.
+pub fn is_dns_over_tcp(protocol: TransportProtocol, src_port: Option<u16>, dst_port: Option<u16>) -> bool {
+    protocol == TransportProtocol::Tcp
+        && (dst_port == Some(53) || (src_port == Some(53) && !matches!(dst_port, Some(80 | 443))))
+}
+
+/// `sniff_l7_desegmenting`, but aware of the transport: DNS over TCP is
+/// length-framed, and a response is recognised by its source port, which
+/// `sniff_l7_desegmenting` (destination port only) cannot see.
 pub fn sniff_for_transport(
     payload: &[u8],
     protocol: TransportProtocol,
     src_port: Option<u16>,
     dst_port: Option<u16>,
 ) -> L7Sniff {
-    if protocol == TransportProtocol::Tcp && (src_port == Some(53) || dst_port == Some(53)) {
+    if is_dns_over_tcp(protocol, src_port, dst_port) {
         return sniff_dns_tcp(payload);
     }
     sniff_l7_desegmenting(payload, dst_port)
@@ -1439,6 +1448,33 @@ mod tests {
             }
             other => panic!("expected the first message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tcp_dns_at_declared_exactly_the_header_size_decodes_or_not_by_content() {
+        // 12 is the smallest declared length that is not rejected outright:
+        // a bare header declares no question, so it stays Undecided.
+        let mut header = vec![0u8; 12];
+        header[5] = 1; // QDCOUNT 1, but no question bytes follow
+        assert_eq!(sniff_dns_tcp(&framed(&header)), L7Sniff::Undecided);
+        assert_eq!(sniff_dns_tcp(&prefix_only(12, 0)), L7Sniff::NeedMoreBytes { at_least: 12 });
+    }
+
+    #[test]
+    fn source_port_53_does_not_hide_http_or_tls() {
+        let hello = build_client_hello("example.com");
+        match sniff_for_transport(&hello, TransportProtocol::Tcp, Some(53), Some(443)) {
+            L7Sniff::Decided(L7Info::TlsClientHello { sni, .. }) => assert_eq!(sni, "example.com"),
+            other => panic!("expected the ClientHello, got {other:?}"),
+        }
+        let get = b"GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+        assert!(matches!(
+            sniff_for_transport(get, TransportProtocol::Tcp, Some(53), Some(80)),
+            L7Sniff::Decided(L7Info::Http { .. })
+        ));
+        assert!(is_dns_over_tcp(TransportProtocol::Tcp, Some(53), Some(51000)));
+        assert!(is_dns_over_tcp(TransportProtocol::Tcp, Some(51000), Some(53)));
+        assert!(!is_dns_over_tcp(TransportProtocol::Udp, Some(51000), Some(53)));
     }
 
     #[test]

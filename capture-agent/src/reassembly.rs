@@ -39,7 +39,7 @@
 //! the prefix and status exposed here are what it needs to build on.
 
 use crate::flow::FlowKey;
-use crate::l7::{sniff_for_transport, L7Info, L7Sniff};
+use crate::l7::{is_dns_over_tcp, sniff_for_transport, L7Info, L7Sniff};
 use crate::parse::{parse_packet, LinkType, ParsedPacket, TransportProtocol};
 use std::collections::HashMap;
 
@@ -869,6 +869,11 @@ impl TcpReassembler {
         self.streams.contains_key(key)
     }
 
+    /// Sequence number of the first byte `prefix` returns.
+    fn base_seq(&self, key: &TcpStreamKey) -> Option<u32> {
+        self.streams.get(key).map(|stream| stream.base_seq)
+    }
+
     /// Feeds one segment's payload. Returns the direction's status whenever
     /// this segment actually changed the buffer, and `None` when it did not —
     /// which is precisely what a retransmission of already-held bytes does
@@ -1118,6 +1123,77 @@ pub struct StreamReassembler {
     last_frame_cut_at_ms: Option<u64>,
     frames_cut_at_snaplen: u64,
     last_evict_ms: u64,
+    dns_framing: DnsTcpFraming,
+}
+
+/// Where the next DNS-over-TCP message starts, per stream direction, as
+/// sequence state rather than buffered bytes (JAM-21). Without it, once the
+/// reassembler has decided or given up on a message, a later segment from
+/// inside that message would be read as the start of a new one, and its bytes
+/// taken for a length prefix.
+///
+/// At most `MAX_TCP_STREAMS` entries, oldest evicted first; an entry idle for
+/// `TCP_STREAM_IDLE_MS` on the capture clock is dropped.
+#[derive(Default)]
+struct DnsTcpFraming {
+    /// `(next_message_seq, last_seen_ms)`.
+    entries: HashMap<TcpStreamKey, (u32, u64)>,
+}
+
+impl DnsTcpFraming {
+    /// Whether `seq` lies before the recorded boundary, by a wraparound-safe
+    /// signed delta, i.e. inside a message already seen the start of.
+    fn is_inside_message(&mut self, key: &TcpStreamKey, seq: u32, now_ms: u64) -> bool {
+        let Some((boundary, last_seen_ms)) = self.entries.get_mut(key) else {
+            return false;
+        };
+        if now_ms.saturating_sub(*last_seen_ms) > TCP_STREAM_IDLE_MS {
+            self.entries.remove(key);
+            return false;
+        }
+        *last_seen_ms = now_ms;
+        (seq.wrapping_sub(*boundary) as i32) < 0
+    }
+
+    fn record(&mut self, key: &TcpStreamKey, next_message_seq: u32, now_ms: u64) {
+        if !self.entries.contains_key(key) && self.entries.len() >= MAX_TCP_STREAMS {
+            if let Some(oldest) = self.entries.iter().min_by_key(|(_, (_, seen))| *seen).map(|(k, _)| k.clone()) {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(key.clone(), (next_message_seq, now_ms));
+    }
+
+    fn forget(&mut self, key: &TcpStreamKey) {
+        self.entries.remove(key);
+    }
+
+    fn drop_flow(&mut self, flow: &FlowKey) {
+        self.entries.retain(|key, _| &key.flow != flow);
+    }
+
+    fn evict_stale(&mut self, now_ms: u64) {
+        self.entries.retain(|_, (_, seen)| now_ms.saturating_sub(*seen) <= TCP_STREAM_IDLE_MS);
+    }
+}
+
+/// The sequence number where the next DNS-over-TCP message starts, walking
+/// the length prefixes in `bytes`, which begin a message at `base_seq`. The
+/// walk is bounded by `bytes.len()`, and a message that runs past the bytes
+/// yields the sequence number of its end, so a segment holding one message
+/// and part of the next marks the end of the next. A buffer ending on one
+/// byte of a prefix gives the sequence just past the whole prefix: the length
+/// is unknown, and the segment that follows starts mid-prefix, so it must not
+/// be read as a message start.
+fn dns_tcp_next_message_seq(bytes: &[u8], base_seq: u32) -> u32 {
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let (Some(&hi), Some(&lo)) = (bytes.get(pos), bytes.get(pos + 1)) else {
+            return base_seq.wrapping_add((pos + 2) as u32);
+        };
+        pos += 2 + usize::from(u16::from_be_bytes([hi, lo]));
+    }
+    base_seq.wrapping_add(pos as u32)
 }
 
 impl StreamReassembler {
@@ -1134,7 +1210,15 @@ impl StreamReassembler {
     pub fn reset(&mut self) {
         self.fragments.clear();
         self.segments.clear();
+        self.dns_framing.entries.clear();
         self.last_frame_cut_at_ms = None;
+    }
+
+    /// Streams with a recorded DNS-over-TCP message boundary. Bounded by
+    /// `MAX_TCP_STREAMS`; exposed for the fuzz target and tests.
+    #[doc(hidden)]
+    pub fn dns_framing_len(&self) -> usize {
+        self.dns_framing.entries.len()
     }
 
     /// Total reserved bytes in reassembly's data and coverage vectors right
@@ -1201,11 +1285,13 @@ impl StreamReassembler {
         self.last_evict_ms = now_ms;
         let _ = self.fragments.evict_stale(now_ms);
         self.segments.evict_stale(now_ms);
+        self.dns_framing.evict_stale(now_ms);
     }
 
     /// Drops both directions of a flow the flow table has evicted.
     pub fn drop_flow(&mut self, flow: &FlowKey) {
         self.segments.drop_flow(flow);
+        self.dns_framing.drop_flow(flow);
     }
 
     /// Sniffs one captured frame's application layer, using reassembly only
@@ -1302,8 +1388,6 @@ impl StreamReassembler {
         // immediately and nothing is buffered at all. See the
         // `has_buffer` check below (JAM-169) for why that standalone
         // decision is not trusted once something is already held.
-        let own = sniff_for_transport(&packet.payload, packet.protocol, packet.src_port, packet.dst_port);
-
         // Only TCP with a known flow identity and a sequence number can be
         // desegmented. Binding the sequence number here, rather than
         // re-unwrapping it further down, means there is no path on which a
@@ -1314,6 +1398,23 @@ impl StreamReassembler {
             }
             _ => None,
         };
+
+        // DNS over TCP: a segment from inside a message whose start was
+        // already seen is not a new message. Skipped only when nothing is
+        // buffered for it, so a message still being assembled (split,
+        // reordered or overlapping segments) behaves as before.
+        let dns_tcp = is_dns_over_tcp(packet.protocol, packet.src_port, packet.dst_port);
+        if let (true, Some((key, seq))) = (dns_tcp, &stream_target) {
+            if packet.tcp_flags.is_some_and(|flags| flags.syn) {
+                // A new connection reusing the four-tuple restarts the sequence space.
+                self.dns_framing.forget(key);
+            } else if !self.segments.has_buffer(key) && self.dns_framing.is_inside_message(key, *seq, now_ms) {
+                return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None, reassembled_packet: None };
+            }
+        }
+
+        let own = sniff_for_transport(&packet.payload, packet.protocol, packet.src_port, packet.dst_port);
+
         let Some((key, seq)) = stream_target else {
             return match own {
                 L7Sniff::Decided(info) => SniffOutcome {
@@ -1345,6 +1446,9 @@ impl StreamReassembler {
                 // overlap-protected buffer's view are the same bytes. Decide
                 // directly rather than allocating a buffer just to release it
                 // again immediately.
+                if dns_tcp {
+                    self.dns_framing.record(&key, dns_tcp_next_message_seq(&packet.payload, seq), now_ms);
+                }
                 return SniffOutcome { info, status: None, need_more_bytes: None, reassembled_packet: None };
             }
             // An earlier, incomplete segment already holds first-seen bytes
@@ -1363,6 +1467,14 @@ impl StreamReassembler {
             return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None, reassembled_packet: None };
         };
         let status = self.attribute(raw_status, now_ms);
+        // The buffer starts at a message start, so its length prefixes say
+        // where the message in progress, or the last one it holds, ends.
+        if dns_tcp {
+            if let Some(base_seq) = self.segments.base_seq(&key) {
+                let next = dns_tcp_next_message_seq(self.segments.prefix(&key), base_seq);
+                self.dns_framing.record(&key, next, now_ms);
+            }
+        }
         match sniff_for_transport(self.segments.prefix(&key), packet.protocol, packet.src_port, packet.dst_port) {
             L7Sniff::Decided(info) => {
                 self.segments.finish(&key, status);
@@ -2858,15 +2970,19 @@ mod tests {
         let stream = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
         let mut r = StreamReassembler::new();
         let key = dns_flow();
+        // Eight bytes held: the prefix, the id 0x1234 and the first flag bytes.
         r.sniff(&dns_out(1000, &stream[..8]), Some((&key, true)), 0);
-        // A forged overlapping copy tries to rewrite the id; the held bytes win.
-        let mut forged = stream[4..].to_vec();
-        forged[0] ^= 0xff;
-        forged[1] ^= 0xff;
-        let done = r.sniff(&dns_out(1004, &forged), Some((&key, true)), 1);
-        // Bytes 4..8 were already held, so the id (stream[2..4]) is untouched
-        // and only the new tail is appended.
-        assert!(matches!(done.info, L7Info::Dns { id: 0x1234, .. }), "{:?}", done.info);
+        // A forged, self-contained framed query with another id overlaps them.
+        // On its own it decodes, so this reaches the "own is Decided while a
+        // buffer is held" path, which must not trust it.
+        let forged_stream = framed_dns(&crate::l7::dns_test_support::query(0x9999, "a.com", 1));
+        assert!(
+            matches!(crate::l7::sniff_dns_tcp(&forged_stream), crate::l7::L7Sniff::Decided(L7Info::Dns { id: 0x9999, .. })),
+            "fixture premise: the forged segment decodes standalone"
+        );
+        let done = r.sniff(&dns_out(1000, &forged_stream), Some((&key, true)), 1);
+        assert!(matches!(done.info, L7Info::Dns { id: 0x1234, .. }), "first-seen id wins: {:?}", done.info);
+        assert!(r.segment_counters().conflicting_overlap_bytes > 0, "the rewrite attempt is counted");
     }
 
     #[test]
@@ -2925,21 +3041,238 @@ mod tests {
             assert_eq!(outcome.need_more_bytes, None);
             seq = seq.wrapping_add(chunk.len() as u32);
         }
-        assert!(r.bytes_held() <= MAX_TCP_BYTES_TOTAL);
+        assert!(
+            r.segments.max_buffered_len() <= MAX_TCP_STREAM_BYTES,
+            "one direction's logical buffer stays within the per-stream cap: {}",
+            r.segments.max_buffered_len()
+        );
+        // The next segment after the decision window finds nothing held.
+        r.sniff(&dns_out(seq, &[0xaa; 64]), Some((&key, true)), 3_000);
+        assert_eq!(r.bytes_held(), 0, "released once the decision window has passed");
+    }
+
+    // ---- DNS over TCP message boundaries (JAM-21) ------------------------
+
+    fn dns_query_stream(id: u16, name: &str) -> Vec<u8> {
+        framed_dns(&crate::l7::dns_test_support::query(id, name, 1))
+    }
+
+    /// A prefix declaring `declared` bytes followed by `present` filler bytes.
+    fn partial_message(declared: u16, present: usize) -> Vec<u8> {
+        let mut out = declared.to_be_bytes().to_vec();
+        out.resize(2 + present, 0xaa);
+        out
+    }
+
+    fn sniff_out(r: &mut StreamReassembler, seq: u32, payload: &[u8], now_ms: u64) -> SniffOutcome {
+        let key = dns_flow();
+        r.sniff(&dns_out(seq, payload), Some((&key, true)), now_ms)
+    }
+
+    fn is_forged(outcome: &SniffOutcome) -> bool {
+        matches!(&outcome.info, L7Info::Dns { query_name, .. } if query_name == "forged.example")
+    }
+
+    #[test]
+    fn tcp_dns_interior_segments_never_decode_after_the_buffer_hits_its_cap() {
+        let mut r = StreamReassembler::new();
+        // Declares 60,000 bytes, so it can never complete.
+        let mut seq = 1u32;
+        let first = partial_message(60_000, 1398);
+        sniff_out(&mut r, seq, &first, 0);
+        seq += first.len() as u32;
+        // Fill to the cap, then one more segment, which clears the entry.
+        let mut gave_up_after = 0;
+        while gave_up_after < 2 {
+            let filler = [0xaau8; 1400];
+            let outcome = sniff_out(&mut r, seq, &filler, 0);
+            assert_eq!(outcome.info, L7Info::None);
+            seq += filler.len() as u32;
+            if r.segment_counters().abandoned_without_completing > 0 {
+                gave_up_after += 1;
+            }
+        }
+        assert!(!r.segments.has_buffer(&TcpStreamKey { flow: dns_flow(), from_local: true }));
+        let forged = sniff_out(&mut r, seq, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&forged), "a segment inside a declared message is not a message start: {:?}", forged.info);
+    }
+
+    #[test]
+    fn tcp_dns_interior_segments_never_decode_after_the_decision_window() {
+        let mut r = StreamReassembler::new();
+        let mut seq = 1u32;
+        let first = partial_message(5_000, 1398);
+        sniff_out(&mut r, seq, &first, 0);
+        seq += first.len() as u32;
+        // Past the 2 s window: the buffer is released, then removed.
+        // The first releases the buffer, the second removes the entry.
+        for (i, now) in [3_000u64, 3_001].into_iter().enumerate() {
+            let filler = [0xaau8; 600];
+            let outcome = sniff_out(&mut r, seq, &filler, now);
+            assert_eq!(outcome.info, L7Info::None, "segment {i}");
+            seq += filler.len() as u32;
+        }
+        let forged = sniff_out(&mut r, seq, &dns_query_stream(0x666, "forged.example"), 3_002);
+        assert!(!is_forged(&forged), "{:?}", forged.info);
+    }
+
+    #[test]
+    fn tcp_dns_message_one_plus_part_of_message_two_marks_the_end_of_message_two() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        let mut a = one.clone();
+        a.extend_from_slice(&partial_message(60, 8));
+        let outcome = sniff_out(&mut r, 100, &a, 0);
+        assert!(matches!(outcome.info, L7Info::Dns { id: 1, .. }), "{:?}", outcome.info);
+        // The rest of message two happens to hold a whole framed query.
+        let inside = sniff_out(&mut r, 100 + a.len() as u32, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&inside), "{:?}", inside.info);
+    }
+
+    #[test]
+    fn tcp_dns_pipelined_second_message_at_the_exact_boundary_decodes() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        let first = sniff_out(&mut r, 100, &one, 0);
+        assert!(matches!(first.info, L7Info::Dns { id: 1, .. }));
+        let second = sniff_out(&mut r, 100 + one.len() as u32, &dns_query_stream(2, "b.com"), 0);
+        assert!(matches!(second.info, L7Info::Dns { id: 2, .. }), "{:?}", second.info);
+    }
+
+    #[test]
+    fn tcp_dns_boundary_survives_sequence_wraparound() {
+        let mut r = StreamReassembler::new();
+        let base = u32::MAX - 10;
+        let one = dns_query_stream(1, "a.com");
+        let mut a = one.clone();
+        a.extend_from_slice(&partial_message(60, 8));
+        assert!(matches!(sniff_out(&mut r, base, &a, 0).info, L7Info::Dns { id: 1, .. }));
+        let a_end = base.wrapping_add(a.len() as u32);
+        assert!(a_end < base, "fixture premise: the boundary wrapped past zero");
+        // Inside message two, now at a small wrapped sequence number.
+        let inside = sniff_out(&mut r, a_end, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&inside), "{:?}", inside.info);
+        // Message three starts exactly at message two's wrapped end.
+        let boundary = base.wrapping_add(one.len() as u32 + 2 + 60);
+        let third = sniff_out(&mut r, boundary, &dns_query_stream(3, "c.com"), 0);
+        assert!(matches!(third.info, L7Info::Dns { id: 3, .. }), "{:?}", third.info);
+    }
+
+    #[test]
+    fn tcp_dns_one_byte_of_a_prefix_makes_the_following_segment_unframed() {
+        let mut r = StreamReassembler::new();
+        let mut a = dns_query_stream(1, "a.com");
+        a.push(0x00); // one byte of message two's length prefix
+        assert!(matches!(sniff_out(&mut r, 100, &a, 0).info, L7Info::Dns { id: 1, .. }));
+        let next = sniff_out(&mut r, 100 + a.len() as u32, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&next), "{:?}", next.info);
+    }
+
+    #[test]
+    fn tcp_dns_retransmit_of_a_decided_message_does_not_decode_again() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+        assert_eq!(sniff_out(&mut r, 100, &one, 1).info, L7Info::None);
+    }
+
+    #[test]
+    fn tcp_dns_syn_forgets_the_boundary_for_a_reused_four_tuple() {
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        let one = dns_query_stream(1, "a.com");
+        sniff_out(&mut r, 1_000_000, &one, 0);
+        let mut syn = dns_out(5, &[]);
+        syn.tcp_flags = Some(crate::parse::TcpFlags { syn: true, ..Default::default() });
+        r.sniff(&syn, Some((&key, true)), 1);
+        let fresh = sniff_out(&mut r, 6, &dns_query_stream(2, "b.com"), 2);
+        assert!(matches!(fresh.info, L7Info::Dns { id: 2, .. }), "{:?}", fresh.info);
+    }
+
+    fn dns_flow_n(n: usize) -> FlowKey {
+        FlowKey { local_port: 1024 + (n % 60_000) as u16, remote_addr: format!("10.9.{}.{}", (n / 256) % 256, n % 256), ..dns_flow() }
+    }
+
+    #[test]
+    fn tcp_dns_framing_table_is_bounded_at_the_stream_limit() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        for n in 0..MAX_TCP_STREAMS {
+            let key = dns_flow_n(n);
+            r.sniff(&dns_out_on(&key, 100, &one), Some((&key, true)), n as u64);
+        }
+        assert_eq!(r.dns_framing_len(), MAX_TCP_STREAMS);
+        let key = dns_flow_n(MAX_TCP_STREAMS);
+        r.sniff(&dns_out_on(&key, 100, &one), Some((&key, true)), MAX_TCP_STREAMS as u64);
+        assert_eq!(r.dns_framing_len(), MAX_TCP_STREAMS, "limit + 1 evicts the oldest");
+        // The oldest (n = 0) is the one gone: its retransmit decodes again.
+        let oldest = dns_flow_n(0);
+        let again = r.sniff(&dns_out_on(&oldest, 100, &one), Some((&oldest, true)), 5_000);
+        assert!(matches!(again.info, L7Info::Dns { id: 1, .. }), "{:?}", again.info);
+    }
+
+    fn dns_out_on(key: &FlowKey, seq: u32, payload: &[u8]) -> ParsedPacket {
+        tcp_segment(&key.local_addr, &key.remote_addr, key.local_port, 53, seq, payload)
+    }
+
+    #[test]
+    fn tcp_dns_boundaries_expire_when_idle() {
+        let mut r = StreamReassembler::new();
+        let mut a = dns_query_stream(1, "a.com");
+        a.extend_from_slice(&partial_message(60, 8));
+        sniff_out(&mut r, 100, &a, 0);
+        assert_eq!(r.dns_framing_len(), 1);
+        // Past the idle timeout the boundary no longer applies on arrival.
+        let late = sniff_out(&mut r, 100 + a.len() as u32, &dns_query_stream(0x666, "forged.example"), TCP_STREAM_IDLE_MS + 1);
+        assert!(is_forged(&late), "an idle entry must not keep skipping: {:?}", late.info);
+        // And the periodic sweep drops it.
+        let mut r = StreamReassembler::new();
+        sniff_out(&mut r, 100, &a, 0);
+        r.maybe_evict(TCP_STREAM_IDLE_MS + 1_001);
+        assert_eq!(r.dns_framing_len(), 0);
+    }
+
+    #[test]
+    fn tcp_dns_reset_and_drop_flow_clear_the_boundaries() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        sniff_out(&mut r, 100, &one, 0);
+        assert_eq!(r.dns_framing_len(), 1);
+        r.drop_flow(&dns_flow());
+        assert_eq!(r.dns_framing_len(), 0);
+        sniff_out(&mut r, 100, &one, 0);
+        r.reset();
+        assert_eq!(r.dns_framing_len(), 0);
     }
 
     #[test]
     fn udp_53_stays_unframed() {
-        // The long-standing UDP test above pins decoding; this pins that a
-        // length-prefixed buffer over UDP is not mistaken for TCP framing.
-        let framed = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
-        assert!(
-            !matches!(
-                crate::l7::sniff_for_transport(&framed, TransportProtocol::Udp, Some(51000), Some(53)),
-                crate::l7::L7Sniff::Decided(L7Info::Dns { id: 0x1234, .. })
-            ),
-            "UDP/53 payload is the bare message, so a prefix shifts every field"
-        );
+        // Through the real parser and reassembler, as the capture loop does:
+        // the UDP payload is the bare message, so a decode must start at byte 0.
+        let udp_packet = |payload: &[u8]| {
+            let mut ip = Ipv4Header::new((8 + payload.len()) as u16, 64, IpNumber::UDP, v4("192.168.1.10"), v4("93.184.216.34"))
+                .expect("fixture");
+            ip.header_checksum = ip.calc_header_checksum();
+            let mut data = Vec::new();
+            ip.write(&mut data).expect("fixture");
+            data.extend_from_slice(&51000u16.to_be_bytes());
+            data.extend_from_slice(&53u16.to_be_bytes());
+            data.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+            data.extend_from_slice(&[0, 0]);
+            data.extend_from_slice(payload);
+            parse_packet(&data, LinkType::Raw).expect("fixture must parse")
+        };
+        let key = FlowKey { protocol: TransportProtocol::Udp, remote_port: 53, ..flow_key() };
+        let mut r = StreamReassembler::new();
+        let bare = crate::l7::dns_test_support::query(0x1234, "a.com", 1);
+        let outcome = r.sniff(&udp_packet(&bare), Some((&key, true)), 0);
+        assert!(matches!(outcome.info, L7Info::Dns { id: 0x1234, .. }), "{:?}", outcome.info);
+        // A length-prefixed message over UDP is not TCP framing: the prefix
+        // shifts every field, so it must not decode as the framed message.
+        let outcome = r.sniff(&udp_packet(&framed_dns(&bare)), Some((&key, true)), 0);
+        assert!(!matches!(outcome.info, L7Info::Dns { id: 0x1234, .. }), "{:?}", outcome.info);
+        assert_eq!(r.bytes_held(), 0);
+        assert_eq!(r.dns_framing_len(), 0, "UDP keeps no framing state");
     }
 
     #[test]
