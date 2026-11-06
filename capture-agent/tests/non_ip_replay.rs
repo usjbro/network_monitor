@@ -5,7 +5,12 @@ use capture_agent::parse::{parse_packet, parse_packet_result, LinkType, ParseFai
 use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// The replay tests share 127.0.0.1:9990, so they run one at a time even
+/// without `--test-threads=1`.
+static REPLAY_AGENT_LOCK: Mutex<()> = Mutex::new(());
 
 struct Agent(Child);
 impl Drop for Agent {
@@ -323,6 +328,7 @@ fn arp_address_lengths_must_match_known_address_types() {
 #[test]
 #[ignore = "requires exclusive 127.0.0.1:9990; run with --ignored --test-threads=1"]
 fn non_ip_replay_counts_only_malformed_frames_and_emits_only_their_findings() {
+    let _serial = REPLAY_AGENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Refuse to connect to an operator's agent if the port is occupied.
     drop(TcpListener::bind("127.0.0.1:9990").expect("exclusive test port required"));
     let auth = agent_auth::AuthFixture::new();
@@ -487,6 +493,7 @@ fn dns_message(id: u16, answer: Option<[u8; 4]>) -> Vec<u8> {
 #[test]
 #[ignore = "requires exclusive 127.0.0.1:9990; run with --ignored --test-threads=1"]
 fn a_matched_dns_exchange_names_the_endpoint_and_an_unmatched_response_does_not() {
+    let _serial = REPLAY_AGENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Refuse to connect to an operator's agent if the port is occupied.
     drop(TcpListener::bind("127.0.0.1:9990").expect("exclusive test port required"));
     let auth = agent_auth::AuthFixture::new();
