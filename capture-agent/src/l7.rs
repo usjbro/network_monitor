@@ -1892,6 +1892,31 @@ mod tests {
         assert_eq!(http_fields(&payload).2, Some(7));
     }
 
+    /// The status line, a padding header sized so the `Content-Length` line
+    /// ends `end` bytes after the status line, then a blank line.
+    fn http_with_target_ending_at(end: usize) -> Vec<u8> {
+        let target = b"Content-Length: 7\r\n";
+        let pad = end - target.len() - b"X-Pad: \r\n".len();
+        let mut payload = b"HTTP/1.1 200 OK\r\nX-Pad: ".to_vec();
+        payload.extend(std::iter::repeat_n(b'a', pad));
+        payload.extend_from_slice(b"\r\n");
+        payload.extend_from_slice(target);
+        payload.extend_from_slice(b"\r\n");
+        payload
+    }
+
+    // Boundary tests: they pin the existing 8,192-byte bound, so they pass
+    // without a code change (no RED).
+    #[test]
+    fn http_header_ending_at_exactly_8192_bytes_is_read() {
+        assert_eq!(http_fields(&http_with_target_ending_at(8192)).2, Some(7));
+    }
+
+    #[test]
+    fn http_header_ending_at_8193_bytes_is_not_read() {
+        assert_eq!(http_fields(&http_with_target_ending_at(8193)).2, None);
+    }
+
     #[test]
     fn http_binary_body_does_not_matter() {
         let mut payload = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 4\r\n\r\n".to_vec();
