@@ -805,6 +805,15 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_content_type_gives_no_field() {
+        for payload in [&b"HTTP/1.1 200 OK\r\nContent-Type:\r\n\r\n"[..], b"HTTP/1.1 200 OK\r\nContent-Type: \r\n\r\n"] {
+            let l7 = crate::l7::sniff_l7(payload, Some(51000));
+            assert!(matches!(l7, L7Info::HttpResponse { .. }), "{l7:?}");
+            assert!(!app_fields(&l7, payload.len() as u32, 0).iter().any(|f| f.path == "http.content_type"));
+        }
+    }
+
+    #[test]
     fn http_content_length_is_a_json_string_past_the_exact_integer_limit() {
         let json = |n: u64| {
             let l7 = L7Info::HttpResponse { status: "200".into(), reason: None, content_type: None, content_length: Some(n) };

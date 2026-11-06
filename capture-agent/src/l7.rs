@@ -1887,7 +1887,7 @@ mod tests {
 
     #[test]
     fn http_malformed_content_type_is_absent() {
-        for value in ["text", "Bearer abc", "/b", "a/", "a/b/c", "a b/c"] {
+        for value in ["", " ", "text", "Bearer abc", "/b", "a/", "a/b/c", "a b/c"] {
             assert_eq!(http_type(&format!("Content-Type: {value}\r\n")), None, "{value:?}");
         }
         let long = format!("a/{}", "b".repeat(254));

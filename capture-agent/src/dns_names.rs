@@ -189,15 +189,34 @@ mod tests {
 
     #[test]
     fn aaaa_key_matches_the_flow_table_address_form() {
-        // The flow table keys on the packet's address string, which is
-        // `Ipv6Addr::to_string`; the answer's data is produced the same way
-        // from the wire bytes, so a compressible address must agree.
-        let addr: std::net::Ipv6Addr = "2001:db8:0:0:0:0:0:1".parse().unwrap();
-        let flow_form = addr.to_string();
-        assert_eq!(flow_form, "2001:db8::1");
+        // The flow table keys on `ParsedPacket::src_ip`, and the name table on
+        // an AAAA answer's decoded text. Both come from the real parsers here,
+        // from the same sixteen bytes, and a compressible address must agree.
+        let octets: [u8; 16] = "2001:db8:0:0:0:0:0:1".parse::<std::net::Ipv6Addr>().unwrap().octets();
+        let client: [u8; 16] = "2001:db8:0:0:0:0:0:2".parse::<std::net::Ipv6Addr>().unwrap().octets();
+        let resolver: [u8; 16] = "2001:db8:0:0:0:0:0:53".parse::<std::net::Ipv6Addr>().unwrap().octets();
+        let response = crate::l7::dns_test_support::response(1, "v6.example", 28, 0, &[(28, 300, octets.to_vec())]);
+        let mut response_frame = Vec::new();
+        etherparse::PacketBuilder::ipv6(resolver, client, 64)
+            .udp(53, 40000)
+            .write(&mut response_frame, &response)
+            .unwrap();
+        let parsed = crate::parse::parse_packet(&response_frame, crate::parse::LinkType::Raw).expect("a DNS response");
+        let crate::l7::L7Info::DnsResponse { query_name, answers, .. } = crate::l7::sniff_l7(&parsed.payload, parsed.dst_port) else {
+            panic!("expected a decoded response");
+        };
         let mut t = ObservedDnsNames::new(8);
-        t.learn_response("v6.example", &[ans("v6.example", 28, 300, &flow_form)], 0);
-        assert_eq!(t.lookup(&flow_form, 0), Some("v6.example"));
+        t.learn_response(&query_name, &answers, 0);
+
+        // Later traffic from that host, through the parser the flow table reads.
+        let mut host_frame = Vec::new();
+        etherparse::PacketBuilder::ipv6(octets, client, 64)
+            .udp(443, 40000)
+            .write(&mut host_frame, b"traffic")
+            .unwrap();
+        let host = crate::parse::parse_packet(&host_frame, crate::parse::LinkType::Raw).expect("a v6 packet");
+        assert_eq!(host.src_ip, "2001:db8::1");
+        assert_eq!(t.lookup(&host.src_ip, 0), Some("v6.example"));
     }
 
     #[test]
@@ -419,6 +438,7 @@ mod tests {
 
     #[test]
     fn retention_clamp_at_the_ttl_boundaries() {
+        assert_eq!(retained_until(3_599), 3_600_000);
         assert_eq!(retained_until(3_600), 3_600_000);
         assert_eq!(retained_until(3_601), 3_601_000);
         assert_eq!(retained_until(86_400), 86_400_000);
