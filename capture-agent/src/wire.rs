@@ -505,6 +505,11 @@ pub struct CaptureStatsJson {
     /// status-appropriate threshold — ordinary connection turnover, not a
     /// capacity concern.
     pub idle_evictions: u64,
+    /// Cumulative count of observed DNS names dropped because the name
+    /// table was full (`MAX_OBSERVED_DNS_NAMES`), not because they expired.
+    /// Nonzero and growing means `observedName` may be missing for hosts
+    /// whose DNS answer was seen earlier.
+    pub observed_name_evictions: u64,
 }
 
 /// Host/interface identity and aggregate throughput, sent once per tick
@@ -1377,6 +1382,7 @@ mod tests {
                 total_connections_observed: 17,
                 capacity_evictions: 2,
                 idle_evictions: 6,
+                observed_name_evictions: 4,
             },
         };
         let line = encode_event(&event);
@@ -1390,6 +1396,7 @@ mod tests {
         assert!(line.contains("\"totalConnectionsObserved\":17"));
         assert!(line.contains("\"capacityEvictions\":2"));
         assert!(line.contains("\"idleEvictions\":6"));
+        assert!(line.contains("\"observedNameEvictions\":4"));
     }
 
     #[test]

@@ -2471,6 +2471,7 @@ fn build_capture_stats_json(
     total_connections_observed: u64,
     capacity_evictions: u64,
     idle_evictions: u64,
+    observed_name_evictions: u64,
 ) -> wire::CaptureStatsJson {
     let (received, dropped, if_dropped) = match stat {
         Some(s) => (s.received, s.dropped, s.if_dropped),
@@ -2485,6 +2486,7 @@ fn build_capture_stats_json(
         total_connections_observed,
         capacity_evictions,
         idle_evictions,
+        observed_name_evictions,
     }
 }
 
@@ -3430,6 +3432,7 @@ async fn main() -> std::io::Result<()> {
                     total_flows_observed,
                     capacity_evictions,
                     idle_evictions,
+                    observed_name_evictions,
                     direction_attribution_unavailable,
                     protocol_hierarchy,
                 ) = {
@@ -3457,6 +3460,7 @@ async fn main() -> std::io::Result<()> {
                         ft.total_flows_observed(),
                         ft.capacity_evictions(),
                         ft.idle_evictions(),
+                        ft.observed_name_evictions(),
                         // Live, not a startup snapshot — a runtime
                         // `set_interface` switch (issue #69) can change
                         // whether local_addrs is empty, so this must be
@@ -3732,6 +3736,7 @@ async fn main() -> std::io::Result<()> {
                     total_flows_observed,
                     capacity_evictions,
                     idle_evictions,
+                    observed_name_evictions,
                 );
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats {
                     stats: stats_json,
@@ -4709,7 +4714,7 @@ mod tests {
             dropped: 7,
             if_dropped: 2,
         };
-        let json = build_capture_stats_json(Some(stat), 15, 4, 42, 3, 1);
+        let json = build_capture_stats_json(Some(stat), 15, 4, 42, 3, 1, 9);
         assert_eq!(json.received, 500);
         assert_eq!(json.dropped, 7);
         assert_eq!(json.if_dropped, 2);
@@ -4718,6 +4723,7 @@ mod tests {
         assert_eq!(json.total_connections_observed, 42);
         assert_eq!(json.capacity_evictions, 3);
         assert_eq!(json.idle_evictions, 1);
+        assert_eq!(json.observed_name_evictions, 9);
     }
 
     #[test]
@@ -4725,7 +4731,7 @@ mod tests {
         // The capture thread hasn't successfully called cap.stats() yet
         // (e.g. right at agent startup) — this must report honest zeros,
         // not panic and not fabricate a nonzero drop count.
-        let json = build_capture_stats_json(None, 0, 0, 0, 0, 0);
+        let json = build_capture_stats_json(None, 0, 0, 0, 0, 0, 0);
         assert_eq!(json.received, 0);
         assert_eq!(json.dropped, 0);
         assert_eq!(json.if_dropped, 0);
@@ -4734,6 +4740,7 @@ mod tests {
         assert_eq!(json.total_connections_observed, 0);
         assert_eq!(json.capacity_evictions, 0);
         assert_eq!(json.idle_evictions, 0);
+        assert_eq!(json.observed_name_evictions, 0);
     }
 
     #[test]
@@ -4817,7 +4824,7 @@ mod tests {
             dropped: 0,
             if_dropped: 0,
         };
-        let json = build_capture_stats_json(Some(stat), 0, 9, 0, 0, 0);
+        let json = build_capture_stats_json(Some(stat), 0, 9, 0, 0, 0, 0);
         assert_eq!(json.dropped, 0);
         assert_eq!(json.relay_lagged_events, 0);
         assert_eq!(json.unparseable_frames, 9);

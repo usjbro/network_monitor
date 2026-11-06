@@ -365,7 +365,8 @@ Sent once per tick (~1 second), immediately after that tick's `layer_update`. Re
     "unparseableFrames": 0,
     "totalConnectionsObserved": 812,
     "capacityEvictions": 0,
-    "idleEvictions": 47
+    "idleEvictions": 47,
+    "observedNameEvictions": 0
   }
 }
 ```
@@ -382,7 +383,8 @@ Field notes:
   Capture truncation and decode failure are separate decisions. The existing capture-length check runs before classification and still reports when captured length is less than original length. A cut non-IP frame remains excluded from `unparseableFrames` if the available framing/known headers decode successfully; a cut Ethernet, VLAN, or ARP header, or an 802.3 payload shorter than its declared length, still increments the counter and emits a malformed-frame finding. An authenticated replay regression covers cut LLDP framing with the truncation warning preserved and no added parse-failure count.
 - `totalConnectionsObserved` — the "N" half of an honest "showing N of M" horizon (JAM-6/GitHub #73): a cumulative count of every distinct flow this session's `FlowTable` has ever observed. A repeat packet on an already-tracked flow never inflates this, so it climbs only as genuinely new connections appear.
 - `capacityEvictions`/`idleEvictions` — two independent reasons a flow can leave the table. `capacityEvictions` counts flows dropped because the table exceeded its capacity ceiling (`MAX_FLOWS`) — a nonzero, growing value here means this session is losing still-active flows under memory pressure, a materially different health signal from ordinary churn. `idleEvictions` counts flows evicted for going idle past their status-appropriate threshold — normal connection turnover, not a capacity concern.
-- All eight counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
+- `observedNameEvictions` — cumulative count of observed DNS names (the `observedName` source on `endpoint_update`) dropped because the name table reached `MAX_OBSERVED_DNS_NAMES`, soonest-to-expire first. Names that simply expired are not counted. A nonzero, growing value means `observedName` may be absent for hosts whose DNS answer was seen earlier.
+- All nine counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
 
 Any connection's `packetLoss` (in `connection_update`) is derived purely from observed TCP retransmits — it has no way to know about packets the kernel or the relay itself lost before ever reaching that computation. A nonzero `dropped`/`ifDropped`/`relayLaggedEvents`/`unparseableFrames` here means `packetLoss` figures elsewhere in this same tick may under-report actual loss; the UI treats these two as independent signals (see `app/page.tsx`'s capture-degraded banner and `ConnectionsView`'s loss-column caveat) rather than trying to merge them into one number.
 

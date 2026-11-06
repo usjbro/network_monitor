@@ -372,4 +372,34 @@ mod tests {
         assert_eq!(t.len(), 0);
         assert!(t.lookup("1.1.1.1", 0).is_none());
     }
+
+    #[test]
+    fn zero_capacity_stores_nothing_and_counts_no_evictions() {
+        let mut t = ObservedDnsNames::new(0);
+        t.learn_response("a.com", &[a("a.com", "1.2.3.4"), a("a.com", "1.2.3.5")], 0);
+        assert_eq!(t.len(), 0);
+        assert_eq!(t.lookup("1.2.3.4", 0), None);
+        assert_eq!(t.evictions(), 0);
+    }
+
+    fn retained_until(ttl: u32) -> u64 {
+        // Smallest `now` at which the entry is gone.
+        let mut t = ObservedDnsNames::new(4);
+        t.learn_response("a.com", &[ans("a.com", 1, ttl, "1.2.3.4")], 0);
+        let mut lo = 0u64;
+        let mut hi = MAX_NAME_RETENTION_MS + 1;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if t.lookup("1.2.3.4", mid).is_none() { hi = mid } else { lo = mid + 1 }
+        }
+        lo
+    }
+
+    #[test]
+    fn retention_clamp_at_the_ttl_boundaries() {
+        assert_eq!(retained_until(3_600), 3_600_000);
+        assert_eq!(retained_until(3_601), 3_601_000);
+        assert_eq!(retained_until(86_400), 86_400_000);
+        assert_eq!(retained_until(86_401), 86_400_000);
+    }
 }

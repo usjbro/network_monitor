@@ -158,6 +158,7 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     totalConnectionsObserved: requireField(w, 'totalConnectionsObserved'),
     capacityEvictions: requireField(w, 'capacityEvictions'),
     idleEvictions: requireField(w, 'idleEvictions'),
+    observedNameEvictions: requireField(w, 'observedNameEvictions'),
   };
 }
 

@@ -174,6 +174,9 @@ export interface CaptureStats {
   totalConnectionsObserved: number;
   capacityEvictions: number;
   idleEvictions: number;
+  // Observed DNS names dropped because the agent's name table was full
+  // (not expired); nonzero means `Endpoint.observedName` may be missing.
+  observedNameEvictions: number;
 }
 
 // Measured protocol hierarchy (JAM-13), from the agent's

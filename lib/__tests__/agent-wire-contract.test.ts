@@ -45,6 +45,7 @@ import {
   mapCaptureFileStatusEvent,
   mapCaptureStatsEvent,
   mapConnectionEvent,
+  mapEndpointUpdateEvent,
   mapFindingEvent,
   mapPacketEvent,
   mapServiceTimeUpdateEvent,
@@ -77,6 +78,7 @@ describe('agent wire contract: real captured agent output maps without throwing'
         'capture_file_status',
         'capture_stats',
         'connection_update',
+        'endpoint_update',
         'finding',
         'layer_update',
         'packet',
@@ -103,6 +105,13 @@ describe('agent wire contract: real captured agent output maps without throwing'
     expect(typeof mapped.totalConnectionsObserved).toBe('number');
     expect(typeof mapped.capacityEvictions).toBe('number');
     expect(typeof mapped.idleEvictions).toBe('number');
+    expect(typeof mapped.observedNameEvictions).toBe('number');
+  });
+
+  it('endpoint_update maps and carries a real observedName', () => {
+    const mapped = mapEndpointUpdateEvent(sample('endpoint_update'));
+    expect(mapped.length).toBeGreaterThan(0);
+    expect(mapped.some((e) => typeof e.observedName === 'string' && e.observedName.length > 0)).toBe(true);
   });
 
   it('system_stats maps', () => {

@@ -944,6 +944,12 @@ impl FlowTable {
         self.total_flows_observed
     }
 
+    /// Cumulative observed-name table evictions (capacity pressure, not
+    /// expiry); survives `reset`, like the other counters.
+    pub fn observed_name_evictions(&self) -> u64 {
+        self.observed_names.evictions()
+    }
+
     pub fn capacity_evictions(&self) -> u64 {
         self.capacity_evictions
     }
@@ -2743,6 +2749,18 @@ mod tests {
         table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 1);
         let endpoints = table.endpoint_snapshot(1000);
         assert_eq!(endpoints[0].observed_name, None);
+    }
+
+    #[test]
+    fn observed_name_evictions_are_readable_and_survive_reset() {
+        let mut table = FlowTable::new(vec!["192.168.1.10".to_string()])
+            .with_observed_name_capacity(1);
+        assert_eq!(table.observed_name_evictions(), 0);
+        table.learn_dns_response("a.com", &[dns_answer("a.com", "1.1.1.1")], 0);
+        table.learn_dns_response("b.com", &[dns_answer("b.com", "2.2.2.2")], 1);
+        assert_eq!(table.observed_name_evictions(), 1);
+        table.reset(vec!["192.168.1.10".to_string()]);
+        assert_eq!(table.observed_name_evictions(), 1);
     }
 
     #[test]

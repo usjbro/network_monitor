@@ -292,6 +292,7 @@ describe('mapCaptureStatsEvent', () => {
         totalConnectionsObserved: 42,
         capacityEvictions: 3,
         idleEvictions: 7,
+        observedNameEvictions: 5,
       },
     };
     const stats = mapCaptureStatsEvent(event);
@@ -304,6 +305,7 @@ describe('mapCaptureStatsEvent', () => {
       totalConnectionsObserved: 42,
       capacityEvictions: 3,
       idleEvictions: 7,
+      observedNameEvictions: 5,
     });
   });
 
@@ -319,6 +321,7 @@ describe('mapCaptureStatsEvent', () => {
         totalConnectionsObserved: 5000,
         capacityEvictions: 0,
         idleEvictions: 0,
+        observedNameEvictions: 0,
       },
     };
     const stats = mapCaptureStatsEvent(event);
@@ -347,12 +350,22 @@ describe('mapCaptureStatsEvent', () => {
         totalConnectionsObserved: 42,
         capacityEvictions: 3,
         idleEvictions: 7,
+        observedNameEvictions: 5,
       },
     };
     const mapped = mapCaptureStatsEvent(event);
     expect(mapped.totalConnectionsObserved).toBe(42);
     expect(mapped.capacityEvictions).toBe(3);
     expect(mapped.idleEvictions).toBe(7);
+    expect(mapped.observedNameEvictions).toBe(5);
+  });
+
+  it('throws when observedNameEvictions is missing', () => {
+    const event = {
+      type: 'capture_stats',
+      stats: { received: 1, dropped: 0, ifDropped: 0, relayLaggedEvents: 0, unparseableFrames: 0, totalConnectionsObserved: 1, capacityEvictions: 0, idleEvictions: 0 },
+    };
+    expect(() => mapCaptureStatsEvent(event)).toThrow('missing required field "observedNameEvictions"');
   });
 
   it('throws when a horizon/eviction counter is missing, same as any other required field', () => {
