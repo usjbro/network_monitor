@@ -29,6 +29,9 @@ pub enum ByteRegion {
     Payload,
 }
 
+/// The largest integer a JSON number carries exactly to a JS client: 2^53 - 1.
+const MAX_EXACT_JSON_UINT: u64 = (1 << 53) - 1;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum FieldValue {
@@ -345,7 +348,14 @@ fn app_fields(l7: &L7Info, payload_len: u32, dns_offset: u32) -> Vec<Field> {
                 fields.push(Field::leaf("http.content_type", "Content-Type", "http", FieldType::Str, FieldValue::Str(content_type.clone()), ByteRegion::Payload, 0, payload_len));
             }
             if let Some(content_length) = content_length {
-                fields.push(Field::leaf("http.content_length", "Content-Length", "http", FieldType::Uint, FieldValue::Uint(*content_length), ByteRegion::Payload, 0, payload_len));
+                // Past this a JS client's number would silently round, so the
+                // value travels as a string; the field is a uint either way.
+                let value = if *content_length > MAX_EXACT_JSON_UINT {
+                    FieldValue::Str(content_length.to_string())
+                } else {
+                    FieldValue::Uint(*content_length)
+                };
+                fields.push(Field::leaf("http.content_length", "Content-Length", "http", FieldType::Uint, value, ByteRegion::Payload, 0, payload_len));
             }
             fields
         }
@@ -792,6 +802,23 @@ mod tests {
         assert_eq!(value("http.response.phrase"), Some(FieldValue::Str("OK".into())));
         assert_eq!(value("http.content_type"), Some(FieldValue::Str("text/html".into())));
         assert_eq!(value("http.content_length"), Some(FieldValue::Uint(12)));
+    }
+
+    #[test]
+    fn http_content_length_is_a_json_string_past_the_exact_integer_limit() {
+        let json = |n: u64| {
+            let l7 = L7Info::HttpResponse { status: "200".into(), reason: None, content_type: None, content_length: Some(n) };
+            let fields = app_fields(&l7, 50, 0);
+            let field = fields.iter().find(|f| f.path == "http.content_length").expect("the field");
+            serde_json::to_value(field).expect("serializes")
+        };
+        let limit = 9_007_199_254_740_991u64;
+        assert_eq!(json(limit)["value"], serde_json::json!(9_007_199_254_740_991u64));
+        assert_eq!(json(limit + 1)["value"], serde_json::json!("9007199254740992"));
+        assert_eq!(json(u64::MAX)["value"], serde_json::json!("18446744073709551615"));
+        assert_eq!(json(0)["value"], serde_json::json!(0));
+        // The field stays an unsigned integer whichever way its value travels.
+        assert_eq!(json(limit + 1)["type"], "uint");
     }
 
     #[test]

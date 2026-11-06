@@ -82,6 +82,7 @@ export interface WireField {
   group?: string;
   // 'str' matches Rust's lowercase serialization of FieldType::Str.
   type: 'group' | 'bool' | 'uint' | 'str' | 'addr' | 'bytes';
+  // A 'uint' above 2^53 - 1 arrives as a decimal string (http.content_length).
   value?: boolean | number | string;
   region: 'header' | 'payload';
   offset: number;

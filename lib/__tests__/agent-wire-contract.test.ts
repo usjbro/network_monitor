@@ -71,7 +71,7 @@ function sample(type: string): WireEvent {
 
 describe('agent wire contract: real captured agent output maps without throwing', () => {
   it('captured every event type the relay maps', () => {
-    expect(samples.map((e) => e.type).sort()).toEqual(
+    expect([...new Set(samples.map((e) => e.type))].sort()).toEqual(
       [
         'agent_status',
         'capture_config',
@@ -153,6 +153,17 @@ describe('agent wire contract: real captured agent output maps without throwing'
       path: 'http.content_length', type: 'uint', region: 'payload', value: 1234,
     }));
     expect(evt.packet).not.toHaveProperty('headerBreakdown');
+  });
+
+  // JAM-21: captured from a replay of a response declaring 2^53 bytes, which a
+  // JSON number can't hold exactly, so the agent sends a decimal string.
+  it('packet maps a Content-Length above 2^53 - 1 as a string', () => {
+    const packets = samples.filter((e) => e.type === 'packet') as unknown as { packet: unknown }[];
+    expect(packets).toHaveLength(2);
+    const mapped = mapPacketEvent(packets[1].packet);
+    expect(mapped.fields).toContainEqual(expect.objectContaining({
+      path: 'http.content_length', type: 'uint', region: 'payload', value: '9007199254740992',
+    }));
   });
 
   // JAM-15. Captured from a replay of a DNS query left unanswered for
