@@ -1372,7 +1372,7 @@ mod tests {
     /// A prefix declaring `declared` bytes followed by `present` filler bytes.
     fn prefix_only(declared: u16, present: usize) -> Vec<u8> {
         let mut out = declared.to_be_bytes().to_vec();
-        out.extend(std::iter::repeat(0u8).take(present));
+        out.extend(std::iter::repeat_n(0u8, present));
         out
     }
 

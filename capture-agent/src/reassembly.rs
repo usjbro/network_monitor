@@ -1605,7 +1605,14 @@ impl StreamReassembler {
         if dns_tcp {
             if let Some(base_seq) = self.segments.base_seq(&key) {
                 let prefix = self.segments.prefix(&key);
+                let at_cap = prefix.len() >= MAX_TCP_STREAM_BYTES;
                 self.dns_framing.record_message(&key, base_seq, prefix, &sniffed, response_only, now_ms);
+                // The cap cut this segment short, so the walk above never saw
+                // its tail, and a message may start there. The segments after
+                // it are cleanup, then read as starts.
+                if at_cap {
+                    self.dns_framing.skip_inside_message(&key, seq, &packet.payload, response_only, now_ms);
+                }
             }
         }
         match sniffed {
@@ -3630,6 +3637,31 @@ mod tests {
         sniff_out(&mut r, 142, &two, 3_001);
         let three = sniff_out(&mut r, 142 + two.len() as u32, &dns_query_stream(3, "c.com"), 3_002);
         assert!(matches!(three.info, L7Info::Dns { id: 3, .. }), "{:?}", three.info);
+    }
+
+    #[test]
+    fn tcp_dns_message_starting_past_the_buffer_cap_in_the_capping_segment_moves_the_boundary() {
+        // Message one ends after the 16,384-byte cap but inside the segment
+        // that reaches it, so the bytes that start message two are cut off.
+        let mut base = ascii_response(16_500);
+        base.extend_from_slice(&ascii_response(60_000));
+        let forged = dns_query_stream(0x666, "forged.example");
+        for from_local in [true, false] {
+            for k in 13..=53 {
+                let mut stream = base.clone();
+                stream[k * 1400..k * 1400 + forged.len()].copy_from_slice(&forged);
+                let mut r = StreamReassembler::new();
+                for (i, chunk) in stream.chunks(1400).enumerate() {
+                    let seq = 1 + (i * 1400) as u32;
+                    let outcome = if from_local {
+                        sniff_out(&mut r, seq, chunk, 0)
+                    } else {
+                        sniff_from_53(&mut r, 51000, seq, chunk, 0)
+                    };
+                    assert!(!is_forged(&outcome), "from_local {from_local}, query at {k}, seen at {i}: {:?}", outcome.info);
+                }
+            }
+        }
     }
 
     #[test]
