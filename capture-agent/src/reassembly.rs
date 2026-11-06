@@ -1248,6 +1248,21 @@ impl DnsTcpFraming {
         self.walk_and_record(key, base_seq, None, bytes, response_only, now_ms);
     }
 
+    /// Whether `bytes`, which start at `base_seq`, hold a whole framed message
+    /// that the recorded boundary already lies at or past. Such a message needs
+    /// nothing more from the buffer, whether or not it decoded.
+    fn covers_first_message(&self, key: &TcpStreamKey, base_seq: u32, bytes: &[u8]) -> bool {
+        let [hi, lo, ..] = *bytes else {
+            return false;
+        };
+        let declared = usize::from(u16::from_be_bytes([hi, lo]));
+        if declared < 12 || bytes.len() < 2 + declared {
+            return false;
+        }
+        let end = base_seq.wrapping_add((2 + declared) as u32);
+        self.entries.get(key).is_some_and(|entry| entry.next_message_seq.wrapping_sub(end) as i32 >= 0)
+    }
+
     fn walk_and_record(
         &mut self,
         key: &TcpStreamKey,
@@ -1612,6 +1627,14 @@ impl StreamReassembler {
                 // it are cleanup, then read as starts.
                 if at_cap {
                     self.dns_framing.skip_inside_message(&key, seq, &packet.payload, response_only, now_ms);
+                }
+                // A complete message `sniff_dns` rejects (a root query, an AXFR
+                // continuation) will never decide, and keeping it would put
+                // the next message behind a prefix that only re-reads this one.
+                if matches!(sniffed, L7Sniff::Undecided)
+                    && self.dns_framing.covers_first_message(&key, base_seq, self.segments.prefix(&key))
+                {
+                    self.segments.finish(&key, status);
                 }
             }
         }
@@ -3461,12 +3484,15 @@ mod tests {
     #[test]
     fn tcp_dns_a_segment_consumed_by_window_release_still_advances_the_boundary() {
         let mut r = StreamReassembler::new();
-        // An undecodable but complete message: held, undecided.
-        let junk = framed_dns(&[0u8; 20]);
-        sniff_out(&mut r, 100, &junk, 0);
-        let mut declaring = 60_000u16.to_be_bytes().to_vec();
+        // An incomplete message: held, undecided. (A complete undecodable one
+        // is no longer held, so it cannot reach a window release.)
+        let held = partial_message(20, 10);
+        sniff_out(&mut r, 100, &held, 0);
+        // The rest of it, then a prefix declaring 60,000.
+        let mut declaring = vec![0xaa; 10];
+        declaring.extend_from_slice(&60_000u16.to_be_bytes());
         declaring.resize(100, 0xaa);
-        let seq2 = 100 + junk.len() as u32;
+        let seq2 = 100 + held.len() as u32;
         // Past the window: released, so the segment itself is not decoded.
         sniff_out(&mut r, seq2, &declaring, 3_000);
         let seq3 = seq2 + declaring.len() as u32;
@@ -3731,6 +3757,72 @@ mod tests {
         sniff_out(&mut r, 100, &one, 0);
         r.reset();
         assert_eq!(r.dns_framing_len(), 0);
+    }
+
+    // ---- Complete messages sniff_dns rejects (JAM-21 decisions fix) --------
+
+    /// Whole, correctly framed messages `sniff_dns` returns None for.
+    fn undecodable_messages() -> Vec<(&'static str, Vec<u8>)> {
+        let header = |qdcount: u8| vec![0x12, 0x34, 0x01, 0x00, 0x00, qdcount, 0, 0, 0, 0, 0, 0];
+        let mut root = header(1);
+        root.extend_from_slice(&[0, 0x00, 0x02, 0x00, 0x01]);
+        let mut continuation = header(0);
+        continuation[2] = 0x84;
+        continuation.extend_from_slice(&[0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01]);
+        let mut non_utf8 = header(1);
+        non_utf8.extend_from_slice(&[2, 0xff, 0xfe, 0, 0x00, 0x01, 0x00, 0x01]);
+        vec![("root query", root), ("QDCOUNT=0", continuation), ("non-UTF-8 label", non_utf8)]
+    }
+
+    #[test]
+    fn tcp_dns_message_after_a_complete_undecodable_one_decodes() {
+        for (what, message) in undecodable_messages() {
+            let mut r = StreamReassembler::new();
+            let rejected = framed_dns(&message);
+            assert_eq!(sniff_out(&mut r, 100, &rejected, 0).info, L7Info::None, "{what}");
+            assert_eq!(r.bytes_held(), 0, "{what}: the boundary already covers it, so nothing is held");
+            let next = sniff_out(&mut r, 100 + rejected.len() as u32, &dns_query_stream(2, "b.com"), 1);
+            assert!(matches!(next.info, L7Info::Dns { id: 2, .. }), "{what}: {:?}", next.info);
+        }
+    }
+
+    #[test]
+    fn tcp_dns_undecodable_message_split_across_segments_finishes_when_complete() {
+        for (what, message) in undecodable_messages() {
+            let mut r = StreamReassembler::new();
+            let rejected = framed_dns(&message);
+            let (head, tail) = rejected.split_at(8);
+            sniff_out(&mut r, 100, head, 0);
+            assert!(r.bytes_held() > 0, "{what}: an incomplete message is still held");
+            sniff_out(&mut r, 108, tail, 0);
+            let next = sniff_out(&mut r, 100 + rejected.len() as u32, &dns_query_stream(2, "b.com"), 1);
+            assert!(matches!(next.info, L7Info::Dns { id: 2, .. }), "{what}: {:?}", next.info);
+        }
+    }
+
+    #[test]
+    fn tcp_dns_from_53_response_after_a_complete_undecodable_one_decodes() {
+        // The AXFR continuation shape: a response with no question section.
+        let mut continuation = vec![0x12, 0x34, 0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0];
+        continuation.extend_from_slice(&[0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01]);
+        let rejected = framed_dns(&continuation);
+        let mut r = StreamReassembler::new();
+        assert_eq!(sniff_from_53(&mut r, 51000, 100, &rejected, 0).info, L7Info::None);
+        let next = sniff_from_53(&mut r, 51000, 100 + rejected.len() as u32, &dns_response_stream(2), 1);
+        assert!(matches!(next.info, L7Info::DnsResponse { id: 2, .. }), "{:?}", next.info);
+    }
+
+    #[test]
+    fn a_complete_frame_from_source_53_with_no_boundary_stays_held() {
+        // QR clear from source 53 records no boundary, so nothing covers these
+        // bytes and they are held like any undecided stream.
+        let (_, message) = undecodable_messages().remove(1);
+        let mut query_shaped = message;
+        query_shaped[2] = 0x04;
+        let mut r = StreamReassembler::new();
+        sniff_from_53(&mut r, 51000, 100, &framed_dns(&query_shaped), 0);
+        assert_eq!(r.dns_framing_len(), 0);
+        assert!(r.bytes_held() > 0);
     }
 
     #[test]
