@@ -1,7 +1,8 @@
 //! JAM-21: names observed in DNS responses, kept so an endpoint can show the
 //! name the local host asked for. Purely passive: it only remembers what
-//! answered responses said, so an on-path attacker who can forge a response
-//! can forge an entry. It is separate from reverse-lookup hostnames and is
+//! answered responses said, so the name is whatever the queried server said:
+//! any process able to send a query, or any zone owner, can choose it (no
+//! on-path attacker is needed). It is separate from reverse-lookup hostnames and is
 //! labelled accordingly on the wire.
 //!
 //! One name per address, the most recently learned. Entries expire on the

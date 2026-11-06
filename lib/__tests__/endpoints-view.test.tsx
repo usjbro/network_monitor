@@ -216,6 +216,12 @@ describe('EndpointsView', () => {
       expect(span.closest('td')).toHaveClass('max-w-xs');
     });
 
+    it('wraps_a_long_ptr_name_too', () => {
+      const ptr = `${'p'.repeat(60)}.${'q'.repeat(60)}.${'r'.repeat(60)}.example.net`;
+      renderOne({ remoteHostname: ptr });
+      expect(screen.getByText(ptr)).toHaveClass('break-all');
+    });
+
     it('renders_markup_in_a_name_as_text', () => {
       const evil = '<img src=x onerror=alert(1)>';
       const { container } = renderOne({ observedName: evil });

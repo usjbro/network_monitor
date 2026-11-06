@@ -55,7 +55,7 @@ function endpointToRow(e: Endpoint): Row {
             {e.observedName}
           </span>
         )}
-        {showPtr && <span className="block text-[10px] text-slate-500">{e.remoteHostname}</span>}
+        {showPtr && <span className="block break-all text-[10px] text-slate-500">{e.remoteHostname}</span>}
       </span>
     ),
     searchText: `${e.host} ${e.observedName ?? ''} ${e.remoteHostname ?? ''} ${e.processName}`,
@@ -84,7 +84,7 @@ function conversationToRow(c: Conversation): Row {
         <span className="text-slate-400">{c.localAddr}</span>
         <span className="text-slate-600"> ↔ </span>
         <span className="font-bold text-slate-200">{c.remoteAddr}</span>
-        {c.remoteHostname && <span className="block text-[10px] text-slate-500">{c.remoteHostname}</span>}
+        {c.remoteHostname && <span className="block break-all text-[10px] text-slate-500">{c.remoteHostname}</span>}
       </span>
     ),
     searchText: `${c.localAddr} ${c.remoteAddr} ${c.remoteHostname ?? ''} ${c.processName}`,
