@@ -1390,12 +1390,18 @@ fn resolve_max_flows() -> usize {
 /// parse success: a zero-capacity flow table evicts every flow the instant
 /// it's inserted, which looks like a total capture failure, not a setting.
 fn parse_max_flows(raw: Option<String>) -> usize {
+    parse_positive_env("MAX_FLOWS", raw, flow::DEFAULT_MAX_FLOWS)
+}
+
+/// A positive integer from the environment variable `name`, or `default` when
+/// `raw` is unset or blank. Anything else panics, for the reasons above.
+fn parse_positive_env(name: &str, raw: Option<String>, default: usize) -> usize {
     let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
-        return flow::DEFAULT_MAX_FLOWS;
+        return default;
     };
     match raw.trim().parse::<usize>() {
         Ok(n) if n > 0 => n,
-        _ => panic!("MAX_FLOWS={raw} is not a valid positive integer"),
+        _ => panic!("{name}={raw} is not a valid positive integer"),
     }
 }
 
@@ -1406,13 +1412,7 @@ fn resolve_max_observed_dns_names() -> usize {
 }
 
 fn parse_max_observed_dns_names(raw: Option<String>) -> usize {
-    let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
-        return capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES;
-    };
-    match raw.trim().parse::<usize>() {
-        Ok(n) if n > 0 => n,
-        _ => panic!("MAX_OBSERVED_DNS_NAMES={raw} is not a valid positive integer"),
-    }
+    parse_positive_env("MAX_OBSERVED_DNS_NAMES", raw, capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES)
 }
 
 /// The only responses that feed the observed name table: a UDP/53 response
@@ -5105,7 +5105,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not a valid positive integer")]
+    #[should_panic(expected = "MAX_FLOWS=not-a-number is not a valid positive integer")]
     fn parse_max_flows_panics_loudly_on_garbage() {
         let _ = parse_max_flows(Some("not-a-number".to_string()));
     }
