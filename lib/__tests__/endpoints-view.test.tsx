@@ -190,7 +190,12 @@ describe('EndpointsView', () => {
     it('shows_a_visible_DNS_tag_beside_an_observed_name', () => {
       renderOne({ observedName: 'example.com' });
       const tag = screen.getByText('DNS');
-      expect(tag).toBeVisible();
+      // jsdom can't see Tailwind's CSS, so check the classes themselves, on the
+      // tag and on the row around it, for anything that hides it until hover.
+      for (const el of [tag, tag.parentElement!]) {
+        expect(el.className).not.toMatch(/(^|\s)(hidden|invisible|sr-only|opacity-0)(\s|$)/);
+        expect(el.className).not.toMatch(/(^|\s)(group-)?hover:/);
+      }
       expect(tag).toHaveAttribute('title', 'Learned from observed DNS');
       expect(tag.closest('td')).toBe(screen.getByText('example.com').closest('td'));
     });

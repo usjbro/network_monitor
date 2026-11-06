@@ -158,7 +158,7 @@ Fix on PR #301:
 - TXT redaction catches a whitespace-led bearer token and `:` separated keys.
 - IP-shaped names aren't learned.
 - Observed names get a visible `DNS` tag.
-- `http.content_length` is sent as a string above 2^53, so the UI never shows a rounded value.
+- `http.content_length` is sent as a string above 2^53 - 1, so the UI never shows a rounded value.
 - A replay-level test covers the call that feeds the name table.
 - All review tidying, test gaps and doc gaps. The docs state that TXT redaction covers the decoded field only, and that `hexDump` and capture files hold raw bytes.
 

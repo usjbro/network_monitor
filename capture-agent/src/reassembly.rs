@@ -1011,10 +1011,12 @@ impl TcpReassembler {
         changed.then_some(status)
     }
 
-    /// Releases a direction's buffer because a detector decided, counting the
-    /// outcome. The entry is removed outright, so a later message on the same
-    /// long-lived connection gets a fresh attempt rather than being locked
-    /// out by the first one's success.
+    /// Releases a direction's buffer because its message is finished, counting
+    /// the outcome: a detector decided, or a complete DNS message was rejected,
+    /// which still counts as `completed` because reassembly did its part. The
+    /// entry is removed outright, so a later message on the same long-lived
+    /// connection gets a fresh attempt rather than being locked out by the
+    /// first one's success.
     pub fn finish(&mut self, key: &TcpStreamKey, status: ReassemblyStatus) {
         if let Some(stream) = self.streams.remove(key) {
             self.bytes_held = self.bytes_held.saturating_sub(stream.accounted_bytes());
@@ -1266,13 +1268,15 @@ impl DnsTcpFraming {
 
     /// Whether `bytes`, which start at `base_seq`, hold a whole framed message
     /// that the recorded boundary already lies at or past. Such a message needs
-    /// nothing more from the buffer, whether or not it decoded.
+    /// nothing more from the buffer, whether or not it decoded. A declared
+    /// length below 12 never gets here with a boundary past it: the walk stops
+    /// at such a prefix.
     fn covers_first_message(&self, key: &TcpStreamKey, base_seq: u32, bytes: &[u8]) -> bool {
         let [hi, lo, ..] = *bytes else {
             return false;
         };
         let declared = usize::from(u16::from_be_bytes([hi, lo]));
-        if declared < 12 || bytes.len() < 2 + declared {
+        if bytes.len() < 2 + declared {
             return false;
         }
         let end = base_seq.wrapping_add((2 + declared) as u32);
@@ -3960,6 +3964,18 @@ mod tests {
         assert_eq!(r.dns_framing_len(), 1);
         let next = sniff_out(&mut r, 100 + frame.len() as u32, &dns_query_stream(2, "b.com"), 1);
         assert!(matches!(next.info, L7Info::Dns { id: 2, .. }), "{:?}", next.info);
+    }
+
+    #[test]
+    fn a_frame_declaring_less_than_a_header_at_a_boundary_stays_held() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+        let mut tiny = 5u16.to_be_bytes().to_vec();
+        tiny.extend_from_slice(&[0; 5]);
+        sniff_out(&mut r, 100 + one.len() as u32, &tiny, 1);
+        assert_eq!(r.dns_framing_len(), 0, "the walk stops at it, so no boundary covers it");
+        assert!(r.bytes_held() > 0);
     }
 
     #[test]
