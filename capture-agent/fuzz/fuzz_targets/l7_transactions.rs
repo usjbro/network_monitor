@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use capture_agent::flow::FlowKey;
-use capture_agent::l7::sniff_l7;
+use capture_agent::l7::{sniff_dns_tcp, sniff_l7};
 use capture_agent::parse::TransportProtocol;
 use capture_agent::transaction::{ServiceTimeStats, TransactionTracker, MAX_PENDING};
 use libfuzzer_sys::fuzz_target;
@@ -38,6 +38,11 @@ fuzz_target!(|data: &[u8]| {
         };
         let dst_port = if outbound { flow.remote_port } else { flow.local_port };
         let l7 = sniff_l7(message, Some(dst_port));
+        // JAM-21: the same message as DNS over TCP, with a correct length
+        // prefix so mutated bytes reach `sniff_dns` past the length check.
+        let mut framed = (message.len() as u16).to_be_bytes().to_vec();
+        framed.extend_from_slice(message);
+        let _ = sniff_dns_tcp(&framed);
         ts_us = ts_us.saturating_add(u64::from(control >> 3) * 250_000);
         let _ = tracker.observe_frame(Some((&flow, outbound)), &l7, ts_us, retransmit);
         let _ = tracker.expire(ts_us);
@@ -47,4 +52,5 @@ fuzz_target!(|data: &[u8]| {
     // And the same bytes through every sniff entry point.
     let _ = sniff_l7(data, Some(53));
     let _ = sniff_l7(data, None);
+    let _ = sniff_dns_tcp(data);
 });

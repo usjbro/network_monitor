@@ -39,7 +39,7 @@
 //! the prefix and status exposed here are what it needs to build on.
 
 use crate::flow::FlowKey;
-use crate::l7::{sniff_l7_desegmenting, L7Info, L7Sniff};
+use crate::l7::{sniff_for_transport, L7Info, L7Sniff};
 use crate::parse::{parse_packet, LinkType, ParsedPacket, TransportProtocol};
 use std::collections::HashMap;
 
@@ -1302,7 +1302,7 @@ impl StreamReassembler {
         // immediately and nothing is buffered at all. See the
         // `has_buffer` check below (JAM-169) for why that standalone
         // decision is not trusted once something is already held.
-        let own = sniff_l7_desegmenting(&packet.payload, packet.dst_port);
+        let own = sniff_for_transport(&packet.payload, packet.protocol, packet.src_port, packet.dst_port);
 
         // Only TCP with a known flow identity and a sequence number can be
         // desegmented. Binding the sequence number here, rather than
@@ -1363,7 +1363,7 @@ impl StreamReassembler {
             return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None, reassembled_packet: None };
         };
         let status = self.attribute(raw_status, now_ms);
-        match sniff_l7_desegmenting(self.segments.prefix(&key), packet.dst_port) {
+        match sniff_for_transport(self.segments.prefix(&key), packet.protocol, packet.src_port, packet.dst_port) {
             L7Sniff::Decided(info) => {
                 self.segments.finish(&key, status);
                 SniffOutcome { info, status: Some(status), need_more_bytes: None, reassembled_packet: None }
@@ -2796,6 +2796,150 @@ mod tests {
         let outcome = r.sniff(&packet, Some((&key, true)), 0);
         assert!(matches!(outcome.info, L7Info::Dns { .. }));
         assert_eq!(r.bytes_held(), 0, "UDP pseudo-streams are explicitly out of scope");
+    }
+
+    // ---- DNS over TCP (JAM-21) -------------------------------------------
+
+    fn framed_dns(msg: &[u8]) -> Vec<u8> {
+        let mut out = (msg.len() as u16).to_be_bytes().to_vec();
+        out.extend_from_slice(msg);
+        out
+    }
+
+    /// A query for "a.com" with `id`, zero-padded so the message is `len`
+    /// bytes. The padding follows an empty answer section and is never read.
+    fn dns_message_of(id: u16, len: usize) -> Vec<u8> {
+        let mut msg = crate::l7::dns_test_support::query(id, "a.com", 1);
+        assert!(len >= msg.len());
+        msg.resize(len, 0);
+        msg
+    }
+
+    fn dns_flow() -> FlowKey {
+        FlowKey { remote_port: 53, ..flow_key() }
+    }
+
+    /// A client-to-server TCP/53 segment.
+    fn dns_out(seq: u32, payload: &[u8]) -> ParsedPacket {
+        tcp_segment("192.168.1.10", "93.184.216.34", 51000, 53, seq, payload)
+    }
+
+    #[test]
+    fn tcp_dns_split_across_segments_decodes_once_complete() {
+        let stream = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
+        // Cut inside the length prefix, then inside the message.
+        for cut in [1, 2, 9] {
+            let mut r = StreamReassembler::new();
+            let key = dns_flow();
+            let first = r.sniff(&dns_out(1000, &stream[..cut]), Some((&key, true)), 0);
+            assert_eq!(first.info, L7Info::None, "cut {cut}: incomplete");
+            assert!(first.need_more_bytes.is_some(), "cut {cut}: must ask for more");
+            let done = r.sniff(&dns_out(1000 + cut as u32, &stream[cut..]), Some((&key, true)), 1);
+            assert!(matches!(done.info, L7Info::Dns { id: 0x1234, .. }), "cut {cut}: {:?}", done.info);
+            assert_eq!(done.status, Some(ReassemblyStatus::Reassembled));
+            assert_eq!(r.bytes_held(), 0, "cut {cut}: released on decision");
+        }
+    }
+
+    #[test]
+    fn tcp_dns_out_of_order_segments_decode() {
+        let stream = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        // The tail arrives first and cannot decide on its own.
+        let late = r.sniff(&dns_out(1004, &stream[4..]), Some((&key, true)), 0);
+        assert_eq!(late.info, L7Info::None);
+        let done = r.sniff(&dns_out(1000, &stream[..4]), Some((&key, true)), 1);
+        assert!(matches!(done.info, L7Info::Dns { id: 0x1234, .. }), "{:?}", done.info);
+    }
+
+    #[test]
+    fn tcp_dns_overlap_keeps_first_seen_bytes() {
+        let stream = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        r.sniff(&dns_out(1000, &stream[..8]), Some((&key, true)), 0);
+        // A forged overlapping copy tries to rewrite the id; the held bytes win.
+        let mut forged = stream[4..].to_vec();
+        forged[0] ^= 0xff;
+        forged[1] ^= 0xff;
+        let done = r.sniff(&dns_out(1004, &forged), Some((&key, true)), 1);
+        // Bytes 4..8 were already held, so the id (stream[2..4]) is untouched
+        // and only the new tail is appended.
+        assert!(matches!(done.info, L7Info::Dns { id: 0x1234, .. }), "{:?}", done.info);
+    }
+
+    #[test]
+    fn tcp_dns_response_from_port_53_uses_framing() {
+        let msg = crate::l7::dns_test_support::response(0xbeef, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        let stream = framed_dns(&msg);
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        // dst_port is ephemeral; only src_port is 53.
+        let packet = tcp_segment("93.184.216.34", "192.168.1.10", 53, 51000, 5000, &stream);
+        let outcome = r.sniff(&packet, Some((&key, false)), 0);
+        match outcome.info {
+            L7Info::DnsResponse { id, query_name, answers, .. } => {
+                assert_eq!(id, 0xbeef);
+                assert_eq!(query_name, "example.com");
+                assert_eq!(answers[0].data, "1.2.3.4");
+            }
+            other => panic!("expected DnsResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_message_at_the_limit_decodes_through_the_reassembler() {
+        let msg = dns_message_of(0x0042, crate::l7::MAX_DNS_TCP_MESSAGE_BYTES);
+        assert_eq!(msg.len(), 16_382);
+        let stream = framed_dns(&msg);
+        assert_eq!(stream.len(), MAX_TCP_STREAM_BYTES);
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        let mut seq = 1u32;
+        let mut last = None;
+        for chunk in stream.chunks(1400) {
+            last = Some(r.sniff(&dns_out(seq, chunk), Some((&key, true)), 0));
+            seq = seq.wrapping_add(chunk.len() as u32);
+        }
+        let done = last.expect("at least one segment");
+        assert!(matches!(done.info, L7Info::Dns { id: 0x0042, .. }), "{:?}", done.info);
+        assert_eq!(r.bytes_held(), 0);
+    }
+
+    #[test]
+    fn tcp_dns_over_limit_never_decodes_and_never_asks_for_more() {
+        // Like any Undecided TCP segment, the reassembler still holds it for
+        // the decision window (a reordered tail is indistinguishable from
+        // it), bounded by the existing caps. What the over-limit rule
+        // guarantees is that it never reports a partial-message shortfall
+        // and never decodes a field.
+        let mut stream = (crate::l7::MAX_DNS_TCP_MESSAGE_BYTES as u16 + 1).to_be_bytes().to_vec();
+        stream.extend_from_slice(&dns_message_of(1, crate::l7::MAX_DNS_TCP_MESSAGE_BYTES + 1));
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        let mut seq = 1u32;
+        for chunk in stream.chunks(1400) {
+            let outcome = r.sniff(&dns_out(seq, chunk), Some((&key, true)), 0);
+            assert_eq!(outcome.info, L7Info::None);
+            assert_eq!(outcome.need_more_bytes, None);
+            seq = seq.wrapping_add(chunk.len() as u32);
+        }
+        assert!(r.bytes_held() <= MAX_TCP_BYTES_TOTAL);
+    }
+
+    #[test]
+    fn udp_53_stays_unframed() {
+        // The long-standing UDP test above pins decoding; this pins that a
+        // length-prefixed buffer over UDP is not mistaken for TCP framing.
+        let framed = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
+        assert!(
+            !matches!(
+                crate::l7::sniff_for_transport(&framed, TransportProtocol::Udp, Some(51000), Some(53)),
+                crate::l7::L7Sniff::Decided(L7Info::Dns { id: 0x1234, .. })
+            ),
+            "UDP/53 payload is the bare message, so a prefix shifts every field"
+        );
     }
 
     #[test]

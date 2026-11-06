@@ -1,4 +1,6 @@
 use crate::ja3::{compute_ja3, label_for_ja3, ClientHelloFields};
+use crate::parse::TransportProtocol;
+use crate::reassembly::MAX_TCP_STREAM_BYTES;
 use crate::redact::redact_headers;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -611,6 +613,53 @@ pub fn sniff_l7_desegmenting(payload: &[u8], dst_port: Option<u16>) -> L7Sniff {
         Some(at_least) => L7Sniff::NeedMoreBytes { at_least },
         None => L7Sniff::Undecided,
     }
+}
+
+/// The longest DNS message a TCP stream buffer can hold behind its two-byte
+/// length prefix. A message declaring more is `Undecided` so nothing is
+/// buffered for it: a message is either fully buffered or never buffered.
+pub const MAX_DNS_TCP_MESSAGE_BYTES: usize = MAX_TCP_STREAM_BYTES - 2;
+
+/// Sniffs a DNS-over-TCP stream buffer (RFC 1035 4.2.2): each message is
+/// preceded by a two-byte big-endian length.
+///
+/// Only the first message in the buffer is decoded, because `L7Info` is one
+/// value per packet; any later pipelined message is not read. The message is
+/// sliced to its declared length before `sniff_dns`, so a compression pointer
+/// cannot read bytes that follow it.
+pub fn sniff_dns_tcp(stream: &[u8]) -> L7Sniff {
+    if stream.is_empty() {
+        return L7Sniff::Undecided;
+    }
+    let [hi, lo, ..] = *stream else {
+        return L7Sniff::NeedMoreBytes { at_least: 1 };
+    };
+    let declared = usize::from(u16::from_be_bytes([hi, lo]));
+    if !(12..=MAX_DNS_TCP_MESSAGE_BYTES).contains(&declared) {
+        return L7Sniff::Undecided;
+    }
+    let Some(message) = stream.get(2..2 + declared) else {
+        return L7Sniff::NeedMoreBytes { at_least: 2 + declared - stream.len() };
+    };
+    match sniff_dns(message) {
+        Some(info) => L7Sniff::Decided(info),
+        None => L7Sniff::Undecided,
+    }
+}
+
+/// `sniff_l7_desegmenting`, but aware of the transport: TCP traffic on port
+/// 53 in either direction is length-framed DNS, which `sniff_l7_desegmenting`
+/// cannot see because it knows only the destination port.
+pub fn sniff_for_transport(
+    payload: &[u8],
+    protocol: TransportProtocol,
+    src_port: Option<u16>,
+    dst_port: Option<u16>,
+) -> L7Sniff {
+    if protocol == TransportProtocol::Tcp && (src_port == Some(53) || dst_port == Some(53)) {
+        return sniff_dns_tcp(payload);
+    }
+    sniff_l7_desegmenting(payload, dst_port)
 }
 
 /// Exactly `sniff_l7_desegmenting` with both non-`Decided` outcomes collapsed
@@ -1280,5 +1329,133 @@ mod tests {
             L7Info::None => {} // also acceptable — existing tolerance for malformed input
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    // ---- DNS over TCP (RFC 1035 4.2.2: a two-byte length prefix) ---------
+
+    /// A message with its two-byte length prefix, as it sits in a TCP stream.
+    fn framed(msg: &[u8]) -> Vec<u8> {
+        let mut out = (msg.len() as u16).to_be_bytes().to_vec();
+        out.extend_from_slice(msg);
+        out
+    }
+
+    /// A prefix declaring `declared` bytes followed by `present` filler bytes.
+    fn prefix_only(declared: u16, present: usize) -> Vec<u8> {
+        let mut out = declared.to_be_bytes().to_vec();
+        out.extend(std::iter::repeat(0u8).take(present));
+        out
+    }
+
+    #[test]
+    fn tcp_dns_empty_is_undecided() {
+        // A bare ACK carries no payload; buffering it would hold a stream
+        // open for every empty segment on port 53.
+        assert_eq!(sniff_dns_tcp(&[]), L7Sniff::Undecided);
+    }
+
+    #[test]
+    fn tcp_dns_one_prefix_byte_needs_one_more() {
+        assert_eq!(sniff_dns_tcp(&[0]), L7Sniff::NeedMoreBytes { at_least: 1 });
+    }
+
+    #[test]
+    fn tcp_dns_zero_length_is_undecided() {
+        assert_eq!(sniff_dns_tcp(&[0, 0]), L7Sniff::Undecided);
+    }
+
+    #[test]
+    fn tcp_dns_below_header_size_is_undecided() {
+        assert_eq!(sniff_dns_tcp(&prefix_only(11, 11)), L7Sniff::Undecided);
+    }
+
+    #[test]
+    fn tcp_dns_partial_message_reports_the_shortfall() {
+        assert_eq!(sniff_dns_tcp(&prefix_only(40, 8)), L7Sniff::NeedMoreBytes { at_least: 32 });
+    }
+
+    #[test]
+    fn tcp_dns_at_limit_needs_bytes() {
+        let limit = MAX_DNS_TCP_MESSAGE_BYTES as u16;
+        assert_eq!(limit, 16_382);
+        assert!(matches!(sniff_dns_tcp(&prefix_only(limit, 0)), L7Sniff::NeedMoreBytes { .. }));
+    }
+
+    #[test]
+    fn tcp_dns_over_limit_is_undecided() {
+        let over = MAX_DNS_TCP_MESSAGE_BYTES as u16 + 1;
+        assert_eq!(over, 16_383);
+        assert_eq!(sniff_dns_tcp(&prefix_only(over, 0)), L7Sniff::Undecided);
+    }
+
+    #[test]
+    fn tcp_dns_complete_query_decodes() {
+        match sniff_dns_tcp(&framed(&query(7, "a.com", 1))) {
+            L7Sniff::Decided(L7Info::Dns { id: 7, query_name, qtype: 1 }) => assert_eq!(query_name, "a.com"),
+            other => panic!("expected Decided(Dns), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_compression_pointers_are_relative_to_the_message() {
+        let msg = response(9, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        match sniff_dns_tcp(&framed(&msg)) {
+            L7Sniff::Decided(L7Info::DnsResponse { query_name, answers, .. }) => {
+                assert_eq!(query_name, "example.com");
+                assert_eq!(answers[0].name, "example.com");
+                assert_eq!(answers[0].data, "1.2.3.4");
+            }
+            other => panic!("expected Decided(DnsResponse), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_pointer_past_the_declared_end_fails() {
+        // The answer name points at the first byte past the message, which
+        // exists in the buffer but lies after the declared end. It must not be read.
+        let mut msg = response(9, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        let name_at = msg.len() - (2 + 10 + 4);
+        msg[name_at] = 0xc0;
+        msg[name_at + 1] = msg.len() as u8;
+        let mut stream = framed(&msg);
+        stream.extend_from_slice(&[7, b'l', b'e', b'a', b'k', b'e', b'd', b'x', 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        match sniff_dns_tcp(&stream) {
+            L7Sniff::Decided(L7Info::DnsResponse { answers, .. }) => {
+                assert!(answers.iter().all(|a| !a.name.contains("leaked")), "{answers:?}");
+                assert!(answers.is_empty() || answers[0].name.is_empty(), "{answers:?}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_second_message_in_a_buffer_is_ignored() {
+        let mut stream = framed(&response(0x1111, "a.com", 1, 0, &[(1, 1, vec![1, 1, 1, 1])]));
+        stream.extend_from_slice(&framed(&response(0x2222, "b.com", 1, 0, &[(1, 1, vec![2, 2, 2, 2])])));
+        match sniff_dns_tcp(&stream) {
+            L7Sniff::Decided(L7Info::DnsResponse { id, query_name, .. }) => {
+                assert_eq!(id, 0x1111);
+                assert_eq!(query_name, "a.com");
+            }
+            other => panic!("expected the first message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sniff_for_transport_frames_tcp_either_port_and_leaves_udp_alone() {
+        let msg = query(7, "a.com", 1);
+        let tcp = framed(&msg);
+        let tcp_t = TransportProtocol::Tcp;
+        assert!(matches!(sniff_for_transport(&tcp, tcp_t, Some(51000), Some(53)), L7Sniff::Decided(L7Info::Dns { id: 7, .. })));
+        assert!(matches!(sniff_for_transport(&tcp, tcp_t, Some(53), Some(51000)), L7Sniff::Decided(L7Info::Dns { id: 7, .. })));
+        // UDP/53 is a bare message; the prefix would shift every field.
+        assert!(matches!(
+            sniff_for_transport(&msg, TransportProtocol::Udp, Some(51000), Some(53)),
+            L7Sniff::Decided(L7Info::Dns { id: 7, .. })
+        ));
+        assert_eq!(
+            sniff_for_transport(&msg, tcp_t, Some(51000), Some(80)),
+            sniff_l7_desegmenting(&msg, Some(80))
+        );
     }
 }

@@ -10,14 +10,28 @@ use libfuzzer_sys::fuzz_target;
 /// One flow identity, reused for every segment so the fuzzer's inputs pile
 /// into the same stream buffer rather than each getting a fresh one — that is
 /// where overlap, reordering, and the per-stream cap actually interact.
-fn flow() -> FlowKey {
+fn flow(remote_port: u16) -> FlowKey {
     FlowKey {
         protocol: TransportProtocol::Tcp,
         local_addr: "192.168.1.10".to_string(),
         local_port: 51000,
         remote_addr: "93.184.216.34".to_string(),
-        remote_port: 80,
+        remote_port,
     }
+}
+
+/// A minimal IPv4/TCP packet to port 53 around `payload`.
+fn tcp53_packet(payload: &[u8], seq: u32) -> Vec<u8> {
+    let total = (40 + payload.len()) as u16;
+    let mut p = vec![0x45, 0];
+    p.extend_from_slice(&total.to_be_bytes());
+    p.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0, 10, 0, 0, 2, 10, 0, 0, 1]);
+    p.extend_from_slice(&51000u16.to_be_bytes());
+    p.extend_from_slice(&53u16.to_be_bytes());
+    p.extend_from_slice(&seq.to_be_bytes());
+    p.extend_from_slice(&[0, 0, 0, 0, 0x50, 0x10, 0xff, 0xff, 0, 0, 0, 0]);
+    p.extend_from_slice(payload);
+    p
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -40,6 +54,9 @@ fuzz_target!(|data: &[u8]| {
     // Driven through the real `parse_packet`, so this is the same path the
     // capture loop takes: arbitrary bytes in, and only what genuinely parses
     // as an IPv4 fragment reaches the reassembler.
+    // JAM-21: one control bit moves the remote end to port 53, so segmented
+    // TCP/53 takes the same sequence-wraparound and overlap cases.
+    let remote_port = if data.first().is_some_and(|b| b & 0x80 != 0) { 53 } else { 80 };
     let mut fragments = IpFragmentReassembler::new();
     let mut now_ms = 0u64;
     for (i, chunk) in data.chunks(64).enumerate().take(64) {
@@ -83,7 +100,7 @@ fuzz_target!(|data: &[u8]| {
     // wrapping offsets densely. Every one of those is a bounds-arithmetic
     // path, which is exactly what needs fuzzing.
     let mut segments = TcpReassembler::new();
-    let key = TcpStreamKey { flow: flow(), from_local: true };
+    let key = TcpStreamKey { flow: flow(remote_port), from_local: true };
     let mut now_ms = 0u64;
     for chunk in data.chunks(16).take(256) {
         // Derive a sequence number from the bytes so the fuzzer can steer
@@ -121,7 +138,7 @@ fuzz_target!(|data: &[u8]| {
     let mut many = TcpReassembler::new();
     for (i, chunk) in data.chunks(8).enumerate().take(512) {
         let key = TcpStreamKey {
-            flow: FlowKey { remote_port: i as u16, ..flow() },
+            flow: FlowKey { remote_port: i as u16, ..flow(remote_port) },
             from_local: i % 2 == 0,
         };
         let _ = many.feed(&key, i as u32, chunk, chunk.len() as u32, i as u64);
@@ -134,9 +151,15 @@ fuzz_target!(|data: &[u8]| {
     // Exercises the fragment path, the per-frame fallback, and the
     // desegmenting L7 hand-off together, as `main.rs` calls them.
     let mut whole = StreamReassembler::new();
-    let key = flow();
+    let key = flow(remote_port);
     for (i, chunk) in data.chunks(128).enumerate().take(32) {
         if let Some(parsed) = parse_packet(chunk, LinkType::Raw) {
+            let _ = whole.sniff(&parsed, Some((&key, i % 2 == 0)), i as u64);
+        }
+        // A TCP/53 segment carrying the chunk, so the framed-DNS path is
+        // reached however the fuzzer shaped the bytes. The headers are
+        // hand-built because `parse_packet` rarely gets random bytes this far.
+        if let Some(parsed) = parse_packet(&tcp53_packet(chunk, i as u32), LinkType::Raw) {
             let _ = whole.sniff(&parsed, Some((&key, i % 2 == 0)), i as u64);
         }
         if i % 3 == 0 {
