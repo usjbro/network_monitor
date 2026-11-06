@@ -28,7 +28,7 @@ These settle the six questions in the gate's plan update.
 
 **1. DNS over TCP framing.** Each message has a 2-byte length prefix (RFC 1035 §4.2.2). Today a TCP/53 payload goes to `sniff_dns` unframed, so every field is read two bytes off, and a response is only reached through the `_` branch because `sniff_l7_desegmenting` sees just `dst_port`. Route on transport and either port.
 
-The bound is `MAX_TCP_STREAM_BYTES` (16 KiB) minus the prefix, so a message is either fully buffered or never buffered. A larger declared length is `Undecided`: nothing is buffered and no field is produced. That loses AXFR-sized messages, which is acceptable because TCP fallback answers are normally far smaller. Reordering, overlap (first-seen-wins), idle timeout, the 2 s decision window and per-stream, per-owner and global caps all stay as the reassembler has them.
+The bound is `MAX_TCP_STREAM_BYTES` (16 KiB) minus the prefix, so a message that can decode always fits the buffer. A larger declared length is `Undecided`: no field is produced, and the reassembler treats it like any other undecided stream, holding it within its existing caps until the decision window ends. That loses AXFR-sized messages, which is acceptable because TCP fallback answers are normally far smaller. Reordering, overlap (first-seen-wins), idle timeout, the 2 s decision window and per-stream, per-owner and global caps all stay as the reassembler has them.
 
 Only the first message in a buffer is decoded, because `L7Info` is one value per packet. This is a named limitation.
 
@@ -151,7 +151,7 @@ In `reassembly.rs`, using its `parse_packet` fixtures:
 - `tcp_dns_overlap_keeps_first_seen_bytes`.
 - `tcp_dns_response_from_port_53_uses_framing`, where `dst_port` is ephemeral.
 - `tcp_dns_message_at_the_limit_decodes_through_the_reassembler`, at 16,382.
-- `tcp_dns_over_limit_buffers_nothing`, asserting `bytes_held() == 0`.
+- `tcp_dns_over_limit_never_decodes_and_never_asks_for_more`, asserting no field, no `need_more_bytes`, and `bytes_held()` within the existing cap.
 - `udp_53_stays_unframed`. The existing test at :2797 pins the same thing and must keep passing unchanged.
 
 - [ ] **Step 2: Run.** `cargo test tcp_dns` — expect compile failure on `sniff_dns_tcp`.
