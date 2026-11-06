@@ -488,7 +488,22 @@ pub fn build_packet_fields(
     l7_from_reassembly: bool,
 ) -> Vec<Field> {
     if l7_from_reassembly {
-        build_fields(parsed, &L7Info::None, link_type)
+        let mut fields = build_fields(parsed, &L7Info::None, link_type);
+        // A DNS message reassembled from a TCP stream has no byte range in
+        // this frame, but its decoded values are still real: emit them with
+        // an empty range, as `transaction_fields` does. HTTP is deliberately
+        // left out, and so is a message rebuilt from IP fragments (its frame
+        // is not TCP), which keeps no application fields on the fragment.
+        if parsed.protocol == TransportProtocol::Tcp
+            && matches!(l7, L7Info::Dns { .. } | L7Info::DnsResponse { .. })
+        {
+            fields.extend(app_fields(l7, 0, 0).into_iter().map(|mut field| {
+                field.offset = 0;
+                field.len = 0;
+                field
+            }));
+        }
+        fields
     } else {
         build_fields(parsed, l7, link_type)
     }
@@ -718,6 +733,29 @@ mod tests {
         assert!(transport_fields(&packet, 34).is_empty());
         packet.protocol = TransportProtocol::Other;
         assert!(transport_fields(&packet, 34).is_empty());
+    }
+
+    #[test]
+    fn reassembled_dns_emits_leaves_with_empty_ranges_but_http_does_not() {
+        let mut packet = base_packet();
+        packet.protocol = TransportProtocol::Tcp;
+        let dns = L7Info::DnsResponse {
+            query_name: "example.com".into(), id: 7, qtype: 1, rcode: 0,
+            answer_count: 1, answers: Vec::new(),
+        };
+        let fields = build_packet_fields(&packet, &dns, crate::parse::LinkType::Raw, true);
+        let name = fields.iter().find(|f| f.path == "dns.qry.name").expect("dns.qry.name");
+        assert_eq!(name.value, Some(FieldValue::Str("example.com".into())));
+        for f in fields.iter().filter(|f| f.path.starts_with("dns")) {
+            assert_eq!((f.offset, f.len), (0, 0), "{}", f.path);
+        }
+        let http = L7Info::HttpResponse { status: "200".into(), reason: None, content_type: None, content_length: None };
+        let fields = build_packet_fields(&packet, &http, crate::parse::LinkType::Raw, true);
+        assert!(!fields.iter().any(|f| f.path.starts_with("http")));
+        // A frame that is not TCP (an IP fragment) keeps no application fields.
+        packet.protocol = TransportProtocol::Other;
+        let fields = build_packet_fields(&packet, &dns, crate::parse::LinkType::Raw, true);
+        assert!(!fields.iter().any(|f| f.path.starts_with("dns")));
     }
 
     #[test]
