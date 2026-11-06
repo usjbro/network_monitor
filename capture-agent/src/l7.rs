@@ -126,7 +126,7 @@ fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
         let headers = payload.iter().position(|b| *b == b'\n').map_or(&[][..], |n| &payload[n + 1..]);
         let (content_type, content_length) = parse_response_headers(headers);
         let reason = parse_reason(first_line, status);
-        let (reason, content_type) = redact_response_text(reason, content_type);
+        let reason = redact_reason(reason);
         Some(L7Info::HttpResponse { status: status.to_string(), reason, content_type, content_length })
     } else {
         None
@@ -148,22 +148,15 @@ fn parse_reason(first_line: &str, status: &str) -> Option<String> {
     Some(reason.to_string())
 }
 
-/// Runs both free-text fields through the shared header redaction before
-/// they leave the parser, so a credential in a reason phrase or a
-/// pathological `Content-Type` never reaches the wire.
-fn redact_response_text(reason: Option<String>, content_type: Option<String>) -> (Option<String>, Option<String>) {
-    let mut pairs = Vec::with_capacity(2);
-    let has_reason = reason.is_some();
-    if let Some(r) = reason {
-        pairs.push(("reason".to_string(), r));
-    }
-    if let Some(c) = content_type {
-        pairs.push(("content-type".to_string(), c));
-    }
-    redact_headers(&mut pairs);
-    let mut values = pairs.into_iter().map(|(_, v)| v);
-    let reason = if has_reason { values.next() } else { None };
-    (reason, values.next())
+/// Runs the reason phrase through the shared header redaction before it
+/// leaves the parser, so a credential there never reaches the wire. A
+/// `Content-Type` needs no such pass: it is a `token/token`, which has no space
+/// to hold a `Bearer ...` value and is not a sensitive name.
+fn redact_reason(reason: Option<String>) -> Option<String> {
+    let mut pair = [("reason".to_string(), reason?)];
+    redact_headers(&mut pair);
+    let [(_, reason)] = pair;
+    Some(reason)
 }
 
 /// What one header has shown so far. A second, different value — or one that
@@ -717,10 +710,6 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
     Some(L7Info::TlsClientHello { sni, ja3, ja3_label, client_random, sni_offset, sni_len })
 }
 
-/// The known HTTP request methods `sniff_http` accepts. Shared with
-/// `unterminated_http_start_line` below so the "is this a plausible partial
-/// request line" probe can never recognize a method the real detector
-/// wouldn't, or miss one it would.
 /// How far past the status line the header scan reads, and how many lines it
 /// counts. A response whose headers run longer is decoded without them.
 pub const MAX_HTTP_HEADER_SCAN_BYTES: usize = 8192;
@@ -729,6 +718,10 @@ pub const MAX_HTTP_HEADER_LINES: usize = 100;
 pub const MAX_HTTP_REASON_BYTES: usize = 128;
 pub const MAX_HTTP_CONTENT_TYPE_BYTES: usize = 255;
 
+/// The known HTTP request methods `sniff_http` accepts. Shared with
+/// `unterminated_http_start_line` below so the "is this a plausible partial
+/// request line" probe can never recognize a method the real detector
+/// wouldn't, or miss one it would.
 const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"];
 
 /// The outcome of sniffing a buffer that may or may not hold a complete
