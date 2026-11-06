@@ -1194,7 +1194,11 @@ impl DnsTcpFraming {
         if payload.is_empty() || self.skip_inside_message(key, seq, payload, response_only, now_ms) {
             return;
         }
-        if self.entries.get(key).is_none_or(|entry| entry.next_message_seq == seq) {
+        let starts_message = match self.entries.get(key) {
+            Some(entry) => entry.next_message_seq == seq,
+            None => looks_like_dns_tcp_start(payload),
+        };
+        if starts_message {
             self.walk_and_record(key, seq, None, payload, response_only, now_ms);
         }
     }
@@ -1225,7 +1229,10 @@ impl DnsTcpFraming {
     }
 
     /// Records where the message starting at `base_seq` in `bytes` ends, or
-    /// forgets the stream when nothing trustworthy can be recorded.
+    /// forgets the stream when nothing trustworthy can be recorded. A start
+    /// nothing vouches for (no boundary reaches it, and the bytes did not
+    /// decode) records only if it passes `looks_like_dns_tcp_start`. If it does
+    /// not, any boundary already held stays: its message may yet arrive.
     ///
     /// `response_only` is for a direction from port 53 to a port that is not
     /// 53, which may be an ordinary connection that merely uses 53 as its
@@ -1245,7 +1252,18 @@ impl DnsTcpFraming {
             self.forget(key);
             return;
         }
+        let decoded = matches!(sniffed, L7Sniff::Decided(_));
+        if !decoded && self.is_past_boundary(key, base_seq) && !looks_like_dns_tcp_start(bytes) {
+            return;
+        }
         self.walk_and_record(key, base_seq, None, bytes, response_only, now_ms);
+    }
+
+    /// Whether `seq` is not known to start a message: nothing is recorded for
+    /// this direction, or it lies past the recorded boundary, so the bytes
+    /// between are missing or have yet to arrive.
+    fn is_past_boundary(&self, key: &TcpStreamKey, seq: u32) -> bool {
+        self.entries.get(key).is_none_or(|entry| seq.wrapping_sub(entry.next_message_seq) as i32 > 0)
     }
 
     /// Whether `bytes`, which start at `base_seq`, hold a whole framed message
@@ -1280,6 +1298,26 @@ impl DnsTcpFraming {
             None => self.forget(key),
         }
     }
+}
+
+/// Whether `bytes`, read as a length prefix and a message, show header flags a
+/// DNS message could have: an assigned opcode and rcode, the reserved Z bit
+/// clear, and no rcode on a query. Bytes too short to show the flags do not.
+///
+/// This is what stands between a segment from inside a message, whose head was
+/// lost or predates the capture, and a boundary read out of its payload. ASCII
+/// and answer records fail it. It is a filter, not proof: about 7% of random
+/// segments pass, and that bogus boundary then lapses as any does. The section
+/// counts are deliberately not read: a head with counts that cannot fit still
+/// gets its boundary, so the segments inside it stay undecoded.
+fn looks_like_dns_tcp_start(bytes: &[u8]) -> bool {
+    let [_, _, _, _, high, low, ..] = *bytes else {
+        return false;
+    };
+    let is_response = high & 0x80 != 0;
+    let opcode = (high >> 3) & 0x0f;
+    let rcode = low & 0x0f;
+    matches!(opcode, 0 | 1 | 2 | 4 | 5 | 6) && low & 0x40 == 0 && rcode <= 10 && (is_response || rcode == 0)
 }
 
 /// Walks the DNS-over-TCP length prefixes in `bytes`, which begin a message
@@ -1615,8 +1653,10 @@ impl StreamReassembler {
         };
         let status = self.attribute(raw_status, now_ms);
         let sniffed = sniff_for_transport(self.segments.prefix(&key), packet.protocol, packet.src_port, packet.dst_port);
-        // The buffer starts at a message start, so its length prefixes say
-        // where the message in progress, or the last one it holds, ends.
+        // The buffer may start at a message start, in which case its length
+        // prefixes say where the message in progress, or the last one it
+        // holds, ends. It may not: its first segment can be the tail of a
+        // message whose head was lost, which `record_message` screens for.
         if dns_tcp {
             if let Some(base_seq) = self.segments.base_seq(&key) {
                 let prefix = self.segments.prefix(&key);
@@ -3823,6 +3863,93 @@ mod tests {
         sniff_from_53(&mut r, 51000, 100, &framed_dns(&query_shaped), 0);
         assert_eq!(r.dns_framing_len(), 0);
         assert!(r.bytes_held() > 0);
+    }
+
+    // ---- Boundaries from unverified starts (JAM-21 decisions fix) ----------
+
+    /// Segments from inside a message, whose first bytes would read as a length
+    /// prefix: ASCII RDATA, and a run of answers starting on a compression pointer.
+    fn message_tails() -> Vec<(&'static str, Vec<u8>)> {
+        let ascii = b"example text record body ".repeat(20);
+        let mut answers = Vec::new();
+        for _ in 0..20 {
+            answers.extend_from_slice(&[0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 0x2c, 0, 4, 1, 2, 3, 4]);
+        }
+        vec![("ascii", ascii), ("answers", answers)]
+    }
+
+    /// Sends three whole messages past the decision window from `seq`: the
+    /// first two pay for the release and removal of whatever is held.
+    fn third_message_after_the_window(r: &mut StreamReassembler, seq: u32) -> SniffOutcome {
+        let message = dns_query_stream(9, "real.example");
+        let step = message.len() as u32;
+        sniff_out(r, seq, &message, 3_000);
+        sniff_out(r, seq + step, &message, 3_001);
+        sniff_out(r, seq + 2 * step, &message, 3_002)
+    }
+
+    #[test]
+    fn a_tail_seen_first_records_no_boundary() {
+        for (what, tail) in message_tails() {
+            let mut r = StreamReassembler::new();
+            sniff_out(&mut r, 100, &tail, 0);
+            assert_eq!(r.dns_framing_len(), 0, "{what}");
+            let real = third_message_after_the_window(&mut r, 100 + tail.len() as u32);
+            assert!(matches!(real.info, L7Info::Dns { id: 9, .. }), "{what}: {:?}", real.info);
+        }
+    }
+
+    #[test]
+    fn a_tail_past_a_lost_head_does_not_move_the_boundary() {
+        for (what, tail) in message_tails() {
+            let mut r = StreamReassembler::new();
+            let one = dns_query_stream(1, "a.com");
+            assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+            let boundary = 100 + one.len() as u32;
+            // The head of the next message never reached the capture.
+            let tail_seq = boundary + 500;
+            sniff_out(&mut r, tail_seq, &tail, 1);
+            let entry = r.dns_framing.entries[&TcpStreamKey { flow: dns_flow(), from_local: true }];
+            assert_eq!(entry.next_message_seq, boundary, "{what}");
+            let real = third_message_after_the_window(&mut r, tail_seq + tail.len() as u32);
+            assert!(matches!(real.info, L7Info::Dns { id: 9, .. }), "{what}: {:?}", real.info);
+        }
+    }
+
+    #[test]
+    fn a_consumed_tail_records_no_boundary() {
+        for (what, tail) in message_tails() {
+            let mut r = StreamReassembler::new();
+            sniff_out(&mut r, 100, &tail, 0);
+            // Past the window: consumed by the release without being sniffed.
+            sniff_out(&mut r, 100 + tail.len() as u32, &tail, 3_000);
+            assert_eq!(r.dns_framing_len(), 0, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_head_too_short_to_show_its_flags_records_its_boundary_once_they_arrive() {
+        let first = partial_message(5_000, 1398);
+        let key = TcpStreamKey { flow: dns_flow(), from_local: true };
+        let mut r = StreamReassembler::new();
+        sniff_out(&mut r, 100, &first[..3], 0);
+        assert_eq!(r.dns_framing_len(), 0, "three bytes prove nothing about the start");
+        sniff_out(&mut r, 103, &first[3..], 0);
+        assert_eq!(r.dns_framing.entries[&key].next_message_seq, 100 + 5_002);
+    }
+
+    #[test]
+    fn a_reordered_tail_leaves_the_verified_boundary_for_its_head() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+        let boundary = 100 + one.len() as u32;
+        let (_, tail) = message_tails().remove(0);
+        let head = partial_message(5_000, 98);
+        sniff_out(&mut r, boundary + 100, &tail, 1);
+        sniff_out(&mut r, boundary, &head, 2);
+        let key = TcpStreamKey { flow: dns_flow(), from_local: true };
+        assert_eq!(r.dns_framing.entries[&key].next_message_seq, boundary + 5_002);
     }
 
     #[test]
