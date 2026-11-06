@@ -2,6 +2,7 @@ use crate::ja3::{compute_ja3, label_for_ja3, ClientHelloFields};
 use crate::parse::TransportProtocol;
 use crate::reassembly::MAX_TCP_STREAM_BYTES;
 use crate::redact::redact_headers;
+use zeroize::Zeroize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum L7Info {
@@ -389,6 +390,9 @@ fn dns_txt_text(rdata: &[u8], budget: usize) -> (String, bool) {
 
     // Escape only as much as the answer cap allows.
     let mut text = String::new();
+    // The same bytes unescaped, one char each, for redaction to judge: `\009`
+    // in `text` is a tab here, and redaction ignores leading whitespace.
+    let mut unescaped = String::new();
     let mut cut = false;
     let mut pos = 0;
     'strings: while pos < rdata.len() {
@@ -415,21 +419,24 @@ fn dns_txt_text(rdata: &[u8], budget: usize) -> (String, bool) {
             }
             // Tokens are ASCII by construction.
             text.push_str(std::str::from_utf8(&token[..n]).unwrap_or_default());
+            unescaped.push(char::from(b));
         }
         pos += 1 + len;
     }
 
     // Sensitive names and the bearer prefix sit at the start of the text, so
     // redacting the capped text judges it exactly as the whole would be. A
-    // `key=value` TXT is judged on its key like an HTTP header; no sensitive
-    // name is anywhere near 64 bytes, so a longer key is not copied.
-    let key = text.split('=').next().unwrap_or_default();
+    // `key=value` or `key: value` TXT is judged on its key like an HTTP header;
+    // only the first separator counts, so a colon in a value changes nothing.
+    // No sensitive name is anywhere near 64 bytes, so a longer key is not copied.
+    let key = unescaped.split(['=', ':']).next().unwrap_or_default().trim();
     let name = if key.len() <= 64 { key.to_string() } else { String::new() };
-    let was_redaction = text == "[REDACTED]";
-    let mut pair = [(name, text)];
+    let mut pair = [(name, unescaped)];
     redact_headers(&mut pair);
-    let [(_, mut text)] = pair;
-    if !was_redaction && text == "[REDACTED]" {
+    let [(_, judged)] = pair;
+    if judged == "[REDACTED]" {
+        text.zeroize();
+        text = judged;
         cut = false;
     }
 
@@ -1197,6 +1204,46 @@ mod tests {
     fn txt_bearer_value_is_redacted() {
         let r = txt_data(&[txt_rdata(b"Bearer abc")]);
         assert_eq!(r, vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_bearer_after_escaped_whitespace_is_redacted() {
+        for text in [&b"\tBearer eyJabc"[..], b"\r\n Bearer eyJabc", b"\x0bbearer eyJabc", b"\xa0Bearer eyJabc"] {
+            let r = txt_data(&[txt_rdata(text)]);
+            assert_eq!(r, vec![("[REDACTED]".to_string(), false)], "{text:?}");
+        }
+    }
+
+    #[test]
+    fn txt_bearer_across_character_strings_is_redacted() {
+        assert_eq!(txt_data(&[b"\x08\tBearer \x03abc".to_vec()]), vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_colon_separated_sensitive_key_is_redacted() {
+        for text in [&b"Authorization: abc"[..], b"cookie: a=b", b"x-api-key:abc", b"Set-Cookie : a=b", b"\tcookie=a"] {
+            let r = txt_data(&[txt_rdata(text)]);
+            assert_eq!(r, vec![("[REDACTED]".to_string(), false)], "{text:?}");
+        }
+    }
+
+    #[test]
+    fn txt_with_a_colon_in_its_value_stays_readable() {
+        for text in ["v=spf1 include:example.com ~all", "google-site-verification=a:b", "note: cookie=x", "v=1; cookie=x"] {
+            assert_eq!(txt_data(&[txt_rdata(text.as_bytes())]), vec![(text.to_string(), false)]);
+        }
+    }
+
+    #[test]
+    fn txt_that_is_literally_the_redaction_marker_is_unchanged() {
+        assert_eq!(txt_data(&[txt_rdata(b"[REDACTED]")]), vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_escaped_past_the_cap_still_reports_the_cut_when_not_redacted() {
+        let r = txt_data(&[txt_rdata(&[0x01; 200])]);
+        assert_eq!(r[0].0.len(), MAX_DNS_TXT_ANSWER_BYTES);
+        assert!(r[0].1);
     }
 
     #[test]
