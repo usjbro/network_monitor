@@ -156,11 +156,15 @@ impl ObservedDnsNames {
 }
 
 /// A name from the wire is shown in the UI, so only plain hostname bytes are
-/// accepted; anything else (escapes, non-ASCII, spaces) is not learned.
+/// accepted; anything else (escapes, non-ASCII, spaces) is not learned. Nor is
+/// a name whose last label is all digits: no such TLD exists, and `8.8.8.8`
+/// shown as a host's name would pass for its address.
 fn is_learnable_name(name: &str) -> bool {
+    let last_label = name.trim_end_matches('.').rsplit('.').next().unwrap_or_default();
     !name.is_empty()
         && name.len() <= MAX_NAME_BYTES
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        && (last_label.is_empty() || !last_label.bytes().all(|b| b.is_ascii_digit()))
 }
 
 #[cfg(test)]
@@ -247,6 +251,24 @@ mod tests {
         t.learn_response("b\u{fc}cher.de", &[a("b\u{fc}cher.de", "1.2.3.5")], 0);
         t.learn_response("", &[a("", "1.2.3.6")], 0);
         assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn ip_shaped_name_is_not_learned() {
+        let mut t = ObservedDnsNames::new(8);
+        t.learn_response("8.8.8.8", &[a("8.8.8.8", "1.2.3.4")], 0);
+        t.learn_response("1.2.3.4.", &[a("1.2.3.4.", "1.2.3.5")], 0);
+        t.learn_response("host.123", &[a("host.123", "1.2.3.6")], 0);
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn digits_outside_the_last_label_are_learned() {
+        let mut t = ObservedDnsNames::new(8);
+        t.learn_response("host1.example.com", &[a("host1.example.com", "1.2.3.4")], 0);
+        t.learn_response("1.2.3.example", &[a("1.2.3.example", "1.2.3.5")], 0);
+        assert_eq!(t.lookup("1.2.3.4", 0), Some("host1.example.com"));
+        assert_eq!(t.lookup("1.2.3.5", 0), Some("1.2.3.example"));
     }
 
     #[test]
