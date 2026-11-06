@@ -884,4 +884,33 @@ mod tests {
         };
         assert_eq!(tcp_query, (Some((2, 2)), Some((4, 1))));
     }
+
+    #[test]
+    fn byte_ranges_are_right_for_each_tcp_53_path() {
+        use crate::l7::dns_test_support::response;
+        let offset_of = |parsed_ports: (u16, u16), payload: Vec<u8>, l7: &L7Info, path: &str| {
+            let mut parsed = base_packet();
+            parsed.protocol = TransportProtocol::Tcp;
+            parsed.src_port = Some(parsed_ports.0);
+            parsed.dst_port = Some(parsed_ports.1);
+            parsed.payload = payload;
+            let fields = build_fields(&parsed, l7, crate::parse::LinkType::Raw);
+            fields.iter().find(|f| f.path == path).map(|f| (f.offset, f.len))
+        };
+        let msg = response(0x42, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        let mut framed = (msg.len() as u16).to_be_bytes().to_vec();
+        framed.extend_from_slice(&msg);
+        let l7 = crate::l7::sniff_l7(&msg, Some(51000));
+        // A response from source 53 to an ephemeral port, and to 8443.
+        assert_eq!(offset_of((53, 51000), framed.clone(), &l7, "dns.id"), Some((2, 2)));
+        assert_eq!(offset_of((53, 8443), framed, &l7, "dns.count.answers"), Some((8, 2)));
+        // TLS from source 53: the SNI range comes from the ClientHello, unshifted.
+        let hello = crate::l7::build_client_hello("example.com");
+        let tls = crate::l7::sniff_l7(&hello, Some(443));
+        let L7Info::TlsClientHello { sni_offset, sni_len, .. } = tls else { panic!("fixture") };
+        assert_eq!(
+            offset_of((53, 8443), hello, &tls, "tls.handshake.sni"),
+            Some((sni_offset as u32, sni_len as u32))
+        );
+    }
 }

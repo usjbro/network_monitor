@@ -647,28 +647,48 @@ pub fn sniff_dns_tcp(stream: &[u8]) -> L7Sniff {
     }
 }
 
-/// Whether a packet is DNS over TCP: TCP to port 53, or from port 53 unless
-/// the other end is 80 or 443. A response comes from port 53 to an ephemeral
-/// port, but a client whose ephemeral port is 53 would otherwise hide its
-/// HTTP or TLS to those well-known ports.
+/// Whether a packet is DNS over TCP: TCP with either port 53. This is a
+/// port test and nothing more, so `sniff_for_transport` does not let it hide
+/// HTTP or TLS from source port 53.
 pub fn is_dns_over_tcp(protocol: TransportProtocol, src_port: Option<u16>, dst_port: Option<u16>) -> bool {
-    protocol == TransportProtocol::Tcp
-        && (dst_port == Some(53) || (src_port == Some(53) && !matches!(dst_port, Some(80 | 443))))
+    protocol == TransportProtocol::Tcp && (src_port == Some(53) || dst_port == Some(53))
 }
 
-/// `sniff_l7_desegmenting`, but aware of the transport: DNS over TCP is
+/// `sniff_l7_desegmenting`, but aware of the transport. DNS over TCP is
 /// length-framed, and a response is recognised by its source port, which
 /// `sniff_l7_desegmenting` (destination port only) cannot see.
+///
+/// To port 53 the payload is DNS only. From port 53 to any other port it
+/// may be a DNS response or an ordinary connection that merely uses 53 as its
+/// ephemeral port, and any port allowlist for the latter would be
+/// incomplete, so HTTP and TLS are tried first and DNS second. DNS here is
+/// always `sniff_dns_tcp`, never raw `sniff_dns`, so its byte ranges stay
+/// two bytes in.
 pub fn sniff_for_transport(
     payload: &[u8],
     protocol: TransportProtocol,
     src_port: Option<u16>,
     dst_port: Option<u16>,
 ) -> L7Sniff {
-    if is_dns_over_tcp(protocol, src_port, dst_port) {
+    if !is_dns_over_tcp(protocol, src_port, dst_port) {
+        return sniff_l7_desegmenting(payload, dst_port);
+    }
+    if dst_port == Some(53) {
         return sniff_dns_tcp(payload);
     }
-    sniff_l7_desegmenting(payload, dst_port)
+    if let Some(info) = sniff_http(payload)
+        .or_else(|| sniff_http_response(payload))
+        .or_else(|| sniff_tls_client_hello(payload))
+    {
+        return L7Sniff::Decided(info);
+    }
+    match sniff_dns_tcp(payload) {
+        L7Sniff::Undecided => match missing_byte_count(payload) {
+            Some(at_least) => L7Sniff::NeedMoreBytes { at_least },
+            None => L7Sniff::Undecided,
+        },
+        other => other,
+    }
 }
 
 /// Exactly `sniff_l7_desegmenting` with both non-`Decided` outcomes collapsed
@@ -1461,20 +1481,49 @@ mod tests {
     }
 
     #[test]
-    fn source_port_53_does_not_hide_http_or_tls() {
+    fn source_port_53_does_not_hide_http_or_tls_on_any_destination_port() {
         let hello = build_client_hello("example.com");
-        match sniff_for_transport(&hello, TransportProtocol::Tcp, Some(53), Some(443)) {
-            L7Sniff::Decided(L7Info::TlsClientHello { sni, .. }) => assert_eq!(sni, "example.com"),
-            other => panic!("expected the ClientHello, got {other:?}"),
+        for dst in [443, 8443, 51000] {
+            match sniff_for_transport(&hello, TransportProtocol::Tcp, Some(53), Some(dst)) {
+                L7Sniff::Decided(L7Info::TlsClientHello { sni, .. }) => assert_eq!(sni, "example.com", "dst {dst}"),
+                other => panic!("dst {dst}: expected the ClientHello, got {other:?}"),
+            }
         }
         let get = b"GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+        for dst in [80, 8080] {
+            assert!(
+                matches!(
+                    sniff_for_transport(get, TransportProtocol::Tcp, Some(53), Some(dst)),
+                    L7Sniff::Decided(L7Info::Http { .. })
+                ),
+                "dst {dst}"
+            );
+        }
+        let status = b"HTTP/1.1 200 OK\r\n\r\n";
         assert!(matches!(
-            sniff_for_transport(get, TransportProtocol::Tcp, Some(53), Some(80)),
-            L7Sniff::Decided(L7Info::Http { .. })
+            sniff_for_transport(status, TransportProtocol::Tcp, Some(53), Some(8080)),
+            L7Sniff::Decided(L7Info::HttpResponse { .. })
         ));
-        assert!(is_dns_over_tcp(TransportProtocol::Tcp, Some(53), Some(51000)));
-        assert!(is_dns_over_tcp(TransportProtocol::Tcp, Some(51000), Some(53)));
+    }
+
+    #[test]
+    fn destination_port_53_is_dns_only_and_the_port_test_has_no_exemptions() {
+        let hello = build_client_hello("example.com");
+        assert_eq!(sniff_for_transport(&hello, TransportProtocol::Tcp, Some(51000), Some(53)), sniff_dns_tcp(&hello));
+        for (src, dst) in [(53, 51000), (53, 443), (53, 8443), (51000, 53)] {
+            assert!(is_dns_over_tcp(TransportProtocol::Tcp, Some(src), Some(dst)), "{src}->{dst}");
+        }
         assert!(!is_dns_over_tcp(TransportProtocol::Udp, Some(51000), Some(53)));
+        assert!(!is_dns_over_tcp(TransportProtocol::Tcp, Some(51000), Some(8443)));
+    }
+
+    #[test]
+    fn a_framed_dns_response_from_source_port_53_still_decodes() {
+        let msg = response(0xbeef, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        assert!(matches!(
+            sniff_for_transport(&framed(&msg), TransportProtocol::Tcp, Some(53), Some(51000)),
+            L7Sniff::Decided(L7Info::DnsResponse { id: 0xbeef, .. })
+        ));
     }
 
     #[test]
