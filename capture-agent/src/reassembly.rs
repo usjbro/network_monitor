@@ -1229,31 +1229,29 @@ impl DnsTcpFraming {
     }
 
     /// Records where the message starting at `base_seq` in `bytes` ends, or
-    /// forgets the stream when nothing trustworthy can be recorded. A start
-    /// nothing vouches for (no boundary reaches it, and the bytes did not
-    /// decode) records only if it passes `looks_like_dns_tcp_start`. If it does
-    /// not, any boundary already held stays: its message may yet arrive.
+    /// forgets the stream when nothing trustworthy can be recorded. A start no
+    /// boundary reaches records only if it passes `looks_like_dns_tcp_start`.
+    /// If it does not, any boundary already held stays: its message may yet
+    /// arrive.
     ///
     /// `response_only` is for a direction from port 53 to a port that is not
     /// 53, which may be an ordinary connection that merely uses 53 as its
-    /// source port: see `dns_tcp_walk`. It also records nothing when the sniff
-    /// decided something other than DNS.
+    /// source port: see `dns_tcp_walk`. It also records nothing when
+    /// `other_protocol` says the sniff decided something other than DNS.
     fn record_message(
         &mut self,
         key: &TcpStreamKey,
         base_seq: u32,
         bytes: &[u8],
-        sniffed: &L7Sniff,
+        other_protocol: bool,
         response_only: bool,
         now_ms: u64,
     ) {
-        let other_protocol = matches!(sniffed, L7Sniff::Decided(info) if !matches!(info, L7Info::Dns { .. } | L7Info::DnsResponse { .. }));
         if response_only && other_protocol {
             self.forget(key);
             return;
         }
-        let decoded = matches!(sniffed, L7Sniff::Decided(_));
-        if !decoded && self.is_past_boundary(key, base_seq) && !looks_like_dns_tcp_start(bytes) {
+        if self.is_past_boundary(key, base_seq) && !looks_like_dns_tcp_start(bytes) {
             return;
         }
         self.walk_and_record(key, base_seq, None, bytes, response_only, now_ms);
@@ -1298,6 +1296,10 @@ impl DnsTcpFraming {
             None => self.forget(key),
         }
     }
+}
+
+fn is_dns_info(info: &L7Info) -> bool {
+    matches!(info, L7Info::Dns { .. } | L7Info::DnsResponse { .. })
 }
 
 /// Whether `bytes`, read as a length prefix and a message, show header flags a
@@ -1558,12 +1560,6 @@ impl StreamReassembler {
             };
         }
 
-        // This frame's own payload first. For the overwhelmingly common case
-        // — a request or ClientHello that fits in one segment, with no
-        // earlier segment already buffered for this direction — this decides
-        // immediately and nothing is buffered at all. See the
-        // `has_buffer` check below (JAM-169) for why that standalone
-        // decision is not trusted once something is already held.
         // Only TCP with a known flow identity and a sequence number can be
         // desegmented. Binding the sequence number here, rather than
         // re-unwrapping it further down, means there is no path on which a
@@ -1592,6 +1588,12 @@ impl StreamReassembler {
             }
         }
 
+        // This frame's own payload first. For the overwhelmingly common case
+        // — a request or ClientHello that fits in one segment, with no
+        // earlier segment already buffered for this direction — this decides
+        // immediately and nothing is buffered at all. See the
+        // `has_buffer` check below (JAM-169) for why that standalone
+        // decision is not trusted once something is already held.
         let own = sniff_for_transport(&packet.payload, packet.protocol, packet.src_port, packet.dst_port);
 
         let Some((key, seq)) = stream_target else {
@@ -1626,8 +1628,8 @@ impl StreamReassembler {
                 // directly rather than allocating a buffer just to release it
                 // again immediately.
                 if dns_tcp {
-                    let sniffed = L7Sniff::Decided(info.clone());
-                    self.dns_framing.record_message(&key, seq, &packet.payload, &sniffed, response_only, now_ms);
+                    let other_protocol = !is_dns_info(&info);
+                    self.dns_framing.record_message(&key, seq, &packet.payload, other_protocol, response_only, now_ms);
                 }
                 return SniffOutcome { info, status: None, need_more_bytes: None, reassembled_packet: None };
             }
@@ -1661,7 +1663,8 @@ impl StreamReassembler {
             if let Some(base_seq) = self.segments.base_seq(&key) {
                 let prefix = self.segments.prefix(&key);
                 let at_cap = prefix.len() >= MAX_TCP_STREAM_BYTES;
-                self.dns_framing.record_message(&key, base_seq, prefix, &sniffed, response_only, now_ms);
+                let other_protocol = matches!(&sniffed, L7Sniff::Decided(info) if !is_dns_info(info));
+                self.dns_framing.record_message(&key, base_seq, prefix, other_protocol, response_only, now_ms);
                 // The cap cut this segment short, so the walk above never saw
                 // its tail, and a message may start there. The segments after
                 // it are cleanup, then read as starts.
