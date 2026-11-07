@@ -1308,18 +1308,29 @@ fn is_dns_info(info: &L7Info) -> bool {
 
 /// Whether `bytes`, read as a length prefix and a message, show a header a DNS
 /// message could have: an assigned opcode and rcode, the reserved Z bit clear,
-/// no rcode and at most one question on a query (RFC 9619), and section counts
+/// no rcode and at most one question on a query, and section counts
 /// that fit the declared length at 5 bytes a question and 11 a record. Fewer
 /// than the 14 bytes of a prefix and header show no such thing and do not pass;
-/// a buffered head is checked again as its bytes arrive.
+/// a buffered head is checked again if its bytes arrive within the 2 s window,
+/// and records nothing if they arrive later.
+///
+/// RFC 9619 limits QDCOUNT to 1 for OPCODE 0 only. Applying the limit to the
+/// other opcodes is this filter's choice; the cost is that a NOTIFY with a
+/// QDCOUNT over 1 loses only its boundary.
 ///
 /// This is what stands between a segment from inside a message, whose head was
 /// lost or predates the capture, and a boundary read out of its payload. It is
 /// a filter, not proof. Measured over random 1,400-byte tails at uniform
-/// alignment: 0 of 4,000 A-answer runs (66 of 1,000,000 in a wider sample), 0
-/// of 4,000 ASCII TXT, 0 of 1,000,000 AAAA runs and random bytes. Printable
-/// text can't pass, since its counts never fit. Mostly zero bytes can: all-zero
-/// counts and flags are a valid empty query. A bogus boundary lapses as any does.
+/// alignment: 0 of 4,000 A-answer runs (66 of 1,000,000 in a wider sample, about
+/// 0.007% against the real function), 0 of 4,000 ASCII TXT, 0 of 1,000,000 AAAA
+/// runs. That last figure holds only for uniformly random addresses: real ones
+/// with long zero runs pass at 1 or 2 of a record's 28 alignments (2620:fe::fe,
+/// 2001:500:2f::f, 2606:4700:4700::1111), and samples sharing a prefix passed
+/// 0.15% (/64), 1.94% (/48) and 12.4% (/32 plus low byte). Printable text can't
+/// pass, since its counts never fit. Mostly zero bytes can: all-zero counts and
+/// flags are a valid empty query. When one passes, a boundary is recorded and the
+/// third message after the window is not decoded, until the boundary is reached
+/// or 30 s pass.
 fn looks_like_dns_tcp_start(bytes: &[u8]) -> bool {
     let Some(header) = bytes.get(2..14) else {
         return false;
