@@ -14,7 +14,7 @@ use capture_agent::{
     tls_decrypt::{self, DecryptOutcome},
     tls_handshake::{HandshakeEvent, TlsHandshakeParser},
     tls_stream::{first_data_sequence, TlsDirectionStream, TlsStreamError},
-    transaction::{ServiceTimeStats, TransactionTracker, TxnEvent, Unanswered},
+    transaction::{ServiceTimeStats, TransactionTracker, TxnEvent, TxnProtocol, Unanswered},
     wire,
 };
 use std::collections::{HashMap, VecDeque};
@@ -1390,12 +1390,45 @@ fn resolve_max_flows() -> usize {
 /// parse success: a zero-capacity flow table evicts every flow the instant
 /// it's inserted, which looks like a total capture failure, not a setting.
 fn parse_max_flows(raw: Option<String>) -> usize {
+    parse_positive_env("MAX_FLOWS", raw, flow::DEFAULT_MAX_FLOWS)
+}
+
+/// A positive integer from the environment variable `name`, or `default` when
+/// `raw` is unset or blank. Anything else panics, for the reasons above.
+fn parse_positive_env(name: &str, raw: Option<String>, default: usize) -> usize {
     let Some(raw) = raw.filter(|s| !s.trim().is_empty()) else {
-        return flow::DEFAULT_MAX_FLOWS;
+        return default;
     };
     match raw.trim().parse::<usize>() {
         Ok(n) if n > 0 => n,
-        _ => panic!("MAX_FLOWS={raw} is not a valid positive integer"),
+        _ => panic!("{name}={raw} is not a valid positive integer"),
+    }
+}
+
+/// Startup-only capacity of the observed DNS name table (JAM-21). Same
+/// parsing rules as `MAX_FLOWS`, for the same reasons.
+fn resolve_max_observed_dns_names() -> usize {
+    parse_max_observed_dns_names(std::env::var("MAX_OBSERVED_DNS_NAMES").ok())
+}
+
+fn parse_max_observed_dns_names(raw: Option<String>) -> usize {
+    parse_positive_env("MAX_OBSERVED_DNS_NAMES", raw, capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES)
+}
+
+/// The only responses that feed the observed name table: a UDP/53 response
+/// the tracker matched to its query (`Answered`) with rcode 0. An unmatched
+/// or duplicate response could be injected without a query behind it, and DNS
+/// over TCP is never `Answered`, so neither teaches a name.
+fn learnable_dns_response<'a>(
+    l7: &'a l7::L7Info,
+    event: &TxnEvent,
+) -> Option<(&'a str, &'a [l7::DnsAnswer])> {
+    match (l7, event) {
+        (
+            l7::L7Info::DnsResponse { query_name, rcode: 0, answers, .. },
+            TxnEvent::Answered { protocol: TxnProtocol::Dns, .. },
+        ) => Some((query_name, answers)),
+        _ => None,
     }
 }
 
@@ -2438,6 +2471,7 @@ fn build_capture_stats_json(
     total_connections_observed: u64,
     capacity_evictions: u64,
     idle_evictions: u64,
+    observed_name_evictions: u64,
 ) -> wire::CaptureStatsJson {
     let (received, dropped, if_dropped) = match stat {
         Some(s) => (s.received, s.dropped, s.if_dropped),
@@ -2452,6 +2486,7 @@ fn build_capture_stats_json(
         total_connections_observed,
         capacity_evictions,
         idle_evictions,
+        observed_name_evictions,
     }
 }
 
@@ -2564,7 +2599,8 @@ async fn main() -> std::io::Result<()> {
     let flow_table = Arc::new(Mutex::new(FlowTable::new_with_capacity(
         local_addrs,
         resolve_max_flows(),
-    )));
+    )
+    .with_observed_name_capacity(resolve_max_observed_dns_names())));
     // JAM-15: written by the capture thread's `TransactionTracker`, read by
     // the periodic emitter for `service_time_update`.
     let service_time_stats = Arc::new(Mutex::new(ServiceTimeStats::default()));
@@ -3136,6 +3172,14 @@ async fn main() -> std::io::Result<()> {
                             capture_ts_us,
                             observe_result.as_ref().is_some_and(|r| r.is_retransmit),
                         );
+                        if let Some((query_name, answers)) =
+                            learnable_dns_response(&l7_info, &txn_event)
+                        {
+                            flow_table
+                                .lock()
+                                .unwrap()
+                                .learn_dns_response(query_name, answers, flow_now_ms);
+                        }
                         emit_unanswered_findings(
                             transactions.expire(capture_ts_us),
                             now_ms,
@@ -3388,6 +3432,7 @@ async fn main() -> std::io::Result<()> {
                     total_flows_observed,
                     capacity_evictions,
                     idle_evictions,
+                    observed_name_evictions,
                     direction_attribution_unavailable,
                     protocol_hierarchy,
                 ) = {
@@ -3415,6 +3460,7 @@ async fn main() -> std::io::Result<()> {
                         ft.total_flows_observed(),
                         ft.capacity_evictions(),
                         ft.idle_evictions(),
+                        ft.observed_name_evictions(),
                         // Live, not a startup snapshot — a runtime
                         // `set_interface` switch (issue #69) can change
                         // whether local_addrs is empty, so this must be
@@ -3488,6 +3534,7 @@ async fn main() -> std::io::Result<()> {
                             process_name,
                             pid,
                             ja3_label: endpoint.ja3_label.map(|s| s.to_string()),
+                            observed_name: endpoint.observed_name,
                         }
                     })
                     .collect();
@@ -3689,6 +3736,7 @@ async fn main() -> std::io::Result<()> {
                     total_flows_observed,
                     capacity_evictions,
                     idle_evictions,
+                    observed_name_evictions,
                 );
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats {
                     stats: stats_json,
@@ -4020,15 +4068,16 @@ mod tests {
     use super::{
         build_capture_stats_json, build_packet_json, build_system_stats_json, datalink_to_link_type,
         emit_unanswered_findings, find_device_by_name, flow_aging_now_ms, is_capturable,
-        is_meaningful_override, looks_like_pcapng, malformed_frame_summary,
-        note_capture_truncation, packet_osi_layer, parse_max_flows, parse_replay_local_addrs,
+        is_meaningful_override, learnable_dns_response, looks_like_pcapng, malformed_frame_summary,
+        note_capture_truncation, packet_osi_layer, parse_max_flows,
+        parse_max_observed_dns_names, parse_replay_local_addrs,
         parse_replay_speed, protocol_node_to_json, reassembly_now_ms, resolve_link_type,
         validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, with_flow_observation, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN,
         MAX_INTERFACE_NAME_LEN,
     };
     use capture_agent::flow::FlowTable;
-    use capture_agent::l7::L7Info;
+    use capture_agent::l7::{DnsAnswer, L7Info};
     use capture_agent::parse::{parse_packet, LinkType, TransportProtocol};
     use capture_agent::reassembly::StreamReassembler;
     use capture_agent::rate_limit::PacketEventLimiter;
@@ -4243,7 +4292,10 @@ mod tests {
             packet_osi_layer(
                 TransportProtocol::Tcp,
                 &L7Info::HttpResponse {
-                    status: "200".into()
+                    status: "200".into(),
+                    reason: None,
+                    content_type: None,
+                    content_length: None,
                 }
             ),
             7
@@ -4662,7 +4714,7 @@ mod tests {
             dropped: 7,
             if_dropped: 2,
         };
-        let json = build_capture_stats_json(Some(stat), 15, 4, 42, 3, 1);
+        let json = build_capture_stats_json(Some(stat), 15, 4, 42, 3, 1, 9);
         assert_eq!(json.received, 500);
         assert_eq!(json.dropped, 7);
         assert_eq!(json.if_dropped, 2);
@@ -4671,6 +4723,7 @@ mod tests {
         assert_eq!(json.total_connections_observed, 42);
         assert_eq!(json.capacity_evictions, 3);
         assert_eq!(json.idle_evictions, 1);
+        assert_eq!(json.observed_name_evictions, 9);
     }
 
     #[test]
@@ -4678,7 +4731,7 @@ mod tests {
         // The capture thread hasn't successfully called cap.stats() yet
         // (e.g. right at agent startup) — this must report honest zeros,
         // not panic and not fabricate a nonzero drop count.
-        let json = build_capture_stats_json(None, 0, 0, 0, 0, 0);
+        let json = build_capture_stats_json(None, 0, 0, 0, 0, 0, 0);
         assert_eq!(json.received, 0);
         assert_eq!(json.dropped, 0);
         assert_eq!(json.if_dropped, 0);
@@ -4687,6 +4740,7 @@ mod tests {
         assert_eq!(json.total_connections_observed, 0);
         assert_eq!(json.capacity_evictions, 0);
         assert_eq!(json.idle_evictions, 0);
+        assert_eq!(json.observed_name_evictions, 0);
     }
 
     #[test]
@@ -4770,7 +4824,7 @@ mod tests {
             dropped: 0,
             if_dropped: 0,
         };
-        let json = build_capture_stats_json(Some(stat), 0, 9, 0, 0, 0);
+        let json = build_capture_stats_json(Some(stat), 0, 9, 0, 0, 0, 0);
         assert_eq!(json.dropped, 0);
         assert_eq!(json.relay_lagged_events, 0);
         assert_eq!(json.unparseable_frames, 9);
@@ -4932,6 +4986,86 @@ mod tests {
         assert!(result.is_ok(), "got: {result:?}");
     }
 
+    // --- MAX_OBSERVED_DNS_NAMES (JAM-21) ---
+
+    #[test]
+    fn parse_max_observed_dns_names_falls_back_to_default_when_unset() {
+        assert_eq!(
+            parse_max_observed_dns_names(None),
+            capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES
+        );
+        assert_eq!(
+            parse_max_observed_dns_names(Some("  ".to_string())),
+            capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES
+        );
+        assert_eq!(parse_max_observed_dns_names(Some(" 64 ".to_string())), 64);
+    }
+
+    #[test]
+    #[should_panic(expected = "MAX_OBSERVED_DNS_NAMES=0")]
+    fn parse_max_observed_dns_names_rejects_zero() {
+        parse_max_observed_dns_names(Some("0".to_string()));
+    }
+
+    #[test]
+    #[should_panic(expected = "MAX_OBSERVED_DNS_NAMES=lots")]
+    fn parse_max_observed_dns_names_rejects_non_numeric() {
+        parse_max_observed_dns_names(Some("lots".to_string()));
+    }
+
+    // --- learnable_dns_response (JAM-21) ---
+
+    fn dns_response(rcode: u8) -> L7Info {
+        L7Info::DnsResponse {
+            query_name: "example.com".into(),
+            id: 1,
+            qtype: 1,
+            rcode,
+            answer_count: 1,
+            answers: vec![DnsAnswer {
+                name: "example.com".into(),
+                rtype: 1,
+                ttl: 60,
+                data: "93.184.216.34".into(),
+                data_truncated: false,
+            }],
+        }
+    }
+
+    fn answered(protocol: TxnProtocol) -> TxnEvent {
+        TxnEvent::Answered { protocol, service_time_us: 1, request_frame_id: None }
+    }
+
+    #[test]
+    fn answered_noerror_dns_is_learnable() {
+        let info = dns_response(0);
+        let (name, answers) = learnable_dns_response(&info, &answered(TxnProtocol::Dns)).unwrap();
+        assert_eq!(name, "example.com");
+        assert_eq!(answers.len(), 1);
+    }
+
+    #[test]
+    fn nxdomain_is_not_learnable() {
+        assert!(learnable_dns_response(&dns_response(3), &answered(TxnProtocol::Dns)).is_none());
+    }
+
+    #[test]
+    fn unmatched_response_is_not_learnable() {
+        assert!(learnable_dns_response(&dns_response(0), &TxnEvent::Unmatched).is_none());
+    }
+
+    #[test]
+    fn duplicate_response_is_not_learnable() {
+        assert!(
+            learnable_dns_response(&dns_response(0), &TxnEvent::DuplicateResponse).is_none()
+        );
+    }
+
+    #[test]
+    fn answered_http_is_not_learnable() {
+        assert!(learnable_dns_response(&dns_response(0), &answered(TxnProtocol::Http)).is_none());
+    }
+
     // --- MAX_FLOWS (JAM-6/GitHub #73) ---
     //
     // Exercised through `parse_max_flows` rather than by setting the real
@@ -4971,7 +5105,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not a valid positive integer")]
+    #[should_panic(expected = "MAX_FLOWS=not-a-number is not a valid positive integer")]
     fn parse_max_flows_panics_loudly_on_garbage() {
         let _ = parse_max_flows(Some("not-a-number".to_string()));
     }

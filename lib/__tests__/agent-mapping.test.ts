@@ -292,6 +292,7 @@ describe('mapCaptureStatsEvent', () => {
         totalConnectionsObserved: 42,
         capacityEvictions: 3,
         idleEvictions: 7,
+        observedNameEvictions: 5,
       },
     };
     const stats = mapCaptureStatsEvent(event);
@@ -304,6 +305,7 @@ describe('mapCaptureStatsEvent', () => {
       totalConnectionsObserved: 42,
       capacityEvictions: 3,
       idleEvictions: 7,
+      observedNameEvictions: 5,
     });
   });
 
@@ -319,6 +321,7 @@ describe('mapCaptureStatsEvent', () => {
         totalConnectionsObserved: 5000,
         capacityEvictions: 0,
         idleEvictions: 0,
+        observedNameEvictions: 0,
       },
     };
     const stats = mapCaptureStatsEvent(event);
@@ -347,12 +350,24 @@ describe('mapCaptureStatsEvent', () => {
         totalConnectionsObserved: 42,
         capacityEvictions: 3,
         idleEvictions: 7,
+        observedNameEvictions: 5,
       },
     };
     const mapped = mapCaptureStatsEvent(event);
     expect(mapped.totalConnectionsObserved).toBe(42);
     expect(mapped.capacityEvictions).toBe(3);
     expect(mapped.idleEvictions).toBe(7);
+    expect(mapped.observedNameEvictions).toBe(5);
+  });
+
+  it('maps observedNameEvictions to undefined (not 0) when an older agent omits it, keeping the other stats', () => {
+    const event = {
+      type: 'capture_stats',
+      stats: { received: 1, dropped: 2, ifDropped: 3, relayLaggedEvents: 4, unparseableFrames: 5, totalConnectionsObserved: 6, capacityEvictions: 7, idleEvictions: 8 },
+    };
+    const mapped = mapCaptureStatsEvent(event);
+    expect(mapped.observedNameEvictions).toBeUndefined();
+    expect(mapped).toMatchObject({ received: 1, dropped: 2, ifDropped: 3, relayLaggedEvents: 4, unparseableFrames: 5, totalConnectionsObserved: 6, capacityEvictions: 7, idleEvictions: 8 });
   });
 
   it('throws when a horizon/eviction counter is missing, same as any other required field', () => {
@@ -612,9 +627,37 @@ describe('mapEndpointUpdateEvent', () => {
         processName: 'Safari',
         pid: 1234,
         ja3Label: undefined,
+        observedName: undefined,
         enrichment: undefined,
       },
     ]);
+  });
+
+  it('keeps observedName when it is a string, separate from remoteHostname', () => {
+    const base = {
+      host: '93.184.216.34', rxBytesTotal: 0, txBytesTotal: 0, rxPacketsTotal: 0,
+      txPacketsTotal: 0, rxSpeed: 0, txSpeed: 0, flowCount: 1, firstSeenMs: 0,
+      lastSeenMs: 0, processName: 'unknown', pid: 0,
+    };
+    const [named] = mapEndpointUpdateEvent({
+      type: 'endpoint_update',
+      endpoints: [{ ...base, observedName: 'example.com' }],
+    });
+    expect(named.observedName).toBe('example.com');
+    expect(named.remoteHostname).toBeUndefined();
+  });
+
+  it('leaves observedName undefined when missing or not a string, without throwing', () => {
+    const base = {
+      host: '93.184.216.34', rxBytesTotal: 0, txBytesTotal: 0, rxPacketsTotal: 0,
+      txPacketsTotal: 0, rxSpeed: 0, txSpeed: 0, flowCount: 1, firstSeenMs: 0,
+      lastSeenMs: 0, processName: 'unknown', pid: 0,
+    };
+    const mapped = mapEndpointUpdateEvent({
+      type: 'endpoint_update',
+      endpoints: [base, { ...base, observedName: 42 }, { ...base, observedName: null }],
+    });
+    expect(mapped.map((e) => e.observedName)).toEqual([undefined, undefined, undefined]);
   });
 
   it('maps an empty list without throwing (nothing captured yet)', () => {

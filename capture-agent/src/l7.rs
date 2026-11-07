@@ -1,4 +1,8 @@
 use crate::ja3::{compute_ja3, label_for_ja3, ClientHelloFields};
+use crate::parse::TransportProtocol;
+use crate::reassembly::MAX_TCP_STREAM_BYTES;
+use crate::redact::redact_headers;
+use zeroize::Zeroize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum L7Info {
@@ -12,7 +16,17 @@ pub enum L7Info {
     /// Request/response *correlation* (matching this to the request it
     /// answers, service-time timing) is explicitly out of scope here; that
     /// is epic #57's #82.
-    HttpResponse { status: String },
+    ///
+    /// `reason`, `content_type` and `content_length` come from the bytes in
+    /// this one segment. A header in a later segment is absent here, and
+    /// absent means "not observed", not "the response had no such header".
+    HttpResponse {
+        status: String,
+        reason: Option<String>,
+        /// Media type only, lowercased, parameters dropped.
+        content_type: Option<String>,
+        content_length: Option<u64>,
+    },
     /// A DNS query (QR bit clear). `id` is the transaction ID and `qtype` the
     /// first question's type (`0` when the question is truncated before its
     /// type field). Both exist for JAM-15's request/response matching
@@ -94,12 +108,11 @@ fn sniff_http(payload: &[u8]) -> Option<L7Info> {
 }
 
 /// Recognizes an HTTP response's status line — `HTTP/<version> <3-digit
-/// status> <reason phrase>` — e.g. `HTTP/1.1 200 OK`. Deliberately narrow:
-/// only the status code is extracted, not the reason phrase, headers, or
-/// body, and this makes no attempt to associate the response with the
-/// request it answers (that's #82's job). A response line is what a
-/// request line is not — this and `sniff_http` above never both match the
-/// same payload.
+/// status> <reason phrase>` — e.g. `HTTP/1.1 200 OK` — and reads the reason
+/// phrase and the `Content-Type` / `Content-Length` headers from the bytes
+/// present. It makes no attempt to associate the response with the request
+/// it answers (that's #82's job). A response line is what a request line is
+/// not — this and `sniff_http` above never both match the same payload.
 fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
     let first_line = first_complete_line(payload)?;
     let mut parts = first_line.split_whitespace();
@@ -109,24 +122,175 @@ fn sniff_http_response(payload: &[u8]) -> Option<L7Info> {
     }
     let status = parts.next()?;
     if status.len() == 3 && status.bytes().all(|b| b.is_ascii_digit()) {
-        Some(L7Info::HttpResponse { status: status.to_string() })
+        // `first_complete_line` found a newline, so this position exists.
+        let headers = payload.iter().position(|b| *b == b'\n').map_or(&[][..], |n| &payload[n + 1..]);
+        let (content_type, content_length) = parse_response_headers(headers);
+        let reason = parse_reason(first_line, status);
+        let reason = redact_reason(reason);
+        Some(L7Info::HttpResponse { status: status.to_string(), reason, content_type, content_length })
     } else {
         None
     }
+}
+
+/// The reason phrase: what follows the status code on the status line, as
+/// printable ASCII within `MAX_HTTP_REASON_BYTES`. Anything else, or an empty
+/// phrase, is absent.
+fn parse_reason(first_line: &str, status: &str) -> Option<String> {
+    let after_version = first_line.trim_start().split_once(char::is_whitespace)?.1;
+    let reason = after_version.trim_start().strip_prefix(status)?.trim();
+    if reason.is_empty()
+        || reason.len() > MAX_HTTP_REASON_BYTES
+        || !reason.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    {
+        return None;
+    }
+    Some(reason.to_string())
+}
+
+/// Runs the reason phrase through the shared header redaction before it
+/// leaves the parser, so a credential there never reaches the wire. A
+/// `Content-Type` needs no such pass: it is a `token/token`, which has no space
+/// to hold a `Bearer ...` value and is not a sensitive name.
+fn redact_reason(reason: Option<String>) -> Option<String> {
+    let mut pair = [("reason".to_string(), reason?)];
+    redact_headers(&mut pair);
+    let [(_, reason)] = pair;
+    Some(reason)
+}
+
+/// What one header has shown so far. A second, different value — or one that
+/// does not parse, or a folded continuation line — makes the header
+/// unreadable rather than letting either value win.
+enum Seen<T> {
+    Unseen,
+    Value(T),
+    Conflict,
+}
+
+impl<T: PartialEq> Seen<T> {
+    fn record(&mut self, value: Option<T>) {
+        *self = match (std::mem::replace(self, Seen::Conflict), value) {
+            (Seen::Unseen, Some(v)) => Seen::Value(v),
+            (Seen::Value(old), Some(v)) if old == v => Seen::Value(old),
+            _ => Seen::Conflict,
+        };
+    }
+
+    fn into_option(self) -> Option<T> {
+        match self {
+            Seen::Value(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
+/// Reads `Content-Type` and `Content-Length` from the lines after the status
+/// line. Scans at most `MAX_HTTP_HEADER_SCAN_BYTES` bytes and
+/// `MAX_HTTP_HEADER_LINES` lines, stops at the blank line, and ignores a final
+/// line with no terminator (its value may be cut short). Works on bytes: the
+/// body after the headers need not be UTF-8.
+fn parse_response_headers(after_status_line: &[u8]) -> (Option<String>, Option<u64>) {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Last {
+        Type,
+        Length,
+        Other,
+    }
+    let window = &after_status_line[..after_status_line.len().min(MAX_HTTP_HEADER_SCAN_BYTES)];
+    let mut content_type = Seen::Unseen;
+    let mut content_length = Seen::Unseen;
+    let mut last = Last::Other;
+    for line in window.split_inclusive(|b| *b == b'\n').take(MAX_HTTP_HEADER_LINES) {
+        let Some(line) = line.strip_suffix(b"\n") else { break };
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() {
+            break;
+        }
+        if line[0] == b' ' || line[0] == b'\t' {
+            // obs-fold: the previous header's value continues here, and we
+            // do not unfold it.
+            match last {
+                Last::Type => content_type.record(None),
+                Last::Length => content_length.record(None),
+                Last::Other => {}
+            }
+            continue;
+        }
+        last = Last::Other;
+        let Some(colon) = line.iter().position(|b| *b == b':') else { continue };
+        let (name, value) = (&line[..colon], trim_ows(&line[colon + 1..]));
+        if name.eq_ignore_ascii_case(b"content-type") {
+            last = Last::Type;
+            content_type.record(media_type(value));
+        } else if name.eq_ignore_ascii_case(b"content-length") {
+            last = Last::Length;
+            content_length.record(parse_content_length(value));
+        }
+    }
+    (content_type.into_option(), content_length.into_option())
+}
+
+fn trim_ows(mut bytes: &[u8]) -> &[u8] {
+    while let [b' ' | b'\t', rest @ ..] = bytes {
+        bytes = rest;
+    }
+    while let [rest @ .., b' ' | b'\t'] = bytes {
+        bytes = rest;
+    }
+    bytes
+}
+
+fn parse_content_length(value: &[u8]) -> Option<u64> {
+    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(value).ok()?.parse().ok()
+}
+
+fn is_http_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// The `type/subtype` of a `Content-Type` value, lowercased, with parameters
+/// dropped. Anything that is not exactly `token/token` is absent.
+fn media_type(value: &[u8]) -> Option<String> {
+    let end = value.iter().position(|b| *b == b';').unwrap_or(value.len());
+    let media = trim_ows(&value[..end]);
+    if media.len() > MAX_HTTP_CONTENT_TYPE_BYTES {
+        return None;
+    }
+    let slash = media.iter().position(|b| *b == b'/')?;
+    let (kind, subtype) = (&media[..slash], &media[slash + 1..]);
+    let token = |t: &[u8]| !t.is_empty() && t.iter().all(|b| is_http_token_byte(*b));
+    if !token(kind) || !token(subtype) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(media).to_ascii_lowercase())
 }
 
 /// One decoded resource record from a DNS response's answer section.
 ///
 /// `data` is the record's value in text form: dotted IPv4 for A, standard
 /// IPv6 notation for AAAA, the target name for CNAME/NS/PTR, and empty for
-/// any other type, whose RDATA is not decoded.
+/// any other type except TXT, whose RDATA is not decoded. For TXT it is the
+/// record's character-strings, joined and escaped, and redacted; see
+/// `dns_txt_text`. `data_truncated` is set when a TXT value was cut at a cap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsAnswer {
     pub name: String,
     pub rtype: u16,
     pub ttl: u32,
     pub data: String,
+    pub data_truncated: bool,
 }
+
+/// Longest TXT text kept for one answer, in output bytes (after escaping).
+pub const MAX_DNS_TXT_ANSWER_BYTES: usize = 512;
+
+/// Longest TXT text kept across all answers of one response, so that sixteen
+/// large records cannot multiply the per-answer cap.
+pub const MAX_DNS_TXT_RESPONSE_BYTES: usize = 2048;
 
 /// Upper bound on the answer records decoded from one response. A response
 /// can declare up to 65,535 answers in ANCOUNT. Decoding is linear in the
@@ -191,6 +355,106 @@ fn read_dns_name(msg: &[u8], offset: usize) -> Option<(String, usize)> {
     }
 }
 
+/// Decodes TXT RDATA (RFC 1035 §3.3.14): length-prefixed character-strings,
+/// concatenated with no separator. Bytes outside printable ASCII, and the
+/// backslash, use the RFC 1035 §5.1 escapes (`\DDD`, `\\`).
+///
+/// `budget` is what is left of the response's TXT allowance. Output never
+/// exceeds `min(budget, MAX_DNS_TXT_ANSWER_BYTES)` and always ends on a whole
+/// escape; `true` is returned when text was cut at either cap. A
+/// character-string that overruns its RDATA is malformed anywhere in the
+/// record: the result is empty, never a partial value.
+fn dns_txt_text(rdata: &[u8], budget: usize) -> (String, bool) {
+    // Validate the structure first, without allocating, so that an overrun
+    // past the cap still gives empty data.
+    let mut pos = 0;
+    let mut content = 0usize;
+    while pos < rdata.len() {
+        let len = rdata[pos] as usize;
+        if pos + 1 + len > rdata.len() {
+            return (String::new(), false);
+        }
+        content += len;
+        pos += 1 + len;
+    }
+    if budget == 0 {
+        return (String::new(), content > 0);
+    }
+
+    // Escape only as much as the answer cap allows.
+    let mut text = String::new();
+    // The same bytes unescaped, one char each, for redaction to judge: `\009`
+    // in `text` is a tab here, and redaction ignores leading whitespace.
+    let mut unescaped = String::new();
+    let mut cut = false;
+    let mut pos = 0;
+    'strings: while pos < rdata.len() {
+        let len = rdata[pos] as usize;
+        for &b in &rdata[pos + 1..pos + 1 + len] {
+            let mut token = [0u8; 4];
+            let n = match b {
+                b'\\' => {
+                    token[..2].copy_from_slice(b"\\\\");
+                    2
+                }
+                0x20..=0x7e => {
+                    token[0] = b;
+                    1
+                }
+                _ => {
+                    token = [b'\\', b'0' + b / 100, b'0' + b / 10 % 10, b'0' + b % 10];
+                    4
+                }
+            };
+            if text.len() + n > MAX_DNS_TXT_ANSWER_BYTES {
+                cut = true;
+                break 'strings;
+            }
+            // Tokens are ASCII by construction.
+            text.push_str(std::str::from_utf8(&token[..n]).unwrap_or_default());
+            unescaped.push(char::from(b));
+        }
+        pos += 1 + len;
+    }
+
+    // Sensitive names and the bearer prefix sit at the start of the text, so
+    // redacting the capped text judges it exactly as the whole would be. A
+    // `key=value` or `key: value` TXT is judged on its key like an HTTP header;
+    // only the first separator counts, so a colon in a value changes nothing.
+    // No sensitive name is anywhere near 64 bytes, so a longer key is not copied.
+    let key = unescaped.split(['=', ':']).next().unwrap_or_default().trim();
+    let name = if key.len() <= 64 { key.to_string() } else { String::new() };
+    let mut pair = [(name, unescaped)];
+    redact_headers(&mut pair);
+    let [(_, judged)] = pair;
+    if judged == "[REDACTED]" {
+        text.zeroize();
+        text = judged;
+        cut = false;
+    }
+
+    if text.len() > budget {
+        // Back up to a whole escape: `\` followed by a digit starts a
+        // 4-byte `\DDD`, otherwise `\` is the 2-byte `\\`.
+        let bytes = text.as_bytes();
+        let mut end = 0;
+        while end < bytes.len() {
+            let step = match bytes[end] {
+                b'\\' if bytes.get(end + 1).is_some_and(u8::is_ascii_digit) => 4,
+                b'\\' => 2,
+                _ => 1,
+            };
+            if end + step > budget {
+                break;
+            }
+            end += step;
+        }
+        text.truncate(end);
+        cut = true;
+    }
+    (text, cut)
+}
+
 fn dns_rdata_text(msg: &[u8], rtype: u16, rdata_offset: usize, rdata: &[u8]) -> String {
     match (rtype, rdata.len()) {
         (1, 4) => std::net::Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]).to_string(),
@@ -246,6 +510,7 @@ fn sniff_dns(payload: &[u8]) -> Option<L7Info> {
     // first question and the answers. Skip them; give up on the answers
     // rather than misread them if a question can't be skipped.
     let mut answers = Vec::new();
+    let mut txt_budget = MAX_DNS_TXT_RESPONSE_BYTES;
     let mut questions_skipped = true;
     for _ in 1..qdcount.min(16) {
         match read_dns_name(payload, pos) {
@@ -265,8 +530,14 @@ fn sniff_dns(payload: &[u8]) -> Option<L7Info> {
             let rdlength = u16::from_be_bytes([fixed[8], fixed[9]]) as usize;
             let rdata_offset = after + 10;
             let Some(rdata) = payload.get(rdata_offset..rdata_offset + rdlength) else { break };
-            let data = dns_rdata_text(payload, rtype, rdata_offset, rdata);
-            answers.push(DnsAnswer { name, rtype, ttl, data });
+            let (data, data_truncated) = if rtype == 16 {
+                let (text, truncated) = dns_txt_text(rdata, txt_budget);
+                txt_budget -= text.len();
+                (text, truncated)
+            } else {
+                (dns_rdata_text(payload, rtype, rdata_offset, rdata), false)
+            };
+            answers.push(DnsAnswer { name, rtype, ttl, data, data_truncated });
             pos = rdata_offset + rdlength;
         }
     }
@@ -439,6 +710,14 @@ fn sniff_tls_client_hello(payload: &[u8]) -> Option<L7Info> {
     Some(L7Info::TlsClientHello { sni, ja3, ja3_label, client_random, sni_offset, sni_len })
 }
 
+/// How far past the status line the header scan reads, and how many lines it
+/// counts. A response whose headers run longer is decoded without them.
+pub const MAX_HTTP_HEADER_SCAN_BYTES: usize = 8192;
+pub const MAX_HTTP_HEADER_LINES: usize = 100;
+/// Longest reason phrase and media type kept; longer ones are absent.
+pub const MAX_HTTP_REASON_BYTES: usize = 128;
+pub const MAX_HTTP_CONTENT_TYPE_BYTES: usize = 255;
+
 /// The known HTTP request methods `sniff_http` accepts. Shared with
 /// `unterminated_http_start_line` below so the "is this a plausible partial
 /// request line" probe can never recognize a method the real detector
@@ -498,6 +777,82 @@ pub fn sniff_l7_desegmenting(payload: &[u8], dst_port: Option<u16>) -> L7Sniff {
     match missing_byte_count(payload) {
         Some(at_least) => L7Sniff::NeedMoreBytes { at_least },
         None => L7Sniff::Undecided,
+    }
+}
+
+/// The longest DNS message a TCP stream buffer can hold behind its two-byte
+/// length prefix. A message declaring more is `Undecided`: it can never be
+/// fully buffered, so it never decodes.
+pub const MAX_DNS_TCP_MESSAGE_BYTES: usize = MAX_TCP_STREAM_BYTES - 2;
+
+/// Sniffs a DNS-over-TCP stream buffer (RFC 1035 4.2.2): each message is
+/// preceded by a two-byte big-endian length.
+///
+/// Only the first message in the buffer is decoded, because `L7Info` is one
+/// value per packet; any later pipelined message is not read. The message is
+/// sliced to its declared length before `sniff_dns`, so a compression pointer
+/// cannot read bytes that follow it.
+pub fn sniff_dns_tcp(stream: &[u8]) -> L7Sniff {
+    if stream.is_empty() {
+        return L7Sniff::Undecided;
+    }
+    let [hi, lo, ..] = *stream else {
+        return L7Sniff::NeedMoreBytes { at_least: 1 };
+    };
+    let declared = usize::from(u16::from_be_bytes([hi, lo]));
+    if !(12..=MAX_DNS_TCP_MESSAGE_BYTES).contains(&declared) {
+        return L7Sniff::Undecided;
+    }
+    let Some(message) = stream.get(2..2 + declared) else {
+        return L7Sniff::NeedMoreBytes { at_least: 2 + declared - stream.len() };
+    };
+    match sniff_dns(message) {
+        Some(info) => L7Sniff::Decided(info),
+        None => L7Sniff::Undecided,
+    }
+}
+
+/// Whether a packet is DNS over TCP: TCP with either port 53. This is a
+/// port test and nothing more, so `sniff_for_transport` does not let it hide
+/// HTTP or TLS from source port 53.
+pub fn is_dns_over_tcp(protocol: TransportProtocol, src_port: Option<u16>, dst_port: Option<u16>) -> bool {
+    protocol == TransportProtocol::Tcp && (src_port == Some(53) || dst_port == Some(53))
+}
+
+/// `sniff_l7_desegmenting`, but aware of the transport. DNS over TCP is
+/// length-framed, and a response is recognised by its source port, which
+/// `sniff_l7_desegmenting` (destination port only) cannot see.
+///
+/// To port 53 the payload is DNS only. From port 53 to any other port it
+/// may be a DNS response or an ordinary connection that merely uses 53 as its
+/// ephemeral port, and any port allowlist for the latter would be
+/// incomplete, so HTTP and TLS are tried first and DNS second. DNS here is
+/// always `sniff_dns_tcp`, never raw `sniff_dns`, so its byte ranges stay
+/// two bytes in.
+pub fn sniff_for_transport(
+    payload: &[u8],
+    protocol: TransportProtocol,
+    src_port: Option<u16>,
+    dst_port: Option<u16>,
+) -> L7Sniff {
+    if !is_dns_over_tcp(protocol, src_port, dst_port) {
+        return sniff_l7_desegmenting(payload, dst_port);
+    }
+    if dst_port == Some(53) {
+        return sniff_dns_tcp(payload);
+    }
+    if let Some(info) = sniff_http(payload)
+        .or_else(|| sniff_http_response(payload))
+        .or_else(|| sniff_tls_client_hello(payload))
+    {
+        return L7Sniff::Decided(info);
+    }
+    match sniff_dns_tcp(payload) {
+        L7Sniff::Undecided => match missing_byte_count(payload) {
+            Some(at_least) => L7Sniff::NeedMoreBytes { at_least },
+            None => L7Sniff::Undecided,
+        },
+        other => other,
     }
 }
 
@@ -671,7 +1026,7 @@ mod tests {
     fn detects_http_response_status_line() {
         let payload = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html></html>";
         match sniff_l7(payload, Some(51000)) {
-            L7Info::HttpResponse { status } => assert_eq!(status, "200"),
+            L7Info::HttpResponse { status, .. } => assert_eq!(status, "200"),
             other => panic!("expected HttpResponse, got {other:?}"),
         }
     }
@@ -680,7 +1035,7 @@ mod tests {
     fn detects_http_error_response_status_line() {
         let payload = b"HTTP/1.1 404 Not Found\r\n\r\n";
         match sniff_l7(payload, Some(51000)) {
-            L7Info::HttpResponse { status } => assert_eq!(status, "404"),
+            L7Info::HttpResponse { status, .. } => assert_eq!(status, "404"),
             other => panic!("expected HttpResponse, got {other:?}"),
         }
     }
@@ -754,13 +1109,172 @@ mod tests {
                 assert_eq!(
                     answers,
                     vec![
-                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 300, data: "93.184.216.34".into() },
-                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 60, data: "93.184.216.35".into() },
+                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 300, data: "93.184.216.34".into(), data_truncated: false },
+                        DnsAnswer { name: "example.com".into(), rtype: 1, ttl: 60, data: "93.184.216.35".into(), data_truncated: false },
                     ]
                 );
             }
             other => panic!("expected DnsResponse, got {other:?}"),
         }
+    }
+
+    fn txt_data(rdatas: &[Vec<u8>]) -> Vec<(String, bool)> {
+        let answers: Vec<(u16, u32, Vec<u8>)> = rdatas.iter().map(|r| (16u16, 60u32, r.clone())).collect();
+        let msg = response(1, "t.example.com", 16, 0, &answers);
+        let L7Info::DnsResponse { answers, .. } = sniff_l7(&msg, None) else { panic!("expected DnsResponse") };
+        answers.into_iter().map(|a| (a.data, a.data_truncated)).collect()
+    }
+
+    /// RDATA of character-strings carrying `text`, split at 255 bytes.
+    fn txt_rdata(text: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in text.chunks(255) {
+            out.push(chunk.len() as u8);
+            out.extend_from_slice(chunk);
+        }
+        out
+    }
+
+    #[test]
+    fn txt_joins_character_strings() {
+        assert_eq!(txt_data(&[b"\x03v=s\x03pf1".to_vec()]), vec![("v=spf1".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_escapes_non_printable_and_backslash() {
+        assert_eq!(txt_data(&[b"\x03a\x00\\".to_vec()]), vec![("a\\000\\\\".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_at_answer_limit_is_not_truncated() {
+        let r = txt_data(&[txt_rdata(&[b'a'; 512])]);
+        assert_eq!(r[0].0.len(), 512);
+        assert!(!r[0].1);
+    }
+
+    #[test]
+    fn txt_over_answer_limit_is_truncated() {
+        let r = txt_data(&[txt_rdata(&[b'a'; 513])]);
+        assert_eq!(r[0].0.len(), 512);
+        assert!(r[0].1);
+    }
+
+    #[test]
+    fn txt_truncation_never_splits_an_escape() {
+        let mut text = vec![b'a'; 511];
+        text.push(0);
+        let r = txt_data(&[txt_rdata(&text)]);
+        assert_eq!(r[0].0.len(), 511);
+        assert!(r[0].1);
+    }
+
+    #[test]
+    fn txt_response_budget_is_shared_across_answers() {
+        let rdata = txt_rdata(&[b'a'; 512]);
+        let r = txt_data(&[rdata.clone(), rdata.clone(), rdata.clone(), rdata.clone(), rdata]);
+        assert_eq!(r.iter().map(|(d, _)| d.len()).sum::<usize>(), 2048);
+        assert!(r[..4].iter().all(|(d, t)| d.len() == 512 && !t));
+        assert_eq!(r[4], (String::new(), true));
+    }
+
+    #[test]
+    fn txt_overrunning_character_string_gives_empty_data() {
+        assert_eq!(txt_data(&[b"\x05ab".to_vec()]), vec![(String::new(), false)]);
+    }
+
+    #[test]
+    fn txt_zero_rdata_gives_empty_data() {
+        assert_eq!(txt_data(&[Vec::new()]), vec![(String::new(), false)]);
+    }
+
+    #[test]
+    fn txt_sensitive_key_is_redacted() {
+        let r = txt_data(&[txt_rdata(b"authorization=abc")]);
+        assert_eq!(r, vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_bearer_value_is_redacted() {
+        let r = txt_data(&[txt_rdata(b"Bearer abc")]);
+        assert_eq!(r, vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_bearer_after_escaped_whitespace_is_redacted() {
+        for text in [&b"\tBearer eyJabc"[..], b"\r\n Bearer eyJabc", b"\x0bbearer eyJabc", b"\xa0Bearer eyJabc"] {
+            let r = txt_data(&[txt_rdata(text)]);
+            assert_eq!(r, vec![("[REDACTED]".to_string(), false)], "{text:?}");
+        }
+    }
+
+    #[test]
+    fn txt_bearer_across_character_strings_is_redacted() {
+        assert_eq!(txt_data(&[b"\x08\tBearer \x03abc".to_vec()]), vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_colon_separated_sensitive_key_is_redacted() {
+        for text in [&b"Authorization: abc"[..], b"cookie: a=b", b"x-api-key:abc", b"Set-Cookie : a=b", b"\tcookie=a"] {
+            let r = txt_data(&[txt_rdata(text)]);
+            assert_eq!(r, vec![("[REDACTED]".to_string(), false)], "{text:?}");
+        }
+    }
+
+    #[test]
+    fn txt_with_a_colon_in_its_value_stays_readable() {
+        for text in ["v=spf1 include:example.com ~all", "google-site-verification=a:b", "note: cookie=x", "v=1; cookie=x"] {
+            assert_eq!(txt_data(&[txt_rdata(text.as_bytes())]), vec![(text.to_string(), false)]);
+        }
+    }
+
+    #[test]
+    fn txt_that_is_literally_the_redaction_marker_is_unchanged() {
+        assert_eq!(txt_data(&[txt_rdata(b"[REDACTED]")]), vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_escaped_past_the_cap_still_reports_the_cut_when_not_redacted() {
+        let r = txt_data(&[txt_rdata(&[0x01; 200])]);
+        assert_eq!(r[0].0.len(), MAX_DNS_TXT_ANSWER_BYTES);
+        assert!(r[0].1);
+    }
+
+    #[test]
+    fn txt_partly_spent_budget_takes_the_remainder() {
+        let big = txt_rdata(&[b'a'; 500]);
+        let r = txt_data(&[big.clone(), big.clone(), big.clone(), big, txt_rdata(&[b'b'; 100])]);
+        assert_eq!(r[4], ("b".repeat(48), true));
+    }
+
+    #[test]
+    fn txt_budget_cut_lands_on_whole_escapes() {
+        let big = txt_rdata(&[b'a'; 500]);
+        let with_tail = |tail: &[u8]| {
+            let mut text = vec![b'a'; 46];
+            text.extend_from_slice(tail);
+            let r = txt_data(&[big.clone(), big.clone(), big.clone(), big.clone(), txt_rdata(&text)]);
+            r[4].clone()
+        };
+        // 46 + `\\` is exactly the 48 left: kept whole, rest cut.
+        assert_eq!(with_tail(b"\\b"), (format!("{}\\\\", "a".repeat(46)), true));
+        // 46 + `\DDD` would be 50: dropped whole, never `\0` or `\00`.
+        assert_eq!(with_tail(b"\x00b"), ("a".repeat(46), true));
+        // 47 + `\\` would be 49.
+        assert_eq!(with_tail(b"a\\"), ("a".repeat(47), true));
+    }
+
+    #[test]
+    fn txt_long_sensitive_value_is_redacted_not_truncated() {
+        let mut text = b"authorization=".to_vec();
+        text.extend_from_slice(&[b'a'; 600]);
+        assert_eq!(txt_data(&[txt_rdata(&text)]), vec![("[REDACTED]".to_string(), false)]);
+    }
+
+    #[test]
+    fn txt_overrun_after_the_cap_still_gives_empty_data() {
+        let mut rdata = txt_rdata(&[b'a'; 600]);
+        rdata.extend_from_slice(&[9, b'x']);
+        assert_eq!(txt_data(&[rdata]), vec![(String::new(), false)]);
     }
 
     #[test]
@@ -928,7 +1442,7 @@ mod tests {
         let mut payload = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n".to_vec();
         payload.extend_from_slice(&[0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x80, 0x00]);
         match sniff_l7(&payload, Some(51000)) {
-            L7Info::HttpResponse { status } => assert_eq!(status, "200"),
+            L7Info::HttpResponse { status, .. } => assert_eq!(status, "200"),
             other => panic!("expected HttpResponse, got {other:?}"),
         }
     }
@@ -1049,5 +1563,413 @@ mod tests {
             L7Info::None => {} // also acceptable — existing tolerance for malformed input
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    // ---- DNS over TCP (RFC 1035 4.2.2: a two-byte length prefix) ---------
+
+    /// A message with its two-byte length prefix, as it sits in a TCP stream.
+    fn framed(msg: &[u8]) -> Vec<u8> {
+        let mut out = (msg.len() as u16).to_be_bytes().to_vec();
+        out.extend_from_slice(msg);
+        out
+    }
+
+    /// A prefix declaring `declared` bytes followed by `present` filler bytes.
+    fn prefix_only(declared: u16, present: usize) -> Vec<u8> {
+        let mut out = declared.to_be_bytes().to_vec();
+        out.extend(std::iter::repeat_n(0u8, present));
+        out
+    }
+
+    #[test]
+    fn tcp_dns_empty_is_undecided() {
+        // A bare ACK carries no payload; buffering it would hold a stream
+        // open for every empty segment on port 53.
+        assert_eq!(sniff_dns_tcp(&[]), L7Sniff::Undecided);
+    }
+
+    #[test]
+    fn tcp_dns_one_prefix_byte_needs_one_more() {
+        assert_eq!(sniff_dns_tcp(&[0]), L7Sniff::NeedMoreBytes { at_least: 1 });
+    }
+
+    #[test]
+    fn tcp_dns_zero_length_is_undecided() {
+        assert_eq!(sniff_dns_tcp(&[0, 0]), L7Sniff::Undecided);
+    }
+
+    #[test]
+    fn tcp_dns_below_header_size_is_undecided() {
+        assert_eq!(sniff_dns_tcp(&prefix_only(11, 11)), L7Sniff::Undecided);
+    }
+
+    #[test]
+    fn tcp_dns_partial_message_reports_the_shortfall() {
+        assert_eq!(sniff_dns_tcp(&prefix_only(40, 8)), L7Sniff::NeedMoreBytes { at_least: 32 });
+    }
+
+    #[test]
+    fn tcp_dns_at_limit_needs_bytes() {
+        let limit = MAX_DNS_TCP_MESSAGE_BYTES as u16;
+        assert_eq!(limit, 16_382);
+        assert!(matches!(sniff_dns_tcp(&prefix_only(limit, 0)), L7Sniff::NeedMoreBytes { .. }));
+    }
+
+    #[test]
+    fn tcp_dns_over_limit_is_undecided() {
+        let over = MAX_DNS_TCP_MESSAGE_BYTES as u16 + 1;
+        assert_eq!(over, 16_383);
+        assert_eq!(sniff_dns_tcp(&prefix_only(over, 0)), L7Sniff::Undecided);
+    }
+
+    #[test]
+    fn tcp_dns_complete_query_decodes() {
+        match sniff_dns_tcp(&framed(&query(7, "a.com", 1))) {
+            L7Sniff::Decided(L7Info::Dns { id: 7, query_name, qtype: 1 }) => assert_eq!(query_name, "a.com"),
+            other => panic!("expected Decided(Dns), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_compression_pointers_are_relative_to_the_message() {
+        let msg = response(9, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        match sniff_dns_tcp(&framed(&msg)) {
+            L7Sniff::Decided(L7Info::DnsResponse { query_name, answers, .. }) => {
+                assert_eq!(query_name, "example.com");
+                assert_eq!(answers[0].name, "example.com");
+                assert_eq!(answers[0].data, "1.2.3.4");
+            }
+            other => panic!("expected Decided(DnsResponse), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_pointer_past_the_declared_end_fails() {
+        // The answer name points at the first byte past the message, which
+        // exists in the buffer but lies after the declared end. It must not be read.
+        let mut msg = response(9, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        let name_at = msg.len() - (2 + 10 + 4);
+        msg[name_at] = 0xc0;
+        msg[name_at + 1] = msg.len() as u8;
+        let mut stream = framed(&msg);
+        stream.extend_from_slice(&[7, b'l', b'e', b'a', b'k', b'e', b'd', b'x', 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        match sniff_dns_tcp(&stream) {
+            L7Sniff::Decided(L7Info::DnsResponse { answers, .. }) => {
+                assert!(answers.iter().all(|a| !a.name.contains("leaked")), "{answers:?}");
+                assert!(answers.is_empty() || answers[0].name.is_empty(), "{answers:?}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_second_message_in_a_buffer_is_ignored() {
+        let mut stream = framed(&response(0x1111, "a.com", 1, 0, &[(1, 1, vec![1, 1, 1, 1])]));
+        stream.extend_from_slice(&framed(&response(0x2222, "b.com", 1, 0, &[(1, 1, vec![2, 2, 2, 2])])));
+        match sniff_dns_tcp(&stream) {
+            L7Sniff::Decided(L7Info::DnsResponse { id, query_name, .. }) => {
+                assert_eq!(id, 0x1111);
+                assert_eq!(query_name, "a.com");
+            }
+            other => panic!("expected the first message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_declared_exactly_12_cannot_decode() {
+        // 12 passes the length check, so a short stream still asks for more,
+        // but a message that is only a header has no room for the question
+        // it declares, so it never decodes.
+        let mut header = vec![0u8; 12];
+        header[5] = 1; // QDCOUNT 1, but no question bytes follow
+        assert_eq!(sniff_dns_tcp(&framed(&header)), L7Sniff::Undecided);
+        assert_eq!(sniff_dns_tcp(&prefix_only(12, 0)), L7Sniff::NeedMoreBytes { at_least: 12 });
+    }
+
+    #[test]
+    fn source_port_53_does_not_hide_http_or_tls_on_any_destination_port() {
+        let hello = build_client_hello("example.com");
+        for dst in [443, 8443, 51000] {
+            match sniff_for_transport(&hello, TransportProtocol::Tcp, Some(53), Some(dst)) {
+                L7Sniff::Decided(L7Info::TlsClientHello { sni, .. }) => assert_eq!(sni, "example.com", "dst {dst}"),
+                other => panic!("dst {dst}: expected the ClientHello, got {other:?}"),
+            }
+        }
+        let get = b"GET / HTTP/1.1\r\nHost: a\r\n\r\n";
+        for dst in [80, 8080] {
+            assert!(
+                matches!(
+                    sniff_for_transport(get, TransportProtocol::Tcp, Some(53), Some(dst)),
+                    L7Sniff::Decided(L7Info::Http { .. })
+                ),
+                "dst {dst}"
+            );
+        }
+        let status = b"HTTP/1.1 200 OK\r\n\r\n";
+        assert!(matches!(
+            sniff_for_transport(status, TransportProtocol::Tcp, Some(53), Some(8080)),
+            L7Sniff::Decided(L7Info::HttpResponse { .. })
+        ));
+    }
+
+    #[test]
+    fn destination_port_53_is_dns_only_and_the_port_test_has_no_exemptions() {
+        let hello = build_client_hello("example.com");
+        assert_eq!(sniff_for_transport(&hello, TransportProtocol::Tcp, Some(51000), Some(53)), sniff_dns_tcp(&hello));
+        for (src, dst) in [(53, 51000), (53, 443), (53, 8443), (51000, 53)] {
+            assert!(is_dns_over_tcp(TransportProtocol::Tcp, Some(src), Some(dst)), "{src}->{dst}");
+        }
+        assert!(!is_dns_over_tcp(TransportProtocol::Udp, Some(51000), Some(53)));
+        assert!(!is_dns_over_tcp(TransportProtocol::Tcp, Some(51000), Some(8443)));
+    }
+
+    #[test]
+    fn a_framed_dns_response_from_source_port_53_still_decodes() {
+        let msg = response(0xbeef, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        assert!(matches!(
+            sniff_for_transport(&framed(&msg), TransportProtocol::Tcp, Some(53), Some(51000)),
+            L7Sniff::Decided(L7Info::DnsResponse { id: 0xbeef, .. })
+        ));
+    }
+
+    #[test]
+    fn sniff_for_transport_frames_tcp_either_port_and_leaves_udp_alone() {
+        let msg = query(7, "a.com", 1);
+        let tcp = framed(&msg);
+        let tcp_t = TransportProtocol::Tcp;
+        assert!(matches!(sniff_for_transport(&tcp, tcp_t, Some(51000), Some(53)), L7Sniff::Decided(L7Info::Dns { id: 7, .. })));
+        assert!(matches!(sniff_for_transport(&tcp, tcp_t, Some(53), Some(51000)), L7Sniff::Decided(L7Info::Dns { id: 7, .. })));
+        // UDP/53 is a bare message; the prefix would shift every field.
+        assert!(matches!(
+            sniff_for_transport(&msg, TransportProtocol::Udp, Some(51000), Some(53)),
+            L7Sniff::Decided(L7Info::Dns { id: 7, .. })
+        ));
+        assert_eq!(
+            sniff_for_transport(&msg, tcp_t, Some(51000), Some(80)),
+            sniff_l7_desegmenting(&msg, Some(80))
+        );
+    }
+
+    // ---- HTTP response reason phrase and headers --------------------------
+
+    fn http_fields(payload: &[u8]) -> (Option<String>, Option<String>, Option<u64>) {
+        match sniff_l7(payload, Some(51000)) {
+            L7Info::HttpResponse { reason, content_type, content_length, .. } => (reason, content_type, content_length),
+            other => panic!("expected HttpResponse, got {other:?}"),
+        }
+    }
+
+    fn http_length(headers: &str) -> Option<u64> {
+        http_fields(format!("HTTP/1.1 200 OK\r\n{headers}\r\n").as_bytes()).2
+    }
+
+    fn http_type(headers: &str) -> Option<String> {
+        http_fields(format!("HTTP/1.1 200 OK\r\n{headers}\r\n").as_bytes()).1
+    }
+
+    #[test]
+    fn http_response_decodes_all_fields() {
+        let payload = b"HTTP/1.1 404 Not Found\r\nContent-Type: Text/HTML; charset=utf-8\r\nContent-Length: 12\r\n\r\n";
+        assert_eq!(
+            http_fields(payload),
+            (Some("Not Found".into()), Some("text/html".into()), Some(12))
+        );
+    }
+
+    #[test]
+    fn http_header_names_are_case_insensitive() {
+        assert_eq!(http_length("content-LENGTH: 1\r\n"), Some(1));
+        assert_eq!(http_type("CONTENT-type: a/b\r\n"), Some("a/b".into()));
+    }
+
+    #[test]
+    fn http_empty_reason_is_absent() {
+        assert_eq!(http_fields(b"HTTP/1.1 200 \r\n\r\n").0, None);
+        assert_eq!(http_fields(b"HTTP/1.1 200\r\n\r\n").0, None);
+    }
+
+    #[test]
+    fn http_reason_at_limit_is_kept() {
+        let reason = "r".repeat(128);
+        let payload = format!("HTTP/1.1 200 {reason}\r\n\r\n");
+        assert_eq!(http_fields(payload.as_bytes()).0, Some(reason));
+    }
+
+    #[test]
+    fn http_reason_over_limit_is_absent() {
+        let payload = format!("HTTP/1.1 200 {}\r\n\r\n", "r".repeat(129));
+        assert_eq!(http_fields(payload.as_bytes()).0, None);
+    }
+
+    #[test]
+    fn http_non_ascii_reason_is_absent() {
+        for payload in [
+            &b"HTTP/1.1 200 O\x01K\r\n\r\n"[..],
+            "HTTP/1.1 200 Caf\u{e9}\r\n\r\n".as_bytes(),
+        ] {
+            match sniff_l7(payload, Some(51000)) {
+                L7Info::HttpResponse { status, reason, .. } => {
+                    assert_eq!(status, "200");
+                    assert_eq!(reason, None);
+                }
+                other => panic!("expected HttpResponse, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn http_bearer_reason_is_redacted() {
+        assert_eq!(http_fields(b"HTTP/1.1 200 Bearer abc\r\n\r\n").0, Some("[REDACTED]".into()));
+    }
+
+    #[test]
+    fn http_status_alone_when_headers_arrive_later() {
+        let sniff = sniff_l7_desegmenting(b"HTTP/1.1 200 OK\r\n", Some(51000));
+        match sniff {
+            L7Sniff::Decided(L7Info::HttpResponse { reason, content_type, content_length, .. }) => {
+                assert_eq!(reason.as_deref(), Some("OK"));
+                assert_eq!((content_type, content_length), (None, None));
+            }
+            other => panic!("expected Decided HttpResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_unterminated_final_header_is_ignored() {
+        let payload = b"HTTP/1.1 200 OK\r\nContent-Length: 12";
+        assert_eq!(http_fields(payload).2, None);
+    }
+
+    #[test]
+    fn http_conflicting_content_lengths_are_absent() {
+        assert_eq!(http_length("Content-Length: 5\r\nContent-Length: 6\r\n"), None);
+        assert_eq!(http_type("Content-Type: a/b\r\nContent-Type: c/d\r\n"), None);
+    }
+
+    #[test]
+    fn http_identical_content_lengths_are_kept() {
+        assert_eq!(http_length("Content-Length: 5\r\nContent-Length: 5\r\n"), Some(5));
+        assert_eq!(http_type("Content-Type: a/b\r\ncontent-type: A/B; x=1\r\n"), Some("a/b".into()));
+    }
+
+    #[test]
+    fn http_content_length_rejects_non_digits() {
+        for value in ["+5", "-1", "5, 5", "0x10", "", "5 5"] {
+            assert_eq!(http_length(&format!("Content-Length: {value}\r\n")), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn http_content_length_zero_is_kept() {
+        assert_eq!(http_length("Content-Length: 0\r\n"), Some(0));
+    }
+
+    #[test]
+    fn http_content_length_max_u64() {
+        assert_eq!(http_length(&format!("Content-Length: {}\r\n", u64::MAX)), Some(u64::MAX));
+    }
+
+    #[test]
+    fn http_content_length_overflow_is_absent() {
+        assert_eq!(http_length(&format!("Content-Length: {}\r\n", u64::MAX as u128 + 1)), None);
+    }
+
+    #[test]
+    fn http_space_before_colon_does_not_match() {
+        assert_eq!(http_length("Content-Length : 5\r\n"), None);
+    }
+
+    #[test]
+    fn http_obs_fold_discards_the_header() {
+        assert_eq!(http_length("Content-Length: 5\r\n 6\r\n"), None);
+        assert_eq!(http_type("Content-Type: a/b;\r\n\tcharset=x\r\n"), None);
+    }
+
+    #[test]
+    fn http_malformed_content_type_is_absent() {
+        for value in ["", " ", "text", "Bearer abc", "/b", "a/", "a/b/c", "a b/c"] {
+            assert_eq!(http_type(&format!("Content-Type: {value}\r\n")), None, "{value:?}");
+        }
+        let long = format!("a/{}", "b".repeat(254));
+        assert_eq!(http_type(&format!("Content-Type: {long}\r\n")), None);
+        let at_limit = format!("a/{}", "b".repeat(253));
+        assert_eq!(http_type(&format!("Content-Type: {at_limit}\r\n")), Some(at_limit));
+    }
+
+    /// `n - 1` filler header lines, then the target as line `n`.
+    fn http_with_target_on_line(n: usize) -> Vec<u8> {
+        let mut payload = b"HTTP/1.1 200 OK\r\n".to_vec();
+        for i in 0..n - 1 {
+            payload.extend_from_slice(format!("X-{i}: v\r\n").as_bytes());
+        }
+        payload.extend_from_slice(b"Content-Length: 7\r\n\r\n");
+        payload
+    }
+
+    #[test]
+    fn http_header_at_line_limit_is_read() {
+        assert_eq!(http_fields(&http_with_target_on_line(100)).2, Some(7));
+    }
+
+    #[test]
+    fn http_header_past_line_limit_is_not() {
+        assert_eq!(http_fields(&http_with_target_on_line(101)).2, None);
+    }
+
+    #[test]
+    fn http_header_past_byte_limit_is_not_read() {
+        let mut payload = b"HTTP/1.1 200 OK\r\nX-Pad: ".to_vec();
+        payload.extend(std::iter::repeat_n(b'a', 8192));
+        payload.extend_from_slice(b"\r\nContent-Length: 7\r\n\r\n");
+        assert_eq!(http_fields(&payload).2, None);
+    }
+
+    #[test]
+    fn http_header_inside_byte_limit_is_read() {
+        let mut payload = b"HTTP/1.1 200 OK\r\nX-Pad: ".to_vec();
+        payload.extend(std::iter::repeat_n(b'a', 8000));
+        payload.extend_from_slice(b"\r\nContent-Length: 7\r\n\r\n");
+        assert_eq!(http_fields(&payload).2, Some(7));
+    }
+
+    /// The status line, a padding header sized so the `Content-Length` line
+    /// ends `end` bytes after the status line, then a blank line.
+    fn http_with_target_ending_at(end: usize) -> Vec<u8> {
+        let target = b"Content-Length: 7\r\n";
+        let pad = end - target.len() - b"X-Pad: \r\n".len();
+        let mut payload = b"HTTP/1.1 200 OK\r\nX-Pad: ".to_vec();
+        payload.extend(std::iter::repeat_n(b'a', pad));
+        payload.extend_from_slice(b"\r\n");
+        payload.extend_from_slice(target);
+        payload.extend_from_slice(b"\r\n");
+        payload
+    }
+
+    // Boundary tests: they pin the existing 8,192-byte bound, so they pass
+    // without a code change (no RED).
+    #[test]
+    fn http_header_ending_at_exactly_8192_bytes_is_read() {
+        assert_eq!(http_fields(&http_with_target_ending_at(8192)).2, Some(7));
+    }
+
+    #[test]
+    fn http_header_ending_at_8193_bytes_is_not_read() {
+        assert_eq!(http_fields(&http_with_target_ending_at(8193)).2, None);
+    }
+
+    #[test]
+    fn http_binary_body_does_not_matter() {
+        let mut payload = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 4\r\n\r\n".to_vec();
+        payload.extend_from_slice(&[0xff, 0xfe, 0x00, 0x80]);
+        assert_eq!(
+            http_fields(&payload),
+            (Some("OK".into()), Some("image/png".into()), Some(4))
+        );
+    }
+
+    #[test]
+    fn http_headers_after_the_blank_line_are_body() {
+        let payload = b"HTTP/1.1 200 OK\r\n\r\nContent-Length: 5\r\n\r\n";
+        assert_eq!(http_fields(payload).2, None);
     }
 }

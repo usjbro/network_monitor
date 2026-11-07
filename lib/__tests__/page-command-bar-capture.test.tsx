@@ -323,6 +323,7 @@ describe('command bar: capture / buffer verbs', () => {
             totalConnectionsObserved: 0,
             capacityEvictions: 0,
             idleEvictions: 0,
+            observedNameEvictions: 0,
           },
         }),
       } as MessageEvent);
@@ -352,6 +353,7 @@ describe('command bar: capture / buffer verbs', () => {
             totalConnectionsObserved: 5000,
             capacityEvictions: 12,
             idleEvictions: 300,
+            observedNameEvictions: 7,
           },
         }),
       } as MessageEvent);
@@ -364,5 +366,6 @@ describe('command bar: capture / buffer verbs', () => {
     expect(screen.getByText(/showing 0 of 5000 observed/)).toBeInTheDocument();
     // Capacity eviction is surfaced distinctly from ordinary idle turnover.
     expect(screen.getByText(/12 connection\(s\) evicted for capacity/)).toBeInTheDocument();
+    expect(screen.getByText(/7 observed DNS name\(s\) evicted for capacity/)).toBeInTheDocument();
   });
 });

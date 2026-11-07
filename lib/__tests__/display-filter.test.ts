@@ -35,6 +35,38 @@ describe('compileDisplayFilter', () => {
     expect(run('frame.len >= 100', packetRecord)).toBe(true);
     expect(run('tls.handshake.sni == "example.com"', packetRecord)).toBe(true);
   });
+  it('compares a uint sent as a string above 2^53 - 1 as an exact integer', () => {
+    const at = (value: string): DisplayFilterRecord => ({
+      kind: 'packet',
+      packet: { ...packet, fields: [field('http.content_length', 'uint', value)] },
+    });
+    const limit = at('9007199254740991');
+    const over = at('9007199254740992');
+    expect(run('http.content_length', over)).toBe(true);
+    expect(run('http.content_length > 1000', over)).toBe(true);
+    expect(run('http.content_length > 9007199254740991', over)).toBe(true);
+    expect(run('http.content_length > 9007199254740992', over)).toBe(false);
+    expect(run('http.content_length > 9007199254740991', limit)).toBe(false);
+    expect(run('http.content_length < 9007199254740993', over)).toBe(true);
+    expect(run('http.content_length < 9007199254740992', over)).toBe(false);
+    expect(run('http.content_length < 9007199254740992', limit)).toBe(true);
+    expect(run('http.content_length == 9007199254740992', over)).toBe(true);
+    expect(run('http.content_length == 9007199254740993', over)).toBe(false);
+    expect(run('http.content_length == 9007199254740991', over)).toBe(false);
+    expect(run('http.content_length != 9007199254740993', over)).toBe(true);
+    expect(run('http.content_length >= 9007199254740992', over)).toBe(true);
+    expect(run('http.content_length <= 9007199254740991', over)).toBe(false);
+    expect(run('http.content_length in {1, 9007199254740992}', over)).toBe(true);
+    expect(run('http.content_length in {1, 9007199254740993}', over)).toBe(false);
+    expect(run('http.content_length contains "9"', over)).toBe(false);
+    expect(run('http.content_length == "9007199254740992"', over)).toBe(false);
+  });
+  it('does not treat other string fields as integers', () => {
+    const rec: DisplayFilterRecord = { kind: 'packet', packet: { ...packet, fields: [field('http.host', 'str', '12345')] } };
+    expect(run('http.host > 1', rec)).toBe(false);
+    expect(run('http.host == 12345', rec)).toBe(false);
+    expect(run('http.host == "12345"', rec)).toBe(true);
+  });
   it('does not make an absent field match !=', () => {
     expect(run('tcp.src_port != 443', packetRecord)).toBe(false);
     expect(run('connection.remote_port != 443', packetRecord)).toBe(false);

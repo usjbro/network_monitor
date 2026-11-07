@@ -158,6 +158,11 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     totalConnectionsObserved: requireField(w, 'totalConnectionsObserved'),
     capacityEvictions: requireField(w, 'capacityEvictions'),
     idleEvictions: requireField(w, 'idleEvictions'),
+    // Optional, unlike its siblings: an older agent omits it, and a cosmetic
+    // counter must not make the mapper throw and hide all capture health.
+    // Absent stays undefined (unknown); it is never defaulted to 0, which
+    // would claim "no evictions".
+    observedNameEvictions: typeof w.observedNameEvictions === 'number' ? w.observedNameEvictions : undefined,
   };
 }
 
@@ -310,6 +315,7 @@ export function mapEndpointUpdateEvent(json: unknown): Endpoint[] {
       processName: requireField<string>(e, 'processName'),
       pid: requireField<number>(e, 'pid'),
       ja3Label: e.ja3Label as string | undefined,
+      observedName: typeof e.observedName === 'string' ? e.observedName : undefined,
       enrichment: undefined,
     };
   });

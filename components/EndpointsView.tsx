@@ -42,15 +42,29 @@ interface Row {
 }
 
 function endpointToRow(e: Endpoint): Row {
+  // Names are attacker-controlled packet content: rendered only as React text.
+  // The PTR line is dropped when it repeats the observed name.
+  const showPtr = e.remoteHostname && e.remoteHostname.toLowerCase() !== e.observedName?.toLowerCase();
   return {
     key: e.host,
     name: (
       <span>
         <span className="font-bold text-slate-200">{e.host}</span>
-        {e.remoteHostname && <span className="block text-[10px] text-slate-500">{e.remoteHostname}</span>}
+        {e.observedName && (
+          <span className="block break-all text-[10px] text-slate-500" title="Learned from observed DNS">
+            <span
+              className="mr-1 rounded border border-slate-600 px-1 text-[9px] font-semibold uppercase text-slate-400"
+              title="Learned from observed DNS"
+            >
+              DNS
+            </span>
+            {e.observedName}
+          </span>
+        )}
+        {showPtr && <span className="block break-all text-[10px] text-slate-500">{e.remoteHostname}</span>}
       </span>
     ),
-    searchText: `${e.host} ${e.remoteHostname ?? ''} ${e.processName}`,
+    searchText: `${e.host} ${e.observedName ?? ''} ${e.remoteHostname ?? ''} ${e.processName}`,
     rxBytesTotal: e.rxBytesTotal,
     txBytesTotal: e.txBytesTotal,
     rxPacketsTotal: e.rxPacketsTotal,
@@ -76,7 +90,7 @@ function conversationToRow(c: Conversation): Row {
         <span className="text-slate-400">{c.localAddr}</span>
         <span className="text-slate-600"> ↔ </span>
         <span className="font-bold text-slate-200">{c.remoteAddr}</span>
-        {c.remoteHostname && <span className="block text-[10px] text-slate-500">{c.remoteHostname}</span>}
+        {c.remoteHostname && <span className="block break-all text-[10px] text-slate-500">{c.remoteHostname}</span>}
       </span>
     ),
     searchText: `${c.localAddr} ${c.remoteAddr} ${c.remoteHostname ?? ''} ${c.processName}`,
@@ -263,7 +277,7 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
                   selectedKey === row.key ? 'bg-slate-900/90 font-semibold' : ''
                 }`}
               >
-                <td className="p-2.5">{row.name}</td>
+                <td className="p-2.5 max-w-xs">{row.name}</td>
                 <td className="p-2.5 text-slate-300">
                   <div className="font-bold">{row.processName}</div>
                   <div className="text-[10px] text-slate-500">PID: {row.pid}</div>

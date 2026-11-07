@@ -139,3 +139,42 @@ Queue throughput depends on James merging. Waiting keeps dependencies ordered, k
 Evidence / References:
 - James's chat decision on 2026-11-05.
 - `AGENTS.md` "Git & Commits".
+
+## ADR-006 — JAM-21 review outcomes before merge
+
+Date:
+2026-11-06
+
+Status:
+Accepted
+
+Context:
+Reviews of PR #301 left gaps, open questions and evidence limits. James went through each one in chat on 2026-11-06 so they could be decided and recorded together.
+
+Decision:
+Fix on PR #301:
+- A complete DNS message the decoder rejects no longer holds the stream buffer.
+- A boundary isn't recorded from an unverified message start.
+- TXT redaction catches a whitespace-led bearer token and `:` separated keys.
+- IP-shaped names aren't learned.
+- Observed names get a visible `DNS` tag.
+- `http.content_length` is sent as a string above 2^53 - 1, so the UI never shows a rounded value.
+- A replay-level test covers the call that feeds the name table.
+- All review tidying, test gaps and doc gaps. The docs state that TXT redaction covers the decoded field only, and that `hexDump` and capture files hold raw bytes.
+
+Evidence required on the final head:
+- Sentinel end-to-end replay on every active interface, with a longer multi-name replay.
+- 10-minute local fuzz runs of `l7_transactions` and `stream_reassembly`.
+- Wrapping measured in Chromium, Firefox and WebKit on the real page.
+- A fresh Opus review of the whole fix diff, a security pass, and the automatic Codex review. Merge doesn't wait for the Codex app.
+
+Accepted limits: the DNS over TCP limits in `docs/wire-protocol.md`, rechecked after the two reassembly fixes.
+
+Follow-ups, implemented by Codex when it's back, behind JAM-263 and Follow Stream: JAM-264 framing table scan, JAM-265 name expiry on live connections, JAM-266 control and bidi characters in packet fields, JAM-267 name table flooding, JAM-268 and JAM-275 flaky tests, JAM-269 partial redaction marker, JAM-270 `drop_flow`, JAM-271 reordered segments, JAM-272 failing-first evidence, JAM-273 `cargo fmt`, JAM-274 Dependabot alerts.
+
+Consequences:
+PR #301 grows and merges later, with stronger evidence. `http.content_length` has two wire types, so consumers must accept a number or a string. Claude's implementation exception still covers JAM-21 only.
+
+Evidence / References:
+- James's chat decisions on 2026-11-06.
+- PR #301 and its reviews.

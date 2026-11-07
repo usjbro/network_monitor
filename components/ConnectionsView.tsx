@@ -49,6 +49,8 @@ interface ConnectionsViewProps {
   // capacity eviction means the table may be missing recent activity.
   totalObserved?: number;
   capacityEvictions?: number;
+  // Observed DNS names dropped because the agent's name table was full.
+  observedNameEvictions?: number;
   // The current client-side retention cap (`buffer connections <n>`).
   bufferLimit?: number;
   displayFilter?: CompiledDisplayFilter;
@@ -71,6 +73,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   captureDegraded,
   totalObserved,
   capacityEvictions,
+  observedNameEvictions,
   bufferLimit,
   displayFilter,
   displayFilterExpression,
@@ -180,6 +183,14 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           {capacityEvictions} connection(s) evicted for capacity — the agent&apos;s flow table hit its ceiling, so it may
           be missing recent activity (a port scan or a burst can do this). Raise it with the agent&apos;s{' '}
           <code>MAX_FLOWS</code> environment variable.
+        </div>
+      )}
+
+      {observedNameEvictions !== undefined && observedNameEvictions > 0 && (
+        <div className="text-[11px] text-amber-500">
+          {observedNameEvictions} observed DNS name(s) evicted for capacity — the agent&apos;s name table was full, so
+          some hosts may lack a name. Raise it with the agent&apos;s <code>MAX_OBSERVED_DNS_NAMES</code> environment
+          variable.
         </div>
       )}
 

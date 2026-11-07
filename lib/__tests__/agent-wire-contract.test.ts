@@ -45,6 +45,7 @@ import {
   mapCaptureFileStatusEvent,
   mapCaptureStatsEvent,
   mapConnectionEvent,
+  mapEndpointUpdateEvent,
   mapFindingEvent,
   mapPacketEvent,
   mapServiceTimeUpdateEvent,
@@ -70,13 +71,14 @@ function sample(type: string): WireEvent {
 
 describe('agent wire contract: real captured agent output maps without throwing', () => {
   it('captured every event type the relay maps', () => {
-    expect(samples.map((e) => e.type).sort()).toEqual(
+    expect([...new Set(samples.map((e) => e.type))].sort()).toEqual(
       [
         'agent_status',
         'capture_config',
         'capture_file_status',
         'capture_stats',
         'connection_update',
+        'endpoint_update',
         'finding',
         'layer_update',
         'packet',
@@ -103,6 +105,13 @@ describe('agent wire contract: real captured agent output maps without throwing'
     expect(typeof mapped.totalConnectionsObserved).toBe('number');
     expect(typeof mapped.capacityEvictions).toBe('number');
     expect(typeof mapped.idleEvictions).toBe('number');
+    expect(typeof mapped.observedNameEvictions).toBe('number');
+  });
+
+  it('endpoint_update maps and carries a real observedName', () => {
+    const mapped = mapEndpointUpdateEvent(sample('endpoint_update'));
+    expect(mapped.length).toBeGreaterThan(0);
+    expect(mapped.some((e) => typeof e.observedName === 'string' && e.observedName.length > 0)).toBe(true);
   });
 
   it('system_stats maps', () => {
@@ -133,7 +142,28 @@ describe('agent wire contract: real captured agent output maps without throwing'
     expect(mapped.fields).toContainEqual(expect.objectContaining({
       path: 'http.response.code', type: 'uint', region: 'payload', value: 200,
     }));
+    // JAM-21: the sample's response carries the phrase and both headers.
+    expect(mapped.fields).toContainEqual(expect.objectContaining({
+      path: 'http.response.phrase', type: 'str', value: 'OK',
+    }));
+    expect(mapped.fields).toContainEqual(expect.objectContaining({
+      path: 'http.content_type', type: 'str', region: 'payload', value: 'text/html',
+    }));
+    expect(mapped.fields).toContainEqual(expect.objectContaining({
+      path: 'http.content_length', type: 'uint', region: 'payload', value: 1234,
+    }));
     expect(evt.packet).not.toHaveProperty('headerBreakdown');
+  });
+
+  // JAM-21: captured from a replay of a response declaring 2^53 bytes, which a
+  // JSON number can't hold exactly, so the agent sends a decimal string.
+  it('packet maps a Content-Length above 2^53 - 1 as a string', () => {
+    const packets = samples.filter((e) => e.type === 'packet') as unknown as { packet: unknown }[];
+    expect(packets).toHaveLength(2);
+    const mapped = mapPacketEvent(packets[1].packet);
+    expect(mapped.fields).toContainEqual(expect.objectContaining({
+      path: 'http.content_length', type: 'uint', region: 'payload', value: '9007199254740992',
+    }));
   });
 
   // JAM-15. Captured from a replay of a DNS query left unanswered for

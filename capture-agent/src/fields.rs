@@ -29,6 +29,9 @@ pub enum ByteRegion {
     Payload,
 }
 
+/// The largest integer a JSON number carries exactly to a JS client: 2^53 - 1.
+const MAX_EXACT_JSON_UINT: u64 = (1 << 53) - 1;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum FieldValue {
@@ -322,33 +325,56 @@ fn transport_fields(parsed: &ParsedPacket, start: u32) -> Vec<Field> {
 /// the visible dump; its offset is retained rather than moved or truncated.
 /// Text fields and derived JA3 values span their source payload. Only SNI's
 /// bytes are located precisely by the TLS extension parser.
-fn app_fields(l7: &L7Info, payload_len: u32) -> Vec<Field> {
+/// `dns_offset` is where the DNS message starts in the payload: 2 over TCP,
+/// after the length prefix, and 0 over UDP.
+fn app_fields(l7: &L7Info, payload_len: u32, dns_offset: u32) -> Vec<Field> {
     match l7 {
         L7Info::Http { method, path } => vec![
             Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
             Field::leaf("http.request.method", "Request Method", "http", FieldType::Str, FieldValue::Str(method.clone()), ByteRegion::Payload, 0, payload_len),
             Field::leaf("http.request.uri", "Request URI", "http", FieldType::Str, FieldValue::Str(path.clone()), ByteRegion::Payload, 0, payload_len),
         ],
-        L7Info::HttpResponse { status } => vec![
-            Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
-            Field::leaf("http.response.code", "Status Code", "http", FieldType::Uint, FieldValue::Uint(status.parse().unwrap_or(0)), ByteRegion::Payload, 0, payload_len),
-        ],
+        L7Info::HttpResponse { status, reason, content_type, content_length } => {
+            let mut fields = vec![
+                Field::group("http", "Hypertext Transfer Protocol", None, ByteRegion::Payload, 0, payload_len),
+                Field::leaf("http.response.code", "Status Code", "http", FieldType::Uint, FieldValue::Uint(status.parse().unwrap_or(0)), ByteRegion::Payload, 0, payload_len),
+            ];
+            // Each leaf is present only when decoded: absent means "not
+            // observed in this segment", not "the response had none".
+            if let Some(reason) = reason {
+                fields.push(Field::leaf("http.response.phrase", "Response Phrase", "http", FieldType::Str, FieldValue::Str(reason.clone()), ByteRegion::Payload, 0, payload_len));
+            }
+            if let Some(content_type) = content_type {
+                fields.push(Field::leaf("http.content_type", "Content-Type", "http", FieldType::Str, FieldValue::Str(content_type.clone()), ByteRegion::Payload, 0, payload_len));
+            }
+            if let Some(content_length) = content_length {
+                // Past this a JS client's number would silently round, so the
+                // value travels as a string; the field is a uint either way.
+                let value = if *content_length > MAX_EXACT_JSON_UINT {
+                    FieldValue::Str(content_length.to_string())
+                } else {
+                    FieldValue::Uint(*content_length)
+                };
+                fields.push(Field::leaf("http.content_length", "Content-Length", "http", FieldType::Uint, value, ByteRegion::Payload, 0, payload_len));
+            }
+            fields
+        }
         L7Info::Dns { query_name, id, qtype } => vec![
             Field::group("dns", "Domain Name System", None, ByteRegion::Payload, 0, payload_len),
-            Field::leaf("dns.id", "Transaction ID", "dns", FieldType::Uint, FieldValue::Uint((*id).into()), ByteRegion::Payload, 0, 2),
-            Field::leaf("dns.flags.response", "Response", "dns", FieldType::Bool, FieldValue::Bool(false), ByteRegion::Payload, 2, 1),
+            Field::leaf("dns.id", "Transaction ID", "dns", FieldType::Uint, FieldValue::Uint((*id).into()), ByteRegion::Payload, dns_offset, 2),
+            Field::leaf("dns.flags.response", "Response", "dns", FieldType::Bool, FieldValue::Bool(false), ByteRegion::Payload, dns_offset + 2, 1),
             Field::leaf("dns.qry.name", "Query Name", "dns", FieldType::Str, FieldValue::Str(query_name.clone()), ByteRegion::Payload, 0, payload_len),
             Field::leaf("dns.qry.type", "Query Type", "dns", FieldType::Str, FieldValue::Str(dns_type_name(*qtype)), ByteRegion::Payload, 0, payload_len),
         ],
         L7Info::DnsResponse { query_name, id, qtype, rcode, answer_count, answers } => {
             let mut fields = vec![
                 Field::group("dns", "Domain Name System", None, ByteRegion::Payload, 0, payload_len),
-                Field::leaf("dns.id", "Transaction ID", "dns", FieldType::Uint, FieldValue::Uint((*id).into()), ByteRegion::Payload, 0, 2),
-                Field::leaf("dns.flags.response", "Response", "dns", FieldType::Bool, FieldValue::Bool(true), ByteRegion::Payload, 2, 1),
-                Field::leaf("dns.flags.rcode", "Response Code", "dns", FieldType::Str, FieldValue::Str(dns_rcode_name(*rcode)), ByteRegion::Payload, 3, 1),
+                Field::leaf("dns.id", "Transaction ID", "dns", FieldType::Uint, FieldValue::Uint((*id).into()), ByteRegion::Payload, dns_offset, 2),
+                Field::leaf("dns.flags.response", "Response", "dns", FieldType::Bool, FieldValue::Bool(true), ByteRegion::Payload, dns_offset + 2, 1),
+                Field::leaf("dns.flags.rcode", "Response Code", "dns", FieldType::Str, FieldValue::Str(dns_rcode_name(*rcode)), ByteRegion::Payload, dns_offset + 3, 1),
                 Field::leaf("dns.qry.name", "Query Name", "dns", FieldType::Str, FieldValue::Str(query_name.clone()), ByteRegion::Payload, 0, payload_len),
                 Field::leaf("dns.qry.type", "Query Type", "dns", FieldType::Str, FieldValue::Str(dns_type_name(*qtype)), ByteRegion::Payload, 0, payload_len),
-                Field::leaf("dns.count.answers", "Answer RRs", "dns", FieldType::Uint, FieldValue::Uint((*answer_count).into()), ByteRegion::Payload, 6, 2),
+                Field::leaf("dns.count.answers", "Answer RRs", "dns", FieldType::Uint, FieldValue::Uint((*answer_count).into()), ByteRegion::Payload, dns_offset + 6, 2),
             ];
             // Each answer gets an indexed path: field paths are unique per
             // packet (the UI's field tree keys on them), so a repeated
@@ -366,6 +392,9 @@ fn app_fields(l7: &L7Info, payload_len: u32) -> Vec<Field> {
                 if !answer.data.is_empty() {
                     let data_type = if matches!(answer.rtype, 1 | 28) { FieldType::Addr } else { FieldType::Str };
                     fields.push(Field::leaf(&format!("{base}.data"), "Data", &base, data_type, FieldValue::Str(answer.data.clone()), ByteRegion::Payload, 0, payload_len));
+                }
+                if answer.data_truncated {
+                    fields.push(Field::leaf(&format!("{base}.truncated"), "Data Truncated", &base, FieldType::Bool, FieldValue::Bool(true), ByteRegion::Payload, 0, payload_len));
                 }
             }
             fields
@@ -454,7 +483,8 @@ pub fn build_fields(parsed: &ParsedPacket, l7: &L7Info, link_type: crate::parse:
     let (ip, transport_start) = ip_fields(parsed, ip_start);
     fields.extend(ip);
     fields.extend(transport_fields(parsed, transport_start));
-    fields.extend(app_fields(l7, parsed.payload.len() as u32));
+    let dns_offset = if crate::l7::is_dns_over_tcp(parsed.protocol, parsed.src_port, parsed.dst_port) { 2 } else { 0 };
+    fields.extend(app_fields(l7, parsed.payload.len() as u32, dns_offset));
     fields
 }
 
@@ -468,7 +498,22 @@ pub fn build_packet_fields(
     l7_from_reassembly: bool,
 ) -> Vec<Field> {
     if l7_from_reassembly {
-        build_fields(parsed, &L7Info::None, link_type)
+        let mut fields = build_fields(parsed, &L7Info::None, link_type);
+        // A DNS message reassembled from a TCP stream has no byte range in
+        // this frame, but its decoded values are still real: emit them with
+        // an empty range, as `transaction_fields` does. HTTP is deliberately
+        // left out, and so is a message rebuilt from IP fragments (its frame
+        // is not TCP), which keeps no application fields on the fragment.
+        if parsed.protocol == TransportProtocol::Tcp
+            && matches!(l7, L7Info::Dns { .. } | L7Info::DnsResponse { .. })
+        {
+            fields.extend(app_fields(l7, 0, 0).into_iter().map(|mut field| {
+                field.offset = 0;
+                field.len = 0;
+                field
+            }));
+        }
+        fields
     } else {
         build_fields(parsed, l7, link_type)
     }
@@ -701,20 +746,88 @@ mod tests {
     }
 
     #[test]
+    fn reassembled_dns_emits_leaves_with_empty_ranges_but_http_does_not() {
+        let mut packet = base_packet();
+        packet.protocol = TransportProtocol::Tcp;
+        let dns = L7Info::DnsResponse {
+            query_name: "example.com".into(), id: 7, qtype: 1, rcode: 0,
+            answer_count: 1, answers: Vec::new(),
+        };
+        let fields = build_packet_fields(&packet, &dns, crate::parse::LinkType::Raw, true);
+        let name = fields.iter().find(|f| f.path == "dns.qry.name").expect("dns.qry.name");
+        assert_eq!(name.value, Some(FieldValue::Str("example.com".into())));
+        for f in fields.iter().filter(|f| f.path.starts_with("dns")) {
+            assert_eq!((f.offset, f.len), (0, 0), "{}", f.path);
+        }
+        let http = L7Info::HttpResponse { status: "200".into(), reason: None, content_type: None, content_length: None };
+        let fields = build_packet_fields(&packet, &http, crate::parse::LinkType::Raw, true);
+        assert!(!fields.iter().any(|f| f.path.starts_with("http")));
+        // A frame that is not TCP (an IP fragment) keeps no application fields.
+        packet.protocol = TransportProtocol::Other;
+        let fields = build_packet_fields(&packet, &dns, crate::parse::LinkType::Raw, true);
+        assert!(!fields.iter().any(|f| f.path.starts_with("dns")));
+    }
+
+    #[test]
     fn app_fields_cover_the_existing_application_decodes() {
         let cases = [
             (L7Info::Http { method: "GET".into(), path: "/index.html".into() }, "http.request.uri", FieldValue::Str("/index.html".into())),
-            (L7Info::HttpResponse { status: "404".into() }, "http.response.code", FieldValue::Uint(404)),
+            (L7Info::HttpResponse { status: "404".into(), reason: None, content_type: None, content_length: None }, "http.response.code", FieldValue::Uint(404)),
             (L7Info::Dns { query_name: "example.com".into(), id: 1, qtype: 1 }, "dns.qry.name", FieldValue::Str("example.com".into())),
         ];
         for (l7, path, value) in cases {
-            let fields = app_fields(&l7, 50);
+            let fields = app_fields(&l7, 50, 0);
             let field = fields.iter().find(|f| f.path == path).expect(path);
             assert_eq!(field.value, Some(value));
             assert_eq!(field.region, ByteRegion::Payload);
             assert_eq!((field.offset, field.len), (0, 50));
         }
-        assert!(app_fields(&L7Info::None, 50).is_empty());
+        assert!(app_fields(&L7Info::None, 50, 0).is_empty());
+    }
+
+    #[test]
+    fn http_response_fields_are_present_only_when_decoded() {
+        let paths = |l7: &L7Info| app_fields(l7, 50, 0).into_iter().map(|f| f.path).collect::<Vec<_>>();
+        let bare = L7Info::HttpResponse { status: "200".into(), reason: None, content_type: None, content_length: None };
+        let bare = paths(&bare);
+        for absent in ["http.response.phrase", "http.content_type", "http.content_length"] {
+            assert!(!bare.iter().any(|p| p == absent), "{absent}");
+        }
+        let full = L7Info::HttpResponse {
+            status: "200".into(), reason: Some("OK".into()),
+            content_type: Some("text/html".into()), content_length: Some(12),
+        };
+        let fields = app_fields(&full, 50, 0);
+        let value = |path: &str| fields.iter().find(|f| f.path == path).expect(path).value.clone();
+        assert_eq!(value("http.response.phrase"), Some(FieldValue::Str("OK".into())));
+        assert_eq!(value("http.content_type"), Some(FieldValue::Str("text/html".into())));
+        assert_eq!(value("http.content_length"), Some(FieldValue::Uint(12)));
+    }
+
+    #[test]
+    fn an_empty_content_type_gives_no_field() {
+        for payload in [&b"HTTP/1.1 200 OK\r\nContent-Type:\r\n\r\n"[..], b"HTTP/1.1 200 OK\r\nContent-Type: \r\n\r\n"] {
+            let l7 = crate::l7::sniff_l7(payload, Some(51000));
+            assert!(matches!(l7, L7Info::HttpResponse { .. }), "{l7:?}");
+            assert!(!app_fields(&l7, payload.len() as u32, 0).iter().any(|f| f.path == "http.content_type"));
+        }
+    }
+
+    #[test]
+    fn http_content_length_is_a_json_string_past_the_exact_integer_limit() {
+        let json = |n: u64| {
+            let l7 = L7Info::HttpResponse { status: "200".into(), reason: None, content_type: None, content_length: Some(n) };
+            let fields = app_fields(&l7, 50, 0);
+            let field = fields.iter().find(|f| f.path == "http.content_length").expect("the field");
+            serde_json::to_value(field).expect("serializes")
+        };
+        let limit = 9_007_199_254_740_991u64;
+        assert_eq!(json(limit)["value"], serde_json::json!(9_007_199_254_740_991u64));
+        assert_eq!(json(limit + 1)["value"], serde_json::json!("9007199254740992"));
+        assert_eq!(json(u64::MAX)["value"], serde_json::json!("18446744073709551615"));
+        assert_eq!(json(0)["value"], serde_json::json!(0));
+        // The field stays an unsigned integer whichever way its value travels.
+        assert_eq!(json(limit + 1)["type"], "uint");
     }
 
     #[test]
@@ -724,7 +837,7 @@ mod tests {
             ja3_label: Some("matches Chrome 12x"), client_random: None,
             sni_offset: 80, sni_len: 11,
         };
-        let fields = app_fields(&l7, 165);
+        let fields = app_fields(&l7, 165, 0);
         let sni = fields.iter().find(|f| f.path == "tls.handshake.sni").unwrap();
         assert_eq!((sni.offset, sni.len), (80, 11));
         assert_eq!(sni.value, Some(FieldValue::Str("example.com".into())));
@@ -738,7 +851,7 @@ mod tests {
             sni: "example.com".into(), ja3: None, ja3_label: None,
             client_random: None, sni_offset: 63, sni_len: 11,
         };
-        let fields = app_fields(&l7, 100);
+        let fields = app_fields(&l7, 100, 0);
         assert!(fields.iter().all(|f| f.path != "tls.ja3" && f.path != "tls.ja3_label"));
     }
 
@@ -791,7 +904,7 @@ mod tests {
         use crate::l7::{dns_test_support::response, sniff_l7};
         let msg = response(0x42, "example.com", 1, 0, &[(1, 300, vec![93, 184, 216, 34]), (5, 30, vec![1, b'x', 0xc0, 0x0c])]);
         let l7 = sniff_l7(&msg, Some(50_000));
-        let fields = app_fields(&l7, msg.len() as u32);
+        let fields = app_fields(&l7, msg.len() as u32, 0);
         let value = |path: &str| fields.iter().find(|f| f.path == path).and_then(|f| f.value.clone());
         assert_eq!(value("dns.id"), Some(FieldValue::Uint(0x42)));
         assert_eq!(value("dns.flags.response"), Some(FieldValue::Bool(true)));
@@ -807,5 +920,104 @@ mod tests {
         let paths: std::collections::HashSet<_> = fields.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths.len(), fields.len());
         assert!(fields.iter().all(|f| f.group.as_deref().is_none_or(|g| paths.contains(g))));
+    }
+
+    #[test]
+    fn truncated_txt_answer_reports_the_truncated_field() {
+        use crate::l7::{dns_test_support::response, sniff_l7};
+        let txt = |len: usize| {
+            let mut rdata = Vec::new();
+            let mut left = len;
+            while left > 0 {
+                let n = left.min(255);
+                rdata.push(n as u8);
+                rdata.extend(std::iter::repeat_n(b'a', n));
+                left -= n;
+            }
+            rdata
+        };
+        let field = |rdatas: &[Vec<u8>], i: usize, leaf: &str| {
+            let answers: Vec<_> = rdatas.iter().map(|r| (16u16, 60u32, r.clone())).collect();
+            let msg = response(1, "t.example.com", 16, 0, &answers);
+            let fields = app_fields(&sniff_l7(&msg, None), msg.len() as u32, 0);
+            let path = format!("dns.answer.{i}.{leaf}");
+            fields.iter().find(|f| f.path == path).and_then(|f| f.value.clone())
+        };
+        assert_eq!(field(&[txt(500)], 0, "truncated"), None);
+        assert_eq!(field(&[txt(513)], 0, "truncated"), Some(FieldValue::Bool(true)));
+        // Once the response budget is spent an answer has no data at all,
+        // yet still says it was cut.
+        let spent = [txt(512), txt(512), txt(512), txt(512), txt(10)];
+        assert_eq!(field(&spent, 4, "data"), None);
+        assert_eq!(field(&spent, 4, "truncated"), Some(FieldValue::Bool(true)));
+    }
+
+    #[test]
+    fn dns_byte_ranges_skip_the_length_prefix_over_tcp_and_not_over_udp() {
+        use crate::l7::{dns_test_support::response, sniff_l7};
+        let msg = response(0x42, "example.com", 1, 0, &[(1, 300, vec![93, 184, 216, 34])]);
+        let ranges = |protocol, src_port, dst_port, payload: Vec<u8>, l7: &L7Info| {
+            let mut parsed = base_packet();
+            parsed.protocol = protocol;
+            parsed.src_port = Some(src_port);
+            parsed.dst_port = Some(dst_port);
+            parsed.payload = payload;
+            let fields = build_fields(&parsed, l7, crate::parse::LinkType::Raw);
+            let range = |path: &str| {
+                let f = fields.iter().find(|f| f.path == path).unwrap_or_else(|| panic!("{path} missing"));
+                (f.offset, f.len)
+            };
+            ["dns.id", "dns.flags.response", "dns.flags.rcode", "dns.count.answers"].map(range)
+        };
+        let l7 = sniff_l7(&msg, Some(51000));
+        let udp = ranges(TransportProtocol::Udp, 53, 51000, msg.clone(), &l7);
+        assert_eq!(udp, [(0, 2), (2, 1), (3, 1), (6, 2)], "UDP is unchanged");
+
+        let mut framed = (msg.len() as u16).to_be_bytes().to_vec();
+        framed.extend_from_slice(&msg);
+        // A response (source port 53) and a request direction both skip the prefix.
+        let tcp = ranges(TransportProtocol::Tcp, 53, 51000, framed.clone(), &l7);
+        assert_eq!(tcp, [(2, 2), (4, 1), (5, 1), (8, 2)]);
+        let query = L7Info::Dns { query_name: "a.com".into(), id: 7, qtype: 1 };
+        let tcp_query = {
+            let mut parsed = base_packet();
+            parsed.protocol = TransportProtocol::Tcp;
+            parsed.src_port = Some(51000);
+            parsed.dst_port = Some(53);
+            parsed.payload = framed;
+            let fields = build_fields(&parsed, &query, crate::parse::LinkType::Raw);
+            let f = |path: &str| fields.iter().find(|f| f.path == path).map(|f| (f.offset, f.len));
+            (f("dns.id"), f("dns.flags.response"))
+        };
+        assert_eq!(tcp_query, (Some((2, 2)), Some((4, 1))));
+    }
+
+    #[test]
+    fn byte_ranges_are_right_for_each_tcp_53_path() {
+        use crate::l7::dns_test_support::response;
+        let offset_of = |parsed_ports: (u16, u16), payload: Vec<u8>, l7: &L7Info, path: &str| {
+            let mut parsed = base_packet();
+            parsed.protocol = TransportProtocol::Tcp;
+            parsed.src_port = Some(parsed_ports.0);
+            parsed.dst_port = Some(parsed_ports.1);
+            parsed.payload = payload;
+            let fields = build_fields(&parsed, l7, crate::parse::LinkType::Raw);
+            fields.iter().find(|f| f.path == path).map(|f| (f.offset, f.len))
+        };
+        let msg = response(0x42, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        let mut framed = (msg.len() as u16).to_be_bytes().to_vec();
+        framed.extend_from_slice(&msg);
+        let l7 = crate::l7::sniff_l7(&msg, Some(51000));
+        // A response from source 53 to an ephemeral port, and to 8443.
+        assert_eq!(offset_of((53, 51000), framed.clone(), &l7, "dns.id"), Some((2, 2)));
+        assert_eq!(offset_of((53, 8443), framed, &l7, "dns.count.answers"), Some((8, 2)));
+        // TLS from source 53: the SNI range comes from the ClientHello, unshifted.
+        let hello = crate::l7::build_client_hello("example.com");
+        let tls = crate::l7::sniff_l7(&hello, Some(443));
+        let L7Info::TlsClientHello { sni_offset, sni_len, .. } = tls else { panic!("fixture") };
+        assert_eq!(
+            offset_of((53, 8443), hello, &tls, "tls.handshake.sni"),
+            Some((sni_offset as u32, sni_len as u32))
+        );
     }
 }

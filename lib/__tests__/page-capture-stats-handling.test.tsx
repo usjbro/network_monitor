@@ -79,6 +79,7 @@ describe('TerminalApp capture_stats stream handling', () => {
             totalConnectionsObserved: 12,
             capacityEvictions: 0,
             idleEvictions: 2,
+            observedNameEvictions: 0,
           },
         }),
       } as MessageEvent);
@@ -106,6 +107,7 @@ describe('TerminalApp capture_stats stream handling', () => {
             totalConnectionsObserved: 12,
             capacityEvictions: 0,
             idleEvictions: 2,
+            observedNameEvictions: 0,
           },
         }),
       } as MessageEvent);
@@ -137,6 +139,7 @@ describe('TerminalApp capture_stats stream handling', () => {
             totalConnectionsObserved: 12,
             capacityEvictions: 0,
             idleEvictions: 2,
+            observedNameEvictions: 0,
           },
         }),
       } as MessageEvent);
@@ -161,6 +164,7 @@ describe('TerminalApp capture_stats stream handling', () => {
             totalConnectionsObserved: 12,
             capacityEvictions: 0,
             idleEvictions: 2,
+            observedNameEvictions: 0,
           },
         }),
       } as MessageEvent);

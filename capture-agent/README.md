@@ -122,12 +122,14 @@ with `pid: 0`.
 | `REPLAY_LOCAL_ADDRS` | Comma-separated local addresses, so replay can attribute rx/tx direction | Startup |
 | `REPLAY_SPEED` | `realtime` to pace by recorded timestamps; otherwise as fast as possible | Startup |
 | `MAX_FLOWS` | Flow-table capacity ceiling (default 10,000) | Startup |
+| `MAX_OBSERVED_DNS_NAMES` | Observed DNS name table capacity (default 16,384) | Startup |
 
-All five are read once at startup. Invalid `CAPTURE_INTERFACE` and
-nonpositive/non-numeric `MAX_FLOWS` fail startup; blank values are unset.
-`REPLAY_FILE` must name a readable supported file. `REPLAY_LOCAL_ADDRS` only
-splits/trims strings, and only exact `REPLAY_SPEED=realtime` selects pacing;
-other speed values select fast mode. See [../docs/architecture.md](../docs/architecture.md)'s
+All six are read once at startup. Invalid `CAPTURE_INTERFACE` and
+nonpositive/non-numeric `MAX_FLOWS` or `MAX_OBSERVED_DNS_NAMES` fail startup;
+blank values are unset. `REPLAY_FILE` must name a readable supported file.
+`REPLAY_LOCAL_ADDRS` only splits/trims strings, and only exact
+`REPLAY_SPEED=realtime` selects pacing; other speed values select fast mode.
+See [../docs/architecture.md](../docs/architecture.md)'s
 Resource limits table for every cap in the system, not just the
 configurable ones.
 

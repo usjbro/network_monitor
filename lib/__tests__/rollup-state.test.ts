@@ -42,6 +42,15 @@ describe('rollup state enrichment', () => {
     ]);
   });
 
+  it('a_name_gone_from_the_snapshot_is_not_retained', () => {
+    const old = endpoint({ observedName: 'example.com', remoteHostname: 'ptr.example.net' });
+    const fresh = endpoint({ rxBytesTotal: 200, observedName: undefined, remoteHostname: undefined });
+
+    const [merged] = mergeEndpointSnapshot([old], [fresh]);
+    expect(merged.observedName).toBeUndefined();
+    expect(merged.remoteHostname).toBe('ptr.example.net');
+  });
+
   it('preserves ownership and PTR hostname when a conversation snapshot replaces counters', () => {
     const old = conversation({ enrichment, remoteHostname: 'example.com' });
     const fresh = conversation({ rxBytesTotal: 200, remoteHostname: undefined, enrichment: undefined });

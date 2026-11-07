@@ -82,6 +82,7 @@ export interface WireField {
   group?: string;
   // 'str' matches Rust's lowercase serialization of FieldType::Str.
   type: 'group' | 'bool' | 'uint' | 'str' | 'addr' | 'bytes';
+  // A 'uint' above 2^53 - 1 arrives as a decimal string (http.content_length).
   value?: boolean | number | string;
   region: 'header' | 'payload';
   offset: number;
@@ -174,6 +175,11 @@ export interface CaptureStats {
   totalConnectionsObserved: number;
   capacityEvictions: number;
   idleEvictions: number;
+  // Observed DNS names dropped because the agent's name table was full
+  // (not expired); nonzero means `Endpoint.observedName` may be missing.
+  // Optional, unlike the counters above: an older agent does not send it, and
+  // undefined means unknown, not zero.
+  observedNameEvictions?: number;
 }
 
 // Measured protocol hierarchy (JAM-13), from the agent's
@@ -331,6 +337,11 @@ export interface Endpoint {
   host: string;
   // PTR name comes from relay-side connection_enrichment, not the agent rollup wire event.
   remoteHostname?: string;
+  // JAM-21: the name an answered DNS response gave this address, observed
+  // passively by the agent. Not a reverse lookup. It is whatever the queried
+  // server said: any process able to send a query, or anyone who owns a zone,
+  // can choose it, so it stays separate from remoteHostname.
+  observedName?: string;
   rxBytesTotal: number;
   txBytesTotal: number;
   rxPacketsTotal: number;

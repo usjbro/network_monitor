@@ -1056,6 +1056,7 @@ export default function TerminalApp() {
               captureDegraded={captureDegraded}
               totalObserved={captureStats?.totalConnectionsObserved}
               capacityEvictions={captureStats?.capacityEvictions}
+              observedNameEvictions={captureStats?.observedNameEvictions}
               bufferLimit={connectionBufferLimit}
               displayFilter={displayFilter?.predicate}
               displayFilterExpression={displayFilter?.expression}

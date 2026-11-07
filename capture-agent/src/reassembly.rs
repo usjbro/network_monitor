@@ -39,7 +39,7 @@
 //! the prefix and status exposed here are what it needs to build on.
 
 use crate::flow::FlowKey;
-use crate::l7::{sniff_l7_desegmenting, L7Info, L7Sniff};
+use crate::l7::{is_dns_over_tcp, sniff_for_transport, L7Info, L7Sniff};
 use crate::parse::{parse_packet, LinkType, ParsedPacket, TransportProtocol};
 use std::collections::HashMap;
 
@@ -869,6 +869,11 @@ impl TcpReassembler {
         self.streams.contains_key(key)
     }
 
+    /// Sequence number of the first byte `prefix` returns.
+    fn base_seq(&self, key: &TcpStreamKey) -> Option<u32> {
+        self.streams.get(key).map(|stream| stream.base_seq)
+    }
+
     /// Feeds one segment's payload. Returns the direction's status whenever
     /// this segment actually changed the buffer, and `None` when it did not —
     /// which is precisely what a retransmission of already-held bytes does
@@ -1006,10 +1011,12 @@ impl TcpReassembler {
         changed.then_some(status)
     }
 
-    /// Releases a direction's buffer because a detector decided, counting the
-    /// outcome. The entry is removed outright, so a later message on the same
-    /// long-lived connection gets a fresh attempt rather than being locked
-    /// out by the first one's success.
+    /// Releases a direction's buffer because its message is finished, counting
+    /// the outcome: a detector decided, or a complete DNS message was rejected,
+    /// which still counts as `completed` because reassembly did its part. The
+    /// entry is removed outright, so a later message on the same long-lived
+    /// connection gets a fresh attempt rather than being locked out by the
+    /// first one's success.
     pub fn finish(&mut self, key: &TcpStreamKey, status: ReassemblyStatus) {
         if let Some(stream) = self.streams.remove(key) {
             self.bytes_held = self.bytes_held.saturating_sub(stream.accounted_bytes());
@@ -1118,6 +1125,279 @@ pub struct StreamReassembler {
     last_frame_cut_at_ms: Option<u64>,
     frames_cut_at_snaplen: u64,
     last_evict_ms: u64,
+    dns_framing: DnsTcpFraming,
+}
+
+/// Where the next DNS-over-TCP message starts, per stream direction, as
+/// sequence state rather than buffered bytes (JAM-21). Without it, once the
+/// reassembler has decided or given up on a message, a later segment from
+/// inside that message would be read as the start of a new one, and its bytes
+/// taken for a length prefix.
+///
+/// At most `MAX_TCP_STREAMS` entries, oldest evicted first; an entry idle for
+/// `TCP_STREAM_IDLE_MS` on the capture clock is dropped.
+#[derive(Default)]
+struct DnsTcpFraming {
+    entries: HashMap<TcpStreamKey, DnsBoundary>,
+}
+
+#[derive(Clone, Copy)]
+struct DnsBoundary {
+    /// Where the next message starts, or, with `pending_high`, the sequence
+    /// number of the low byte of its length prefix.
+    next_message_seq: u32,
+    /// The high byte of a length prefix split across segments.
+    pending_high: Option<u8>,
+    last_seen_ms: u64,
+}
+
+impl DnsTcpFraming {
+    /// Whether this segment is inside a message already seen the start of, so
+    /// must not be read as a new message. `seq` before the boundary is inside
+    /// it, by a wraparound-safe signed delta; so is the segment that begins
+    /// with the low byte of a split prefix.
+    ///
+    /// A skipped segment that reaches past the boundary is walked from the
+    /// boundary over its suffix, since a message may start inside it, and
+    /// that is a record. One that does not reach it changes nothing and
+    /// deliberately does not refresh `last_seen_ms`: a crafted prefix could
+    /// otherwise be kept alive by the very traffic it hides. A legitimate
+    /// message that takes longer than `TCP_STREAM_IDLE_MS` lets its boundary
+    /// lapse, and segments inside it are then read as starts, as before JAM-21.
+    fn skip_inside_message(&mut self, key: &TcpStreamKey, seq: u32, payload: &[u8], response_only: bool, now_ms: u64) -> bool {
+        let Some(&entry) = self.entries.get(key) else {
+            return false;
+        };
+        if now_ms.saturating_sub(entry.last_seen_ms) > TCP_STREAM_IDLE_MS {
+            self.entries.remove(key);
+            return false;
+        }
+        let delta = seq.wrapping_sub(entry.next_message_seq) as i32;
+        if delta > 0 || (delta == 0 && entry.pending_high.is_none()) {
+            return false;
+        }
+        // `offset` bytes of this segment precede the boundary.
+        let offset = delta.unsigned_abs() as usize;
+        if let Some(suffix) = payload.get(offset..).filter(|suffix| !suffix.is_empty()) {
+            let base = entry.next_message_seq.wrapping_sub(u32::from(entry.pending_high.is_some()));
+            self.walk_and_record(key, base, entry.pending_high, suffix, response_only, now_ms);
+        }
+        true
+    }
+
+    /// A segment the reassembler consumed without sniffing (a window release,
+    /// a cleanup, a retransmission): keep the boundary moving over its bytes.
+    ///
+    /// An empty segment has none, and its sequence number says nothing about
+    /// the stream: `feed` returns `None` for pure ACKs and bare SYNs and FINs
+    /// too. A segment past the boundary is not contiguous with it, so its first
+    /// byte is not known to start a message.
+    fn note_consumed(&mut self, key: &TcpStreamKey, seq: u32, payload: &[u8], response_only: bool, now_ms: u64) {
+        if payload.is_empty() || self.skip_inside_message(key, seq, payload, response_only, now_ms) {
+            return;
+        }
+        let starts_message = match self.entries.get(key) {
+            Some(entry) => entry.next_message_seq == seq,
+            None => looks_like_dns_tcp_start(payload),
+        };
+        if starts_message {
+            self.walk_and_record(key, seq, None, payload, response_only, now_ms);
+        }
+    }
+
+    fn record(&mut self, key: &TcpStreamKey, boundary: DnsBoundary) {
+        if !self.entries.contains_key(key) && self.entries.len() >= MAX_TCP_STREAMS {
+            if let Some(oldest) =
+                self.entries.iter().min_by_key(|(_, entry)| entry.last_seen_ms).map(|(k, _)| k.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(key.clone(), boundary);
+    }
+
+    fn forget(&mut self, key: &TcpStreamKey) {
+        self.entries.remove(key);
+    }
+
+    fn drop_flow(&mut self, flow: &FlowKey) {
+        for from_local in [true, false] {
+            self.entries.remove(&TcpStreamKey { flow: flow.clone(), from_local });
+        }
+    }
+
+    fn evict_stale(&mut self, now_ms: u64) {
+        self.entries.retain(|_, entry| now_ms.saturating_sub(entry.last_seen_ms) <= TCP_STREAM_IDLE_MS);
+    }
+
+    /// Records where the message starting at `base_seq` in `bytes` ends, or
+    /// forgets the stream when nothing trustworthy can be recorded. A start no
+    /// boundary reaches records only if it passes `looks_like_dns_tcp_start`.
+    /// If it does not, any boundary already held stays: its message may yet
+    /// arrive.
+    ///
+    /// `response_only` is for a direction from port 53 to a port that is not
+    /// 53, which may be an ordinary connection that merely uses 53 as its
+    /// source port: see `dns_tcp_walk`. It also records nothing when
+    /// `other_protocol` says the sniff decided something other than DNS.
+    fn record_message(
+        &mut self,
+        key: &TcpStreamKey,
+        base_seq: u32,
+        bytes: &[u8],
+        other_protocol: bool,
+        response_only: bool,
+        now_ms: u64,
+    ) {
+        if response_only && other_protocol {
+            self.forget(key);
+            return;
+        }
+        if self.is_past_boundary(key, base_seq) && !looks_like_dns_tcp_start(bytes) {
+            return;
+        }
+        self.walk_and_record(key, base_seq, None, bytes, response_only, now_ms);
+    }
+
+    /// Whether `seq` is not known to start a message: nothing is recorded for
+    /// this direction, or it lies past the recorded boundary, so the bytes
+    /// between are missing or have yet to arrive.
+    fn is_past_boundary(&self, key: &TcpStreamKey, seq: u32) -> bool {
+        self.entries.get(key).is_none_or(|entry| seq.wrapping_sub(entry.next_message_seq) as i32 > 0)
+    }
+
+    /// Whether `bytes`, which start at `base_seq`, hold a whole framed message
+    /// that the recorded boundary already lies at or past. Such a message needs
+    /// nothing more from the buffer, whether or not it decoded. A declared
+    /// length below 12 never gets here with a boundary past it: the walk stops
+    /// at such a prefix.
+    fn covers_first_message(&self, key: &TcpStreamKey, base_seq: u32, bytes: &[u8]) -> bool {
+        let [hi, lo, ..] = *bytes else {
+            return false;
+        };
+        let declared = usize::from(u16::from_be_bytes([hi, lo]));
+        if bytes.len() < 2 + declared {
+            return false;
+        }
+        let end = base_seq.wrapping_add((2 + declared) as u32);
+        self.entries.get(key).is_some_and(|entry| entry.next_message_seq.wrapping_sub(end) as i32 >= 0)
+    }
+
+    fn walk_and_record(
+        &mut self,
+        key: &TcpStreamKey,
+        base_seq: u32,
+        carry: Option<u8>,
+        bytes: &[u8],
+        response_only: bool,
+        now_ms: u64,
+    ) {
+        let continuing = self.entries.contains_key(key);
+        match dns_tcp_walk(bytes, base_seq, carry, response_only, continuing) {
+            Some((next_message_seq, pending_high)) => {
+                self.record(key, DnsBoundary { next_message_seq, pending_high, last_seen_ms: now_ms })
+            }
+            None => self.forget(key),
+        }
+    }
+}
+
+fn is_dns_info(info: &L7Info) -> bool {
+    matches!(info, L7Info::Dns { .. } | L7Info::DnsResponse { .. })
+}
+
+/// Whether `bytes`, read as a length prefix and a message, show a header a DNS
+/// message could have: an assigned opcode and rcode, the reserved Z bit clear,
+/// no rcode and at most one question on a query, and section counts
+/// that fit the declared length at 5 bytes a question and 11 a record. Fewer
+/// than the 14 bytes of a prefix and header show no such thing and do not pass;
+/// a buffered head is checked again if its bytes arrive within the 2 s window,
+/// and records nothing if they arrive later.
+///
+/// RFC 9619 limits QDCOUNT to 1 for OPCODE 0 only. Applying the limit to the
+/// other opcodes is this filter's choice; the cost is that a NOTIFY with a
+/// QDCOUNT over 1 loses only its boundary.
+///
+/// This is what stands between a segment from inside a message, whose head was
+/// lost or predates the capture, and a boundary read out of its payload. It is
+/// a filter, not proof. Measured over random 1,400-byte tails at uniform
+/// alignment: 0 of 4,000 A-answer runs (66 of 1,000,000 in a wider sample, about
+/// 0.007% against the real function), 0 of 4,000 ASCII TXT, 0 of 1,000,000 AAAA
+/// runs. That last figure holds only for uniformly random addresses: real ones
+/// with long zero runs pass at 1 or 2 of a record's 28 alignments (2620:fe::fe,
+/// 2001:500:2f::f, 2606:4700:4700::1111), and samples sharing a prefix passed
+/// 0.15% (/64), 1.94% (/48) and 12.4% (/32 plus low byte). Printable text can't
+/// pass, since its counts never fit. Mostly zero bytes can: all-zero counts and
+/// flags are a valid empty query. When one passes, a boundary is recorded and
+/// later messages stay undecoded until the boundary is reached or 30 s pass.
+fn looks_like_dns_tcp_start(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(2..14) else {
+        return false;
+    };
+    let declared = u32::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+    let count = |at: usize| u32::from(u16::from_be_bytes([header[at], header[at + 1]]));
+    let (high, low) = (header[2], header[3]);
+    let is_response = high & 0x80 != 0;
+    let opcode = (high >> 3) & 0x0f;
+    let rcode = low & 0x0f;
+    let least_bytes = 12 + 5 * count(4) + 11 * (count(6) + count(8) + count(10));
+    matches!(opcode, 0 | 1 | 2 | 4 | 5 | 6)
+        && low & 0x40 == 0
+        && rcode <= 11
+        && (is_response || (rcode == 0 && count(4) <= 1))
+        && least_bytes <= declared
+}
+
+/// Walks the DNS-over-TCP length prefixes in `bytes`, which begin a message
+/// at `base_seq` (preceded by `carry`, the high byte of a prefix split across
+/// segments, in which case `base_seq` is the carried byte's sequence number).
+/// Returns the sequence number where the next message starts and any pending
+/// high prefix byte.
+///
+/// The walk is bounded by the bytes available, and a message that runs past
+/// them yields the sequence number of its end, so a segment holding one
+/// message and part of the next marks the end of the next. A buffer ending on
+/// one byte of a prefix yields the sequence number of the missing low byte and
+/// that high byte as pending.
+///
+/// A declared length below the 12-byte header cannot be a DNS message, so the
+/// walk stops there: a crafted tiny prefix records no boundary of its own
+/// (`None` when it is the first). Lengths above `MAX_DNS_TCP_MESSAGE_BYTES`
+/// still do, because an over-limit message is exactly what the boundary
+/// exists to skip. With `response_only` the first message must show a
+/// response (QR set in the byte after the ID), so `GET /`, `HTTP/` and TLS
+/// records from source port 53 never create a boundary. When `continuing`, the
+/// stream already has a boundary, so bytes too short to show that flags byte
+/// are not evidence against it: only a clear QR is. Without one, they are, so
+/// a short HTTP or TLS fragment records nothing.
+fn dns_tcp_walk(
+    bytes: &[u8],
+    base_seq: u32,
+    carry: Option<u8>,
+    response_only: bool,
+    continuing: bool,
+) -> Option<(u32, Option<u8>)> {
+    let skip = usize::from(carry.is_some());
+    let len = bytes.len() + skip;
+    let at = |i: usize| match (carry, i) {
+        (Some(high), 0) => Some(high),
+        _ => bytes.get(i - skip).copied(),
+    };
+    if response_only && !at(4).map_or(continuing, |flags| flags & 0x80 != 0) {
+        return None;
+    }
+    let mut pos = 0usize;
+    while pos < len {
+        let (Some(hi), Some(lo)) = (at(pos), at(pos + 1)) else {
+            return Some((base_seq.wrapping_add((pos + 1) as u32), at(pos)));
+        };
+        let declared = usize::from(u16::from_be_bytes([hi, lo]));
+        if declared < 12 {
+            return (pos > 0).then(|| (base_seq.wrapping_add(pos as u32), None));
+        }
+        pos += 2 + declared;
+    }
+    Some((base_seq.wrapping_add(pos as u32), None))
 }
 
 impl StreamReassembler {
@@ -1134,7 +1414,15 @@ impl StreamReassembler {
     pub fn reset(&mut self) {
         self.fragments.clear();
         self.segments.clear();
+        self.dns_framing.entries.clear();
         self.last_frame_cut_at_ms = None;
+    }
+
+    /// Streams with a recorded DNS-over-TCP message boundary. Bounded by
+    /// `MAX_TCP_STREAMS`; exposed for the fuzz target and tests.
+    #[doc(hidden)]
+    pub fn dns_framing_len(&self) -> usize {
+        self.dns_framing.entries.len()
     }
 
     /// Total reserved bytes in reassembly's data and coverage vectors right
@@ -1201,11 +1489,13 @@ impl StreamReassembler {
         self.last_evict_ms = now_ms;
         let _ = self.fragments.evict_stale(now_ms);
         self.segments.evict_stale(now_ms);
+        self.dns_framing.evict_stale(now_ms);
     }
 
     /// Drops both directions of a flow the flow table has evicted.
     pub fn drop_flow(&mut self, flow: &FlowKey) {
         self.segments.drop_flow(flow);
+        self.dns_framing.drop_flow(flow);
     }
 
     /// Sniffs one captured frame's application layer, using reassembly only
@@ -1296,14 +1586,6 @@ impl StreamReassembler {
             };
         }
 
-        // This frame's own payload first. For the overwhelmingly common case
-        // — a request or ClientHello that fits in one segment, with no
-        // earlier segment already buffered for this direction — this decides
-        // immediately and nothing is buffered at all. See the
-        // `has_buffer` check below (JAM-169) for why that standalone
-        // decision is not trusted once something is already held.
-        let own = sniff_l7_desegmenting(&packet.payload, packet.dst_port);
-
         // Only TCP with a known flow identity and a sequence number can be
         // desegmented. Binding the sequence number here, rather than
         // re-unwrapping it further down, means there is no path on which a
@@ -1314,6 +1596,32 @@ impl StreamReassembler {
             }
             _ => None,
         };
+
+        // DNS over TCP: a segment from inside a message whose start was
+        // already seen is not a new message. Skipped only when nothing is
+        // buffered for it, so a message still being assembled (split,
+        // reordered or overlapping segments) behaves as before.
+        let dns_tcp = is_dns_over_tcp(packet.protocol, packet.src_port, packet.dst_port);
+        let response_only = dns_tcp && packet.dst_port != Some(53);
+        if let (true, Some((key, seq))) = (dns_tcp, &stream_target) {
+            if packet.tcp_flags.is_some_and(|flags| flags.syn) {
+                // A new connection reusing the four-tuple restarts the sequence space.
+                self.dns_framing.forget(key);
+            } else if !self.segments.has_buffer(key)
+                && self.dns_framing.skip_inside_message(key, *seq, &packet.payload, response_only, now_ms)
+            {
+                return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None, reassembled_packet: None };
+            }
+        }
+
+        // This frame's own payload first. For the overwhelmingly common case
+        // — a request or ClientHello that fits in one segment, with no
+        // earlier segment already buffered for this direction — this decides
+        // immediately and nothing is buffered at all. See the
+        // `has_buffer` check below (JAM-169) for why that standalone
+        // decision is not trusted once something is already held.
+        let own = sniff_for_transport(&packet.payload, packet.protocol, packet.src_port, packet.dst_port);
+
         let Some((key, seq)) = stream_target else {
             return match own {
                 L7Sniff::Decided(info) => SniffOutcome {
@@ -1345,6 +1653,10 @@ impl StreamReassembler {
                 // overlap-protected buffer's view are the same bytes. Decide
                 // directly rather than allocating a buffer just to release it
                 // again immediately.
+                if dns_tcp {
+                    let other_protocol = !is_dns_info(&info);
+                    self.dns_framing.record_message(&key, seq, &packet.payload, other_protocol, response_only, now_ms);
+                }
                 return SniffOutcome { info, status: None, need_more_bytes: None, reassembled_packet: None };
             }
             // An earlier, incomplete segment already holds first-seen bytes
@@ -1359,11 +1671,43 @@ impl StreamReassembler {
 
         let declared = packet.ip_declared_payload_len.saturating_sub(packet.transport_header_len);
         let Some(raw_status) = self.segments.feed(&key, seq, &packet.payload, declared, now_ms) else {
-            // Nothing changed — e.g. a retransmission of bytes already held.
+            // Nothing changed — e.g. a retransmission of bytes already held,
+            // or a segment consumed by a window release or cleanup. Its bytes
+            // still say where DNS messages start.
+            if dns_tcp {
+                self.dns_framing.note_consumed(&key, seq, &packet.payload, response_only, now_ms);
+            }
             return SniffOutcome { info: L7Info::None, status: None, need_more_bytes: None, reassembled_packet: None };
         };
         let status = self.attribute(raw_status, now_ms);
-        match sniff_l7_desegmenting(self.segments.prefix(&key), packet.dst_port) {
+        let sniffed = sniff_for_transport(self.segments.prefix(&key), packet.protocol, packet.src_port, packet.dst_port);
+        // The buffer may start at a message start, in which case its length
+        // prefixes say where the message in progress, or the last one it
+        // holds, ends. It may not: its first segment can be the tail of a
+        // message whose head was lost, which `record_message` screens for.
+        if dns_tcp {
+            if let Some(base_seq) = self.segments.base_seq(&key) {
+                let prefix = self.segments.prefix(&key);
+                let at_cap = prefix.len() >= MAX_TCP_STREAM_BYTES;
+                let other_protocol = matches!(&sniffed, L7Sniff::Decided(info) if !is_dns_info(info));
+                self.dns_framing.record_message(&key, base_seq, prefix, other_protocol, response_only, now_ms);
+                // The cap cut this segment short, so the walk above never saw
+                // its tail, and a message may start there. The segments after
+                // it are cleanup, then read as starts.
+                if at_cap {
+                    self.dns_framing.skip_inside_message(&key, seq, &packet.payload, response_only, now_ms);
+                }
+                // A complete message `sniff_dns` rejects (a root query, an AXFR
+                // continuation) will never decide, and keeping it would put
+                // the next message behind a prefix that only re-reads this one.
+                if matches!(sniffed, L7Sniff::Undecided)
+                    && self.dns_framing.covers_first_message(&key, base_seq, self.segments.prefix(&key))
+                {
+                    self.segments.finish(&key, status);
+                }
+            }
+        }
+        match sniffed {
             L7Sniff::Decided(info) => {
                 self.segments.finish(&key, status);
                 SniffOutcome { info, status: Some(status), need_more_bytes: None, reassembled_packet: None }
@@ -2796,6 +3140,1050 @@ mod tests {
         let outcome = r.sniff(&packet, Some((&key, true)), 0);
         assert!(matches!(outcome.info, L7Info::Dns { .. }));
         assert_eq!(r.bytes_held(), 0, "UDP pseudo-streams are explicitly out of scope");
+    }
+
+    // ---- DNS over TCP (JAM-21) -------------------------------------------
+
+    fn framed_dns(msg: &[u8]) -> Vec<u8> {
+        let mut out = (msg.len() as u16).to_be_bytes().to_vec();
+        out.extend_from_slice(msg);
+        out
+    }
+
+    /// A query for "a.com" with `id`, zero-padded so the message is `len`
+    /// bytes. The padding follows an empty answer section and is never read.
+    fn dns_message_of(id: u16, len: usize) -> Vec<u8> {
+        let mut msg = crate::l7::dns_test_support::query(id, "a.com", 1);
+        assert!(len >= msg.len());
+        msg.resize(len, 0);
+        msg
+    }
+
+    fn dns_flow() -> FlowKey {
+        FlowKey { remote_port: 53, ..flow_key() }
+    }
+
+    /// A client-to-server TCP/53 segment.
+    fn dns_out(seq: u32, payload: &[u8]) -> ParsedPacket {
+        tcp_segment("192.168.1.10", "93.184.216.34", 51000, 53, seq, payload)
+    }
+
+    #[test]
+    fn tcp_dns_split_across_segments_decodes_once_complete() {
+        let stream = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
+        // Cut inside the length prefix, then inside the message.
+        for cut in [1, 2, 9] {
+            let mut r = StreamReassembler::new();
+            let key = dns_flow();
+            let first = r.sniff(&dns_out(1000, &stream[..cut]), Some((&key, true)), 0);
+            assert_eq!(first.info, L7Info::None, "cut {cut}: incomplete");
+            assert!(first.need_more_bytes.is_some(), "cut {cut}: must ask for more");
+            let done = r.sniff(&dns_out(1000 + cut as u32, &stream[cut..]), Some((&key, true)), 1);
+            assert!(matches!(done.info, L7Info::Dns { id: 0x1234, .. }), "cut {cut}: {:?}", done.info);
+            assert_eq!(done.status, Some(ReassemblyStatus::Reassembled));
+            assert_eq!(r.bytes_held(), 0, "cut {cut}: released on decision");
+        }
+    }
+
+    #[test]
+    fn tcp_dns_out_of_order_segments_decode() {
+        let stream = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        // The tail arrives first and cannot decide on its own.
+        let late = r.sniff(&dns_out(1004, &stream[4..]), Some((&key, true)), 0);
+        assert_eq!(late.info, L7Info::None);
+        let done = r.sniff(&dns_out(1000, &stream[..4]), Some((&key, true)), 1);
+        assert!(matches!(done.info, L7Info::Dns { id: 0x1234, .. }), "{:?}", done.info);
+    }
+
+    #[test]
+    fn tcp_dns_overlap_keeps_first_seen_bytes() {
+        let stream = framed_dns(&crate::l7::dns_test_support::query(0x1234, "a.com", 1));
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        // Eight bytes held: the prefix, the id 0x1234 and the first flag bytes.
+        r.sniff(&dns_out(1000, &stream[..8]), Some((&key, true)), 0);
+        // A forged, self-contained framed query with another id overlaps them.
+        // On its own it decodes, so this reaches the "own is Decided while a
+        // buffer is held" path, which must not trust it.
+        let forged_stream = framed_dns(&crate::l7::dns_test_support::query(0x9999, "a.com", 1));
+        assert!(
+            matches!(crate::l7::sniff_dns_tcp(&forged_stream), crate::l7::L7Sniff::Decided(L7Info::Dns { id: 0x9999, .. })),
+            "fixture premise: the forged segment decodes standalone"
+        );
+        let done = r.sniff(&dns_out(1000, &forged_stream), Some((&key, true)), 1);
+        assert!(matches!(done.info, L7Info::Dns { id: 0x1234, .. }), "first-seen id wins: {:?}", done.info);
+        assert!(r.segment_counters().conflicting_overlap_bytes > 0, "the rewrite attempt is counted");
+    }
+
+    #[test]
+    fn tcp_dns_response_from_port_53_uses_framing() {
+        let msg = crate::l7::dns_test_support::response(0xbeef, "example.com", 1, 0, &[(1, 30, vec![1, 2, 3, 4])]);
+        let stream = framed_dns(&msg);
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        // dst_port is ephemeral; only src_port is 53.
+        let packet = tcp_segment("93.184.216.34", "192.168.1.10", 53, 51000, 5000, &stream);
+        let outcome = r.sniff(&packet, Some((&key, false)), 0);
+        match outcome.info {
+            L7Info::DnsResponse { id, query_name, answers, .. } => {
+                assert_eq!(id, 0xbeef);
+                assert_eq!(query_name, "example.com");
+                assert_eq!(answers[0].data, "1.2.3.4");
+            }
+            other => panic!("expected DnsResponse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tcp_dns_message_at_the_limit_decodes_through_the_reassembler() {
+        let msg = dns_message_of(0x0042, crate::l7::MAX_DNS_TCP_MESSAGE_BYTES);
+        assert_eq!(msg.len(), 16_382);
+        let stream = framed_dns(&msg);
+        assert_eq!(stream.len(), MAX_TCP_STREAM_BYTES);
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        let mut seq = 1u32;
+        let mut last = None;
+        for chunk in stream.chunks(1400) {
+            last = Some(r.sniff(&dns_out(seq, chunk), Some((&key, true)), 0));
+            seq = seq.wrapping_add(chunk.len() as u32);
+        }
+        let done = last.expect("at least one segment");
+        assert!(matches!(done.info, L7Info::Dns { id: 0x0042, .. }), "{:?}", done.info);
+        assert_eq!(r.bytes_held(), 0);
+    }
+
+    #[test]
+    fn tcp_dns_over_limit_never_decodes_and_never_asks_for_more() {
+        // Like any Undecided TCP segment, the reassembler still holds it for
+        // the decision window (a reordered tail is indistinguishable from
+        // it), bounded by the existing caps. What the over-limit rule
+        // guarantees is that it never reports a partial-message shortfall
+        // and never decodes a field.
+        let mut stream = (crate::l7::MAX_DNS_TCP_MESSAGE_BYTES as u16 + 1).to_be_bytes().to_vec();
+        stream.extend_from_slice(&dns_message_of(1, crate::l7::MAX_DNS_TCP_MESSAGE_BYTES + 1));
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        let mut seq = 1u32;
+        for chunk in stream.chunks(1400) {
+            let outcome = r.sniff(&dns_out(seq, chunk), Some((&key, true)), 0);
+            assert_eq!(outcome.info, L7Info::None);
+            assert_eq!(outcome.need_more_bytes, None);
+            seq = seq.wrapping_add(chunk.len() as u32);
+        }
+        assert!(
+            r.segments.max_buffered_len() <= MAX_TCP_STREAM_BYTES,
+            "one direction's logical buffer stays within the per-stream cap: {}",
+            r.segments.max_buffered_len()
+        );
+        // The next segment after the decision window finds nothing held.
+        r.sniff(&dns_out(seq, &[0xaa; 64]), Some((&key, true)), 3_000);
+        assert_eq!(r.bytes_held(), 0, "released once the decision window has passed");
+    }
+
+    // ---- DNS over TCP message boundaries (JAM-21) ------------------------
+
+    fn dns_query_stream(id: u16, name: &str) -> Vec<u8> {
+        framed_dns(&crate::l7::dns_test_support::query(id, name, 1))
+    }
+
+    /// A prefix declaring `declared` bytes, then the first `present` bytes of a
+    /// message: a real query header, then filler.
+    fn partial_message(declared: u16, present: usize) -> Vec<u8> {
+        let mut out = declared.to_be_bytes().to_vec();
+        out.extend_from_slice(&[0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+        out.resize(2 + present, 0xaa);
+        out
+    }
+
+    fn sniff_out(r: &mut StreamReassembler, seq: u32, payload: &[u8], now_ms: u64) -> SniffOutcome {
+        let key = dns_flow();
+        r.sniff(&dns_out(seq, payload), Some((&key, true)), now_ms)
+    }
+
+    fn is_forged(outcome: &SniffOutcome) -> bool {
+        matches!(&outcome.info, L7Info::Dns { query_name, .. } if query_name == "forged.example")
+    }
+
+    #[test]
+    fn tcp_dns_interior_segments_never_decode_after_the_buffer_hits_its_cap() {
+        let mut r = StreamReassembler::new();
+        // Declares 60,000 bytes, so it can never complete.
+        let mut seq = 1u32;
+        let first = partial_message(60_000, 1398);
+        sniff_out(&mut r, seq, &first, 0);
+        seq += first.len() as u32;
+        // Fill to the cap, then one more segment, which clears the entry.
+        let mut gave_up_after = 0;
+        while gave_up_after < 2 {
+            let filler = [0xaau8; 1400];
+            let outcome = sniff_out(&mut r, seq, &filler, 0);
+            assert_eq!(outcome.info, L7Info::None);
+            seq += filler.len() as u32;
+            if r.segment_counters().abandoned_without_completing > 0 {
+                gave_up_after += 1;
+            }
+        }
+        assert!(!r.segments.has_buffer(&TcpStreamKey { flow: dns_flow(), from_local: true }));
+        let forged = sniff_out(&mut r, seq, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&forged), "a segment inside a declared message is not a message start: {:?}", forged.info);
+    }
+
+    #[test]
+    fn tcp_dns_interior_segments_never_decode_after_the_decision_window() {
+        let mut r = StreamReassembler::new();
+        let mut seq = 1u32;
+        let first = partial_message(5_000, 1398);
+        sniff_out(&mut r, seq, &first, 0);
+        seq += first.len() as u32;
+        // Past the 2 s window: the buffer is released, then removed.
+        // The first releases the buffer, the second removes the entry.
+        for (i, now) in [3_000u64, 3_001].into_iter().enumerate() {
+            let filler = [0xaau8; 600];
+            let outcome = sniff_out(&mut r, seq, &filler, now);
+            assert_eq!(outcome.info, L7Info::None, "segment {i}");
+            seq += filler.len() as u32;
+        }
+        let forged = sniff_out(&mut r, seq, &dns_query_stream(0x666, "forged.example"), 3_002);
+        assert!(!is_forged(&forged), "{:?}", forged.info);
+    }
+
+    #[test]
+    fn tcp_dns_message_one_plus_part_of_message_two_marks_the_end_of_message_two() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        let mut a = one.clone();
+        a.extend_from_slice(&partial_message(60, 8));
+        let outcome = sniff_out(&mut r, 100, &a, 0);
+        assert!(matches!(outcome.info, L7Info::Dns { id: 1, .. }), "{:?}", outcome.info);
+        // The rest of message two happens to hold a whole framed query.
+        let inside = sniff_out(&mut r, 100 + a.len() as u32, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&inside), "{:?}", inside.info);
+    }
+
+    #[test]
+    fn tcp_dns_pipelined_second_message_at_the_exact_boundary_decodes() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        let first = sniff_out(&mut r, 100, &one, 0);
+        assert!(matches!(first.info, L7Info::Dns { id: 1, .. }));
+        let second = sniff_out(&mut r, 100 + one.len() as u32, &dns_query_stream(2, "b.com"), 0);
+        assert!(matches!(second.info, L7Info::Dns { id: 2, .. }), "{:?}", second.info);
+    }
+
+    #[test]
+    fn tcp_dns_boundary_survives_sequence_wraparound() {
+        let mut r = StreamReassembler::new();
+        let base = u32::MAX - 10;
+        let one = dns_query_stream(1, "a.com");
+        let mut a = one.clone();
+        a.extend_from_slice(&partial_message(60, 8));
+        assert!(matches!(sniff_out(&mut r, base, &a, 0).info, L7Info::Dns { id: 1, .. }));
+        let a_end = base.wrapping_add(a.len() as u32);
+        assert!(a_end < base, "fixture premise: the boundary wrapped past zero");
+        // Inside message two, now at a small wrapped sequence number.
+        let inside = sniff_out(&mut r, a_end, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&inside), "{:?}", inside.info);
+        // Message three starts exactly at message two's wrapped end.
+        let boundary = base.wrapping_add(one.len() as u32 + 2 + 60);
+        let third = sniff_out(&mut r, boundary, &dns_query_stream(3, "c.com"), 0);
+        assert!(matches!(third.info, L7Info::Dns { id: 3, .. }), "{:?}", third.info);
+    }
+
+    #[test]
+    fn tcp_dns_one_byte_of_a_prefix_makes_the_following_segment_unframed() {
+        let mut r = StreamReassembler::new();
+        let mut a = dns_query_stream(1, "a.com");
+        a.push(0x00); // one byte of message two's length prefix
+        assert!(matches!(sniff_out(&mut r, 100, &a, 0).info, L7Info::Dns { id: 1, .. }));
+        let next = sniff_out(&mut r, 100 + a.len() as u32, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&next), "{:?}", next.info);
+    }
+
+    #[test]
+    fn tcp_dns_retransmit_of_a_decided_message_does_not_decode_again() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+        assert_eq!(sniff_out(&mut r, 100, &one, 1).info, L7Info::None);
+    }
+
+    // ---- Source port 53 and crafted prefixes (JAM-21 round 2) -------------
+
+    /// A server-to-client segment from port 53 to `dst_port`.
+    fn from_53(dst_port: u16, seq: u32, payload: &[u8]) -> ParsedPacket {
+        tcp_segment("93.184.216.34", "192.168.1.10", 53, dst_port, seq, payload)
+    }
+
+    fn sniff_from_53(r: &mut StreamReassembler, dst_port: u16, seq: u32, payload: &[u8], now_ms: u64) -> SniffOutcome {
+        let key = dns_flow();
+        r.sniff(&from_53(dst_port, seq, payload), Some((&key, false)), now_ms)
+    }
+
+    #[test]
+    fn a_client_hello_from_source_53_to_8443_decodes() {
+        let mut r = StreamReassembler::new();
+        let outcome = sniff_from_53(&mut r, 8443, 1, &build_client_hello("example.com"), 0);
+        assert!(matches!(outcome.info, L7Info::TlsClientHello { .. }), "{:?}", outcome.info);
+        assert_eq!(r.dns_framing_len(), 0, "a ClientHello is not a response and records no boundary");
+    }
+
+    #[test]
+    fn two_pipelined_gets_from_source_53_to_8080_both_decode() {
+        let mut r = StreamReassembler::new();
+        let one = b"GET /one HTTP/1.1\r\nHost: a\r\n\r\n";
+        let two = b"GET /two HTTP/1.1\r\nHost: a\r\n\r\n";
+        let first = sniff_from_53(&mut r, 8080, 1, one, 0);
+        assert!(matches!(&first.info, L7Info::Http { path, .. } if path == "/one"), "{:?}", first.info);
+        let second = sniff_from_53(&mut r, 8080, 1 + one.len() as u32, two, 0);
+        assert!(matches!(&second.info, L7Info::Http { path, .. } if path == "/two"), "{:?}", second.info);
+    }
+
+    #[test]
+    fn a_client_hello_split_across_segments_from_source_53_still_decodes() {
+        let hello = build_client_hello("example.com");
+        let mut r = StreamReassembler::new();
+        let first = sniff_from_53(&mut r, 8443, 1, &hello[..20], 0);
+        assert_eq!(first.info, L7Info::None);
+        let done = sniff_from_53(&mut r, 8443, 21, &hello[20..], 1);
+        assert!(matches!(done.info, L7Info::TlsClientHello { .. }), "{:?}", done.info);
+    }
+
+    #[test]
+    fn an_over_limit_response_from_source_53_suppresses_interior_segments() {
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        let tcb = TcpStreamKey { flow: key.clone(), from_local: false };
+        // Declares 60,000 bytes; id 0x0001, flags 0x8180 (a response), one question.
+        let mut first = vec![0xea, 0x60, 0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        first.resize(1400, 0xaa);
+        sniff_from_53(&mut r, 51000, 1, &first, 0);
+        let mut seq = 1 + first.len() as u32;
+        let mut gave_up = 0;
+        while gave_up < 2 {
+            sniff_from_53(&mut r, 51000, seq, &[0xaa; 1400], 0);
+            seq += 1400;
+            if r.segment_counters().abandoned_without_completing > 0 {
+                gave_up += 1;
+            }
+        }
+        assert!(!r.segments.has_buffer(&tcb));
+        let forged = framed_dns(&crate::l7::dns_test_support::response(0x666, "forged.example", 1, 0, &[]));
+        let outcome = sniff_from_53(&mut r, 51000, seq, &forged, 0);
+        assert_eq!(outcome.info, L7Info::None, "inside the declared message: {:?}", outcome.info);
+    }
+
+    #[test]
+    fn a_declared_length_below_the_header_size_records_no_boundary() {
+        let mut r = StreamReassembler::new();
+        let mut crafted = 11u16.to_be_bytes().to_vec();
+        crafted.extend_from_slice(&[0xaa; 11]);
+        sniff_out(&mut r, 100, &crafted, 0);
+        assert_eq!(r.dns_framing_len(), 0);
+        assert!(r.bytes_held() > 0, "nothing covers it, so it stays held");
+    }
+
+    #[test]
+    fn a_skipped_segment_does_not_extend_the_boundarys_life() {
+        let mut r = StreamReassembler::new();
+        let mut a = dns_query_stream(1, "a.com");
+        a.extend_from_slice(&partial_message(60, 8));
+        sniff_out(&mut r, 100, &a, 0);
+        let inside = 100 + a.len() as u32;
+        // Exactly at the timeout the entry still applies, and skips...
+        let at_limit = sniff_out(&mut r, inside, &dns_query_stream(0x666, "forged.example"), TCP_STREAM_IDLE_MS);
+        assert!(!is_forged(&at_limit), "{:?}", at_limit.info);
+        // ...but that skip did not refresh it, so one millisecond later it lapsed.
+        let after = sniff_out(&mut r, inside, &dns_query_stream(0x666, "forged.example"), TCP_STREAM_IDLE_MS + 1);
+        assert!(is_forged(&after), "a skipped segment must not keep the entry alive: {:?}", after.info);
+    }
+
+    // ---- Messages that start inside a skipped segment (JAM-21 round 3) ----
+
+    #[test]
+    fn tcp_dns_back_to_back_over_limit_messages_hide_a_query_inside_message_two() {
+        let mut base = Vec::new();
+        for _ in 0..2 {
+            base.extend_from_slice(&partial_message(60_000, 60_000));
+        }
+        let forged = dns_query_stream(0x666, "forged.example");
+        // Whichever segment-aligned spot inside message two the query lands on.
+        for k in 44..85 {
+            let mut stream = base.clone();
+            stream[k * 1400..k * 1400 + forged.len()].copy_from_slice(&forged);
+            let mut r = StreamReassembler::new();
+            for (i, chunk) in stream.chunks(1400).enumerate() {
+                let outcome = sniff_out(&mut r, 1 + (i * 1400) as u32, chunk, 0);
+                assert!(!is_forged(&outcome), "query at segment {k}, seen at {i}: {:?}", outcome.info);
+            }
+        }
+    }
+
+    #[test]
+    fn tcp_dns_message_starting_inside_a_skipped_segment_moves_the_boundary() {
+        let mut r = StreamReassembler::new();
+        let mut seg1 = dns_query_stream(1, "a.com");
+        seg1.extend_from_slice(&partial_message(50, 10));
+        assert!(matches!(sniff_out(&mut r, 100, &seg1, 0).info, L7Info::Dns { id: 1, .. }));
+        // The rest of message two, then a prefix declaring 60,000.
+        let mut seg2 = vec![0xaa; 40];
+        seg2.extend_from_slice(&60_000u16.to_be_bytes());
+        seg2.resize(seg2.len() + 100, 0xaa);
+        let seq2 = 100 + seg1.len() as u32;
+        assert_eq!(sniff_out(&mut r, seq2, &seg2, 0).info, L7Info::None);
+        let seq3 = seq2 + seg2.len() as u32;
+        let third = sniff_out(&mut r, seq3, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&third), "{:?}", third.info);
+    }
+
+    #[test]
+    fn tcp_dns_prefix_split_across_a_skipped_segment_still_completes() {
+        let mut r = StreamReassembler::new();
+        let mut seg1 = dns_query_stream(1, "a.com");
+        seg1.push(0xea); // high byte of a 60,000-byte declaration
+        assert!(matches!(sniff_out(&mut r, 100, &seg1, 0).info, L7Info::Dns { id: 1, .. }));
+        let mut seg2 = vec![0x60];
+        seg2.resize(100, 0xaa);
+        let seq2 = 100 + seg1.len() as u32;
+        assert_eq!(sniff_out(&mut r, seq2, &seg2, 0).info, L7Info::None);
+        let third = sniff_out(&mut r, seq2 + 100, &dns_query_stream(0x666, "forged.example"), 0);
+        assert!(!is_forged(&third), "{:?}", third.info);
+    }
+
+    #[test]
+    fn tcp_dns_a_segment_consumed_by_window_release_still_advances_the_boundary() {
+        let mut r = StreamReassembler::new();
+        // An incomplete message: held, undecided. (A complete undecodable one
+        // is no longer held, so it cannot reach a window release.)
+        let held = partial_message(20, 12);
+        sniff_out(&mut r, 100, &held, 0);
+        // The rest of it, then a prefix declaring 60,000.
+        let mut declaring = vec![0xaa; 8];
+        declaring.extend_from_slice(&60_000u16.to_be_bytes());
+        declaring.resize(100, 0xaa);
+        let seq2 = 100 + held.len() as u32;
+        // Past the window: released, so the segment itself is not decoded.
+        sniff_out(&mut r, seq2, &declaring, 3_000);
+        let seq3 = seq2 + declaring.len() as u32;
+        let filler = sniff_out(&mut r, seq3, &[0xaa; 100], 3_001);
+        assert_eq!(filler.info, L7Info::None);
+        let forged = sniff_out(&mut r, seq3 + 100, &dns_query_stream(0x666, "forged.example"), 3_002);
+        assert!(!is_forged(&forged), "{:?}", forged.info);
+    }
+
+    // ---- Short suffixes, empty segments, held retransmissions (JAM-21 round 4)
+
+    /// A whole framed response declaring `declared` bytes: a real header, then
+    /// ASCII, so bit 7 is clear everywhere but the flags byte and only that
+    /// byte can show QR.
+    fn ascii_response(declared: u16) -> Vec<u8> {
+        let mut out = declared.to_be_bytes().to_vec();
+        out.extend_from_slice(&[0x00, 0x01, 0x81, 0x80, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+        out.resize(2 + usize::from(declared), b'x');
+        out
+    }
+
+    fn dns_response_stream(id: u16) -> Vec<u8> {
+        framed_dns(&crate::l7::dns_test_support::response(id, "a.com", 1, 0, &[]))
+    }
+
+    #[test]
+    fn tcp_dns_from_53_back_to_back_over_limit_messages_hide_a_query_inside_message_two() {
+        let one = ascii_response(60_000);
+        let mut base = one.clone();
+        base.extend_from_slice(&ascii_response(60_000));
+        let forged = dns_query_stream(0x666, "forged.example");
+        // A segment ends `straddle` bytes into message two, too few to show
+        // its flags byte; the query lands on each later segment start.
+        for straddle in 1..=4 {
+            let first_len = (one.len() + straddle) % 1400;
+            for k in 1..=42 {
+                let at = one.len() + straddle + k * 1400;
+                let mut stream = base.clone();
+                stream[at..at + forged.len()].copy_from_slice(&forged);
+                let mut r = StreamReassembler::new();
+                sniff_from_53(&mut r, 51000, 1, &stream[..first_len], 0);
+                for (i, chunk) in stream[first_len..].chunks(1400).enumerate() {
+                    let seq = 1 + (first_len + i * 1400) as u32;
+                    let outcome = sniff_from_53(&mut r, 51000, seq, chunk, 0);
+                    assert!(!is_forged(&outcome), "straddle {straddle}, query at {k}, seen at {i}: {:?}", outcome.info);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tcp_dns_from_53_message_starting_inside_a_skipped_segment_moves_the_boundary() {
+        let two = ascii_response(50);
+        let three = ascii_response(60_000);
+        for straddle in 1..=4 {
+            let mut r = StreamReassembler::new();
+            let mut seg1 = dns_response_stream(1);
+            seg1.extend_from_slice(&two[..12]);
+            let first = sniff_from_53(&mut r, 51000, 100, &seg1, 0);
+            assert!(matches!(first.info, L7Info::DnsResponse { id: 1, .. }), "{:?}", first.info);
+            // The rest of message two, then too little of message three to
+            // show its flags byte.
+            let mut seg2 = two[12..].to_vec();
+            seg2.extend_from_slice(&three[..straddle]);
+            let seq2 = 100 + seg1.len() as u32;
+            assert_eq!(sniff_from_53(&mut r, 51000, seq2, &seg2, 0).info, L7Info::None);
+            let seq3 = seq2 + seg2.len() as u32;
+            let third = sniff_from_53(&mut r, 51000, seq3, &dns_query_stream(0x666, "forged.example"), 0);
+            assert!(!is_forged(&third), "straddle {straddle}: {:?}", third.info);
+        }
+    }
+
+    #[test]
+    fn tcp_dns_from_53_prefix_split_across_a_skipped_segment_still_completes() {
+        let hidden = ascii_response(60_000);
+        for low_len in [1, 2, 3, 100] {
+            let mut r = StreamReassembler::new();
+            let mut seg1 = dns_response_stream(1);
+            seg1.push(hidden[0]);
+            let first = sniff_from_53(&mut r, 51000, 100, &seg1, 0);
+            assert!(matches!(first.info, L7Info::DnsResponse { id: 1, .. }), "{:?}", first.info);
+            let seq2 = 100 + seg1.len() as u32;
+            assert_eq!(sniff_from_53(&mut r, 51000, seq2, &hidden[1..1 + low_len], 0).info, L7Info::None);
+            let seq3 = seq2 + low_len as u32;
+            let third = sniff_from_53(&mut r, 51000, seq3, &dns_query_stream(0x666, "forged.example"), 0);
+            assert!(!is_forged(&third), "low segment of {low_len} bytes: {:?}", third.info);
+        }
+    }
+
+    #[test]
+    fn a_short_http_or_tls_fragment_from_source_53_records_no_boundary() {
+        let hello = build_client_hello("example.com");
+        for fragment in [&b"GE"[..], &b"GET "[..], &hello[..4]] {
+            let mut r = StreamReassembler::new();
+            sniff_from_53(&mut r, 8080, 1, fragment, 0);
+            assert_eq!(r.dns_framing_len(), 0, "{fragment:?}");
+        }
+    }
+
+    #[test]
+    fn tcp_dns_server_ack_at_the_boundary_keeps_it() {
+        let forged = dns_query_stream(0x666, "forged.example");
+        let mut msg = crate::l7::dns_test_support::response(1, "a.com", 1, 0, &[]);
+        msg.resize(3000, b'x');
+        let mut stream = framed_dns(&msg);
+        stream[1400..1400 + forged.len()].copy_from_slice(&forged);
+        let mut r = StreamReassembler::new();
+        let mut last = None;
+        for (i, chunk) in stream.chunks(1400).enumerate() {
+            last = Some(sniff_from_53(&mut r, 51000, 1 + (i * 1400) as u32, chunk, 0));
+        }
+        let done = last.expect("at least one segment");
+        assert!(matches!(done.info, L7Info::DnsResponse { id: 1, .. }), "{:?}", done.info);
+        // The server acknowledges the client's next query from the boundary.
+        sniff_from_53(&mut r, 51000, 1 + stream.len() as u32, &[], 1);
+        let again = sniff_from_53(&mut r, 51000, 1401, &stream[1400..2800], 2);
+        assert!(!is_forged(&again), "{:?}", again.info);
+    }
+
+    #[test]
+    fn tcp_dns_ack_ahead_of_the_stream_does_not_move_the_boundary() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+        let boundary = 100 + one.len() as u32;
+        sniff_out(&mut r, boundary + 50_000, &[], 1);
+        let second = sniff_out(&mut r, boundary, &dns_query_stream(2, "b.com"), 2);
+        assert!(matches!(second.info, L7Info::Dns { id: 2, .. }), "{:?}", second.info);
+    }
+
+    #[test]
+    fn tcp_dns_empty_segment_does_not_refresh_the_boundary() {
+        let mut r = StreamReassembler::new();
+        let mut a = dns_query_stream(1, "a.com");
+        a.extend_from_slice(&partial_message(60, 8));
+        sniff_out(&mut r, 100, &a, 0);
+        let inside = 100 + a.len() as u32;
+        sniff_out(&mut r, inside + 52, &[], TCP_STREAM_IDLE_MS);
+        let after = sniff_out(&mut r, inside, &dns_query_stream(0x666, "forged.example"), TCP_STREAM_IDLE_MS + 1);
+        assert!(is_forged(&after), "an empty segment must not keep the entry alive: {:?}", after.info);
+    }
+
+    #[test]
+    fn tcp_dns_empty_segments_create_no_boundary() {
+        let key = dns_flow();
+        let mut r = StreamReassembler::new();
+        let mut syn = dns_out(5, &[]);
+        syn.tcp_flags = Some(crate::parse::TcpFlags { syn: true, ..Default::default() });
+        r.sniff(&syn, Some((&key, true)), 0);
+        assert_eq!(r.dns_framing_len(), 0, "bare SYN");
+        sniff_out(&mut r, 6, &[], 1);
+        assert_eq!(r.dns_framing_len(), 0, "bare ACK");
+    }
+
+    #[test]
+    fn tcp_dns_retransmit_of_held_out_of_order_bytes_does_not_move_the_boundary() {
+        let mut r = StreamReassembler::new();
+        // Message one is cut short, so its end at 142 is the boundary.
+        sniff_out(&mut r, 100, &partial_message(40, 12), 0);
+        // Bytes from later in the stream, held past a hole, then retransmitted.
+        let held = partial_message(60_000, 20);
+        sniff_out(&mut r, 300, &held, 1);
+        sniff_out(&mut r, 300, &held, 2);
+        // Past the window: the rest of message one releases the buffer, and
+        // the next segment removes the entry without being decoded.
+        sniff_out(&mut r, 114, &[0xaa; 28], 3_000);
+        let two = dns_query_stream(2, "b.com");
+        sniff_out(&mut r, 142, &two, 3_001);
+        let three = sniff_out(&mut r, 142 + two.len() as u32, &dns_query_stream(3, "c.com"), 3_002);
+        assert!(matches!(three.info, L7Info::Dns { id: 3, .. }), "{:?}", three.info);
+    }
+
+    #[test]
+    fn tcp_dns_message_starting_past_the_buffer_cap_in_the_capping_segment_moves_the_boundary() {
+        // Message one ends after the 16,384-byte cap but inside the segment
+        // that reaches it, so the bytes that start message two are cut off.
+        let mut base = ascii_response(16_500);
+        base.extend_from_slice(&ascii_response(60_000));
+        let forged = dns_query_stream(0x666, "forged.example");
+        for from_local in [true, false] {
+            for k in 13..=53 {
+                let mut stream = base.clone();
+                stream[k * 1400..k * 1400 + forged.len()].copy_from_slice(&forged);
+                let mut r = StreamReassembler::new();
+                for (i, chunk) in stream.chunks(1400).enumerate() {
+                    let seq = 1 + (i * 1400) as u32;
+                    let outcome = if from_local {
+                        sniff_out(&mut r, seq, chunk, 0)
+                    } else {
+                        sniff_from_53(&mut r, 51000, seq, chunk, 0)
+                    };
+                    assert!(!is_forged(&outcome), "from_local {from_local}, query at {k}, seen at {i}: {:?}", outcome.info);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tcp_dns_syn_forgets_the_boundary_for_a_reused_four_tuple() {
+        let mut r = StreamReassembler::new();
+        let key = dns_flow();
+        let one = dns_query_stream(1, "a.com");
+        sniff_out(&mut r, 1_000_000, &one, 0);
+        let mut syn = dns_out(5, &[]);
+        syn.tcp_flags = Some(crate::parse::TcpFlags { syn: true, ..Default::default() });
+        r.sniff(&syn, Some((&key, true)), 1);
+        let fresh = sniff_out(&mut r, 6, &dns_query_stream(2, "b.com"), 2);
+        assert!(matches!(fresh.info, L7Info::Dns { id: 2, .. }), "{:?}", fresh.info);
+    }
+
+    fn dns_flow_n(n: usize) -> FlowKey {
+        FlowKey { local_port: 1024 + (n % 60_000) as u16, remote_addr: format!("10.9.{}.{}", (n / 256) % 256, n % 256), ..dns_flow() }
+    }
+
+    #[test]
+    fn tcp_dns_framing_table_is_bounded_at_the_stream_limit() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        for n in 0..MAX_TCP_STREAMS {
+            let key = dns_flow_n(n);
+            r.sniff(&dns_out_on(&key, 100, &one), Some((&key, true)), n as u64);
+        }
+        assert_eq!(r.dns_framing_len(), MAX_TCP_STREAMS);
+        let key = dns_flow_n(MAX_TCP_STREAMS);
+        r.sniff(&dns_out_on(&key, 100, &one), Some((&key, true)), MAX_TCP_STREAMS as u64);
+        assert_eq!(r.dns_framing_len(), MAX_TCP_STREAMS, "limit + 1 evicts the oldest");
+        // The oldest (n = 0) is the one gone: its retransmit decodes again.
+        let oldest = dns_flow_n(0);
+        let again = r.sniff(&dns_out_on(&oldest, 100, &one), Some((&oldest, true)), 5_000);
+        assert!(matches!(again.info, L7Info::Dns { id: 1, .. }), "{:?}", again.info);
+    }
+
+    fn dns_out_on(key: &FlowKey, seq: u32, payload: &[u8]) -> ParsedPacket {
+        tcp_segment(&key.local_addr, &key.remote_addr, key.local_port, 53, seq, payload)
+    }
+
+    #[test]
+    fn tcp_dns_boundaries_expire_when_idle() {
+        let mut r = StreamReassembler::new();
+        let mut a = dns_query_stream(1, "a.com");
+        a.extend_from_slice(&partial_message(60, 8));
+        sniff_out(&mut r, 100, &a, 0);
+        assert_eq!(r.dns_framing_len(), 1);
+        // Past the idle timeout the boundary no longer applies on arrival.
+        let late = sniff_out(&mut r, 100 + a.len() as u32, &dns_query_stream(0x666, "forged.example"), TCP_STREAM_IDLE_MS + 1);
+        assert!(is_forged(&late), "an idle entry must not keep skipping: {:?}", late.info);
+        // And the periodic sweep drops it.
+        let mut r = StreamReassembler::new();
+        sniff_out(&mut r, 100, &a, 0);
+        r.maybe_evict(TCP_STREAM_IDLE_MS + 1_001);
+        assert_eq!(r.dns_framing_len(), 0);
+    }
+
+    #[test]
+    fn tcp_dns_reset_and_drop_flow_clear_the_boundaries() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        sniff_out(&mut r, 100, &one, 0);
+        assert_eq!(r.dns_framing_len(), 1);
+        r.drop_flow(&dns_flow());
+        assert_eq!(r.dns_framing_len(), 0);
+        sniff_out(&mut r, 100, &one, 0);
+        r.reset();
+        assert_eq!(r.dns_framing_len(), 0);
+    }
+
+    // ---- Complete messages sniff_dns rejects (JAM-21 decisions fix) --------
+
+    /// Whole, correctly framed messages `sniff_dns` returns None for.
+    fn undecodable_messages() -> Vec<(&'static str, Vec<u8>)> {
+        let header = |qdcount: u8| vec![0x12, 0x34, 0x01, 0x00, 0x00, qdcount, 0, 0, 0, 0, 0, 0];
+        let mut root = header(1);
+        root.extend_from_slice(&[0, 0x00, 0x02, 0x00, 0x01]);
+        let mut continuation = header(0);
+        continuation[2] = 0x84;
+        continuation.extend_from_slice(&[0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01]);
+        let mut non_utf8 = header(1);
+        non_utf8.extend_from_slice(&[2, 0xff, 0xfe, 0, 0x00, 0x01, 0x00, 0x01]);
+        vec![("root query", root), ("QDCOUNT=0", continuation), ("non-UTF-8 label", non_utf8)]
+    }
+
+    #[test]
+    fn tcp_dns_message_after_a_complete_undecodable_one_decodes() {
+        for (what, message) in undecodable_messages() {
+            let mut r = StreamReassembler::new();
+            let rejected = framed_dns(&message);
+            assert_eq!(sniff_out(&mut r, 100, &rejected, 0).info, L7Info::None, "{what}");
+            assert_eq!(r.bytes_held(), 0, "{what}: the boundary already covers it, so nothing is held");
+            let next = sniff_out(&mut r, 100 + rejected.len() as u32, &dns_query_stream(2, "b.com"), 1);
+            assert!(matches!(next.info, L7Info::Dns { id: 2, .. }), "{what}: {:?}", next.info);
+        }
+    }
+
+    #[test]
+    fn tcp_dns_undecodable_message_split_across_segments_finishes_when_complete() {
+        for (what, message) in undecodable_messages() {
+            let mut r = StreamReassembler::new();
+            let rejected = framed_dns(&message);
+            let (head, tail) = rejected.split_at(8);
+            sniff_out(&mut r, 100, head, 0);
+            assert!(r.bytes_held() > 0, "{what}: an incomplete message is still held");
+            sniff_out(&mut r, 108, tail, 0);
+            let next = sniff_out(&mut r, 100 + rejected.len() as u32, &dns_query_stream(2, "b.com"), 1);
+            assert!(matches!(next.info, L7Info::Dns { id: 2, .. }), "{what}: {:?}", next.info);
+        }
+    }
+
+    #[test]
+    fn tcp_dns_from_53_response_after_a_complete_undecodable_one_decodes() {
+        // The AXFR continuation shape: a response with no question section.
+        let mut continuation = vec![0x12, 0x34, 0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0];
+        continuation.extend_from_slice(&[0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 0x2c, 0, 4, 1, 2, 3, 4]);
+        let rejected = framed_dns(&continuation);
+        let mut r = StreamReassembler::new();
+        assert_eq!(sniff_from_53(&mut r, 51000, 100, &rejected, 0).info, L7Info::None);
+        let next = sniff_from_53(&mut r, 51000, 100 + rejected.len() as u32, &dns_response_stream(2), 1);
+        assert!(matches!(next.info, L7Info::DnsResponse { id: 2, .. }), "{:?}", next.info);
+    }
+
+    #[test]
+    fn a_complete_frame_from_source_53_with_no_boundary_stays_held() {
+        // QR clear from source 53 records no boundary, so nothing covers these
+        // bytes and they are held like any undecided stream.
+        let (_, message) = undecodable_messages().remove(1);
+        let mut query_shaped = message;
+        query_shaped[2] = 0x04;
+        let mut r = StreamReassembler::new();
+        sniff_from_53(&mut r, 51000, 100, &framed_dns(&query_shaped), 0);
+        assert_eq!(r.dns_framing_len(), 0);
+        assert!(r.bytes_held() > 0);
+    }
+
+    // ---- The start check, clause by clause (JAM-21 part C) -----------------
+
+    /// A prefix and header: `flags`, then QD, AN, NS and AR counts.
+    fn head(declared: u16, flags: [u8; 2], counts: [u16; 4]) -> Vec<u8> {
+        let mut out = declared.to_be_bytes().to_vec();
+        out.extend_from_slice(&[0x12, 0x34]);
+        out.extend_from_slice(&flags);
+        for count in counts {
+            out.extend_from_slice(&count.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn start_check_passes_heads_real_messages_have() {
+        let query = [0x01, 0x00];
+        for (what, bytes) in [
+            ("query", head(30, query, [1, 0, 0, 0])),
+            ("query with EDNS", head(40, query, [1, 0, 0, 1])),
+            ("response", head(60, [0x81, 0x80], [1, 2, 0, 0])),
+            ("NXDOMAIN", head(90, [0x81, 0x83], [1, 0, 1, 0])),
+            ("AXFR continuation", head(60_000, [0x84, 0x00], [0, 500, 0, 0])),
+            ("inverse query opcode", head(30, [0x08, 0x00], [1, 0, 0, 0])),
+            ("status opcode", head(30, [0x10, 0x00], [1, 0, 0, 0])),
+            ("NOTIFY", head(30, [0x20, 0x00], [1, 0, 0, 0])),
+            ("UPDATE", head(60, [0x28, 0x00], [1, 0, 2, 0])),
+            ("DSO keepalive", head(20, [0x30, 0x00], [0, 0, 0, 0])),
+            ("DSO DSOTYPENI", head(12, [0xb0, 0x0b], [0, 0, 0, 0])),
+            ("NOTZONE", head(30, [0xa8, 0x0a], [1, 0, 0, 0])),
+            ("AD and CD set", head(30, [0x01, 0x30], [1, 0, 0, 0])),
+            ("header alone", head(12, query, [0, 0, 0, 0])),
+            ("two questions on a response", head(60, [0x81, 0x80], [2, 0, 0, 0])),
+            ("exact question fit", head(17, query, [1, 0, 0, 0])),
+            ("exact answer fit", head(23, [0x81, 0x80], [0, 1, 0, 0])),
+            ("exact authority fit", head(23, [0x81, 0x80], [0, 0, 1, 0])),
+            ("exact additional fit", head(23, [0x81, 0x80], [0, 0, 0, 1])),
+            ("exact fit of all four", head(50, [0x81, 0x80], [1, 1, 1, 1])),
+        ] {
+            assert!(looks_like_dns_tcp_start(&bytes), "{what}");
+        }
+    }
+
+    #[test]
+    fn start_check_rejects_one_head_per_clause() {
+        let query = [0x01, 0x00];
+        let mut cases = vec![
+            ("header cut one byte short", head(30, query, [1, 0, 0, 0])[..13].to_vec()),
+            ("Z set", head(30, [0x01, 0x40], [1, 0, 0, 0])),
+            ("rcode 12", head(30, [0x81, 0x0c], [1, 0, 0, 0])),
+            ("rcode on a query", head(30, [0x01, 0x01], [1, 0, 0, 0])),
+            ("rcode 11 on a query", head(30, [0x31, 0x0b], [0, 0, 0, 0])),
+            ("declared below the header", head(11, query, [0, 0, 0, 0])),
+            ("question one byte over", head(16, query, [1, 0, 0, 0])),
+            ("answer one byte over", head(22, [0x81, 0x80], [0, 1, 0, 0])),
+            ("authority one byte over", head(22, [0x81, 0x80], [0, 0, 1, 0])),
+            ("additional one byte over", head(22, [0x81, 0x80], [0, 0, 0, 1])),
+            ("all four one byte over", head(49, [0x81, 0x80], [1, 1, 1, 1])),
+            ("every count at its maximum", head(u16::MAX, [0x81, 0x80], [u16::MAX; 4])),
+            ("two questions on a query", head(60, query, [2, 0, 0, 0])),
+        ];
+        for opcode in [3u8, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+            cases.push(("unassigned opcode", head(30, [opcode << 3, 0x00], [1, 0, 0, 0])));
+        }
+        for (what, bytes) in cases {
+            assert!(!looks_like_dns_tcp_start(&bytes), "{what}: {bytes:02x?}");
+        }
+    }
+
+    #[test]
+    fn a_dso_response_with_rcode_11_as_a_first_message_records_its_boundary() {
+        let mut message = vec![0x12, 0x34, 0xb0, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0];
+        message.extend_from_slice(&[0, 0, 0, 0]);
+        let frame = framed_dns(&message);
+        let mut r = StreamReassembler::new();
+        assert_eq!(sniff_out(&mut r, 100, &frame, 0).info, L7Info::None);
+        assert_eq!(r.dns_framing_len(), 1);
+        let next = sniff_out(&mut r, 100 + frame.len() as u32, &dns_query_stream(2, "b.com"), 1);
+        assert!(matches!(next.info, L7Info::Dns { id: 2, .. }), "{:?}", next.info);
+    }
+
+    #[test]
+    fn a_frame_declaring_less_than_a_header_at_a_boundary_stays_held() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+        let mut tiny = 5u16.to_be_bytes().to_vec();
+        tiny.extend_from_slice(&[0; 5]);
+        sniff_out(&mut r, 100 + one.len() as u32, &tiny, 1);
+        assert_eq!(r.dns_framing_len(), 0, "the walk stops at it, so no boundary covers it");
+        assert!(r.bytes_held() > 0);
+    }
+
+    #[test]
+    fn a_complete_frame_to_53_that_fails_the_start_check_stays_held() {
+        // Nothing vouches for these bytes, so no boundary covers them, and
+        // they wait out the window like any undecided stream.
+        let mut message = vec![0x12, 0x34, 0x01, 0x40, 0, 0, 0, 0, 0, 0, 0, 0];
+        message.extend_from_slice(&[0; 6]);
+        let frame = framed_dns(&message);
+        let mut r = StreamReassembler::new();
+        assert_eq!(sniff_out(&mut r, 100, &frame, 0).info, L7Info::None);
+        assert_eq!(r.dns_framing_len(), 0);
+        assert!(r.bytes_held() > 0);
+    }
+
+    // ---- How often real tails pass the start check (JAM-21 part C) ---------
+
+    /// A small seeded generator, so a measurement can be repeated exactly.
+    fn next_random(state: &mut u64) -> u32 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        (*state >> 32) as u32
+    }
+
+    /// 1,400 bytes from a run of A answers (`c0 0c`, type, class, TTL, length,
+    /// address), each with a random address and a TTL up to a day, starting at
+    /// a random offset into a record: a segment boundary falls anywhere.
+    fn a_answer_tail(state: &mut u64) -> Vec<u8> {
+        let mut run = Vec::new();
+        while run.len() < 1_400 + 16 {
+            let ttl = 1 + next_random(state) % 86_400;
+            run.extend_from_slice(&[0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01]);
+            run.extend_from_slice(&ttl.to_be_bytes());
+            run.extend_from_slice(&[0x00, 0x04]);
+            run.extend_from_slice(&next_random(state).to_be_bytes());
+        }
+        let start = (next_random(state) % 16) as usize;
+        run[start..start + 1_400].to_vec()
+    }
+
+    /// 1,400 bytes of SPF-style TXT text from a random offset into it.
+    fn ascii_txt_tail(state: &mut u64) -> Vec<u8> {
+        let text = b"v=spf1 10.0.0.0/8 ip4:192.0.2.0/24 include:_spf.example.com ~all ".repeat(30);
+        let start = next_random(state) as usize % 64;
+        text[start..start + 1_400].to_vec()
+    }
+
+    /// Of `n` tails: how many passed the check, recorded a boundary as the
+    /// first segment seen, and left the third message after the window undecoded.
+    fn measure_tails(n: usize, mut tail: impl FnMut(&mut u64) -> Vec<u8>) -> (usize, usize, usize) {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let (mut passed, mut recorded, mut lost) = (0, 0, 0);
+        for _ in 0..n {
+            let bytes = tail(&mut state);
+            passed += usize::from(looks_like_dns_tcp_start(&bytes));
+            let mut r = StreamReassembler::new();
+            sniff_out(&mut r, 100, &bytes, 0);
+            recorded += r.dns_framing_len();
+            let real = third_message_after_the_window(&mut r, 100 + bytes.len() as u32);
+            lost += usize::from(!matches!(real.info, L7Info::Dns { id: 9, .. }));
+        }
+        (passed, recorded, lost)
+    }
+
+    #[test]
+    fn measured_pass_rate_of_real_tails() {
+        let answers = measure_tails(4_000, a_answer_tail);
+        let ascii = measure_tails(4_000, ascii_txt_tail);
+        println!("A answers of 4000: passed, recorded, lost = {answers:?}");
+        println!("ASCII TXT of 4000: passed, recorded, lost = {ascii:?}");
+        assert!(answers.0 <= 8, "{answers:?}");
+        assert_eq!(ascii, (0, 0, 0));
+    }
+
+    // ---- Boundaries from unverified starts (JAM-21 decisions fix) ----------
+
+    /// Segments from inside a message, whose first bytes would read as a length
+    /// prefix: SPF text and a run of A answers, at every alignment within them.
+    fn message_tails() -> Vec<(String, Vec<u8>)> {
+        let ascii = b"10.0.0.0/8 ip4:192.0.2.0/24 ~all ".repeat(24);
+        let mut answers = Vec::new();
+        for _ in 0..40 {
+            answers.extend_from_slice(&[0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0, 0, 1, 0x2c, 0, 4, 1, 2, 3, 4]);
+        }
+        let mut tails = Vec::new();
+        for offset in 0..33 {
+            tails.push((format!("ascii at {offset}"), ascii[offset..offset + 600].to_vec()));
+        }
+        for offset in 0..16 {
+            tails.push((format!("answers at {offset}"), answers[offset..offset + 600].to_vec()));
+        }
+        tails
+    }
+
+    /// Sends three whole messages past the decision window from `seq`: the
+    /// first two pay for the release and removal of whatever is held.
+    fn third_message_after_the_window(r: &mut StreamReassembler, seq: u32) -> SniffOutcome {
+        let message = dns_query_stream(9, "real.example");
+        let step = message.len() as u32;
+        sniff_out(r, seq, &message, 3_000);
+        sniff_out(r, seq + step, &message, 3_001);
+        sniff_out(r, seq + 2 * step, &message, 3_002)
+    }
+
+    #[test]
+    fn a_tail_seen_first_records_no_boundary() {
+        for (what, tail) in message_tails() {
+            let mut r = StreamReassembler::new();
+            sniff_out(&mut r, 100, &tail, 0);
+            assert_eq!(r.dns_framing_len(), 0, "{what}");
+            let real = third_message_after_the_window(&mut r, 100 + tail.len() as u32);
+            assert!(matches!(real.info, L7Info::Dns { id: 9, .. }), "{what}: {:?}", real.info);
+        }
+    }
+
+    #[test]
+    fn a_tail_past_a_lost_head_does_not_move_the_boundary() {
+        for (what, tail) in message_tails() {
+            let mut r = StreamReassembler::new();
+            let one = dns_query_stream(1, "a.com");
+            assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+            let boundary = 100 + one.len() as u32;
+            // The head of the next message never reached the capture.
+            let tail_seq = boundary + 500;
+            sniff_out(&mut r, tail_seq, &tail, 1);
+            let entry = r.dns_framing.entries[&TcpStreamKey { flow: dns_flow(), from_local: true }];
+            assert_eq!(entry.next_message_seq, boundary, "{what}");
+            let real = third_message_after_the_window(&mut r, tail_seq + tail.len() as u32);
+            assert!(matches!(real.info, L7Info::Dns { id: 9, .. }), "{what}: {:?}", real.info);
+        }
+    }
+
+    #[test]
+    fn a_consumed_tail_records_no_boundary() {
+        for (what, tail) in message_tails() {
+            let mut r = StreamReassembler::new();
+            sniff_out(&mut r, 100, &tail, 0);
+            // Past the window: consumed by the release without being sniffed.
+            sniff_out(&mut r, 100 + tail.len() as u32, &tail, 3_000);
+            assert_eq!(r.dns_framing_len(), 0, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_head_too_short_to_show_its_header_records_its_boundary_once_it_arrives() {
+        let first = partial_message(5_000, 1398);
+        let key = TcpStreamKey { flow: dns_flow(), from_local: true };
+        let mut r = StreamReassembler::new();
+        sniff_out(&mut r, 100, &first[..13], 0);
+        assert_eq!(r.dns_framing_len(), 0, "a head without all its counts proves nothing about the start");
+        sniff_out(&mut r, 113, &first[13..], 0);
+        assert_eq!(r.dns_framing.entries[&key].next_message_seq, 100 + 5_002);
+    }
+
+    #[test]
+    fn a_reordered_tail_leaves_the_verified_boundary_for_its_head() {
+        let mut r = StreamReassembler::new();
+        let one = dns_query_stream(1, "a.com");
+        assert!(matches!(sniff_out(&mut r, 100, &one, 0).info, L7Info::Dns { id: 1, .. }));
+        let boundary = 100 + one.len() as u32;
+        let (_, tail) = message_tails().remove(0);
+        let head = partial_message(5_000, 98);
+        let key = TcpStreamKey { flow: dns_flow(), from_local: true };
+        sniff_out(&mut r, boundary + 100, &tail, 1);
+        assert_eq!(r.dns_framing.entries[&key].next_message_seq, boundary, "the tail moved nothing");
+        sniff_out(&mut r, boundary, &head, 2);
+        assert_eq!(r.dns_framing.entries[&key].next_message_seq, boundary + 5_002);
+    }
+
+    #[test]
+    fn udp_53_stays_unframed() {
+        // Through the real parser and reassembler, as the capture loop does:
+        // the UDP payload is the bare message, so a decode must start at byte 0.
+        let udp_packet = |payload: &[u8]| {
+            let mut ip = Ipv4Header::new((8 + payload.len()) as u16, 64, IpNumber::UDP, v4("192.168.1.10"), v4("93.184.216.34"))
+                .expect("fixture");
+            ip.header_checksum = ip.calc_header_checksum();
+            let mut data = Vec::new();
+            ip.write(&mut data).expect("fixture");
+            data.extend_from_slice(&51000u16.to_be_bytes());
+            data.extend_from_slice(&53u16.to_be_bytes());
+            data.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+            data.extend_from_slice(&[0, 0]);
+            data.extend_from_slice(payload);
+            parse_packet(&data, LinkType::Raw).expect("fixture must parse")
+        };
+        let key = FlowKey { protocol: TransportProtocol::Udp, remote_port: 53, ..flow_key() };
+        let mut r = StreamReassembler::new();
+        let bare = crate::l7::dns_test_support::query(0x1234, "a.com", 1);
+        let outcome = r.sniff(&udp_packet(&bare), Some((&key, true)), 0);
+        assert!(matches!(outcome.info, L7Info::Dns { id: 0x1234, .. }), "{:?}", outcome.info);
+        // A length-prefixed message over UDP is not TCP framing: the prefix
+        // shifts every field, so it must not decode as the framed message.
+        let outcome = r.sniff(&udp_packet(&framed_dns(&bare)), Some((&key, true)), 0);
+        assert!(!matches!(outcome.info, L7Info::Dns { id: 0x1234, .. }), "{:?}", outcome.info);
+        assert_eq!(r.bytes_held(), 0);
+        assert_eq!(r.dns_framing_len(), 0, "UDP keeps no framing state");
     }
 
     #[test]
