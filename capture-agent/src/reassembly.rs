@@ -1328,9 +1328,8 @@ fn is_dns_info(info: &L7Info) -> bool {
 /// 2001:500:2f::f, 2606:4700:4700::1111), and samples sharing a prefix passed
 /// 0.15% (/64), 1.94% (/48) and 12.4% (/32 plus low byte). Printable text can't
 /// pass, since its counts never fit. Mostly zero bytes can: all-zero counts and
-/// flags are a valid empty query. When one passes, a boundary is recorded and the
-/// third message after the window is not decoded, until the boundary is reached
-/// or 30 s pass.
+/// flags are a valid empty query. When one passes, a boundary is recorded and
+/// later messages stay undecoded until the boundary is reached or 30 s pass.
 fn looks_like_dns_tcp_start(bytes: &[u8]) -> bool {
     let Some(header) = bytes.get(2..14) else {
         return false;
