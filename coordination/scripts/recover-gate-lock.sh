@@ -3,12 +3,12 @@
 # gate operation is currently active. A recorded live owner is never removed.
 #
 # Usage:
-#   ./recover-gate-lock.sh <linear-id> <slug> --confirm-no-live-operation
+#   ./recover-gate-lock.sh <issue-key> <slug> --confirm-no-live-operation
 
 set -euo pipefail
 
-LINEAR_ID="${1:?usage: recover-gate-lock.sh <linear-id> <slug> --confirm-no-live-operation}"
-SLUG="${2:?usage: recover-gate-lock.sh <linear-id> <slug> --confirm-no-live-operation}"
+ISSUE_KEY="${1:?usage: recover-gate-lock.sh <issue-key> <slug> --confirm-no-live-operation}"
+SLUG="${2:?usage: recover-gate-lock.sh <issue-key> <slug> --confirm-no-live-operation}"
 CONFIRM="${3:-}"
 
 if [[ "$CONFIRM" != "--confirm-no-live-operation" || $# -ne 3 ]]; then
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
+GATE_FILE="$(gate_path "$ISSUE_KEY" "$SLUG")"
 LOCK_DIR="${GATE_FILE}.lock"
 if [[ -L "$LOCK_DIR" || ! -d "$LOCK_DIR" ]]; then
   echo "no recoverable lock directory: $LOCK_DIR" >&2

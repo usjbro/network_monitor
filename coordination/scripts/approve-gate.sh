@@ -7,18 +7,18 @@
 # Error Handling: "Both channels reply close together").
 #
 # Usage:
-#   ./approve-gate.sh <linear-id> <slug>
+#   ./approve-gate.sh <issue-key> <slug>
 
 set -euo pipefail
 
-LINEAR_ID="${1:?usage: approve-gate.sh <linear-id> <slug>}"
-SLUG="${2:?usage: approve-gate.sh <linear-id> <slug>}"
+ISSUE_KEY="${1:?usage: approve-gate.sh <issue-key> <slug>}"
+SLUG="${2:?usage: approve-gate.sh <issue-key> <slug>}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
+GATE_FILE="$(gate_path "$ISSUE_KEY" "$SLUG")"
 
 if [[ ! -f "$GATE_FILE" ]]; then
   echo "no such gate: $GATE_FILE" >&2

@@ -10,13 +10,13 @@
 # was never approved, or was blocked/still pending.
 #
 # Usage:
-#   ./mark-gate-delegated.sh <linear-id> <slug> <in-session|codex> [agent-type]
+#   ./mark-gate-delegated.sh <issue-key> <slug> <in-session|codex> [agent-type]
 
 set -euo pipefail
 
-LINEAR_ID="${1:?usage: mark-gate-delegated.sh <linear-id> <slug> <in-session|codex> [agent-type]}"
-SLUG="${2:?usage: mark-gate-delegated.sh <linear-id> <slug> <in-session|codex> [agent-type]}"
-TARGET="${3:?usage: mark-gate-delegated.sh <linear-id> <slug> <in-session|codex> [agent-type]}"
+ISSUE_KEY="${1:?usage: mark-gate-delegated.sh <issue-key> <slug> <in-session|codex> [agent-type]}"
+SLUG="${2:?usage: mark-gate-delegated.sh <issue-key> <slug> <in-session|codex> [agent-type]}"
+TARGET="${3:?usage: mark-gate-delegated.sh <issue-key> <slug> <in-session|codex> [agent-type]}"
 AGENT_TYPE="${4:-}"
 
 if [[ "$TARGET" != "in-session" && "$TARGET" != "codex" ]]; then
@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
+GATE_FILE="$(gate_path "$ISSUE_KEY" "$SLUG")"
 
 if [[ ! -f "$GATE_FILE" ]]; then
   echo "no such gate: $GATE_FILE" >&2

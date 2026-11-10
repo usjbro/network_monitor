@@ -2,7 +2,8 @@
 task: <task-slug>
 owner: claude-code | codex
 status: open | in-progress | blocked | review | done
-branch: jamesmbrownjr/<task-slug>
+branch: KAN-<m>-<task-slug> | jamesmbrownjr/<task-slug>
+issue_key: KAN-<m> | <empty for untracked work>
 depends_on: []
 created: <date>
 ---

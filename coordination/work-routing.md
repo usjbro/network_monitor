@@ -20,7 +20,7 @@ Skill names are bare here. Claude Code prefixes the Superpowers ones, as in `sup
 
 | Work | Owner | Skill, in order | Loop or goal | Agent |
 |---|---|---|---|---|
-| Start a Linear issue | Codex | `epic-task-cycle` when it belongs to an epic | Contract `## Goal`; Codex `/goal` only if James asks (see below) | None |
+| Start a Jira issue | Codex | `epic-task-cycle` when it belongs to an epic | Contract `## Goal`; Codex `/goal` only if James asks (see below) | None |
 | Work the queue | Codex, Claude Code for coordination | `epic-task-cycle` per issue | `AGENTS.md` "Continuous Work Queue", only under James's standing instruction | None |
 | Write a spec | Claude Code | `brainstorming` | None; James approves | `architect` when subsystems compete; `security-engineer` for security-sensitive work |
 | Write a plan | Codex, or Claude Code | `writing-plans` | None; the other agent reviews and gives the verdict. James approves a plan that lands in a PR | None |
