@@ -40,6 +40,9 @@ export interface StreamAgentClient {
   off(event: 'event', listener: (event: unknown) => void): unknown;
   off(event: 'status', listener: (status: { connected: boolean }) => void): unknown;
   isConnected(): boolean;
+  // JAM-18: the latest io_series_status on the current agent connection, if
+  // any. Optional so test doubles that predate it need not implement it.
+  latestIoSeriesStatus?(): unknown;
 }
 
 export interface StreamEnrichmentClient {
@@ -223,6 +226,17 @@ export function buildStreamResponse(deps: StreamRouteDeps = {}): Response {
       // Replay current connection status immediately so a fresh client
       // doesn't wait for the next status change to know the agent's state.
       onStatus({ connected: client.isConnected() });
+      // JAM-18: then the agent client's cached IO graph series set, before
+      // any live event, so a tab opened on an already-connected relay still
+      // learns it (AgentClient keeps one message, cleared on disconnect).
+      const ioSeriesStatus = client.isConnected() ? client.latestIoSeriesStatus?.() : undefined;
+      if (ioSeriesStatus !== undefined) {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(ioSeriesStatus)}\n\n`));
+        } catch {
+          // stream already closed/closing — ignore
+        }
+      }
     },
     cancel() {
       if (onEvent) client.off('event', onEvent);

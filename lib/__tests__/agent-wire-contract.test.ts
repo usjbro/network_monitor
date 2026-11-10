@@ -47,6 +47,8 @@ import {
   mapConnectionEvent,
   mapEndpointUpdateEvent,
   mapFindingEvent,
+  mapIoBucketsEvent,
+  mapIoSeriesStatusEvent,
   mapPacketEvent,
   mapServiceTimeUpdateEvent,
   mapSystemStatsEvent,
@@ -80,6 +82,8 @@ describe('agent wire contract: real captured agent output maps without throwing'
         'connection_update',
         'endpoint_update',
         'finding',
+        'io_buckets',
+        'io_series_status',
         'layer_update',
         'packet',
         'service_time_update',
@@ -97,6 +101,33 @@ describe('agent wire contract: real captured agent output maps without throwing'
     expect(mapped.capturing).toBe(true);
     expect(typeof mapped.interface).toBe('string');
     expect(mapped.directionAttributionUnavailable).toBe(false);
+  });
+
+  // JAM-18: captured from a REPLAY_WAIT_FOR_IO_SERIES=1 replay after a
+  // set_io_series with one counting and one failing series.
+  it('io_series_status maps, keeping a failing series with its filter and error', () => {
+    const mapped = mapIoSeriesStatusEvent(sample('io_series_status'));
+    expect(mapped.revision).toBe(1);
+    expect(mapped.requestId).toBe('c41f09aa');
+    expect(mapped.replayWaiting).toBe(false);
+    expect(mapped.rejected).toBeUndefined();
+    expect(mapped.series.map((s) => [s.id, s.filter, s.ok])).toEqual([
+      ['all', '', true],
+      ['big', 'frame.len > 1000 and ==', false],
+    ]);
+    expect(mapped.series[1].error).toEqual({ message: 'Unexpected token', token: '==', position: 21 });
+  });
+
+  it('io_buckets maps 100 ms buckets with on-wire byte counts', () => {
+    const mapped = mapIoBucketsEvent(sample('io_buckets'));
+    const status = mapIoSeriesStatusEvent(sample('io_series_status'));
+    expect(mapped.epoch).toBe(status.epoch);
+    expect(mapped.bucketMs).toBe(100);
+    expect(mapped.coveredToMs - mapped.coveredFromMs).toBe(1000);
+    const all = mapped.series.find((s) => s.id === 'all')!;
+    expect(all.buckets).toHaveLength(10);
+    expect(all.buckets.every(([start, packets, bytes]) => start % 100 === 0 && packets === 4 && bytes === 192)).toBe(true);
+    expect(mapped.series.find((s) => s.id === 'big')!.buckets).toEqual([]);
   });
 
   it('capture_stats maps, including the horizon counters', () => {

@@ -389,6 +389,8 @@ Field notes:
 
 Any connection's `packetLoss` (in `connection_update`) is derived purely from observed TCP retransmits — it has no way to know about packets the kernel or the relay itself lost before ever reaching that computation. A nonzero `dropped`/`ifDropped`/`relayLaggedEvents`/`unparseableFrames` here means `packetLoss` figures elsewhere in this same tick may under-report actual loss; the UI treats these two as independent signals (see `app/page.tsx`'s capture-degraded banner and `ConnectionsView`'s loss-column caveat) rather than trying to merge them into one number.
 
+- `replayWaiting` (JAM-18) — present and `true` only while the replay reader is held by `REPLAY_WAIT_FOR_IO_SERIES=1`, waiting for a first IO-graph series set. Omitted otherwise; the mapper leaves it `undefined`.
+
 ### `system_stats`
 
 Sent once per tick (~1 second), immediately after that tick's `capture_stats`. Host/interface identity and aggregate throughput — issue #64. Replaces the placeholder `SystemStats` values the UI used to seed itself with client-side; every field here is a real measurement.
@@ -621,6 +623,46 @@ Sent once, immediately, when a `set_interface` control message is rejected — a
 
 The rejected switch never takes effect: the previous capture handle, link type, local-address list, and `FlowTable` all keep running exactly as they were — nothing is torn down speculatively before the new interface is confirmed to actually work. Unlike `capture_config_error`, the UI clears this banner automatically once `interface_changed` arrives, since that event only ever fires on a *successful* switch — real evidence the rejection was resolved, not just an unrelated periodic re-send.
 
+### `io_series_status` (JAM-18)
+
+The agent's single shared IO-graph series set. Sent on every `set_io_series` (accepted or refused) and, once, straight to each newly authenticated agent connection, before any other event. The relay caches the latest one and replays it to every new SSE subscriber right after `connection_status`, so a tab opened on an already-connected relay still learns the set; the cache is cleared when the agent disconnects. Flat: fields sit beside `type`.
+
+```json
+{"type":"io_series_status","revision":1,"requestId":"c41f09aa","epoch":"f181901688f7d41c","replayWaiting":false,
+ "series":[{"id":"all","filter":"","ok":true},
+           {"id":"big","filter":"frame.len > 1000 and ==","ok":false,"error":{"message":"Unexpected token","token":"==","position":21}}]}
+```
+
+- `epoch` — random per agent process. A new epoch is a new history; revisions restart with it.
+- `revision` — assigned by the agent, strictly increasing within an epoch; 0 before any set.
+- `requestId` — echoed from the `set_io_series` this answers; absent on the connection bootstrap.
+- `rejected` — present when that `set_io_series` was refused: `conflict` (stale `baseEpoch`/`baseRevision`), `too_many_series`, `invalid_id`, `duplicate_id`, `filter_too_long`, `invalid_request_id`, `invalid_epoch`. `series` is then the unchanged current set.
+- `series[]` — every entry carries its authoritative `filter` source, so any tab can rebuild the editor and resend the other series unchanged. A filter that fails to compile is kept with `ok:false` and its `error` (same `message`/`token`/`position` as the browser's display-filter errors; `position` is in UTF-16 code units) and is never counted. An empty filter means every parsed frame. `connection.*` and `*.response_to` are rejected for series: the first is never present on a packet, and the second exists only when the request was itself sent to the browser, so it would count a sample.
+- `replayWaiting` — the replay barrier is still waiting (see `REPLAY_WAIT_FOR_IO_SERIES`).
+
+### `io_buckets` (JAM-18)
+
+Closed 100 ms buckets for every series, sent from the 1 s emitter tick. Flat. Never subject to the packet-event limiter.
+
+```json
+{"type":"io_buckets","revision":1,"epoch":"f181901688f7d41c","bucketMs":100,
+ "coveredFromMs":1794120000000,"coveredToMs":1794120001000,"notObserved":[],
+ "loss":{"kernelDropped":0,"ifDropped":0,"unparseable":0,"evaluationSkipped":0},
+ "series":[{"id":"all","late":0,"lateBuckets":[],"buckets":[[1794120000000,4,192],[1794120000100,4,192]]},
+           {"id":"big","late":0,"lateBuckets":[],"buckets":[]}]}
+```
+
+- **Counts are complete, not sampled.** Each series' filter is evaluated in the agent on every parsed IP frame, before the packet-event limiter, over the same field tree the browser's `packet` events carry (`build_packet_fields` plus transaction fields such as `dns.time_us`). Non-IP frames (which the agent skips entirely) and unparseable frames are not series inputs; unparseable frames are reported in `loss`.
+- **Buckets** are `[startMs, packets, bytes]`, keyed by the frame's own timestamp (capture time live, recorded time in replay), `startMs` a multiple of 100. **Bytes are the on-wire (original) length**, while `frame.len` in filters is the captured length, so under snap-length truncation a `frame.len` filter and the byte count can legitimately disagree.
+- **Sparse and gap-explicit.** Only non-empty buckets are listed. Every bucket in `[coveredFromMs, coveredToMs)` that is neither listed nor inside a `notObserved` range is a true zero. Consecutive messages' covered ranges abut; time outside them is unknown, never zero. A message may cover zero time (`coveredFromMs == coveredToMs`) when it only reports late frames or a marker.
+- **Closing.** A bucket closes once the closing clock passes its end by 500 ms. The closing clock is the newest frame timestamp seen (a high-water mark that never moves backwards), in replay and live alike; on a quiet live link, each 1 s read timeout advances it to wall-clock time, so covered zero-traffic time keeps being published. End of file (or a replay read error) closes every open bucket, so no tail is lost.
+- **Late frames.** A frame whose bucket already closed (out-of-order file, clock step, a file with a timestamp reset) is never added to that bucket. It is reported in `lateBuckets` against its original bucket, at most 256 entries per series per message; the rest are summed into `late`. After a backward timestamp reset in a file, the frames behind the high-water mark show as late, not on a fabricated timeline.
+- **`notObserved`** — `interface_switch` (the span of a runtime `set_interface`), `replay_error` (a zero-length marker at the point the file stopped being readable) and `backlog` (live only: the emitter fell more than an hour of buckets behind, and those frames were not counted; also summed in `loss.evaluationSkipped`). Unknown reasons map to `unknown` in the browser. Pause has no marker: while paused the agent stops reading, the kernel keeps buffering, and frames read after `resume` are counted; frames the kernel dropped meanwhile show in `loss.kernelDropped`.
+- **`loss`** — deltas since the previous `io_buckets` that carried them, attached to the first line of a tick: kernel and interface drops (live), unparseable frames, and backlog frames.
+- **Bounds.** At most 8 series; every line is at most 64 KiB (a tick's buckets are split across lines, never truncated); at most 8 lines per tick. In replay the capture thread blocks rather than drop when more than about an hour of buckets is queued.
+- **Revision changes.** On a new set, the old set's open buckets are closed and reported under the old revision, and counting restarts under the new one. A browser keys history by `(epoch, revision)`.
+- **Cost** (JAM-18 Task 2 benchmark, `capture-agent/tests/io_graph_bench.rs`, one development machine): while any series is configured, the agent builds a field tree for every frame. End to end in fast replay of 200 000 mixed frames: 3 742 ns/frame with no series, 7 277 with 1, 7 804 with 8 (2.09×). Almost all of it is the field tree; evaluating 8 filters instead of 1 adds about 0.5 µs. With no series configured the cost is one atomic load per frame.
+
 ## Relay → browser (SSE, not the raw agent protocol)
 
 `app/api/stream/route.ts` re-wraps agent events as Server-Sent Events (`data: <json>\n\n`) and adds one synthetic event type the agent itself never sends:
@@ -702,6 +744,17 @@ Sent by `app/api/control/route.ts` (same POST endpoint as `pause`/`resume`/`set_
 Queued from the async connection-handling task into the dedicated writer thread (the only place the open `pcapng::Writer`/`ring::RingState` lives) via an in-process channel, the same pattern `set_capture_filter`/`set_snaplen`/`set_interface` use for the capture thread. Rejected via `capture_file_error` rather than silently switching files out from under an in-flight write or writing somewhere unsafe: `start_capture_file` while one is already active; an empty path; a path containing a `.data/` component; or a path that resolves *inside* the agent's own working directory (`validate_capture_file_path` in `capture-agent/src/main.rs` — capture files must be written somewhere outside the agent's own project checkout, not inside it). `stop_capture_file` with no capture active is a no-op, reported success — same idempotent tolerance `pause`/`resume` already have for a redundant call.
 
 Refuses to begin at all if free space on the target volume is already below a fixed 500MB floor (`DEFAULT_LOW_DISK_FLOOR_BYTES` in `capture-agent/src/ring.rs` — not operator-configurable; `start_capture_file`'s wire shape has no field for it); while running, the writer thread checks free space each rotation tick and stops cleanly (same clean-stop path as autostop, reported via `capture_file_status`'s `autostopReason: "lowDisk"`) rather than running the volume to zero.
+
+### `set_io_series` (JAM-18)
+
+```json
+{"type":"set_io_series","baseEpoch":"f181901688f7d41c","baseRevision":0,"requestId":"c41f09aa",
+ "series":[{"id":"all","filter":""},{"id":"dns","filter":"dns"}]}
+```
+
+Replaces the agent's single shared series set (every tab sees the same set). Compare-and-swap: accepted only if `baseEpoch` and `baseRevision` match the agent's current epoch and revision (from the latest `io_series_status`), checked and swapped under one lock, so two edits from the same base can never both win; a mismatch is refused as `conflict`, never silently overwritten. An empty `series` list turns counting off. `/api/control` validates before forwarding and forwards only these fields, rebuilt: at most 8 series; `id` matching `^[a-z0-9-]{1,32}$` and unique; `filter` at most 2048 characters (UTF-16 code units — the display-filter limit, not BPF's 1024); `baseRevision` an integer 0..2^32-1; `requestId` and `baseEpoch` 8–32 hex digits. The agent re-validates everything and answers with `io_series_status`.
+
+**`REPLAY_WAIT_FOR_IO_SERIES=1`** (startup, only with `REPLAY_FILE`; unset or empty means off, any other value fails startup): the replay reader waits before reading the first frame until a `set_io_series` with at least one compiling series is accepted. Because that message arrives through a browser's `/api/control` call, a subscriber exists by then and receives every bucket of the file. While waiting, `capture_stats` and `io_series_status` report `replayWaiting: true`. Without it, a replay that finishes before series are set has no IO graph.
 
 ## Adding a new field or event type
 

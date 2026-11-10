@@ -6,6 +6,7 @@ pub mod fields;
 pub mod flow;
 pub mod host_stats;
 pub mod http2;
+pub mod io_series;
 pub mod ja3;
 pub mod keylog;
 pub mod l7;

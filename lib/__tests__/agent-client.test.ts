@@ -31,6 +31,31 @@ describe('AgentClient', () => {
     client.stop();
   });
 
+  // JAM-18: the relay's cache of the shared IO graph series set.
+  it('keeps the latest io_series_status for later subscribers and forgets it on disconnect', async () => {
+    let agentSocket: net.Socket | undefined;
+    server = auth.createServer((socket) => {
+      agentSocket = socket;
+      socket.write('{"type":"io_series_status","revision":0,"epoch":"4be1a07c","replayWaiting":false,"series":[]}\n');
+      socket.write('{"type":"io_series_status","revision":1,"epoch":"4be1a07c","replayWaiting":false,"series":[{"id":"all","filter":"","ok":true}]}\n');
+      socket.write('{"type":"capture_stats","stats":{}}\n');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    port = (server.address() as net.AddressInfo).port;
+    const client = new AgentClient('127.0.0.1', port, auth.file);
+    expect(client.latestIoSeriesStatus()).toBeUndefined();
+    await new Promise<void>((resolve) => {
+      client.on('event', (e: { type?: string }) => { if (e.type === 'capture_stats') resolve(); });
+      client.start();
+    });
+    expect(client.latestIoSeriesStatus()).toMatchObject({ type: 'io_series_status', revision: 1 });
+    const disconnected = new Promise((resolve) => client.once('status', resolve));
+    agentSocket!.destroy();
+    expect(await disconnected).toEqual({ connected: false });
+    expect(client.latestIoSeriesStatus()).toBeUndefined();
+    client.stop();
+  });
+
   it('emits a disconnected status when the agent is unreachable', async () => {
     const client = new AgentClient('127.0.0.1', 1, auth.file); // port 1 refuses connections
     const status = await new Promise((resolve) => {

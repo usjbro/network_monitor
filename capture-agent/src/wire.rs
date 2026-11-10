@@ -312,6 +312,14 @@ pub enum AgentEvent {
     CaptureFileError {
         message: String,
     },
+    IoSeriesStatus {
+        #[serde(flatten)]
+        status: Box<IoSeriesStatusJson>,
+    },
+    IoBuckets {
+        #[serde(flatten)]
+        buckets: Box<IoBucketsJson>,
+    },
     /// Expert Info (JAM-12) — an annotated observation, never a verdict. See
     /// docs/superpowers/specs/2026-09-26-expert-info-findings-design.md.
     Finding {
@@ -510,6 +518,10 @@ pub struct CaptureStatsJson {
     /// Nonzero and growing means `observedName` may be missing for hosts
     /// whose DNS answer was seen earlier.
     pub observed_name_evictions: u64,
+    /// JAM-18: the replay reader is waiting for a first IO-graph series
+    /// set (`REPLAY_WAIT_FOR_IO_SERIES=1`). Omitted when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub replay_waiting: bool,
 }
 
 /// Host/interface identity and aggregate throughput, sent once per tick
@@ -609,6 +621,110 @@ pub enum ControlMessage {
         autostop: Option<AutostopConfigJson>,
     },
     StopCaptureFile,
+    /// JAM-18 IO graph: replace the agent's single shared series set.
+    /// Compare-and-swap on the epoch and revision the sender last saw
+    /// (`io_series_status`); a mismatch is refused as `conflict`, never
+    /// silently overwritten. An empty `series` list turns counting off.
+    SetIoSeries {
+        #[serde(rename = "baseEpoch")]
+        base_epoch: String,
+        #[serde(rename = "baseRevision")]
+        base_revision: u32,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        series: Vec<IoSeriesDefJson>,
+    },
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct IoSeriesDefJson {
+    pub id: String,
+    pub filter: String,
+}
+
+/// `io_series_status` (JAM-18): the agent's current series set, sent on
+/// every `set_io_series` and on every relay (re)connection. Each entry
+/// carries its filter source so any tab can rebuild the shared editor.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IoSeriesStatusJson {
+    pub revision: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub epoch: String,
+    pub replay_waiting: bool,
+    /// Why a `set_io_series` was refused (`conflict`, `too_many_series`,
+    /// ...); the series list is then the unchanged current set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<String>,
+    pub series: Vec<IoSeriesEntryJson>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct IoSeriesEntryJson {
+    pub id: String,
+    pub filter: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<IoSeriesErrorJson>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct IoSeriesErrorJson {
+    pub message: String,
+    pub token: String,
+    /// UTF-16 code-unit offset, as in the browser's filter errors.
+    pub position: usize,
+}
+
+/// One 100 ms bucket: `[startMs, packets, bytes]`.
+pub type IoBucket = [u64; 3];
+
+/// `io_buckets` (JAM-18): closed 100 ms buckets for every series over
+/// `[coveredFromMs, coveredToMs)`. Buckets not listed and not inside a
+/// `notObserved` range are true zeros; time outside the covered range is
+/// unknown, never zero.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IoBucketsJson {
+    pub revision: u32,
+    pub epoch: String,
+    pub bucket_ms: u64,
+    pub covered_from_ms: u64,
+    pub covered_to_ms: u64,
+    pub not_observed: Vec<IoNotObservedJson>,
+    pub loss: IoLossJson,
+    pub series: Vec<IoSeriesBucketsJson>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IoNotObservedJson {
+    pub from_ms: u64,
+    pub to_ms: u64,
+    pub reason: &'static str,
+}
+
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IoLossJson {
+    pub kernel_dropped: u64,
+    pub if_dropped: u64,
+    pub unparseable: u64,
+    pub evaluation_skipped: u64,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IoSeriesBucketsJson {
+    pub id: String,
+    /// Late frames not attributed to a bucket (beyond the per-message
+    /// `lateBuckets` bound).
+    pub late: u64,
+    /// Late frames attributed to their original bucket.
+    pub late_buckets: Vec<IoBucket>,
+    pub buckets: Vec<IoBucket>,
 }
 
 #[derive(Deserialize, Debug, PartialEq)]
@@ -1383,6 +1499,7 @@ mod tests {
                 capacity_evictions: 2,
                 idle_evictions: 6,
                 observed_name_evictions: 4,
+                replay_waiting: false,
             },
         };
         let line = encode_event(&event);

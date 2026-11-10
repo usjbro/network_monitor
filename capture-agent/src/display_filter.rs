@@ -188,6 +188,8 @@ enum Literal {
 
 #[derive(Debug, Clone)]
 enum Node {
+    /// Matches every frame: an empty IO-graph series filter (spec D3).
+    All,
     Or(Vec<Node>),
     And(Vec<Node>),
     Not(Box<Node>),
@@ -270,6 +272,7 @@ fn compare(value: Option<Value<'_>>, op: Op, literal: &Literal) -> bool {
 impl Node {
     fn eval(&self, fields: &[Field], frame_len: u32) -> bool {
         match self {
+            Node::All => true,
             Node::Or(children) => children.iter().any(|c| c.eval(fields, frame_len)),
             Node::And(children) => children.iter().all(|c| c.eval(fields, frame_len)),
             Node::Not(child) => !child.eval(fields, frame_len),
@@ -472,7 +475,14 @@ pub fn compile(source: &str) -> Result<Compiled, Error> {
 /// `connection.*` (always absent on a packet record) and `*.response_to`
 /// (present only when the request was itself sent to the browser, so it
 /// depends on the packet-event rate limiter).
+///
+/// An empty or whitespace-only source means "every parsed frame" (spec D3),
+/// where the browser's `compile` treats it as a syntax error; the browser
+/// treats an empty display filter as "no filter", which is the same thing.
 pub fn compile_for_series(source: &str) -> Result<Compiled, Error> {
+    if utf16_len(source) <= MAX_SOURCE_LENGTH && source.chars().all(is_js_whitespace) {
+        return Ok(Compiled { root: Node::All, paths: Vec::new() });
+    }
     let compiled = compile(source)?;
     for (path, position) in &compiled.paths {
         if path.starts_with("connection.") {
@@ -528,6 +538,18 @@ mod tests {
     fn series_reports_compile_errors_before_path_rejections() {
         let e = compile_for_series("connection.process ==").unwrap_err();
         assert_eq!(e.message, "Unexpected token");
+    }
+
+    #[test]
+    fn an_empty_series_filter_matches_every_frame() {
+        for source in ["", "  \t\u{FEFF}"] {
+            let all = compile_for_series(source).unwrap();
+            assert!(all.matches(&[], 0));
+            assert!(all.matches(&[uint("x", 1)], 1500));
+        }
+        // The browser grammar itself still rejects an empty source.
+        assert_eq!(compile("").unwrap_err().message, "Unexpected token");
+        assert!(compile_for_series("\u{85}").is_err());
     }
 
     #[test]

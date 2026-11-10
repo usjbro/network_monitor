@@ -180,6 +180,70 @@ export interface CaptureStats {
   // Optional, unlike the counters above: an older agent does not send it, and
   // undefined means unknown, not zero.
   observedNameEvictions?: number;
+  // JAM-18: the replay is waiting for a first IO-graph series set
+  // (REPLAY_WAIT_FOR_IO_SERIES=1). Absent means not waiting.
+  replayWaiting?: boolean;
+}
+
+// IO graph (JAM-18, docs/wire-protocol.md "io_series_status"/"io_buckets").
+// One shared series set per agent; edits are compare-and-swap on
+// (epoch, revision), both assigned by the agent.
+export interface IoSeriesError {
+  message: string;
+  token: string;
+  position: number;
+}
+
+export interface IoSeriesEntry {
+  id: string;
+  filter: string;
+  ok: boolean;
+  error?: IoSeriesError;
+}
+
+export interface IoSeriesStatus {
+  revision: number;
+  epoch: string;
+  replayWaiting: boolean;
+  // Echoed from the set_io_series this status answers, if any.
+  requestId?: string;
+  // Why that set_io_series was refused ('conflict', 'too_many_series', ...);
+  // `series` is then the unchanged current set.
+  rejected?: string;
+  series: IoSeriesEntry[];
+}
+
+// [startMs, packets, bytes] for one 100 ms bucket. Bytes are on-wire lengths.
+export type IoBucket = [number, number, number];
+
+export type IoNotObservedReason = 'interface_switch' | 'replay_error' | 'backlog' | 'unknown';
+
+export interface IoNotObserved {
+  fromMs: number;
+  toMs: number;
+  reason: IoNotObservedReason;
+}
+
+export interface IoSeriesBuckets {
+  id: string;
+  // Late frames not attributed to a bucket (beyond the per-message bound).
+  late: number;
+  // Late frames attributed to their original bucket.
+  lateBuckets: IoBucket[];
+  buckets: IoBucket[];
+}
+
+export interface IoBuckets {
+  revision: number;
+  epoch: string;
+  bucketMs: number;
+  // Every bucket in [coveredFromMs, coveredToMs) that is neither listed nor
+  // inside a notObserved range is a true zero; time outside is unknown.
+  coveredFromMs: number;
+  coveredToMs: number;
+  notObserved: IoNotObserved[];
+  loss: { kernelDropped: number; ifDropped: number; unparseable: number; evaluationSkipped: number };
+  series: IoSeriesBuckets[];
 }
 
 // Measured protocol hierarchy (JAM-13), from the agent's

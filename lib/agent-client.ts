@@ -18,6 +18,11 @@ export class AgentClient extends EventEmitter {
   private authenticated = false;
   private authTimer: NodeJS.Timeout | null = null;
   private lastDiagnostic: 'credential' | 'handshake' | null = null;
+  // JAM-18: the latest io_series_status from the agent on the current
+  // connection, so a browser tab that subscribes later still learns the
+  // shared IO graph series set (the agent only sends it on change and on
+  // connect). One message; cleared on disconnect, so it is never stale.
+  private ioSeriesStatus: unknown = undefined;
 
   constructor(host: string, port: number, private tokenPath?: string) {
     super();
@@ -65,6 +70,7 @@ export class AgentClient extends EventEmitter {
       handled = true;
       if (!this.authenticated) this.diagnostic('handshake');
       this.authenticated = false;
+      this.ioSeriesStatus = undefined;
       this.buffer = '';
       ackBuffer.fill(0);
       if (this.authTimer) clearTimeout(this.authTimer);
@@ -112,6 +118,7 @@ export class AgentClient extends EventEmitter {
         try {
           const event = JSON.parse(line);
           if (event?.type === 'authenticate' || event?.type === 'authenticated') continue;
+          if (event?.type === 'io_series_status') this.ioSeriesStatus = event;
           this.emit('event', event);
           if (!active()) return;
         } catch {
@@ -133,8 +140,19 @@ export class AgentClient extends EventEmitter {
       | { type: 'set_snaplen'; bytes: number }
       | { type: 'list_interfaces' }
       | { type: 'set_interface'; name: string }
+      | {
+          type: 'set_io_series';
+          baseEpoch: string;
+          baseRevision: number;
+          requestId: string;
+          series: { id: string; filter: string }[];
+        }
   ): void {
     if (this.authenticated) this.socket?.write(JSON.stringify(message) + '\n');
+  }
+
+  latestIoSeriesStatus(): unknown {
+    return this.authenticated ? this.ioSeriesStatus : undefined;
   }
 
   isConnected(): boolean {
@@ -143,6 +161,7 @@ export class AgentClient extends EventEmitter {
 
   stop(): void {
     this.stopped = true;
+    this.ioSeriesStatus = undefined;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     if (this.authTimer) clearTimeout(this.authTimer);

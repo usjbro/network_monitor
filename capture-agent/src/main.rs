@@ -2487,6 +2487,7 @@ fn build_capture_stats_json(
         capacity_evictions,
         idle_evictions,
         observed_name_evictions,
+        replay_waiting: false,
     }
 }
 
@@ -2563,6 +2564,13 @@ async fn main() -> std::io::Result<()> {
         replay_source,
         device_for_reopen,
     } = resolve_packet_source();
+    // JAM-18: the IO-graph replay start barrier. Read once at startup, like
+    // REPLAY_FILE itself; a bad value fails startup loudly.
+    let replay_wait_for_io_series = capture_agent::io_series::parse_replay_wait(
+        std::env::var("REPLAY_WAIT_FOR_IO_SERIES").ok().as_deref(),
+        mode == "replay",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     println!(
         "capture-agent: mode={mode} interface={interface_name}{}",
         replay_source
@@ -2694,6 +2702,17 @@ async fn main() -> std::io::Result<()> {
     let current_link_type = Arc::new(Mutex::new(link_type));
 
     let (tx, _rx) = broadcast::channel::<String>(1024);
+
+    // JAM-18 IO graph (spec docs/superpowers/specs/2026-11-10-io-graph-design.md):
+    // one shared series set, replaced by compare-and-swap from the control
+    // task; the capture thread counts into closed 100 ms buckets and hands
+    // them to the 1 s emitter through a bounded channel. Off (no series) by
+    // default, costing one atomic load per frame.
+    let io_shared = Arc::new(capture_agent::io_series::IoSeriesShared::with_random_epoch());
+    let io_loss = Arc::new(capture_agent::io_series::IoLossShared::default());
+    let (io_piece_tx, io_piece_rx) = std::sync::mpsc::sync_channel::<capture_agent::io_series::Piece>(
+        capture_agent::io_series::PIECE_CHANNEL_CAPACITY,
+    );
 
     // Capture-to-file (epic #55, JAM-132/JAM-5/GitHub #70/#72) shared
     // state: never on by default. `writer_active` is the hot capture
@@ -2862,6 +2881,8 @@ async fn main() -> std::io::Result<()> {
         let writer_active = writer_active.clone();
         let writer_backpressure_drops = writer_backpressure_drops.clone();
         let service_time_stats = service_time_stats.clone();
+        let io_shared = io_shared.clone();
+        let io_loss = io_loss.clone();
         std::thread::spawn(move || {
             let mut packet_source = packet_source;
             // Mutable locals, not Arc<Mutex<_>>: only this thread ever
@@ -2921,6 +2942,24 @@ async fn main() -> std::io::Result<()> {
             let replay_speed = replay_speed();
             let mut previous_frame_timestamp: Option<std::time::SystemTime> = None;
             let mut replay_clock = ReplayClock::default();
+            // JAM-18: the IO-graph accumulator exists only while the shared
+            // set has something to count. Replay blocks on a full piece
+            // channel (backpressure, nothing lost); live reports `backlog`.
+            let io_replaying = mode == "replay";
+            let mut io_acc: Option<capture_agent::io_series::Accumulator> = None;
+            let mut io_generation = u64::MAX;
+            let mut io_send = |piece: capture_agent::io_series::Piece| {
+                if io_replaying {
+                    let _ = io_piece_tx.send(piece);
+                } else if let Err(std::sync::mpsc::TrySendError::Full(piece)) = io_piece_tx.try_send(piece) {
+                    io_loss.record_backlog(&piece);
+                }
+            };
+            if io_replaying && replay_wait_for_io_series {
+                println!("capture-agent: replay waiting for an IO-graph series set (REPLAY_WAIT_FOR_IO_SERIES=1)");
+                io_shared.wait_for_first_countable_set();
+                println!("capture-agent: IO-graph series set received; starting replay");
+            }
             loop {
                 // Non-blocking: applies at most whatever has queued up since
                 // the last iteration. `next_frame()`'s 1s live-mode timeout
@@ -2932,6 +2971,7 @@ async fn main() -> std::io::Result<()> {
                     match (&mut packet_source, device_for_reopen.as_mut()) {
                         (PacketSource::Live(cap), Some(device_for_reopen)) => match request {
                             CaptureConfigRequest::SwitchInterface(name) => {
+                                let io_switch_from_ms = system_time_us(std::time::SystemTime::now()) / 1000;
                                 apply_interface_switch_request(
                                     &name,
                                     cap,
@@ -2946,6 +2986,10 @@ async fn main() -> std::io::Result<()> {
                                     &mut transactions,
                                     &tx,
                                 );
+                                if let Some(acc) = io_acc.as_mut() {
+                                    let to_ms = system_time_us(std::time::SystemTime::now()) / 1000;
+                                    acc.mark_not_observed(io_switch_from_ms, to_ms, "interface_switch");
+                                }
                             }
                             other => {
                                 apply_capture_config_request(
@@ -3277,6 +3321,32 @@ async fn main() -> std::io::Result<()> {
                             &tx,
                         );
 
+                        // JAM-18 IO graph: count this frame for every series
+                        // here, before the packet-event limiter, so counts are
+                        // complete rather than sampled. The field tree is the
+                        // browser's (build_packet_json's) and is only built
+                        // while a series set is active.
+                        capture_agent::io_series::sync_accumulator(&io_shared, &mut io_acc, &mut io_generation, &mut io_send);
+                        if let Some(acc) = io_acc.as_mut() {
+                            acc.observe_with(system_time_us(timestamp), original_len, parsed.total_len as u32, || {
+                                let mut tree = fields::build_packet_fields(
+                                    &parsed,
+                                    &l7_info,
+                                    link_type,
+                                    sniff_outcome.status.is_some(),
+                                );
+                                tree.extend(fields::transaction_fields(&txn_event));
+                                tree
+                            });
+                            // Closing clock: the newest frame time seen, in
+                            // replay and live alike (live idle time is
+                            // advanced on read timeouts, below).
+                            let clock_ms = acc.high_water_ms();
+                            if let Some(piece) = acc.advance(clock_ms) {
+                                io_send(piece);
+                            }
+                        }
+
                         if !packet_event_limiter.allow(now_ms) {
                             continue; // stats already recorded; just skip the discrete event
                         }
@@ -3341,6 +3411,12 @@ async fn main() -> std::io::Result<()> {
                             // Live idle expiry uses wall time, the same
                             // timeline as live packet timestamps.
                             let now_us = system_time_us(std::time::SystemTime::now());
+                            // JAM-18: a quiet link still closes its buckets
+                            // and keeps publishing covered zero-traffic time.
+                            capture_agent::io_series::sync_accumulator(&io_shared, &mut io_acc, &mut io_generation, &mut io_send);
+                            if let Some(piece) = io_acc.as_mut().and_then(|acc| acc.advance(now_us / 1000)) {
+                                io_send(piece);
+                            }
                             emit_unanswered_findings(
                                 transactions.expire(now_us),
                                 now_ms,
@@ -3354,6 +3430,15 @@ async fn main() -> std::io::Result<()> {
                     }
                     SourceFrame::ReplayError(error) => {
                         eprintln!("capture-agent: replay failed: {error}");
+                        // JAM-18: report everything counted so far, then mark
+                        // the rest of the file as not observed.
+                        if let Some(acc) = io_acc.as_mut() {
+                            let at = acc.high_water_ms();
+                            acc.mark_not_observed(at, at, "replay_error");
+                            if let Some(piece) = acc.finalize() {
+                                io_send(piece);
+                            }
+                        }
                         break;
                     }
                     SourceFrame::Eof => {
@@ -3363,6 +3448,12 @@ async fn main() -> std::io::Result<()> {
                         // the rest of the agent (relay, control channel,
                         // periodic emitter) keeps running on whatever state
                         // it already has.
+                        // JAM-18: close every open IO-graph bucket so the
+                        // tail of a replay (or a capture shorter than the
+                        // grace period) is never lost.
+                        if let Some(piece) = io_acc.as_mut().and_then(|acc| acc.finalize()) {
+                            io_send(piece);
+                        }
                         println!(
                             "capture-agent: {} finished — no more frames",
                             if mode == "replay" {
@@ -3405,7 +3496,14 @@ async fn main() -> std::io::Result<()> {
         let writer_autostop_reason = writer_autostop_reason.clone();
         let writer_backpressure_drops = writer_backpressure_drops.clone();
         let paused = paused.clone();
+        let io_shared = io_shared.clone();
+        let io_loss = io_loss.clone();
         tokio::spawn(async move {
+            let io_piece_rx = io_piece_rx;
+            // JAM-18: pieces left over from a tick that hit the line cap,
+            // and the loss counters already reported.
+            let mut io_carry: Vec<capture_agent::io_series::Piece> = Vec::new();
+            let mut io_reported = (0u64, 0u64, 0u64);
             let mut interval = tokio::time::interval(Duration::from_secs(1));
             // Previous tick's cumulative counter readings, so each tick can
             // report this-tick-only deltas (see build_system_stats_json's
@@ -3729,7 +3827,7 @@ async fn main() -> std::io::Result<()> {
                 let stat = *capture_stats.lock().unwrap();
                 let lagged = relay_lagged_events.load(Ordering::Relaxed);
                 let unparseable = unparseable_frames.load(Ordering::Relaxed);
-                let stats_json = build_capture_stats_json(
+                let mut stats_json = build_capture_stats_json(
                     stat,
                     lagged,
                     unparseable,
@@ -3738,9 +3836,38 @@ async fn main() -> std::io::Result<()> {
                     idle_evictions,
                     observed_name_evictions,
                 );
+                stats_json.replay_waiting = io_shared.replay_waiting();
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats {
                     stats: stats_json,
                 }));
+
+                // JAM-18: closed IO-graph buckets since the last tick, as
+                // bounded io_buckets lines. Loss deltas ride on the first
+                // line; they are only consumed when a line is sent, so no
+                // loss is ever reported against nothing.
+                let mut io_pieces = std::mem::take(&mut io_carry);
+                while io_pieces.len() < capture_agent::io_series::PIECE_CHANNEL_CAPACITY {
+                    match io_piece_rx.try_recv() {
+                        Ok(piece) => io_pieces.push(piece),
+                        Err(_) => break,
+                    }
+                }
+                if !io_pieces.is_empty() {
+                    let (kernel, iface) = stat.map(|s| (u64::from(s.dropped), u64::from(s.if_dropped))).unwrap_or((0, 0));
+                    let loss = wire::IoLossJson {
+                        kernel_dropped: kernel.saturating_sub(io_reported.0),
+                        if_dropped: iface.saturating_sub(io_reported.1),
+                        unparseable: unparseable.saturating_sub(io_reported.2),
+                        evaluation_skipped: io_loss.evaluation_skipped.swap(0, Ordering::Relaxed),
+                    };
+                    io_reported = (kernel, iface, unparseable);
+                    let (lines, rest) =
+                        capture_agent::io_series::build_lines(io_shared.epoch(), io_pieces, loss, io_loss.take_backlog());
+                    io_carry = rest;
+                    for line in lines {
+                        let _ = tx.send(line);
+                    }
+                }
 
                 // System/throughput stats (issue #64) — reuses `stat.received`
                 // above as this event's total_packets_captured rather than a
@@ -3870,6 +3997,7 @@ async fn main() -> std::io::Result<()> {
         let current_interface = current_interface.clone();
         let current_link_type = current_link_type.clone();
         let hostname = hostname.clone();
+        let io_shared = io_shared.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half);
@@ -3888,6 +4016,14 @@ async fn main() -> std::io::Result<()> {
             }
             drop(pending);
             let mut rx = trace_tx.subscribe();
+            // JAM-18: tell this (re)connected relay the current IO-graph
+            // series set directly, rather than broadcasting it to everyone.
+            let bootstrap = wire::encode_event(&wire::AgentEvent::IoSeriesStatus {
+                status: Box::new(io_shared.status()),
+            });
+            if write_half.write_all(bootstrap.as_bytes()).await.is_err() {
+                return;
+            }
             let mut reader = reader.lines();
 
             loop {
@@ -3954,6 +4090,15 @@ async fn main() -> std::io::Result<()> {
                                         // than touch `cap` from this async
                                         // task (see CaptureConfigRequest).
                                         let _ = capture_config_tx.send(CaptureConfigRequest::SetFilter(filter));
+                                    }
+                                    Some(wire::ControlMessage::SetIoSeries { base_epoch, base_revision, request_id, series }) => {
+                                        // JAM-18: validated, compiled and
+                                        // compare-and-swapped under one lock;
+                                        // every relay sees the outcome.
+                                        let status = io_shared.apply(&base_epoch, base_revision, &request_id, &series);
+                                        let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::IoSeriesStatus {
+                                            status: Box::new(status),
+                                        }));
                                     }
                                     Some(wire::ControlMessage::SetSnaplen { bytes }) => {
                                         let _ = capture_config_tx.send(CaptureConfigRequest::SetSnaplen(bytes));
