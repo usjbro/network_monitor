@@ -6,7 +6,9 @@
 //! Properties under test: no panic anywhere (including unbounded recursion,
 //! which would abort on stack overflow); a successful compile implies the
 //! source is within the 2048 UTF-16-unit limit; evaluation always terminates;
-//! and the series wrapper never accepts something plain `compile` rejects.
+//! and the series wrapper never accepts something plain `compile` rejects,
+//! except an empty or whitespace-only source, which means "every frame"
+//! for a series.
 use capture_agent::display_filter::{compile, compile_for_series, MAX_SOURCE_LENGTH};
 use capture_agent::fields::{ByteRegion, Field, FieldType, FieldValue};
 use libfuzzer_sys::fuzz_target;
@@ -34,7 +36,10 @@ fuzz_target!(|data: &[u8]| {
             let _ = compiled.matches(&[], 0);
         }
         Err(error) => {
-            assert!(compile_for_series(source).is_err(), "series wrapper accepted a rejected filter");
+            if let Ok(all) = compile_for_series(source) {
+                assert!(source.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}').is_empty(), "series wrapper accepted a rejected filter");
+                assert!(all.matches(&fields, 0), "an empty series filter must match every frame");
+            }
             assert!(!error.message.is_empty());
         }
     }

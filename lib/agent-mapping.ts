@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, IoBucket, IoBuckets, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -163,6 +163,8 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     // Absent stays undefined (unknown); it is never defaulted to 0, which
     // would claim "no evictions".
     observedNameEvictions: typeof w.observedNameEvictions === 'number' ? w.observedNameEvictions : undefined,
+    // JAM-18: omitted by the agent when false.
+    replayWaiting: w.replayWaiting === true ? true : undefined,
   };
 }
 
@@ -418,4 +420,102 @@ export function isAgentAuthenticatedMessage(value: unknown): value is import('./
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     && Object.keys(value).length === 1 && Object.prototype.hasOwnProperty.call(value, 'type')
     && (value as Record<string, unknown>).type === 'authenticated';
+}
+
+// IO graph (JAM-18). Both events are flat (fields at the top level, beside
+// `type`), unlike the nested-envelope events above. Anything malformed
+// throws, as the other mappers do; an unknown notObserved reason maps to
+// 'unknown' rather than throwing, so a newer agent's reason is shown, not
+// dropped (docs/security-plan-review-checklist.md §6).
+function requireNumber(obj: Record<string, unknown>, key: string): number {
+  const value = requireField<unknown>(obj, key);
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`agent event field "${key}" is not a number`);
+  }
+  return value;
+}
+
+function requireString(obj: Record<string, unknown>, key: string): string {
+  const value = requireField<unknown>(obj, key);
+  if (typeof value !== 'string') throw new Error(`agent event field "${key}" is not a string`);
+  return value;
+}
+
+function requireArray(obj: Record<string, unknown>, key: string): unknown[] {
+  const value = requireField<unknown>(obj, key);
+  if (!Array.isArray(value)) throw new Error(`agent event field "${key}" is not an array`);
+  return value;
+}
+
+export function mapIoSeriesStatusEvent(json: unknown): IoSeriesStatus {
+  const w = json as Record<string, unknown>;
+  const series = requireArray(w, 'series').map((raw) => {
+    const e = raw as Record<string, unknown>;
+    const entry: IoSeriesStatus['series'][number] = {
+      id: requireString(e, 'id'),
+      filter: requireString(e, 'filter'),
+      ok: requireField<boolean>(e, 'ok') === true,
+    };
+    if (e.error !== undefined) {
+      const err = e.error as Record<string, unknown>;
+      entry.error = { message: requireString(err, 'message'), token: requireString(err, 'token'), position: requireNumber(err, 'position') };
+    }
+    return entry;
+  });
+  return {
+    revision: requireNumber(w, 'revision'),
+    epoch: requireString(w, 'epoch'),
+    replayWaiting: w.replayWaiting === true,
+    requestId: typeof w.requestId === 'string' ? w.requestId : undefined,
+    rejected: typeof w.rejected === 'string' ? w.rejected : undefined,
+    series,
+  };
+}
+
+const IO_NOT_OBSERVED_REASONS: ReadonlySet<string> = new Set(['interface_switch', 'replay_error', 'backlog']);
+
+function mapIoBucketList(value: unknown[], key: string): IoBucket[] {
+  return value.map((b) => {
+    if (!Array.isArray(b) || b.length !== 3 || !b.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+      throw new Error(`malformed io_buckets "${key}" entry`);
+    }
+    return [b[0], b[1], b[2]] as IoBucket;
+  });
+}
+
+export function mapIoBucketsEvent(json: unknown): IoBuckets {
+  const w = json as Record<string, unknown>;
+  const loss = requireField<Record<string, unknown>>(w, 'loss');
+  const notObserved: IoNotObserved[] = requireArray(w, 'notObserved').map((raw) => {
+    const n = raw as Record<string, unknown>;
+    const reason = requireString(n, 'reason');
+    return {
+      fromMs: requireNumber(n, 'fromMs'),
+      toMs: requireNumber(n, 'toMs'),
+      reason: (IO_NOT_OBSERVED_REASONS.has(reason) ? reason : 'unknown') as IoNotObservedReason,
+    };
+  });
+  return {
+    revision: requireNumber(w, 'revision'),
+    epoch: requireString(w, 'epoch'),
+    bucketMs: requireNumber(w, 'bucketMs'),
+    coveredFromMs: requireNumber(w, 'coveredFromMs'),
+    coveredToMs: requireNumber(w, 'coveredToMs'),
+    notObserved,
+    loss: {
+      kernelDropped: requireNumber(loss, 'kernelDropped'),
+      ifDropped: requireNumber(loss, 'ifDropped'),
+      unparseable: requireNumber(loss, 'unparseable'),
+      evaluationSkipped: requireNumber(loss, 'evaluationSkipped'),
+    },
+    series: requireArray(w, 'series').map((raw) => {
+      const s = raw as Record<string, unknown>;
+      return {
+        id: requireString(s, 'id'),
+        late: requireNumber(s, 'late'),
+        lateBuckets: mapIoBucketList(requireArray(s, 'lateBuckets'), 'lateBuckets'),
+        buckets: mapIoBucketList(requireArray(s, 'buckets'), 'buckets'),
+      };
+    }),
+  };
 }
