@@ -478,6 +478,38 @@ pub fn sync_accumulator(
     }
 }
 
+/// Kernel and interface drop totals across pcap handle replacements. A
+/// replaced handle (interface switch, snap length reopen) restarts its own
+/// counters at zero, so a delta against the old handle's baseline would
+/// silently swallow the new handle's first drops. This keeps process-wide
+/// cumulative totals instead.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DropTotals {
+    base: (u64, u64),
+    last: (u64, u64),
+}
+
+impl DropTotals {
+    /// Records a stats poll of the current handle; returns the process-wide
+    /// `(kernel, interface)` totals.
+    pub fn poll(&mut self, dropped: u32, if_dropped: u32) -> (u64, u64) {
+        self.last = (u64::from(dropped), u64::from(if_dropped));
+        self.totals()
+    }
+
+    /// The current handle was replaced: fold its last polled counts into
+    /// the base. Drops on the old handle after its last poll are not
+    /// observable and are not reported.
+    pub fn handle_replaced(&mut self) {
+        self.base = (self.base.0 + self.last.0, self.base.1 + self.last.1);
+        self.last = (0, 0);
+    }
+
+    pub fn totals(&self) -> (u64, u64) {
+        (self.base.0 + self.last.0, self.base.1 + self.last.1)
+    }
+}
+
 /// Loss counters and backlog spans shared between the capture thread and
 /// the emitter.
 #[derive(Default)]
@@ -951,6 +983,20 @@ mod tests {
         let loss = IoLossShared::default();
         loss.record_backlog(&p);
         assert_eq!(loss.evaluation_skipped.load(Ordering::Relaxed), 101);
+    }
+
+    #[test]
+    fn drop_totals_survive_handle_replacement() {
+        let mut d = DropTotals::default();
+        assert_eq!(d.poll(100, 2), (100, 2));
+        d.handle_replaced();
+        assert_eq!(d.totals(), (100, 2), "no drop lost or invented at the switch");
+        // The new handle starts from zero; its first 3 drops are reported.
+        assert_eq!(d.poll(3, 0), (103, 2));
+        assert_eq!(d.poll(10, 1), (110, 3));
+        d.handle_replaced();
+        d.handle_replaced(); // replaced again before any poll: nothing doubles
+        assert_eq!(d.poll(0, 0), (110, 3));
     }
 
     #[test]

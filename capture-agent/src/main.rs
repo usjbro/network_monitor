@@ -2166,20 +2166,22 @@ fn validate_snaplen(bytes: u32) -> Result<i32, String> {
 /// left exactly as they were — the previous capture configuration keeps
 /// running uninterrupted — per issue #68's acceptance criteria that a
 /// rejected change must never leave the agent in a half-applied state.
+/// Returns true when the live pcap handle was replaced (a successful snap
+/// length reopen), which restarts its drop counters (JAM-18 IO graph loss).
 fn apply_capture_config_request(
     request: CaptureConfigRequest,
     cap: &mut pcap::Capture<pcap::Active>,
     device: &pcap::Device,
     state: &Mutex<wire::CaptureConfigJson>,
     tx: &broadcast::Sender<String>,
-) {
+) -> bool {
     match request {
         CaptureConfigRequest::SetFilter(filter) => {
             if let Err(message) = validate_capture_filter_len(&filter) {
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
                     message,
                 }));
-                return;
+                return false;
             }
             match cap.filter(&filter, true) {
                 Ok(()) => {
@@ -2201,6 +2203,7 @@ fn apply_capture_config_request(
                     }));
                 }
             }
+            false
         }
         CaptureConfigRequest::SetSnaplen(bytes) => {
             let snaplen = match validate_snaplen(bytes) {
@@ -2209,7 +2212,7 @@ fn apply_capture_config_request(
                     let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
                         message,
                     }));
-                    return;
+                    return false;
                 }
             };
             let reopened = pcap::Capture::from_device(device.clone()).and_then(|c| {
@@ -2225,7 +2228,7 @@ fn apply_capture_config_request(
                     let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfigError {
                         message: format!("failed to apply snap length {bytes}: {e}"),
                     }));
-                    return;
+                    return false;
                 }
             };
             let existing_filter = state.lock().unwrap().filter.clone();
@@ -2246,7 +2249,7 @@ fn apply_capture_config_request(
                             "snap length {bytes} rejected: the active capture filter could not be reapplied after reopening ({e}) — keeping the previous configuration"
                         ),
                     }));
-                    return;
+                    return false;
                 }
             }
             *cap = new_cap;
@@ -2260,6 +2263,7 @@ fn apply_capture_config_request(
             let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureConfig {
                 config: snapshot,
             }));
+            true
         }
         CaptureConfigRequest::SwitchInterface(_) => {
             unreachable!(
@@ -2322,12 +2326,12 @@ fn apply_interface_switch_request(
     reassembly: &mut StreamReassembler,
     transactions: &mut TransactionTracker,
     tx: &broadcast::Sender<String>,
-) {
+) -> bool {
     if let Err(message) = validate_interface_name_len(name) {
         let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
             message,
         }));
-        return;
+        return false;
     }
     let devices = match pcap::Device::list() {
         Ok(d) => d,
@@ -2335,14 +2339,14 @@ fn apply_interface_switch_request(
             let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
                 message: format!("failed to list capture devices: {e}"),
             }));
-            return;
+            return false;
         }
     };
     let Some(device) = find_device_by_name(&devices, name) else {
         let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
             message: format!("no such interface: {name}"),
         }));
-        return;
+        return false;
     };
     if !is_capturable(device) {
         let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
@@ -2351,7 +2355,7 @@ fn apply_interface_switch_request(
                  local/remote and nothing would be recorded"
             ),
         }));
-        return;
+        return false;
     }
 
     let reopened = pcap::Capture::from_device(device.clone()).and_then(|c| {
@@ -2367,7 +2371,7 @@ fn apply_interface_switch_request(
             let _ = tx.send(wire::encode_event(&wire::AgentEvent::InterfaceError {
                 message: format!("failed to open {name}: {e}"),
             }));
-            return;
+            return false;
         }
     };
     let Some(new_link_type) = datalink_to_link_type(new_cap.get_datalink()) else {
@@ -2380,7 +2384,7 @@ fn apply_interface_switch_request(
                 "{name} uses link type {dl_name}, which this agent doesn't know how to parse"
             ),
         }));
-        return; // new_cap drops here, closing it — *cap is never touched
+        return false; // new_cap drops here, closing it — *cap is never touched
     };
 
     let new_local_addrs = local_addrs_for(device);
@@ -2433,6 +2437,7 @@ fn apply_interface_switch_request(
             ip_address: new_ip_address,
         },
     }));
+    true
 }
 
 /// Builds the `capture_stats` wire event from the latest kernel-side
@@ -2710,6 +2715,11 @@ async fn main() -> std::io::Result<()> {
     // default, costing one atomic load per frame.
     let io_shared = Arc::new(capture_agent::io_series::IoSeriesShared::with_random_epoch());
     let io_loss = Arc::new(capture_agent::io_series::IoLossShared::default());
+    // Kernel/interface drop totals for the whole process, across pcap handle
+    // replacements (interface switch, snap length reopen), each of which
+    // restarts the handle's own counters. io_buckets loss deltas use these.
+    let io_kernel_drops_total = Arc::new(AtomicU64::new(0));
+    let io_if_drops_total = Arc::new(AtomicU64::new(0));
     let (io_piece_tx, io_piece_rx) = std::sync::mpsc::sync_channel::<capture_agent::io_series::Piece>(
         capture_agent::io_series::PIECE_CHANNEL_CAPACITY,
     );
@@ -2883,6 +2893,8 @@ async fn main() -> std::io::Result<()> {
         let service_time_stats = service_time_stats.clone();
         let io_shared = io_shared.clone();
         let io_loss = io_loss.clone();
+        let io_kernel_drops_total = io_kernel_drops_total.clone();
+        let io_if_drops_total = io_if_drops_total.clone();
         std::thread::spawn(move || {
             let mut packet_source = packet_source;
             // Mutable locals, not Arc<Mutex<_>>: only this thread ever
@@ -2947,6 +2959,8 @@ async fn main() -> std::io::Result<()> {
             // channel (backpressure, nothing lost); live reports `backlog`.
             let io_replaying = mode == "replay";
             let mut io_acc: Option<capture_agent::io_series::Accumulator> = None;
+            // JAM-18 loss deltas: drop totals across handle replacements.
+            let mut io_drops = capture_agent::io_series::DropTotals::default();
             let mut io_generation = u64::MAX;
             let mut io_send = |piece: capture_agent::io_series::Piece| {
                 if io_replaying {
@@ -2972,7 +2986,7 @@ async fn main() -> std::io::Result<()> {
                         (PacketSource::Live(cap), Some(device_for_reopen)) => match request {
                             CaptureConfigRequest::SwitchInterface(name) => {
                                 let io_switch_from_ms = system_time_us(std::time::SystemTime::now()) / 1000;
-                                apply_interface_switch_request(
+                                let replaced = apply_interface_switch_request(
                                     &name,
                                     cap,
                                     device_for_reopen,
@@ -2986,19 +3000,25 @@ async fn main() -> std::io::Result<()> {
                                     &mut transactions,
                                     &tx,
                                 );
-                                if let Some(acc) = io_acc.as_mut() {
-                                    let to_ms = system_time_us(std::time::SystemTime::now()) / 1000;
-                                    acc.mark_not_observed(io_switch_from_ms, to_ms, "interface_switch");
+                                if replaced {
+                                    io_drops.handle_replaced();
+                                    if let Some(acc) = io_acc.as_mut() {
+                                        let to_ms = system_time_us(std::time::SystemTime::now()) / 1000;
+                                        acc.mark_not_observed(io_switch_from_ms, to_ms, "interface_switch");
+                                    }
                                 }
                             }
                             other => {
-                                apply_capture_config_request(
+                                let replaced = apply_capture_config_request(
                                     other,
                                     cap,
                                     device_for_reopen,
                                     &capture_config_state,
                                     &tx,
                                 );
+                                if replaced {
+                                    io_drops.handle_replaced();
+                                }
                             }
                         },
                         // Replay mode: these control messages have no live
@@ -3031,6 +3051,9 @@ async fn main() -> std::io::Result<()> {
                         match cap.stats() {
                             Ok(stat) => {
                                 *capture_stats.lock().unwrap() = Some(stat);
+                                let (kernel, iface) = io_drops.poll(stat.dropped, stat.if_dropped);
+                                io_kernel_drops_total.store(kernel, Ordering::Relaxed);
+                                io_if_drops_total.store(iface, Ordering::Relaxed);
                                 if writer_active.load(Ordering::Relaxed) {
                                     let _ = writer_tx.try_send(WriterCommand::Stats {
                                         received: stat.received,
@@ -3498,6 +3521,8 @@ async fn main() -> std::io::Result<()> {
         let paused = paused.clone();
         let io_shared = io_shared.clone();
         let io_loss = io_loss.clone();
+        let io_kernel_drops_total = io_kernel_drops_total.clone();
+        let io_if_drops_total = io_if_drops_total.clone();
         tokio::spawn(async move {
             let io_piece_rx = io_piece_rx;
             // JAM-18: pieces left over from a tick that hit the line cap,
@@ -3853,7 +3878,10 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
                 if !io_pieces.is_empty() {
-                    let (kernel, iface) = stat.map(|s| (u64::from(s.dropped), u64::from(s.if_dropped))).unwrap_or((0, 0));
+                    // Process-wide totals, not the current handle's own
+                    // counters, which restart on every handle replacement.
+                    let kernel = io_kernel_drops_total.load(Ordering::Relaxed);
+                    let iface = io_if_drops_total.load(Ordering::Relaxed);
                     let loss = wire::IoLossJson {
                         kernel_dropped: kernel.saturating_sub(io_reported.0),
                         if_dropped: iface.saturating_sub(io_reported.1),
