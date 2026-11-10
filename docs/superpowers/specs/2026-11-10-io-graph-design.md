@@ -89,11 +89,13 @@ Counts are aggregate metadata of the same sensitivity as `system_stats`: they re
 ```json
 { "type": "io_series_status", "version": 7, "epoch": "4be1a07c",
   "series": [
-    { "id": "all", "ok": true },
-    { "id": "dns", "ok": true },
-    { "id": "big", "ok": false, "error": { "message": "Unknown keyword", "token": "tcpp", "position": 18 } }
+    { "id": "all", "filter": "", "ok": true },
+    { "id": "dns", "filter": "dns", "ok": true },
+    { "id": "big", "filter": "frame.len > 1000 and tcpp", "ok": false, "error": { "message": "Unknown keyword", "token": "tcpp", "position": 18 } }
   ] }
 ```
+
+**Every entry carries its authoritative `filter` source, including failed entries.** Ids are arbitrary labels, so without the source another tab could not rebuild the shared series editor, could not resend the other series unchanged in a replace-all update, and could not apply the series filter during click-through (D7). The browser always builds a `set_io_series` from the latest `io_series_status`, never from its own earlier copy. The status line is bounded by construction: at most 8 × 2048 characters of filter source, which fits within the 64 KiB line ceiling below.
 
 A series that fails to compile is kept in the set, so the user can see and fix it, but it is never counted. A rejected message as a whole (too many series, a bad id) returns `io_series_status` with `"rejected": "<reason>"` and leaves the previous set in force.
 
@@ -141,6 +143,7 @@ Browser memory at the defaults: about 14 000 buckets per series × (2 × 8-byte 
 
 - **Bucket key** = `floor(frame_timestamp_us / 100 000)`, from the frame's own timestamp: pcap header time live, recorded time in replay. This is the same clock as the packet event's `timestamp` (`main.rs:3012`), which is what makes click-through (D7) line up. It is not `relativeTimeMs`, which is agent wall-elapsed time (`main.rs:3300`) and is wrong for replay.
 - **Closing rule** (checklist §5, replay-aware clock): a bucket closes once the closing clock has passed its end by the 500 ms grace. The clock is chosen per mode, the same way `reassembly_now_ms` (`main.rs:1730-1741`) chooses the clock for reassembly and flow aging (`main.rs:3027-3034`). In replay it is the newest recorded frame timestamp seen. Live, it is the agent's wall-clock epoch time, checked on every frame and on the 1 s tick so a quiet link still closes buckets. Note that `flow_now_ms` itself cannot be reused directly: live, it is agent-relative (`start.elapsed()`), while bucket keys are epoch time. Because the replay clock is recorded time, replay at any speed produces identical buckets. A test replays the same fixture at `realtime` and `fast` and asserts identical `io_buckets` content.
+- **End of source: finalize explicitly.** At replay EOF, or on `ReplayError` or a live device ending (`SourceFrame::Eof`/`ReplayError`, `main.rs:3355-3374`), the capture thread currently just `break`s, while the periodic emitter keeps running. Nothing would ever advance the recorded-time closing clock past the last frame, so the tail buckets within the grace window would never close. A capture shorter than 500 ms would emit no counts at all. So before the thread exits, it closes every open bucket, hands them to the emitter, and marks the covered range as ending at the end of the last frame's bucket. On `ReplayError` it adds a `notObserved` range with reason `replay_error` from there on. After finalization, `io_buckets` keeps the epoch but reports no further covered time. Tests: a replay shorter than the grace window yields all of its frames; a long replay's final bucket equals the hand count; a truncated file reports `replay_error`.
 - **Late frames.** A frame whose bucket has already closed, because of an out-of-order file, a clock step backwards, or a frame older than the grace, is counted in that series' `late` for the current message. It is not placed. The chart marks the message's span "N late frames not shown". A late count is never added to a bucket that was already sent, because the browser may have already rolled it into a coarser interval.
 - **Forward jumps** (a clock step forward, or a gap in a recorded file) produce empty covered time. Sparse encoding keeps this free on the wire.
 - **Pause.** While paused, the capture loop does not read (`main.rs:2979-2982`), so the paused span is `notObserved` with reason `paused`, never zeros.
@@ -180,6 +183,8 @@ The issue's implementation note cites a `CLAUDE.md` rule ("no CSS-in-JS, no stat
 ### D9. Relationship to recorded data and JAM-255
 
 - **Today, without JAM-255:** `REPLAY_FILE=x.pcapng REPLAY_SPEED=fast` already gives a graph over a whole file's duration, with complete counts, through exactly the path above (D4 backpressure, D5 recorded-time buckets). That is the issue's "a graph over a file can cover its whole duration", delivered with no new service. Replay is startup-only and has no seek (`docs/architecture.md:121-122`). That limit is inherited, not solved.
+- **Replay start barrier — needed for the whole-file promise.** Today the replay reader starts the moment the agent starts and ends at EOF. A fast replay of an ordinary capture can therefore finish before any browser has opened the chart or sent `set_io_series`. With no series configured, nothing is counted (D1), and browser-held history (decision 3) cannot backfill. Proposal: a new startup option `REPLAY_WAIT_FOR_IO_SERIES=1`, valid only with `REPLAY_FILE` and off by default, so existing replay behaviour is unchanged. With it set, the replay reader waits before reading the first frame until the first valid, non-empty `set_io_series` arrives. Because that message reaches the agent through a browser's `/api/control` call, a subscribed tab exists by then and receives every `io_buckets` from the first bucket. While waiting, the agent says so: `capture_stats` and `io_series_status` report `replayWaiting: true`, and the chart shows "replay is waiting for series: add one to start". A test checks that with the option set, a short fixture's "all" series equals its frame count even though `set_io_series` is sent after agent startup. Without the option, the documented limit stands: a replay that finished before series were set has no IO graph. This is a startup-configuration change, so it is listed as decision 6.
+- **Reloading mid-replay** loses the browser's history under decision 3 (B), as it does live. The chart labels the restart. Restarting the agent with the barrier option is the recovery path until agent-held history (decision 3 A) or JAM-255 exists.
 - **Later, with JAM-255:** the service would answer "bounded time buckets over a selected recorded source" (`2026-10-11-local-query-service-spike-result.md:142`). This spec's bucket contract (100 ms base, `[startMs, packets, bytes]`, explicit covered and not-observed ranges, loss counters) is the shape that service should return, so `lib/io-graph.ts` can ingest either source unchanged. That integration is not part of this issue.
 
 ### D10. Numeric-field aggregates (SUM/MIN/MAX/AVG) — later PR in the same plan
@@ -197,6 +202,7 @@ The field model this depends on (#76, epic JAM-126) is done. A series may name `
 3. **History location in the first version:** **(B, recommended)** browser-held rings fed by `io_buckets`, lost on reload and labelled as such; versus (A) agent-held rings plus a paged backfill route. (A) survives reloads but needs the request/response relay machinery that JAM-17's plan introduces and has not yet built. B can be upgraded to A later without changing the bucket contract.
 4. **Defaults in D4:** 8 series, 100 ms base bucket, 500 ms grace, browser retention 15 min / 1 h / 24 h. The series cap is provisional until the D1 benchmark.
 5. **Aggregates:** in this plan as a later PR (recommended), or split into a separate issue.
+6. **Replay start barrier (D9):** the opt-in `REPLAY_WAIT_FOR_IO_SERIES=1` startup option (recommended), versus documenting that a replay must still be running when series are set.
 
 ## Acceptance criteria → how each is met and tested
 
@@ -245,6 +251,7 @@ Each PR is separately reviewable, and the feature stays invisible to users until
 
 ## Revision log
 
+- 2026-11-10 — r2, Codex review on PR #302. Three changes: `io_series_status` now carries each series' filter source; D5 adds explicit finalization at end of source; D9 adds the opt-in replay start barrier (new decision 6).
 - 2026-11-10 — r1, first draft (Claude Code), from the 2026-10-11 spec-readiness review on JAM-18 and the JAM-255 proposal-impact comments.
 
 ## Next
