@@ -257,6 +257,11 @@ pub struct Piece {
     pub covered_from_ms: u64,
     pub covered_to_ms: u64,
     pub not_observed: Vec<IoNotObservedJson>,
+    /// Distinct frames whose results this piece carries (on-time frames in
+    /// its closed buckets plus late frames), matched or not. Unlike the
+    /// per-series counts, it does not depend on the configured filters, so it
+    /// is what a dropped piece reports as lost (`evaluationSkipped`).
+    pub frames: u64,
     /// Indexed like the set's series.
     pub series: Vec<SeriesPiece>,
 }
@@ -284,8 +289,10 @@ pub struct Accumulator {
     pub generation: u64,
     set: Arc<SeriesSet>,
     ids: Arc<Vec<String>>,
-    /// Open buckets: start -> per-series (packets, bytes).
-    open: BTreeMap<u64, Vec<(u64, u64)>>,
+    /// Open buckets: start -> (frames observed, per-series (packets, bytes)).
+    open: BTreeMap<u64, (u64, Vec<(u64, u64)>)>,
+    /// Late frames since the last piece, matched or not.
+    late_frames: u64,
     /// Everything before this boundary is closed and reported.
     covered_to_ms: Option<u64>,
     /// Newest frame timestamp seen; never moves backwards.
@@ -303,6 +310,7 @@ impl Accumulator {
             set,
             ids,
             open: BTreeMap::new(),
+            late_frames: 0,
             covered_to_ms: None,
             high_water_ms: 0,
             late: vec![BTreeMap::new(); n],
@@ -346,6 +354,7 @@ impl Accumulator {
         let covered = *self.covered_to_ms.get_or_insert(start);
         let bytes = u64::from(original_len);
         if start < covered {
+            self.late_frames += 1;
             for (i, matched) in matches.iter().enumerate() {
                 if *matched {
                     let e = self.late[i].entry(start).or_insert((0, 0));
@@ -355,11 +364,9 @@ impl Accumulator {
             }
             return;
         }
-        if !matches.iter().any(|m| *m) {
-            return;
-        }
         let n = self.set.series.len();
-        let counts = self.open.entry(start).or_insert_with(|| vec![(0, 0); n]);
+        let (frames, counts) = self.open.entry(start).or_insert_with(|| (0, vec![(0, 0); n]));
+        *frames += 1;
         for (i, matched) in matches.iter().enumerate() {
             if *matched {
                 counts[i].0 += 1;
@@ -411,7 +418,7 @@ impl Accumulator {
     }
 
     fn pending_only(&mut self, covered: u64) -> Option<Piece> {
-        if self.late.iter().all(BTreeMap::is_empty) && self.not_observed.is_empty() {
+        if self.late_frames == 0 && self.late.iter().all(BTreeMap::is_empty) && self.not_observed.is_empty() {
             return None;
         }
         Some(self.close_until(covered, covered))
@@ -421,7 +428,9 @@ impl Accumulator {
         let n = self.set.series.len();
         let mut series: Vec<SeriesPiece> = vec![SeriesPiece::default(); n];
         let still_open = self.open.split_off(&to);
-        for (start, counts) in std::mem::replace(&mut self.open, still_open) {
+        let mut frames = std::mem::take(&mut self.late_frames);
+        for (start, (bucket_frames, counts)) in std::mem::replace(&mut self.open, still_open) {
+            frames += bucket_frames;
             for (i, (packets, bytes)) in counts.into_iter().enumerate() {
                 if packets > 0 {
                     series[i].buckets.push([start, packets, bytes]);
@@ -438,6 +447,7 @@ impl Accumulator {
             covered_from_ms: from,
             covered_to_ms: to,
             not_observed: std::mem::take(&mut self.not_observed),
+            frames,
             series,
         }
     }
@@ -480,7 +490,7 @@ impl IoLossShared {
     /// A live piece could not be queued (the emitter is stalled): its frames
     /// were not delivered and its span is reported as `backlog`.
     pub fn record_backlog(&self, piece: &Piece) {
-        self.evaluation_skipped.fetch_add(piece.packets(), Ordering::Relaxed);
+        self.evaluation_skipped.fetch_add(piece.frames, Ordering::Relaxed);
         let mut spans = self.backlog.lock().unwrap();
         let full = spans.len() >= MAX_BACKLOG_SPANS;
         match spans.last_mut() {
@@ -917,6 +927,33 @@ mod tests {
     }
 
     #[test]
+    fn piece_frames_count_distinct_frames_independent_of_filters() {
+        // Eight overlapping all-traffic series and one that matches nothing:
+        // 100 frames are 100 frames, not 800 and not 0.
+        let mut overlapping = Accumulator::new(1, set_of(&["", "", "", "", "", "", "", ""]));
+        let mut none = Accumulator::new(1, set_of(&["x == 1"]));
+        for i in 0..100 {
+            overlapping.observe_matches(us(1_000 + i), 1, &[true; 8]);
+            none.observe_matches(us(1_000 + i), 1, &[false]);
+        }
+        overlapping.observe_matches(us(1_000), 1, &[true; 8]); // still on time
+        let p = overlapping.finalize().unwrap();
+        assert_eq!(p.frames, 101);
+        assert_eq!(p.packets(), 8 * 101);
+        assert_eq!(none.finalize().unwrap().frames, 100);
+        // Late frames count too, once each.
+        let mut late = Accumulator::new(1, set_of(&["", ""]));
+        late.observe_matches(us(5_000), 1, &[true, true]);
+        assert_eq!(late.advance(6_000).unwrap().frames, 1);
+        late.observe_matches(us(5_010), 1, &[true, true]);
+        assert_eq!(late.advance(6_000).unwrap().frames, 1);
+        // And the backlog counter uses them.
+        let loss = IoLossShared::default();
+        loss.record_backlog(&p);
+        assert_eq!(loss.evaluation_skipped.load(Ordering::Relaxed), 101);
+    }
+
+    #[test]
     fn finalize_never_moves_coverage_backwards() {
         let mut a = Accumulator::new(1, set_of(&[""]));
         a.observe_matches(us(1_000), 1, &[true]);
@@ -1047,6 +1084,7 @@ mod tests {
             covered_from_ms: from,
             covered_to_ms: to,
             not_observed: Vec::new(),
+            frames: 0,
             series: vec![SeriesPiece::default()],
         };
         let loss = IoLossJson { kernel_dropped: 3, if_dropped: 0, unparseable: 2, evaluation_skipped: 1 };
@@ -1076,6 +1114,7 @@ mod tests {
             covered_from_ms: 0,
             covered_to_ms: 0,
             not_observed: Vec::new(),
+            frames: 0,
             series: vec![SeriesPiece { buckets: Vec::new(), late_buckets: late }],
         };
         let (lines, _) = build_lines("4be1a07c", vec![piece], IoLossJson::default(), Vec::new());
@@ -1094,6 +1133,7 @@ mod tests {
                 covered_from_ms: i * 1_000,
                 covered_to_ms: i * 1_000 + 100,
                 not_observed: Vec::new(),
+                frames: 2,
                 series: vec![SeriesPiece { buckets: vec![[i * 1_000, 2, 20]], late_buckets: BTreeMap::new() }],
             };
             loss.record_backlog(&piece);
