@@ -70,7 +70,7 @@ Counts are aggregate metadata of the same sensitivity as `system_stats`: they re
 **Browser → agent (via `/api/control`):**
 
 ```json
-{ "type": "set_io_series", "version": 7,
+{ "type": "set_io_series", "baseRevision": 7, "requestId": "c41f09aa",
   "series": [
     { "id": "all",  "filter": "" },
     { "id": "dns",  "filter": "dns" },
@@ -79,8 +79,8 @@ Counts are aggregate metadata of the same sensitivity as `system_stats`: they re
 ```
 
 - Replace-all semantics. An empty `series` list turns the feature off and returns the hot path to zero cost. An empty `filter` means every parsed frame.
-- `app/api/control/route.ts` adds `set_io_series` to its allowlist (`route.ts:50-61`), after `rejectIfCrossSite` as today. It validates before forwarding: `version` a u32; at most `MAX_IO_SERIES` entries (D4); `id` matching `^[a-z0-9-]{1,32}$` and unique; `filter` a string of at most 2048 characters. (Note that the route's existing `set_capture_filter` bound is 1024. That is BPF, a different language, and stays unchanged.) The agent re-validates everything, since it does not trust the relay to have done so.
-- **One series set per agent, shared by every tab** (decision A). The agent has no notion of which tab sent a control message, and per-tab sets would need relay caller identity (JAM-196). Every tab renders the agent's current set from `io_series_status`. A tab that edits the set sends the full new list with `version` = last seen + 1. Last writer wins, and the UI says "series changed in another tab" when it receives a version it did not send.
+- `app/api/control/route.ts` adds `set_io_series` to its allowlist (`route.ts:50-61`), after `rejectIfCrossSite` as today. It validates before forwarding: `baseRevision` a u32; `requestId` matching `^[0-9a-f]{8,32}$`; at most `MAX_IO_SERIES` entries (D4); `id` matching `^[a-z0-9-]{1,32}$` and unique; `filter` a string of at most 2048 characters. (Note that the route's existing `set_capture_filter` bound is 1024. That is BPF, a different language, and stays unchanged.) The agent re-validates everything, since it does not trust the relay to have done so.
+- **One series set per agent, shared by every tab** (decision A). The agent has no notion of which tab sent a control message, and per-tab sets would need relay caller identity (JAM-196). Every tab renders the agent's current set from `io_series_status`. **Revisions are assigned by the agent, and edits are compare-and-swap.** A tab that edits the set sends the full new list, the `baseRevision` it edited from (the latest `revision` it has seen), and a fresh random `requestId`. The agent accepts the edit only if `baseRevision` equals its current revision. It then assigns `revision = current + 1`, which is strictly increasing within an epoch, so two different accepted sets can never share a revision. On a mismatch it refuses with `"rejected": "conflict"` and the unchanged current set. Either way, the `io_series_status` echoes the `requestId`. A tab therefore knows whether *its* edit was accepted, rebuilds its editor from the current set, and shows "series changed in another tab: review and resend" without silently overwriting the other edit. Test: two tabs both send `baseRevision: 7` with different lists. Exactly one is accepted as revision 8, the other gets `conflict`, and every subsequent `io_buckets` carries `revision: 8` with only the accepted series.
 
 **Agent → browser:**
 
@@ -89,7 +89,7 @@ Counts are aggregate metadata of the same sensitivity as `system_stats`: they re
 So the relay caches the latest `io_series_status` it has forwarded. That cache holds one message, bounded by the line ceiling below. It is cleared on agent disconnect and replaced on every new status. Each new SSE subscriber gets the cached copy immediately after its `connection_status` replay, before any live event. Test: with the relay already connected and a series set configured, open a second subscription and assert its first two events are `connection_status` then the cached `io_series_status`. After an agent disconnect, a new subscription receives no stale status.
 
 ```json
-{ "type": "io_series_status", "version": 7, "epoch": "4be1a07c",
+{ "type": "io_series_status", "revision": 8, "requestId": "c41f09aa", "epoch": "4be1a07c",
   "series": [
     { "id": "all", "filter": "", "ok": true },
     { "id": "dns", "filter": "dns", "ok": true },
@@ -104,7 +104,7 @@ A series that fails to compile is kept in the set, so the user can see and fix i
 `io_buckets`: sent from the 1 s emitter tick (`main.rs:3409`) with every 100 ms bucket that closed since the previous tick.
 
 ```json
-{ "type": "io_buckets", "version": 7, "epoch": "4be1a07c", "bucketMs": 100,
+{ "type": "io_buckets", "revision": 8, "epoch": "4be1a07c", "bucketMs": 100,
   "coveredFromMs": 1794120000000, "coveredToMs": 1794120001000,
   "notObserved": [ { "fromMs": 1794120000300, "toMs": 1794120000600, "reason": "paused" } ],
   "loss": { "kernelDropped": 0, "ifDropped": 0, "unparseable": 3, "evaluationSkipped": 0 },
@@ -164,8 +164,9 @@ Kernel stats arrive once per second and cannot be attributed to a 100 ms bucket.
 
 Clicking a bucket at any interval opens the Packets view constrained to `[t0, t1)` **and** that series' filter. The time range is a UI-level constraint next to the display filter, not new filter-grammar syntax, so the field model is unchanged. The header is computed, never assumed:
 
-> **12 of 4 180 packets** in 14:05:10.000–14:05:11.000 matching `dns` are available here. The other 4 168 were counted by the agent but not sent to the browser (rate-limited to 100 packet events/s) or have aged out of the 100-packet buffer. To inspect all of them, record a capture file (`capture start …`) and replay it.
+> **12 of 4 180 packets** in 14:05:10.000–14:05:11.000 matching `dns` are available here. The other 4 168 were counted by the agent but not sent to the browser (rate-limited to 100 packet events/s) or have aged out of the 100-packet buffer. To inspect all of them, record a capture file (`capture start …`) and open it in an external analyzer at this time range.
 
+- **Replaying through this app does not recover them.** Replayed frames pass the same `packet_event_limiter.allow` gate (`main.rs:3280-3282`), and fast replay (D9) suppresses almost every packet event. So the header never suggests replay as the remedy. Complete in-app drill-down is deferred to JAM-255; until then, the honest path is an external tool on the recorded file.
 - N is the bucket's exact count, or the sum over the selected coarser interval. k is the number of buffered packets with `timestamp ∈ [t0, t1)` that match the filter, evaluated in the browser with the TS evaluator over the same fields.
 - k can never exceed N, except that a buffered packet's `timestamp` is in milliseconds while bucket edges are exact multiples of 100 ms. Flooring µs to ms cannot move a frame across a 100 ms boundary, so k ≤ N holds. A test asserts it, and the UI clamps and flags any violation rather than display it.
 - If the interval was `notObserved` or late frames were reported in it, the header says that too.
@@ -200,7 +201,7 @@ The field model this depends on (#76, epic JAM-126) is done. A series may name `
 ## Decisions needed from James
 
 1. **D1 data source:** agent-side per-frame evaluation (B, recommended), with its wire change (D3). The alternative, deferring the feature until the JAM-255 service exists, means no live IO graph.
-2. **Series scope:** one shared series set per agent, last writer wins, visible across tabs (recommended), versus per-tab sets, which wait on JAM-196 relay caller identity.
+2. **Series scope:** one shared series set per agent with agent-assigned revisions and compare-and-swap edits (a conflicting edit is refused, never silently overwritten), visible across tabs (recommended), versus per-tab sets, which wait on JAM-196 relay caller identity.
 3. **History location in the first version:** **(B, recommended)** browser-held rings fed by `io_buckets`, lost on reload and labelled as such; versus (A) agent-held rings plus a paged backfill route. (A) survives reloads but needs the request/response relay machinery that JAM-17's plan introduces and has not yet built. B can be upgraded to A later without changing the bucket contract.
 4. **Defaults in D4:** 8 series, 100 ms base bucket, 500 ms grace, browser retention 15 min / 1 h / 24 h. The series cap is provisional until the D1 benchmark.
 5. **Aggregates:** in this plan as a later PR (recommended), or split into a separate issue.
@@ -253,6 +254,7 @@ Each PR is separately reviewable, and the feature stays invisible to users until
 
 ## Revision log
 
+- 2026-11-10 — r4, Codex re-review: agent-assigned revisions with compare-and-swap edits replace client-chosen versions (D3); D7 no longer offers replay as a way to see every counted packet.
 - 2026-11-10 — r3, Codex re-review: the relay caches the latest `io_series_status` and replays it to each new SSE subscriber (D3).
 - 2026-11-10 — r2, Codex review on PR #302. Three changes: `io_series_status` now carries each series' filter source; D5 adds explicit finalization at end of source; D9 adds the opt-in replay start barrier (new decision 6).
 - 2026-11-10 — r1, first draft (Claude Code), from the 2026-10-11 spec-readiness review on JAM-18 and the JAM-255 proposal-impact comments.
