@@ -52,9 +52,9 @@ CI runs the same three steps (`.github/workflows/ci.yml`'s `rust` job) — grant
 
 ## Project roadmap
 
-**Linear is the source of truth for tasks and workflow status.** Use the James team, Network Monitor project. `AGENTS.md` ("Sources of Truth", "Continuous Work Queue") and the `epic-task-cycle` skill describe how work is picked, gated and closed there. GitHub holds the implementation evidence: branches, pull requests, CI runs and review. A Linear status alone doesn't prove anything shipped. Check the merged PR and its CI.
+**Jira is the source of truth for tasks and workflow status.** Use project `KAN` at theantimeridian.atlassian.net. `AGENTS.md` ("Sources of Truth", "Continuous Work Queue") and the `epic-task-cycle` skill describe how work is picked, gated and closed there. GitHub holds the implementation evidence: branches, pull requests, CI runs and review. A Jira status alone doesn't prove anything shipped. Check the merged PR and its CI.
 
-Historical: before the move to Linear, the roadmap was tracked as GitHub issues in this repo. Those issues were migrated to Linear (each migrated issue's description links its original, e.g. "Migrated from GitHub #75"). The list below is the pre-migration record and isn't kept up to date:
+Historical: from September to November 2026 work was tracked in Linear (team `JAM`); every issue moved to Jira on the cutover recorded in ADR-007, labelled `linear-jam-<n>`, and `coordination/migration/jam-to-kan.tsv` maps each `JAM-n` to its `KAN-m`. Before Linear, the roadmap was tracked as GitHub issues in this repo. Those issues were migrated to Linear (each migrated issue's description links its original, e.g. "Migrated from GitHub #75"). The list below is the pre-migration record and isn't kept up to date:
 
 - Issue #26 — top-level roadmap, links every epic
 - Epic #13 — Live Capture Core (done)
