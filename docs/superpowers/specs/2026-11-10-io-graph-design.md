@@ -1,7 +1,7 @@
 # IO Graph: Filter-Defined Series over a Real Time Axis — Design Spec
 
 **Issue:** JAM-18 (legacy GitHub #85) · **Epic:** JAM-127, Analysis surfaces (phase 2, epic D)
-**Status:** draft for James's review. No implementation is approved by this document. The wire change (D3) and the open decisions (§"Decisions needed") are ask-first under `AGENTS.md`.
+**Status:** design decisions made by James in chat on 2026-11-10 (§"Decisions recorded"), including approval of the D3 wire change and the D9 startup option. Implementation still needs an approved plan (`docs/superpowers/plans/`), per `CONTRIBUTING.md`.
 **Base revision read:** `main` at `f664407`.
 
 ## Problem
@@ -30,7 +30,7 @@ The second fact: **display filters exist only in TypeScript** (`lib/display-filt
 
 ## Decisions
 
-### D1. Counts are computed in the agent, per series, before the rate limiter — **needs James's approval (wire change)**
+### D1. Counts are computed in the agent, per series, before the rate limiter — **decided (James, 2026-11-10): live agent-side now, JAM-255 later**
 
 Options considered:
 
@@ -64,7 +64,7 @@ The Rust evaluator is a port of `lib/display-filter.ts`, not a new dialect:
 - **Conformance includes transaction fields:** the corpus has a matched DNS response (`dns.time_us`), a matched HTTP response (`http.time_us`) and a duplicate response (`dns.response.duplicate`). The Rust test drives each through the real capture-loop tree builder, not a hand-built tree, so a future change to how `build_packet_json` assembles fields cannot silently diverge.
 - **Decrypted content is never a series input.** Decrypted TLS data arrives through separate `decrypted_*` events (gated, ephemeral) and is not part of the packet field tree. The evaluator only ever sees `build_packet_fields` plus `transaction_fields` output. A test asserts that a filter naming a decrypted-only path matches nothing, and that the series code path holds no reference to the decrypt store.
 
-### D3. Wire: one control message and two events, broadcast on the existing SSE feed — **wire change, ask-first**
+### D3. Wire: one control message and two events, broadcast on the existing SSE feed — **wire change, approved (James, 2026-11-10)**
 
 Counts are aggregate metadata of the same sensitivity as `system_stats`: they reveal no more than the packet fields every tab is already sent. So unlike Follow Stream's content (`2026-10-31-follow-stream-design.md` D4), they may ride the shared SSE feed. No new relay route or request/response machinery is needed in the first version.
 
@@ -199,14 +199,14 @@ The field model this depends on (#76, epic JAM-126) is done. A series may name `
 - AVG is derived (sum ÷ count) at every interval, never averaged-of-averages.
 - **Phasing:** packets and bits first. Aggregates land as their own PR once the base pipeline is merged and measured, because they add per-frame field reads and widen the bucket.
 
-## Decisions needed from James
+## Decisions recorded (James, in chat, 2026-11-10)
 
-1. **D1 data source:** agent-side per-frame evaluation (B, recommended), with its wire change (D3). The alternative, deferring the feature until the JAM-255 service exists, means no live IO graph.
-2. **Series scope:** one shared series set per agent with agent-assigned revisions and compare-and-swap edits (a conflicting edit is refused, never silently overwritten), visible across tabs (recommended), versus per-tab sets, which wait on JAM-196 relay caller identity.
-3. **History location in the first version:** **(B, recommended)** browser-held rings fed by `io_buckets`, lost on reload and labelled as such; versus (A) agent-held rings plus a paged backfill route. (A) survives reloads but needs the request/response relay machinery that JAM-17's plan introduces and has not yet built. B can be upgraded to A later without changing the bucket contract.
-4. **Defaults in D4:** 8 series, 100 ms base bucket, 500 ms grace, browser retention 15 min / 1 h / 24 h. The series cap is provisional until the D1 benchmark.
-5. **Aggregates:** in this plan as a later PR (recommended), or split into a separate issue.
-6. **Replay start barrier (D9):** the opt-in `REPLAY_WAIT_FOR_IO_SERIES=1` startup option (recommended), versus documenting that a replay must still be running when series are set.
+1. **D1 data source: live agent-side counting now, the JAM-255 query service later.** Phase 1 is the agent-side per-frame evaluation in D1, with the D3 wire change. The recorded whole-file graph served by the JAM-255 query service is the long-term source, and D9's bucket contract stays compatible with it. James first picked "wait for JAM-255", then clarified: live now, JAM-255 later.
+2. **Series scope:** one shared series set per agent, visible in every tab, with agent-assigned revisions and compare-and-swap edits bound to the epoch (D3). Per-tab sets are not pursued (they would need JAM-196).
+3. **History in the first version:** browser-held rings fed by `io_buckets`, lost on reload and labelled as such (D4). Agent-held history with backfill is a possible later upgrade that needs no bucket-contract change.
+4. **Defaults (D4) accepted:** 8 series (provisional until the D1 benchmark, which may lower it), 100 ms base bucket, 500 ms grace, browser retention 15 min / 1 h / 24 h.
+5. **Aggregates (D10):** a later PR in this same plan, after the base pipeline is merged and measured.
+6. **Replay start barrier (D9):** add the opt-in `REPLAY_WAIT_FOR_IO_SERIES=1` startup option, off by default and valid only with `REPLAY_FILE`.
 
 ## Acceptance criteria → how each is met and tested
 
@@ -255,6 +255,7 @@ Each PR is separately reviewable, and the feature stays invisible to users until
 
 ## Revision log
 
+- 2026-11-10 — r6: James's decisions recorded (all six), and the status changed from draft to decided pending a plan.
 - 2026-11-10 — r5, Codex re-review: series evaluation includes `transaction_fields` (D1/D2); late frames are attributed to their original bucket and k is never clamped (D5/D7); compare-and-swap edits are bound to the agent epoch (D3).
 - 2026-11-10 — r4, Codex re-review: agent-assigned revisions with compare-and-swap edits replace client-chosen versions (D3); D7 no longer offers replay as a way to see every counted packet.
 - 2026-11-10 — r3, Codex re-review: the relay caches the latest `io_series_status` and replays it to each new SSE subscriber (D3).
@@ -263,4 +264,4 @@ Each PR is separately reviewable, and the feature stays invisible to users until
 
 ## Next
 
-James reviews the five decisions above. Once the spec is approved, write `docs/superpowers/plans/2026-11-10-io-graph.md` per `CONTRIBUTING.md`'s spec → plan process. No feature code before the plan is approved.
+Write `docs/superpowers/plans/2026-11-10-io-graph.md` per `CONTRIBUTING.md`'s spec → plan process, following the PR sequence above. No feature code before James approves the plan.
