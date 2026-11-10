@@ -84,7 +84,9 @@ Counts are aggregate metadata of the same sensitivity as `system_stats`: they re
 
 **Agent → browser:**
 
-`io_series_status`: sent on every `set_io_series` and on every relay (re)connection, so a new tab learns the current set.
+`io_series_status`: the agent sends it on every `set_io_series` and on every relay (re)connection. **That is not enough for a new tab.** The relay keeps one process-wide `AgentClient`, and each SSE subscription only adds listeners and replays `connection_status` (`lib/stream-response.ts:217-226`). A tab opened while the relay stays connected would never see the set.
+
+So the relay caches the latest `io_series_status` it has forwarded. That cache holds one message, bounded by the line ceiling below. It is cleared on agent disconnect and replaced on every new status. Each new SSE subscriber gets the cached copy immediately after its `connection_status` replay, before any live event. Test: with the relay already connected and a series set configured, open a second subscription and assert its first two events are `connection_status` then the cached `io_series_status`. After an agent disconnect, a new subscription receives no stale status.
 
 ```json
 { "type": "io_series_status", "version": 7, "epoch": "4be1a07c",
@@ -251,6 +253,7 @@ Each PR is separately reviewable, and the feature stays invisible to users until
 
 ## Revision log
 
+- 2026-11-10 — r3, Codex re-review: the relay caches the latest `io_series_status` and replays it to each new SSE subscriber (D3).
 - 2026-11-10 — r2, Codex review on PR #302. Three changes: `io_series_status` now carries each series' filter source; D5 adds explicit finalization at end of source; D9 adds the opt-in replay start barrier (new decision 6).
 - 2026-11-10 — r1, first draft (Claude Code), from the 2026-10-11 spec-readiness review on JAM-18 and the JAM-255 proposal-impact comments.
 
