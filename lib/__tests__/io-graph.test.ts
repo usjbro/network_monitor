@@ -1,0 +1,250 @@
+// JAM-18 Task 3: browser IO graph history (lib/io-graph.ts).
+import { describe, expect, it } from 'vitest';
+import {
+  RING_CAPACITY,
+  allowedIntervals,
+  createHistory,
+  finestAllowed,
+  horizonText,
+  ingestBuckets,
+  ingestStatus,
+  latestCoveredMs,
+  newRequestId,
+  query,
+  rate,
+  ticks,
+} from '../io-graph';
+import type { IoBuckets, IoSeriesStatus } from '../types';
+
+const T0 = 1_794_120_000_000; // a whole minute
+
+function status(revision: number, ids: string[], epoch = 'aaaabbbb'): IoSeriesStatus {
+  return { revision, epoch, replayWaiting: false, series: ids.map((id) => ({ id, filter: '', ok: true })) };
+}
+
+function msg(over: Partial<IoBuckets> & { series: IoBuckets['series'] }): IoBuckets {
+  return {
+    revision: 1,
+    epoch: 'aaaabbbb',
+    bucketMs: 100,
+    coveredFromMs: T0,
+    coveredToMs: T0 + 1000,
+    notObserved: [],
+    loss: { kernelDropped: 0, ifDropped: 0, unparseable: 0, evaluationSkipped: 0 },
+    ...over,
+  };
+}
+
+function series(id: string, buckets: Array<[number, number, number]>, extra: Partial<IoBuckets['series'][number]> = {}) {
+  return { id, late: 0, lateBuckets: [], buckets, ...extra };
+}
+
+function fullSecond(start: number, packets: number, bytes: number): Array<[number, number, number]> {
+  return Array.from({ length: 10 }, (_, i) => [start + i * 100, packets, bytes] as [number, number, number]);
+}
+
+describe('roll-up', () => {
+  it('coarser intervals are exact sums of the 100 ms buckets', () => {
+    const h = createHistory();
+    ingestStatus(h, status(1, ['all']));
+    for (let s = 0; s < 120; s++) {
+      ingestBuckets(h, msg({ coveredFromMs: T0 + s * 1000, coveredToMs: T0 + (s + 1) * 1000, series: [series('all', fullSecond(T0 + s * 1000, 3, 300))] }));
+    }
+    const fine = query(h, 'all', 100, T0, T0 + 120_000);
+    const sec = query(h, 'all', 1000, T0, T0 + 120_000);
+    const ten = query(h, 'all', 10000, T0, T0 + 120_000);
+    const min = query(h, 'all', 60000, T0, T0 + 120_000);
+    const total = (ps: { packets: number }[]) => ps.reduce((a, p) => a + p.packets, 0);
+    expect([fine.length, sec.length, ten.length, min.length]).toEqual([1200, 120, 12, 2]);
+    expect(total(fine)).toBe(3600);
+    expect(total(sec)).toBe(3600);
+    expect(total(ten)).toBe(3600);
+    expect(total(min)).toBe(3600);
+    expect(sec[0]).toMatchObject({ packets: 30, bytes: 3000, state: 'value' });
+    expect(ten[0].packets).toBe(300);
+    expect(min[1].packets).toBe(1800);
+    expect(rate(sec[0], 'packets', 1000)).toBe(30);
+    expect(rate(sec[0], 'bits', 1000)).toBe(24000);
+    expect(rate(fine[0], 'packets', 100)).toBe(30);
+  });
+});
+
+describe('zero, unknown and not observed stay distinct', () => {
+  it('a covered empty bucket is a true zero; uncovered time is unknown; notObserved is its own state', () => {
+    const h = createHistory();
+    ingestStatus(h, status(1, ['all']));
+    ingestBuckets(h, msg({
+      coveredFromMs: T0, coveredToMs: T0 + 1000,
+      notObserved: [{ fromMs: T0 + 300, toMs: T0 + 500, reason: 'interface_switch' }],
+      series: [series('all', [[T0, 5, 50]])],
+    }));
+    const points = query(h, 'all', 100, T0 - 200, T0 + 1200);
+    const at = (ms: number) => points.find((p) => p.startMs === ms)!;
+    expect(at(T0 - 200).state).toBe('unknown');
+    expect(at(T0)).toMatchObject({ state: 'value', packets: 5 });
+    expect(at(T0 + 100)).toMatchObject({ state: 'value', packets: 0 });
+    expect(at(T0 + 300).state).toBe('notObserved');
+    expect(at(T0 + 400).state).toBe('notObserved');
+    expect(at(T0 + 500).state).toBe('value');
+    expect(at(T0 + 1000).state).toBe('unknown');
+    // A coarser bucket overlapping a notObserved span reports that, the
+    // more specific signal, ahead of "unknown".
+    expect(query(h, 'all', 10000, T0, T0 + 10000)[0].state).toBe('notObserved');
+  });
+
+  it('a coarser bucket that is only partly covered is unknown, not a small value', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ series: [series('all', [[T0, 5, 50]])] }));
+    expect(query(h, 'all', 10000, T0, T0 + 10000)[0]).toMatchObject({ state: 'unknown', packets: 0 });
+    expect(query(h, 'all', 1000, T0, T0 + 1000)[0]).toMatchObject({ state: 'value', packets: 5 });
+  });
+
+  it('a zero-length marker (replay_error) does not blank any bucket', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ notObserved: [{ fromMs: T0 + 1000, toMs: T0 + 1000, reason: 'replay_error' }], series: [series('all', [])] }));
+    expect(query(h, 'all', 100, T0, T0 + 1000).every((p) => p.state === 'value')).toBe(true);
+    expect(h.notObserved).toHaveLength(1);
+  });
+});
+
+describe('late frames and loss', () => {
+  it('late frames are kept apart from on-time counts at every interval', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ series: [series('all', [[T0, 4, 40]])] }));
+    ingestBuckets(h, msg({ coveredFromMs: T0 + 1000, coveredToMs: T0 + 1000, series: [series('all', [], { lateBuckets: [[T0 + 100, 2, 20]] })] }));
+    const fine = query(h, 'all', 100, T0, T0 + 200);
+    expect(fine[0]).toMatchObject({ packets: 4, latePackets: 0 });
+    expect(fine[1]).toMatchObject({ packets: 0, latePackets: 2 });
+    expect(query(h, 'all', 1000, T0, T0 + 1000)[0]).toMatchObject({ packets: 4, latePackets: 2 });
+  });
+
+  it('unattributed late frames are recorded against their message span', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ series: [series('all', [], { late: 7 })] }));
+    expect(h.unattributedLate).toEqual([{ fromMs: T0, toMs: T0 + 1000, series: 0, frames: 7 }]);
+  });
+
+  it('loss shades the whole message span, never a single bucket', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ loss: { kernelDropped: 3, ifDropped: 0, unparseable: 1, evaluationSkipped: 0 }, series: [series('all', [])] }));
+    const fine = query(h, 'all', 100, T0, T0 + 1000);
+    expect(fine.every((p) => p.lossy)).toBe(true);
+    expect(h.loss).toEqual([{ fromMs: T0, toMs: T0 + 1000, frames: 4 }]);
+    expect(query(h, 'all', 100, T0 + 1000, T0 + 1100)[0].lossy).toBe(false);
+  });
+});
+
+describe('segments', () => {
+  it('an epoch change starts a new history; the old counts are gone', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ series: [series('all', [[T0, 9, 90]])] }));
+    ingestBuckets(h, msg({ epoch: 'ccccdddd', coveredFromMs: T0 + 5000, coveredToMs: T0 + 6000, series: [series('all', [])] }));
+    expect(h.epoch).toBe('ccccdddd');
+    expect(query(h, 'all', 100, T0, T0 + 100)[0].state).toBe('unknown');
+    expect(h.startedMs).toBe(T0 + 5000);
+  });
+
+  it('a new revision drops removed series and restarts history', () => {
+    const h = createHistory();
+    ingestStatus(h, status(1, ['a', 'b']));
+    ingestBuckets(h, msg({ series: [series('a', [[T0, 1, 1]]), series('b', [[T0, 2, 2]])] }));
+    ingestStatus(h, status(2, ['b']));
+    expect(h.ids).toEqual(['b']);
+    expect(query(h, 'a', 100, T0, T0 + 100)).toEqual([]);
+    expect(query(h, 'b', 100, T0, T0 + 100)[0].state).toBe('unknown');
+  });
+
+  it('a rejected status changes nothing, and re-applying the same status is a no-op', () => {
+    const h = createHistory();
+    ingestStatus(h, status(1, ['a']));
+    ingestBuckets(h, msg({ series: [series('a', [[T0, 1, 1]])] }));
+    ingestStatus(h, { ...status(1, ['zzz']), rejected: 'conflict' });
+    ingestStatus(h, status(1, ['a']));
+    expect(query(h, 'a', 100, T0, T0 + 100)[0].packets).toBe(1);
+  });
+
+  it('a series the current segment does not know yet restarts the segment before anything is added', () => {
+    const h = createHistory();
+    ingestStatus(h, status(1, ['a']));
+    ingestBuckets(h, msg({ series: [series('a', [[T0, 1, 1]]), series('b', [[T0, 2, 2]])] }));
+    expect(h.ids).toEqual(['a', 'b']);
+    expect(query(h, 'a', 100, T0, T0 + 100)[0].packets).toBe(1);
+    expect(query(h, 'b', 100, T0, T0 + 100)[0].packets).toBe(2);
+  });
+
+  it('buckets arriving before their status still form a segment, without losing the first message', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ series: [series('x', [[T0, 1, 1]]), series('y', [[T0, 2, 2]])] }));
+    expect(query(h, 'x', 100, T0, T0 + 100)[0].packets).toBe(1);
+    expect(query(h, 'y', 100, T0, T0 + 100)[0].packets).toBe(2);
+  });
+});
+
+describe('retention', () => {
+  it('the 100 ms ring wraps at capacity: older buckets become unknown, and the horizon says so', () => {
+    const h = createHistory();
+    const seconds = RING_CAPACITY[100] / 10 + 30; // 15.5 minutes of 100 ms buckets
+    for (let s = 0; s < seconds; s++) {
+      ingestBuckets(h, msg({ coveredFromMs: T0 + s * 1000, coveredToMs: T0 + (s + 1) * 1000, series: [series('all', fullSecond(T0 + s * 1000, 1, 1))] }));
+    }
+    expect(query(h, 'all', 100, T0, T0 + 100)[0].state).toBe('unknown');
+    const end = T0 + seconds * 1000;
+    expect(query(h, 'all', 100, end - 100, end)[0]).toMatchObject({ state: 'value', packets: 1 });
+    // The 1 s ring (1 h) still has the start.
+    expect(query(h, 'all', 1000, T0, T0 + 1000)[0]).toMatchObject({ state: 'value', packets: 10 });
+    expect(horizonText(h, 100, 'UTC')).toContain('retention limit reached: 15 min at 100 ms');
+    expect(horizonText(h, 1000, 'UTC')).not.toContain('retention limit');
+    expect(horizonText(h, 1000, 'UTC')).toContain('History since');
+  });
+
+  it('a bucket older than the ring horizon is dropped, never written over newer data', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ coveredFromMs: T0 + 1_000_000, coveredToMs: T0 + 1_001_000, series: [series('all', [[T0 + 1_000_000, 5, 5]])] }));
+    // A late report for the bucket exactly one ring capacity older maps to
+    // the same 100 ms slot as the newest bucket; it must not evict it.
+    const sameSlot = T0 + 1_000_000 - RING_CAPACITY[100] * 100;
+    ingestBuckets(h, msg({ coveredFromMs: T0 + 1_001_000, coveredToMs: T0 + 1_001_000, series: [series('all', [], { lateBuckets: [[sameSlot, 1, 1]] })] }));
+    expect(query(h, 'all', 100, T0 + 1_000_000, T0 + 1_000_100)[0]).toMatchObject({ packets: 5, latePackets: 0 });
+  });
+});
+
+describe('intervals and ticks', () => {
+  it('disables intervals that would exceed 2000 points, with a reason', () => {
+    const tenMinutes = allowedIntervals(T0, T0 + 600_000);
+    expect(tenMinutes.find((i) => i.interval === 100)).toMatchObject({ allowed: false });
+    expect(tenMinutes.find((i) => i.interval === 100)!.reason).toContain('6000 points');
+    expect(tenMinutes.find((i) => i.interval === 1000)!.allowed).toBe(true);
+    expect(finestAllowed(T0, T0 + 200_000)).toBe(100);
+    expect(finestAllowed(T0, T0 + 200_100)).toBe(1000);
+    expect(finestAllowed(T0, T0 + 10 * 86_400_000)).toBe(60000);
+  });
+
+  it('labels sub-second ticks with milliseconds and coarse ones without', () => {
+    const fine = ticks(T0, T0 + 1000, 6, 'UTC');
+    expect(fine[0].label).toMatch(/^\d\d:\d\d:\d\d\.\d{3}$/);
+    const coarse = ticks(T0, T0 + 3_600_000, 6, 'UTC');
+    expect(coarse.every((t) => /^\d\d:\d\d:\d\d$/.test(t.label))).toBe(true);
+    expect(coarse.length).toBeGreaterThan(2);
+    expect(coarse.length).toBeLessThanOrEqual(7);
+  });
+
+  it('labels across midnight and a DST change use wall-clock time', () => {
+    // 2026-03-08 01:59:59 -> 03:00:00 in New York (spring forward).
+    const beforeJump = Date.UTC(2026, 2, 8, 6, 59, 0);
+    const labels = ticks(beforeJump, beforeJump + 120_000, 6, 'America/New_York').map((t) => t.label);
+    expect(labels).toContain('03:00:00');
+    expect(labels.some((l) => l.startsWith('01:59'))).toBe(true);
+    const midnight = Date.UTC(2026, 10, 10, 23, 59, 0);
+    expect(ticks(midnight, midnight + 120_000, 6, 'UTC').map((t) => t.label)).toContain('00:00:00');
+  });
+
+  it('latest covered time and request ids', () => {
+    const h = createHistory();
+    expect(latestCoveredMs(h)).toBeNull();
+    ingestBuckets(h, msg({ series: [series('all', [])] }));
+    ingestBuckets(h, msg({ coveredFromMs: T0 + 1000, coveredToMs: T0 + 2000, series: [series('all', [])] }));
+    expect(latestCoveredMs(h)).toBe(T0 + 2000);
+    expect(h.covered).toEqual([{ fromMs: T0, toMs: T0 + 2000 }]);
+    expect(newRequestId()).toMatch(/^[0-9a-f]{16}$/);
+  });
+});

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
+  Activity,
   BarChart2,
   Globe,
   Layers,
@@ -30,6 +31,7 @@ import {
   ThemeConfig,
   OSILayerNumber,
   TracerouteHop,
+  IoSeriesStatus,
 } from '@/lib/types';
 import { THEMES } from '@/lib/osi-engine';
 import {
@@ -51,6 +53,8 @@ import {
   mapSystemStatsEvent,
   mapTracerouteHopEvent,
   mergeLayerStats,
+  mapIoBucketsEvent,
+  mapIoSeriesStatusEvent,
 } from '@/lib/agent-mapping';
 import { mapDecryptedPayloadEvent } from '@/lib/decrypted-mapping';
 import { applyEnrichmentEvent } from '@/lib/enrichment-mapping';
@@ -73,10 +77,18 @@ import { EndpointsView } from '@/components/EndpointsView';
 import { InstallModal } from '@/components/InstallModal';
 import { CommandLineBar } from '@/components/CommandLineBar';
 import { compileDisplayFilter, type CompiledDisplayFilter } from '@/lib/display-filter';
+import { IoGraphView, type SetIoSeriesMessage } from '@/components/IoGraphView';
+import { createHistory, ingestBuckets, ingestStatus } from '@/lib/io-graph';
 
 export default function TerminalApp() {
   // Application State
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'layer' | 'connections' | 'hosts' | 'packets' | 'topology' | 'findings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'layer' | 'connections' | 'hosts' | 'packets' | 'topology' | 'findings' | 'io'>('dashboard');
+  // JAM-18 IO graph: the shared series set (latest io_series_status) and the
+  // bucket history. The history is one stable object (fixed-capacity typed
+  // arrays mutated in place by the stream handler); ioVersion re-renders.
+  const [ioStatus, setIoStatus] = useState<IoSeriesStatus | null>(null);
+  const [ioHistory] = useState(createHistory);
+  const [ioVersion, setIoVersion] = useState(0);
   const [selectedLayerNum, setSelectedLayerNum] = useState<OSILayerNumber>(7);
   const [selectedTheme, setSelectedTheme] = useState<TerminalTheme>('sophisticated');
   const [isPaused, setIsPaused] = useState(false);
@@ -371,6 +383,18 @@ export default function TerminalApp() {
             }
           }
         }
+        if (data.type === 'io_series_status') {
+          const status = mapIoSeriesStatusEvent(data);
+          ingestStatus(ioHistory, status);
+          setIoStatus(status);
+          setIoVersion(ioHistory.version);
+          return;
+        }
+        if (data.type === 'io_buckets') {
+          ingestBuckets(ioHistory, mapIoBucketsEvent(data));
+          setIoVersion(ioHistory.version);
+          return;
+        }
         if (data.type === 'geo_hop_update') {
           const connectionId = targetIpToConnectionId.current.get(data.targetIp);
           if (connectionId) {
@@ -383,7 +407,22 @@ export default function TerminalApp() {
     };
 
     return () => source.close();
-  }, []);
+  }, [ioHistory]); // ioHistory is one stable object; the stream is opened once
+
+  // JAM-18: replaces the agent's shared IO graph series set. The route
+  // validates and forwards; the agent's answer arrives as io_series_status.
+  const sendIoSeries = async (message: SetIoSeriesMessage): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(message),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
 
   // Sends a pause/resume control message to the capture agent via the relay.
   const sendControl = async (type: 'pause' | 'resume') => {
@@ -623,6 +662,8 @@ export default function TerminalApp() {
       setActiveTab('packets');
     } else if (mainCmd === 'matrix' || mainCmd === 'topology') {
       setActiveTab('topology');
+    } else if (mainCmd === 'io' || mainCmd === 'iograph') {
+      setActiveTab('io');
     } else if (mainCmd === 'theme' && arg1) {
       if (THEMES[arg1 as TerminalTheme]) {
         setSelectedTheme(arg1 as TerminalTheme);
@@ -1015,6 +1056,19 @@ export default function TerminalApp() {
             <span>F6: FINDINGS ({findings.length})</span>
           </button>
 
+          <button
+            onClick={() => setActiveTab('io')}
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded transition font-bold ${
+              activeTab === 'io'
+                ? themeConfig.highlight
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+            }`}
+            data-testid="tab-io"
+          >
+            <Activity className="h-3.5 w-3.5" />
+            <span>F8: IO GRAPH</span>
+          </button>
+
         </nav>
 
         {/* Active View Container */}
@@ -1105,6 +1159,17 @@ export default function TerminalApp() {
                 <ServiceTimeView summaries={serviceTimes} theme={themeConfig} />
               </div>
             </div>
+          )}
+
+          {activeTab === 'io' && (
+            <IoGraphView
+              history={ioHistory}
+              version={ioVersion}
+              status={ioStatus}
+              connected={agentConnected}
+              theme={themeConfig}
+              onSend={sendIoSeries}
+            />
           )}
 
           {activeTab === 'findings' && (
