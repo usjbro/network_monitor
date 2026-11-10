@@ -129,7 +129,14 @@ Since KAN has no In Review status, "In Review" in the skill and docs becomes "In
 - [ ] **Step 1: Freeze.** Post `feedback` to Slack: "Linear is frozen; don't edit issues". Stop or park JAM-18's cloud session and Codex's queue. Check that no gate is `delegated` mid-task, or note its new key.
 - [ ] **Step 2: Delta sync.** Search Linear for `updatedAt` after the export start, and re-apply status and comment changes to the mapped KAN issues.
 - [ ] **Step 3:** In each open `coordination/tasks/*.md` and `coordination/gates/*.md` that has a `linear_id`, add `issue_key: KAN-m` from the ledger. `gate_field_issue_key` prefers `issue_key`, so reminders and `list-pending-gates.sh` show the KAN key. Gate files keep their `jam-n__<slug>.md` names, so commands on a gate that is still in flight keep using its legacy key, for example `gate-status.sh JAM-21 <slug>`. New gates use KAN keys.
-- [ ] **Step 4:** James merges the repo-switch PR (Tasks 7–8) and applies D7.
+- [ ] **Step 3b:** On the repo-switch branch, update the user-facing docs and live task state so they point at Jira. This needs KAN keys, so it can't be done earlier.
+  - Replace the `linear.app` links with `theantimeridian.atlassian.net/browse/KAN-m` links looked up in the ledger: JAM-70 in `docs/analysis-guide.md:142`, `docs/troubleshooting.md:79` and `docs/usage.md:22`, and JAM-254 in `docs/wire-protocol.md:145`.
+  - Point `.ai/CURRENT_TASK.md` and `.ai/HANDOFF.md` at the KAN key for whatever task is active.
+  - Check that `git grep -n 'linear\.app' -- . ':!docs/superpowers'` comes back empty.
+- [ ] **Step 4:** James merges the repo-switch PR (Tasks 7–8) and applies D7. Outside the repo, James also:
+  - disables the `linear@claude-plugins-official` plugin in `.claude/settings.local.json` (Claude reads Linear through it until the delta sync is done);
+  - gives Codex an Atlassian/Jira app. `~/.codex/config.toml` only pre-approves `linear.save_issue` and `linear.save_comment`, so it needs matching approvals for the Jira create, edit, transition and comment tools;
+  - removes the Linear approvals there afterwards.
 - [ ] **Step 5:** Post `done` with the ledger path. From here on, the next work item is the next KAN `To Do` issue.
 
 ### Task 7: Coordination scripts take an issue key, not a Linear id
