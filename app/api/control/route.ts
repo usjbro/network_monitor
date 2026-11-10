@@ -39,12 +39,13 @@ function isValidModeThreshold(value: unknown, allowedModes: string[]): boolean {
   return typeof threshold === 'number' && Number.isInteger(threshold) && threshold > 0;
 }
 
-// JAM-18 IO graph series (docs/wire-protocol.md "set_io_series"). These
+// JAM-18 IO graph series (docs/wire-protocol.md "set_io_series"). Not
+// exported: a Next.js route module may only export route handlers. These
 // bounds mirror the agent's own (capture-agent/src/io_series.rs), which
 // re-validates everything; the display-filter source limit is 2048 UTF-16
 // code units (JS string length), unlike BPF's MAX_CAPTURE_FILTER_LEN.
-export const MAX_IO_SERIES = 8;
-export const MAX_IO_SERIES_FILTER_LEN = 2048;
+const MAX_IO_SERIES = 8;
+const MAX_IO_SERIES_FILTER_LEN = 2048;
 const IO_SERIES_ID = /^[a-z0-9-]{1,32}$/;
 const HEX_TOKEN = /^[0-9a-f]{8,32}$/i;
 

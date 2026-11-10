@@ -391,12 +391,18 @@ impl Accumulator {
     /// change: closes every open bucket now, so no tail is lost.
     pub fn finalize(&mut self) -> Option<Piece> {
         let covered = self.covered_to_ms?;
+        // Cover through the bucket of the newest frame seen, matched or not:
+        // a tail of frames that match no series is observed zero-count time,
+        // not unknown time. Never move back past coverage already reported
+        // (the live idle clock may have advanced it).
+        let newest_bucket_end = bucket_start(self.high_water_ms) + BUCKET_MS;
         let boundary = self
             .open
             .keys()
             .next_back()
             .map(|start| start + BUCKET_MS)
             .unwrap_or(covered)
+            .max(newest_bucket_end)
             .max(covered);
         if boundary <= covered {
             return self.pending_only(covered);
@@ -889,6 +895,32 @@ mod tests {
         let p = a.finalize().unwrap();
         assert_eq!((p.covered_from_ms, p.covered_to_ms), (100, 300));
         assert_eq!(p.series[0].buckets, vec![[100, 2, 2], [200, 1, 1]]);
+        assert!(a.finalize().is_none());
+    }
+
+    #[test]
+    fn finalize_covers_a_tail_of_frames_that_match_no_series() {
+        // Only a DNS series; the replay's frames are all non-DNS.
+        let mut a = Accumulator::new(1, set_of(&["dns"]));
+        a.observe_with(us(1_000), 60, 60, Vec::new);
+        a.observe_with(us(1_200), 60, 60, Vec::new);
+        let p = a.finalize().expect("observed zero-count time must be reported");
+        assert_eq!((p.covered_from_ms, p.covered_to_ms), (1_000, 1_300));
+        assert!(p.series[0].buckets.is_empty());
+        // A matched bucket followed by an unmatched tail covers the tail too.
+        let mut b = Accumulator::new(1, set_of(&["x == 1"]));
+        b.observe_with(us(2_000), 1, 1, || vec![uint("x", 1)]);
+        b.observe_with(us(2_450), 1, 1, Vec::new);
+        let p = b.finalize().unwrap();
+        assert_eq!(p.covered_to_ms, 2_500);
+        assert_eq!(p.series[0].buckets, vec![[2_000, 1, 1]]);
+    }
+
+    #[test]
+    fn finalize_never_moves_coverage_backwards() {
+        let mut a = Accumulator::new(1, set_of(&[""]));
+        a.observe_matches(us(1_000), 1, &[true]);
+        a.advance(5_000).unwrap(); // live idle clock covered through 4_500
         assert!(a.finalize().is_none());
     }
 
