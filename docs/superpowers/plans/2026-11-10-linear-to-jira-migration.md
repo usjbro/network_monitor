@@ -90,7 +90,7 @@ Since KAN has no In Review status, "In Review" in the skill and docs becomes "In
 
 ### Task 1: Prepare KAN and the ledger (James, then the agent)
 
-**Files:** Create `coordination/migration/jam-to-kan.tsv` (header `jam_id	kan_key	kind	parent_kan	status_set	links_set	comments_set`) and `coordination/migration/README.md` (the mapping table above, plus the rerun procedure). Add `coordination/migration/export/` to `.gitignore`.
+**Files:** `coordination/migration/jam-to-kan.tsv` (header only) and its README already exist from the repo-switch PR. Fill in (header `jam_id	kan_key	kind	parent_kan	status_set	links_set	comments_set`) and `coordination/migration/README.md` (the mapping table above, plus the rerun procedure). Add `coordination/migration/export/` to `.gitignore`.
 
 - [ ] **Step 1:** James confirms D2, D5 and D7, or overrides them.
 - [ ] **Step 2: Verify through the MCP.** Create one throwaway issue `KAN migration probe`. `getTransitionsForJiraIssue` must reach To Do, In Progress and Done; record the transition ids in the README. `getJiraIssueTypeMetaWithFields` for Task (`requiredFieldsOnly: false`) tells you whether a story-point field exists; record its field id in the README. James deletes the probe; the MCP cannot.
@@ -128,7 +128,7 @@ Since KAN has no In Review status, "In Review" in the skill and docs becomes "In
 
 - [ ] **Step 1: Freeze.** Post `feedback` to Slack: "Linear is frozen; don't edit issues". Stop or park JAM-18's cloud session and Codex's queue. Check that no gate is `delegated` mid-task, or note its new key.
 - [ ] **Step 2: Delta sync.** Search Linear for `updatedAt` after the export start, and re-apply status and comment changes to the mapped KAN issues.
-- [ ] **Step 3:** Add `kan_id: KAN-m` to each open `coordination/tasks/*.md` and `coordination/gates/*.md` that has a `linear_id`.
+- [ ] **Step 3:** In each open `coordination/tasks/*.md` and `coordination/gates/*.md` that has a `linear_id`, add `issue_key: KAN-m` from the ledger. `gate_field_issue_key` prefers `issue_key`, so reminders and `list-pending-gates.sh` show the KAN key. Gate files keep their `jam-n__<slug>.md` names, so commands on a gate that is still in flight keep using its legacy key, for example `gate-status.sh JAM-21 <slug>`. New gates use KAN keys.
 - [ ] **Step 4:** James merges the repo-switch PR (Tasks 7–8) and applies D7.
 - [ ] **Step 5:** Post `done` with the ledger path. From here on, the next work item is the next KAN `To Do` issue.
 
@@ -150,7 +150,7 @@ Since KAN has no In Review status, "In Review" in the skill and docs becomes "In
   - In `test-create-gate.sh`, a `KAN-12` gate writes `issue_key: KAN-12` to `kan-12__<slug>.md`.
   - In `test-lib.sh`, `gate_field_issue_key` returns `JAM-21` for a legacy file that has only `linear_id: JAM-21`.
   - In `test-gate-transitions.sh`, `gate-status.sh JAM-21 <slug>` still resolves a legacy file.
-  - In `test-create-gate.sh`, `new-task.sh … KAN-12` makes branch `KAN-12-<slug>`, while `new-task.sh` with no key still makes `<prefix>/<slug>`.
+  - In `test-lib.sh`, `task_branch <slug> KAN-12` (and `kan-12`) gives `KAN-12-<slug>`, and with no key it gives `<prefix>/<slug>`. `task_branch` rejects a bad slug or key, and `normalize_issue_key` upper-cases the key. `new-task.sh` builds its branch and the `issue_key` it records from these helpers. There is no end-to-end `new-task.sh` test, because the script creates a real worktree and branch in the shared repository.
 - [ ] **Step 2:** Run `for t in coordination/scripts/tests/test-*.sh; do bash "$t"; done`. The new assertions should fail.
 - [ ] **Step 3:** Rename `LINEAR_ID` to `ISSUE_KEY` and the usage strings, write `issue_key:`, add `gate_field_issue_key`, and switch `list-pending-gates.sh` and `complete-task.sh` to it. Gate tags keep the `<key-lower>__<slug>` shape.
 - [ ] **Step 4:** Run the whole suite and confirm everything passes. Then `git grep -n -i linear coordination/scripts` may only match the legacy-fallback lines and their comments.

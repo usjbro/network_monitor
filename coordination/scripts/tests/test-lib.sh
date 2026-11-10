@@ -227,6 +227,19 @@ for case in "slug-a|KAN-12|KAN-12-slug-a" "slug-a|kan-12|KAN-12-slug-a" "slug-a|
 done
 assert_exits_nonzero "task_branch rejects a key with a slash" \
   "source '$LIB'; task_branch 'slug-a' 'KAN-1/../x'"
+assert_exits_nonzero "task_branch rejects a slug with traversal" \
+  "source '$LIB'; task_branch '../../outside' 'KAN-1'"
+assert_exits_nonzero "task_branch rejects a slug with a space, with no key" \
+  "source '$LIB'; task_branch 'Foo Bar'"
+got="$(bash -c "source '$LIB'; normalize_issue_key 'kan-12'")"
+if [[ "$got" == "KAN-12" ]]; then
+  echo "PASS: normalize_issue_key upper-cases kan-12"
+else
+  echo "FAIL: normalize_issue_key upper-cases kan-12 — got '$got'"
+  FAILURES=$((FAILURES + 1))
+fi
+assert_exits_nonzero "normalize_issue_key rejects a key with a slash" \
+  "source '$LIB'; normalize_issue_key 'KAN-1/x'"
 
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."

@@ -30,6 +30,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 TASKS_DIR="$REPO_ROOT/coordination/tasks"
 
+validate_slug "$TASK_SLUG" "task-slug"
+if [[ -n "$ISSUE_KEY" ]]; then
+  ISSUE_KEY="$(normalize_issue_key "$ISSUE_KEY")" || exit 1
+fi
 BRANCH="$(task_branch "$TASK_SLUG" "$ISSUE_KEY")"
 
 WORKTREE_DIR="$REPO_ROOT/.worktrees/${TASK_SLUG}"

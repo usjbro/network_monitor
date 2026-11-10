@@ -120,6 +120,16 @@ gate_path() {
   echo "$REPO_ROOT/coordination/gates/${key_lower}__${slug}.md"
 }
 
+# Validates a tracker issue key (KAN-12, kan-12, legacy JAM-21) and prints
+# it upper-cased, the form Jira, JQL and the jam-to-kan ledger use. Gate
+# file names use the lower-cased form (gate_path).
+normalize_issue_key() {
+  local lower
+  lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  validate_slug "$lower" "issue-key"
+  echo "$lower" | tr '[:lower:]' '[:upper:]'
+}
+
 # Branch name for a coordination task. With an issue key it is Jira's own
 # default, KEY-<slug> with the key upper-cased, so GitHub for Jira links it
 # (ADR-007). Without one it is <prefix>/<slug>: every unkeyed branch in this
@@ -129,9 +139,11 @@ gate_path() {
 # COORDINATION_BRANCH_PREFIX if that handle ever changes.
 task_branch() {
   local slug="$1" key="${2:-}"
+  validate_slug "$slug" "slug"
   if [[ -n "$key" ]]; then
-    validate_slug "$(echo "$key" | tr '[:upper:]' '[:lower:]')" "issue-key"
-    echo "$(echo "$key" | tr '[:lower:]' '[:upper:]')-${slug}"
+    local upper
+    upper="$(normalize_issue_key "$key")" || exit 1
+    echo "${upper}-${slug}"
   else
     echo "${COORDINATION_BRANCH_PREFIX:-jamesmbrownjr}/${slug}"
   fi

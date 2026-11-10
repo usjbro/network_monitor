@@ -14,3 +14,6 @@ coverage/
 .data/
 /test-results/
 /playwright-report/
+
+# Linear export for the Jira migration (may contain unpublished comments)
+coordination/migration/export/
