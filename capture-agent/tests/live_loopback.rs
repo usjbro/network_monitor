@@ -601,8 +601,15 @@ fn authentication_rejects_without_feed_or_control_side_effects() {
     http.get_ref()
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
+    // JAM-18: every authenticated connection is first sent the current IO
+    // graph series set. That one line is the only thing allowed before the
+    // HTTP line closes the connection: no event feed, no control effect.
     let mut text = String::new();
-    assert!(matches!(http.read_line(&mut text), Ok(0) | Err(_)));
+    http.read_line(&mut text).unwrap();
+    let bootstrap: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(bootstrap["type"], "io_series_status", "unexpected first line: {text}");
+    text.clear();
+    assert!(matches!(http.read_line(&mut text), Ok(0) | Err(_)), "connection stayed open: {text}");
     assert!(!capture_path.exists());
     drop(guard);
 }
