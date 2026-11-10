@@ -1,0 +1,1117 @@
+{
+ "comment": "Shared display-filter conformance corpus (JAM-18). Run by lib/__tests__/display-filter-conformance.test.ts and capture-agent/tests/display_filter_conformance.rs. Positions are UTF-16 code units, as in the TypeScript implementation. uint values above 2^53-1 are decimal strings, as on the wire.",
+ "frameLen": 120,
+ "fields": [
+  {
+   "path": "tcp",
+   "type": "group"
+  },
+  {
+   "path": "tcp.dst_port",
+   "type": "uint",
+   "value": 443
+  },
+  {
+   "path": "tcp.src_port",
+   "type": "uint",
+   "value": 51000
+  },
+  {
+   "path": "tls.handshake.sni",
+   "type": "str",
+   "value": "Example.COM"
+  },
+  {
+   "path": "tcp.flags.syn",
+   "type": "bool",
+   "value": true
+  },
+  {
+   "path": "ip.src",
+   "type": "addr",
+   "value": "2001:DB8::1"
+  },
+  {
+   "path": "app.quote",
+   "type": "str",
+   "value": "say \"hello\""
+  },
+  {
+   "path": "app.slash",
+   "type": "str",
+   "value": "C:\\temp"
+  },
+  {
+   "path": "app.bytes",
+   "type": "bytes"
+  },
+  {
+   "path": "app.nouint",
+   "type": "uint"
+  },
+  {
+   "path": "dup.path",
+   "type": "uint",
+   "value": 1
+  },
+  {
+   "path": "dup.path",
+   "type": "uint",
+   "value": 2
+  },
+  {
+   "path": "big.max",
+   "type": "uint",
+   "value": "18446744073709551615"
+  },
+  {
+   "path": "big.p53",
+   "type": "uint",
+   "value": "9007199254740992"
+  },
+  {
+   "path": "big.small",
+   "type": "uint",
+   "value": 9007199254740991
+  },
+  {
+   "path": "unicode.i",
+   "type": "str",
+   "value": "İSTANBUL"
+  },
+  {
+   "path": "unicode.sigma",
+   "type": "str",
+   "value": "ΟΔΟΣ"
+  },
+  {
+   "path": "unicode.ss",
+   "type": "str",
+   "value": "Straße"
+  },
+  {
+   "path": "dns.time_us",
+   "type": "uint",
+   "value": 1500
+  },
+  {
+   "path": "Mixed.Case",
+   "type": "uint",
+   "value": 7
+  },
+  {
+   "path": "empty",
+   "type": "str",
+   "value": ""
+  }
+ ],
+ "cases": [
+  {
+   "name": "match: 'tcp.dst_port == 443'",
+   "filter": "tcp.dst_port == 443",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port != 443'",
+   "filter": "tcp.dst_port != 443",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port > 442'",
+   "filter": "tcp.dst_port > 442",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port < 443'",
+   "filter": "tcp.dst_port < 443",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port >= 443'",
+   "filter": "tcp.dst_port >= 443",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port <= 442'",
+   "filter": "tcp.dst_port <= 442",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port == 0443'",
+   "filter": "tcp.dst_port == 0443",
+   "expect": true
+  },
+  {
+   "name": "match: 'frame.len == 120'",
+   "filter": "frame.len == 120",
+   "expect": true
+  },
+  {
+   "name": "match: 'frame.len > 1000'",
+   "filter": "frame.len > 1000",
+   "expect": false
+  },
+  {
+   "name": "match: 'FRAME.LEN == 120'",
+   "filter": "FRAME.LEN == 120",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp'",
+   "filter": "tcp",
+   "expect": true
+  },
+  {
+   "name": "match: 'udp'",
+   "filter": "udp",
+   "expect": false
+  },
+  {
+   "name": "match: 'app.bytes'",
+   "filter": "app.bytes",
+   "expect": true
+  },
+  {
+   "name": "match: 'app.bytes == 1'",
+   "filter": "app.bytes == 1",
+   "expect": false
+  },
+  {
+   "name": "match: 'app.nouint'",
+   "filter": "app.nouint",
+   "expect": true
+  },
+  {
+   "name": "match: 'app.nouint == 0'",
+   "filter": "app.nouint == 0",
+   "expect": false
+  },
+  {
+   "name": "match: 'tls.handshake.sni == \"example.com\"'",
+   "filter": "tls.handshake.sni == \"example.com\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'tls.handshake.sni != \"example.com\"'",
+   "filter": "tls.handshake.sni != \"example.com\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'tls.handshake.sni > \"a\"'",
+   "filter": "tls.handshake.sni > \"a\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'TLS.Handshake.SNI == \"EXAMPLE.com\"'",
+   "filter": "TLS.Handshake.SNI == \"EXAMPLE.com\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'mixed.case == 7'",
+   "filter": "mixed.case == 7",
+   "expect": true
+  },
+  {
+   "name": "match: 'tls.handshake.sni contains \"PLE.c\"'",
+   "filter": "tls.handshake.sni contains \"PLE.c\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port contains \"4\"'",
+   "filter": "tcp.dst_port contains \"4\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'tls.handshake.sni contains \"\"'",
+   "filter": "tls.handshake.sni contains \"\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'ip.src == \"2001:db8::1\"'",
+   "filter": "ip.src == \"2001:db8::1\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'ip.src contains \"DB8\"'",
+   "filter": "ip.src contains \"DB8\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'ip.src > \"1\"'",
+   "filter": "ip.src > \"1\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.flags.syn == true'",
+   "filter": "tcp.flags.syn == true",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.flags.syn == TRUE'",
+   "filter": "tcp.flags.syn == TRUE",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.flags.syn != false'",
+   "filter": "tcp.flags.syn != false",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.flags.syn > false'",
+   "filter": "tcp.flags.syn > false",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.flags.syn == 1'",
+   "filter": "tcp.flags.syn == 1",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.flags.syn != 1'",
+   "filter": "tcp.flags.syn != 1",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port == \"443\"'",
+   "filter": "tcp.dst_port == \"443\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port != \"443\"'",
+   "filter": "tcp.dst_port != \"443\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port in {80, 443}'",
+   "filter": "tcp.dst_port in {80, 443}",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port in {\"443\"}'",
+   "filter": "tcp.dst_port in {\"443\"}",
+   "expect": false
+  },
+  {
+   "name": "match: 'tls.handshake.sni in {\"EXAMPLE.COM\", \"x\"}'",
+   "filter": "tls.handshake.sni in {\"EXAMPLE.COM\", \"x\"}",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.flags.syn in {true}'",
+   "filter": "tcp.flags.syn in {true}",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.flags.syn in {1}'",
+   "filter": "tcp.flags.syn in {1}",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp in {1}'",
+   "filter": "tcp in {1}",
+   "expect": false
+  },
+  {
+   "name": "match: 'udp in {1}'",
+   "filter": "udp in {1}",
+   "expect": false
+  },
+  {
+   "name": "match: 'not tcp.dst_port == 80'",
+   "filter": "not tcp.dst_port == 80",
+   "expect": true
+  },
+  {
+   "name": "match: 'not not tcp'",
+   "filter": "not not tcp",
+   "expect": true
+  },
+  {
+   "name": "match: 'not udp'",
+   "filter": "not udp",
+   "expect": true
+  },
+  {
+   "name": "match: '(tcp.dst_port == 80 or tcp.dst_port == 443) and tcp.flags.syn == true'",
+   "filter": "(tcp.dst_port == 80 or tcp.dst_port == 443) and tcp.flags.syn == true",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port == 80 or tcp.dst_port == 443 and tcp.flags.syn == false'",
+   "filter": "tcp.dst_port == 80 or tcp.dst_port == 443 and tcp.flags.syn == false",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port == 443 or tcp.dst_port == 80 and tcp.flags.syn == false'",
+   "filter": "tcp.dst_port == 443 or tcp.dst_port == 80 and tcp.flags.syn == false",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp AnD tcp.flags.syn == true'",
+   "filter": "tcp AnD tcp.flags.syn == true",
+   "expect": true
+  },
+  {
+   "name": "match: 'udp Or tcp'",
+   "filter": "udp Or tcp",
+   "expect": true
+  },
+  {
+   "name": "match: 'NOT udp'",
+   "filter": "NOT udp",
+   "expect": true
+  },
+  {
+   "name": "match: 'dup.path == 1'",
+   "filter": "dup.path == 1",
+   "expect": true
+  },
+  {
+   "name": "match: 'dup.path == 2'",
+   "filter": "dup.path == 2",
+   "expect": false
+  },
+  {
+   "name": "match: 'dup.path in {2}'",
+   "filter": "dup.path in {2}",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.max == 18446744073709551615'",
+   "filter": "big.max == 18446744073709551615",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max > 18446744073709551614'",
+   "filter": "big.max > 18446744073709551614",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max < 18446744073709551616'",
+   "filter": "big.max < 18446744073709551616",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max == 18446744073709551616'",
+   "filter": "big.max == 18446744073709551616",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.max < 99999999999999999999999999999999999999999999'",
+   "filter": "big.max < 99999999999999999999999999999999999999999999",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max in {18446744073709551615}'",
+   "filter": "big.max in {18446744073709551615}",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max in {18446744073709551614}'",
+   "filter": "big.max in {18446744073709551614}",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.p53 == 9007199254740992'",
+   "filter": "big.p53 == 9007199254740992",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.p53 > 9007199254740991'",
+   "filter": "big.p53 > 9007199254740991",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.p53 == 9007199254740993'",
+   "filter": "big.p53 == 9007199254740993",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.small == 9007199254740991'",
+   "filter": "big.small == 9007199254740991",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.small < 9007199254740992'",
+   "filter": "big.small < 9007199254740992",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.small == 9007199254740993'",
+   "filter": "big.small == 9007199254740993",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.small in {9007199254740991}'",
+   "filter": "big.small in {9007199254740991}",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.p53 in {9007199254740992}'",
+   "filter": "big.p53 in {9007199254740992}",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.small > 99999999999999999999999999999999999999999999999999'",
+   "filter": "big.small > 99999999999999999999999999999999999999999999999999",
+   "expect": false
+  },
+  {
+   "name": "match: 'unicode.i == \"i̇stanbul\"'",
+   "filter": "unicode.i == \"i̇stanbul\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'unicode.i == \"istanbul\"'",
+   "filter": "unicode.i == \"istanbul\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'unicode.i == \"İstanbul\"'",
+   "filter": "unicode.i == \"İstanbul\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'unicode.sigma == \"οδος\"'",
+   "filter": "unicode.sigma == \"οδος\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'unicode.sigma == \"ΟΔΟΣ\"'",
+   "filter": "unicode.sigma == \"ΟΔΟΣ\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'unicode.sigma == \"οδοσ\"'",
+   "filter": "unicode.sigma == \"οδοσ\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'unicode.sigma contains \"ος\"'",
+   "filter": "unicode.sigma contains \"ος\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'unicode.ss == \"STRASSE\"'",
+   "filter": "unicode.ss == \"STRASSE\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'unicode.ss == \"STRAßE\"'",
+   "filter": "unicode.ss == \"STRAßE\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'unicode.ss in {\"straße\"}'",
+   "filter": "unicode.ss in {\"straße\"}",
+   "expect": true
+  },
+  {
+   "name": "match: 'empty == \"\"'",
+   "filter": "empty == \"\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'empty != \"\"'",
+   "filter": "empty != \"\"",
+   "expect": false
+  },
+  {
+   "name": "match: 'dns.time_us > 1000'",
+   "filter": "dns.time_us > 1000",
+   "expect": true
+  },
+  {
+   "name": "match: 'app.quote == \"say \\\\\"hello\\\\\"\"'",
+   "filter": "app.quote == \"say \\\"hello\\\"\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'app.slash == \"C:\\\\\\\\temp\"'",
+   "filter": "app.slash == \"C:\\\\temp\"",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port > 443'",
+   "filter": "tcp.dst_port > 443",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port < 443'",
+   "filter": "tcp.dst_port < 443",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port >= 443'",
+   "filter": "tcp.dst_port >= 443",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port <= 443'",
+   "filter": "tcp.dst_port <= 443",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port == 443'",
+   "filter": "tcp.dst_port == 443",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port != 443'",
+   "filter": "tcp.dst_port != 443",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port > 442'",
+   "filter": "tcp.dst_port > 442",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port < 444'",
+   "filter": "tcp.dst_port < 444",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp.dst_port >= 444'",
+   "filter": "tcp.dst_port >= 444",
+   "expect": false
+  },
+  {
+   "name": "match: 'tcp.dst_port <= 442'",
+   "filter": "tcp.dst_port <= 442",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.max > 18446744073709551615'",
+   "filter": "big.max > 18446744073709551615",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.max < 18446744073709551615'",
+   "filter": "big.max < 18446744073709551615",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.max >= 18446744073709551615'",
+   "filter": "big.max >= 18446744073709551615",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max <= 18446744073709551615'",
+   "filter": "big.max <= 18446744073709551615",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max == 18446744073709551615'",
+   "filter": "big.max == 18446744073709551615",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max != 18446744073709551615'",
+   "filter": "big.max != 18446744073709551615",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.max > 18446744073709551614'",
+   "filter": "big.max > 18446744073709551614",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.max <= 18446744073709551614'",
+   "filter": "big.max <= 18446744073709551614",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.p53 > 9007199254740992'",
+   "filter": "big.p53 > 9007199254740992",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.p53 < 9007199254740992'",
+   "filter": "big.p53 < 9007199254740992",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.p53 >= 9007199254740992'",
+   "filter": "big.p53 >= 9007199254740992",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.p53 <= 9007199254740992'",
+   "filter": "big.p53 <= 9007199254740992",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.p53 == 9007199254740992'",
+   "filter": "big.p53 == 9007199254740992",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.p53 != 9007199254740992'",
+   "filter": "big.p53 != 9007199254740992",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.p53 > 9007199254740991'",
+   "filter": "big.p53 > 9007199254740991",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.p53 < 9007199254740993'",
+   "filter": "big.p53 < 9007199254740993",
+   "expect": true
+  },
+  {
+   "name": "match: 'big.p53 >= 9007199254740993'",
+   "filter": "big.p53 >= 9007199254740993",
+   "expect": false
+  },
+  {
+   "name": "match: 'big.p53 <= 9007199254740991'",
+   "filter": "big.p53 <= 9007199254740991",
+   "expect": false
+  },
+  {
+   "name": "match: 'frame.len > 120'",
+   "filter": "frame.len > 120",
+   "expect": false
+  },
+  {
+   "name": "match: 'frame.len < 120'",
+   "filter": "frame.len < 120",
+   "expect": false
+  },
+  {
+   "name": "match: 'frame.len >= 120'",
+   "filter": "frame.len >= 120",
+   "expect": true
+  },
+  {
+   "name": "match: 'frame.len <= 120'",
+   "filter": "frame.len <= 120",
+   "expect": true
+  },
+  {
+   "name": "match: 'frame.len == 120'",
+   "filter": "frame.len == 120",
+   "expect": true
+  },
+  {
+   "name": "match: 'frame.len != 120'",
+   "filter": "frame.len != 120",
+   "expect": false
+  },
+  {
+   "name": "match: 'frame.len > 119'",
+   "filter": "frame.len > 119",
+   "expect": true
+  },
+  {
+   "name": "match: 'frame.len < 121'",
+   "filter": "frame.len < 121",
+   "expect": true
+  },
+  {
+   "name": "match: 'frame.len >= 121'",
+   "filter": "frame.len >= 121",
+   "expect": false
+  },
+  {
+   "name": "match: 'frame.len <= 119'",
+   "filter": "frame.len <= 119",
+   "expect": false
+  },
+  {
+   "name": "match: '\\ttcp.dst_port\\n==\\xa0443\\ufeff'",
+   "filter": "\ttcp.dst_port\n== 443﻿",
+   "expect": true
+  },
+  {
+   "name": "match: 'tcp\\u2028and\\u3000tcp'",
+   "filter": "tcp and　tcp",
+   "expect": true
+  },
+  {
+   "name": "error: ''",
+   "filter": "",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "<end>",
+     "position": 0
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp =='",
+   "filter": "tcp ==",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "<end>",
+     "position": 6
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp.dst_port = 443'",
+   "filter": "tcp.dst_port = 443",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "=",
+     "position": 13
+    }
+   }
+  },
+  {
+   "name": "error: '\"abc'",
+   "filter": "\"abc",
+   "expect": {
+    "error": {
+     "message": "Unterminated string",
+     "token": "<end>",
+     "position": 4
+    }
+   }
+  },
+  {
+   "name": "error: '\"a\\\\b\"'",
+   "filter": "\"a\\b\"",
+   "expect": {
+    "error": {
+     "message": "Invalid string escape",
+     "token": "b",
+     "position": 3
+    }
+   }
+  },
+  {
+   "name": "error: 'x == \"a\\\\'",
+   "filter": "x == \"a\\",
+   "expect": {
+    "error": {
+     "message": "Invalid string escape",
+     "token": "<end>",
+     "position": 8
+    }
+   }
+  },
+  {
+   "name": "error: 'a b'",
+   "filter": "a b",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "b",
+     "position": 2
+    }
+   }
+  },
+  {
+   "name": "error: 'and'",
+   "filter": "and",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "and",
+     "position": 0
+    }
+   }
+  },
+  {
+   "name": "error: 'TRUE'",
+   "filter": "TRUE",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "TRUE",
+     "position": 0
+    }
+   }
+  },
+  {
+   "name": "error: '(tcp'",
+   "filter": "(tcp",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "<end>",
+     "position": 4
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp in {}'",
+   "filter": "tcp in {}",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "}",
+     "position": 8
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp in {1,}'",
+   "filter": "tcp in {1,}",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "}",
+     "position": 10
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp in 1'",
+   "filter": "tcp in 1",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "1",
+     "position": 7
+    }
+   }
+  },
+  {
+   "name": "error: 'é'",
+   "filter": "é",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "é",
+     "position": 0
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp == é'",
+   "filter": "tcp == é",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "é",
+     "position": 7
+    }
+   }
+  },
+  {
+   "name": "error: '\\x85tcp'",
+   "filter": "tcp",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "",
+     "position": 0
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp == 1 2'",
+   "filter": "tcp == 1 2",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "2",
+     "position": 9
+    }
+   }
+  },
+  {
+   "name": "error: 'x == @'",
+   "filter": "x == @",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "@",
+     "position": 5
+    }
+   }
+  },
+  {
+   "name": "error: 'x == ='",
+   "filter": "x == =",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "=",
+     "position": 5
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp == tcp'",
+   "filter": "tcp == tcp",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "tcp",
+     "position": 7
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp contains 1 or'",
+   "filter": "tcp contains 1 or",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "<end>",
+     "position": 17
+    }
+   }
+  },
+  {
+   "name": "error: 'x ! y'",
+   "filter": "x ! y",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "!",
+     "position": 2
+    }
+   }
+  },
+  {
+   "name": "error: '1 == 1'",
+   "filter": "1 == 1",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "1",
+     "position": 0
+    }
+   }
+  },
+  {
+   "name": "error: 'tcp )'",
+   "filter": "tcp )",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": ")",
+     "position": 4
+    }
+   }
+  },
+  {
+   "name": "source length 2048 (limit)",
+   "filter": "tcp                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             ",
+   "expect": true
+  },
+  {
+   "name": "source length 2049 (limit + 1)",
+   "filter": "tcp                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              ",
+   "expect": {
+    "error": {
+     "message": "Source length limit exceeded",
+     "token": "<source-limit>",
+     "position": 2048
+    }
+   }
+  },
+  {
+   "name": "UTF-16 length 2047 with astral chars",
+   "filter": "empty == \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"",
+   "expect": false
+  },
+  {
+   "name": "UTF-16 length 2049 with astral chars (1030 chars)",
+   "filter": "empty == \"😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀\"",
+   "expect": {
+    "error": {
+     "message": "Source length limit exceeded",
+     "token": "<source-limit>",
+     "position": 2048
+    }
+   }
+  },
+  {
+   "name": "UTF-16 position after an astral char",
+   "filter": "empty == \"😀\" or x == @",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "@",
+     "position": 22
+    }
+   }
+  },
+  {
+   "name": "512 tokens (limit)",
+   "filter": "not tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp",
+   "expect": true
+  },
+  {
+   "name": "513 tokens (limit + 1)",
+   "filter": "not not tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp or tcp",
+   "expect": {
+    "error": {
+     "message": "Token limit exceeded",
+     "token": "<token-limit>",
+     "position": 1793
+    }
+   }
+  },
+  {
+   "name": "tokenizer error past an earlier parse error",
+   "filter": "a b c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c c",
+   "expect": {
+    "error": {
+     "message": "Unexpected token",
+     "token": "b",
+     "position": 2
+    }
+   }
+  },
+  {
+   "name": "nesting 64 via not (limit)",
+   "filter": "not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not tcp",
+   "expect": true
+  },
+  {
+   "name": "nesting 65 via not (limit + 1)",
+   "filter": "not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not not tcp",
+   "expect": {
+    "error": {
+     "message": "Nesting limit exceeded",
+     "token": "<nesting-limit>",
+     "position": 256
+    }
+   }
+  },
+  {
+   "name": "nesting 64 via parentheses (limit)",
+   "filter": "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((tcp))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))",
+   "expect": true
+  },
+  {
+   "name": "nesting 65 via parentheses (limit + 1)",
+   "filter": "(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((tcp)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))",
+   "expect": {
+    "error": {
+     "message": "Nesting limit exceeded",
+     "token": "<nesting-limit>",
+     "position": 64
+    }
+   }
+  },
+  {
+   "name": "set size 128 (limit)",
+   "filter": "tcp.dst_port in {316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,360,361,362,363,364,365,366,367,368,369,370,371,372,373,374,375,376,377,378,379,380,381,382,383,384,385,386,387,388,389,390,391,392,393,394,395,396,397,398,399,400,401,402,403,404,405,406,407,408,409,410,411,412,413,414,415,416,417,418,419,420,421,422,423,424,425,426,427,428,429,430,431,432,433,434,435,436,437,438,439,440,441,442,443}",
+   "expect": true
+  },
+  {
+   "name": "set size 129 (limit + 1)",
+   "filter": "tcp.dst_port in {315,316,317,318,319,320,321,322,323,324,325,326,327,328,329,330,331,332,333,334,335,336,337,338,339,340,341,342,343,344,345,346,347,348,349,350,351,352,353,354,355,356,357,358,359,360,361,362,363,364,365,366,367,368,369,370,371,372,373,374,375,376,377,378,379,380,381,382,383,384,385,386,387,388,389,390,391,392,393,394,395,396,397,398,399,400,401,402,403,404,405,406,407,408,409,410,411,412,413,414,415,416,417,418,419,420,421,422,423,424,425,426,427,428,429,430,431,432,433,434,435,436,437,438,439,440,441,442,443}",
+   "expect": {
+    "error": {
+     "message": "Set size limit exceeded",
+     "token": "<set-limit>",
+     "position": 529
+    }
+   }
+  }
+ ]
+}

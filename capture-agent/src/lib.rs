@@ -1,5 +1,6 @@
 pub mod control_auth;
 pub mod core_limits;
+pub mod display_filter;
 pub mod dns_names;
 pub mod fields;
 pub mod flow;
