@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Create a Slack approval gate for a Linear-tracked task: writes
-# coordination/gates/<linear-id>__<slug>.md with status: awaiting-approval
+# Create a Slack approval gate for a tracked (Jira KAN) task: writes
+# coordination/gates/<issue-key>__<slug>.md with status: awaiting-approval
 # and posts the plan to the shared Slack channel for visibility/discussion.
 # The plan/design doc predates AGENTS.md "Slack Approval Gate", which
 # supersedes it on how a gate gets approved: only a human typing directly
@@ -10,7 +10,7 @@
 # for everything else (file layout, locking, delegation).
 #
 # Usage:
-#   ./create-gate.sh <linear-id> <slug> "<plan-summary>" <interactive|autonomous>
+#   ./create-gate.sh <issue-key> <slug> "<plan-summary>" <interactive|autonomous>
 #
 # mode "interactive": if the Slack post fails or nothing is configured, the
 #   gate is still created (approval can still come from this chat session)
@@ -22,10 +22,10 @@
 
 set -euo pipefail
 
-LINEAR_ID="${1:?usage: create-gate.sh <linear-id> <slug> \"<plan-summary>\" <interactive|autonomous>}"
-SLUG="${2:?usage: create-gate.sh <linear-id> <slug> \"<plan-summary>\" <interactive|autonomous>}"
-PLAN_SUMMARY="${3:?usage: create-gate.sh <linear-id> <slug> \"<plan-summary>\" <interactive|autonomous>}"
-MODE="${4:?usage: create-gate.sh <linear-id> <slug> \"<plan-summary>\" <interactive|autonomous>}"
+ISSUE_KEY="${1:?usage: create-gate.sh <issue-key> <slug> \"<plan-summary>\" <interactive|autonomous>}"
+SLUG="${2:?usage: create-gate.sh <issue-key> <slug> \"<plan-summary>\" <interactive|autonomous>}"
+PLAN_SUMMARY="${3:?usage: create-gate.sh <issue-key> <slug> \"<plan-summary>\" <interactive|autonomous>}"
+MODE="${4:?usage: create-gate.sh <issue-key> <slug> \"<plan-summary>\" <interactive|autonomous>}"
 
 if [[ "$MODE" != "interactive" && "$MODE" != "autonomous" ]]; then
   echo "mode must be 'interactive' or 'autonomous'" >&2
@@ -36,9 +36,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
-LINEAR_ID_LOWER="$(echo "$LINEAR_ID" | tr '[:upper:]' '[:lower:]')"
-GATE_TAG="${LINEAR_ID_LOWER}__${SLUG}"
+GATE_FILE="$(gate_path "$ISSUE_KEY" "$SLUG")"
+ISSUE_KEY_LOWER="$(echo "$ISSUE_KEY" | tr '[:upper:]' '[:lower:]')"
+GATE_TAG="${ISSUE_KEY_LOWER}__${SLUG}"
 
 mkdir -p "$REPO_ROOT/coordination/gates"
 
@@ -55,7 +55,7 @@ _create_locked() {
 
   cat > "$GATE_FILE" <<EOF
 ---
-linear_id: ${LINEAR_ID}
+issue_key: ${ISSUE_KEY}
 slug: ${SLUG}
 status: awaiting-approval
 delegated: false

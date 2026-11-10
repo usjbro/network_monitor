@@ -8,14 +8,14 @@ BIN="$SCRIPT_DIR/.."
 # shellcheck disable=SC1091
 source "$BIN/lib.sh"
 FAILURES=0
-TEST_LINEAR_ID="ZZZ-999"
+TEST_ISSUE_KEY="ZZZ-999"
 TEST_SLUG="test-recovery-$$"
-GATE_FILE="$(gate_path "$TEST_LINEAR_ID" "$TEST_SLUG")"
+GATE_FILE="$(gate_path "$TEST_ISSUE_KEY" "$TEST_SLUG")"
 LOCK_DIR="${GATE_FILE}.lock"
 LOCK_PROBE_GATE="${GATE_FILE}.probe"
 LOCK_PROBE_DIR="${LOCK_PROBE_GATE}.lock"
 MALFORMED_SLUG="test-recovery-malformed-$$"
-MALFORMED_GATE="$(gate_path "$TEST_LINEAR_ID" "$MALFORMED_SLUG")"
+MALFORMED_GATE="$(gate_path "$TEST_ISSUE_KEY" "$MALFORMED_SLUG")"
 
 for command in claim-gate-delegation.sh reset-gate-delegation-claim.sh recover-gate-lock.sh; do
   if [[ ! -x "$BIN/$command" ]]; then
@@ -33,7 +33,7 @@ trap cleanup EXIT
 mkdir -p "$(dirname "$GATE_FILE")"
 cat > "$GATE_FILE" <<EOF_GATE
 ---
-linear_id: ${TEST_LINEAR_ID}
+linear_id: ${TEST_ISSUE_KEY}
 slug: ${TEST_SLUG}
 status: approved
 delegated: false
@@ -50,7 +50,7 @@ EOF_GATE
 
 # An approved, unclaimed gate is resumable; claiming it atomically prevents a
 # second session from launching a duplicate delegation.
-"$BIN/mark-gate-delegated.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" codex >/dev/null 2>&1
+"$BIN/mark-gate-delegated.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" codex >/dev/null 2>&1
 MARK_WITHOUT_CLAIM_CODE=$?
 if [[ "$MARK_WITHOUT_CLAIM_CODE" -ne 0 ]]; then
   echo "PASS: unclaimed delegation cannot be marked complete"
@@ -60,10 +60,10 @@ else
 fi
 
 # A failed gate rewrite must never let a claimant report success and dispatch.
-printf '%s\n' '---' "linear_id: $TEST_LINEAR_ID" "slug: $MALFORMED_SLUG" \
+printf '%s\n' '---' "linear_id: $TEST_ISSUE_KEY" "slug: $MALFORMED_SLUG" \
   'status: approved' 'delegated: false' 'delegation_claimed: false' > "$MALFORMED_GATE"
 MALFORMED_BEFORE="$(cat "$MALFORMED_GATE")"
-CLAIM_OUT="$("$BIN/claim-gate-delegation.sh" "$TEST_LINEAR_ID" "$MALFORMED_SLUG" 2>&1)"
+CLAIM_OUT="$("$BIN/claim-gate-delegation.sh" "$TEST_ISSUE_KEY" "$MALFORMED_SLUG" 2>&1)"
 CLAIM_CODE=$?
 if [[ "$CLAIM_CODE" -ne 0 && "$(cat "$MALFORMED_GATE")" == "$MALFORMED_BEFORE" \
   && "$CLAIM_OUT" != "delegation-claimed" ]]; then
@@ -72,7 +72,7 @@ else
   echo "FAIL: failed claim rewrite exited $CLAIM_CODE with output '$CLAIM_OUT'"
   FAILURES=$((FAILURES + 1))
 fi
-"$BIN/claim-gate-delegation.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" >/dev/null 2>&1
+"$BIN/claim-gate-delegation.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" >/dev/null 2>&1
 FIRST_CLAIM_CODE=$?
 if [[ "$FIRST_CLAIM_CODE" -eq 0 ]]; then
   echo "PASS: first session claims an approved gate"
@@ -80,7 +80,7 @@ else
   echo "FAIL: first claim exited $FIRST_CLAIM_CODE"
   FAILURES=$((FAILURES + 1))
 fi
-"$BIN/claim-gate-delegation.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" >/dev/null 2>&1
+"$BIN/claim-gate-delegation.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" >/dev/null 2>&1
 SECOND_CLAIM_CODE=$?
 if [[ "$SECOND_CLAIM_CODE" -ne 0 ]]; then
   echo "PASS: duplicate claim is refused"
@@ -88,11 +88,11 @@ else
   echo "FAIL: duplicate claim was accepted"
   FAILURES=$((FAILURES + 1))
 fi
-STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_LINEAR_ID" "$TEST_SLUG")"
+STATUS_OUT="$("$BIN/gate-status.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG")"
 [[ "$STATUS_OUT" == "status=approved delegated=false delegation_claimed=true" ]] \
   && echo "PASS: status reports the incomplete delegation claim" \
   || { echo "FAIL: status does not expose claim — got '$STATUS_OUT'"; FAILURES=$((FAILURES + 1)); }
-"$BIN/mark-gate-delegated.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" codex >/dev/null 2>&1
+"$BIN/mark-gate-delegated.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" codex >/dev/null 2>&1
 MARK_CODE=$?
 if [[ "$MARK_CODE" -eq 0 ]]; then
   echo "PASS: claimed delegation can be marked complete"
@@ -100,7 +100,7 @@ else
   echo "FAIL: mark claimed delegation exited $MARK_CODE"
   FAILURES=$((FAILURES + 1))
 fi
-"$BIN/reset-gate-delegation-claim.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" --confirm-no-active-delegation >/dev/null 2>&1
+"$BIN/reset-gate-delegation-claim.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" --confirm-no-active-delegation >/dev/null 2>&1
 RESET_COMPLETE_CODE=$?
 if [[ "$RESET_COMPLETE_CODE" -ne 0 ]]; then
   echo "PASS: completed delegation cannot be reset"
@@ -113,7 +113,7 @@ fi
 # confirmation, after checking that no delegation is active.
 cat > "$GATE_FILE" <<EOF_GATE
 ---
-linear_id: ${TEST_LINEAR_ID}
+linear_id: ${TEST_ISSUE_KEY}
 slug: ${TEST_SLUG}
 status: approved
 delegated: false
@@ -127,11 +127,11 @@ delegation_agent_type:
 
 recovery test
 EOF_GATE
-"$BIN/reset-gate-delegation-claim.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" >/dev/null 2>&1
+"$BIN/reset-gate-delegation-claim.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" >/dev/null 2>&1
 RESET_UNCONFIRMED_CODE=$?
-"$BIN/reset-gate-delegation-claim.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" --confirm-no-active-delegation >/dev/null 2>&1
+"$BIN/reset-gate-delegation-claim.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" --confirm-no-active-delegation >/dev/null 2>&1
 RESET_CONFIRMED_CODE=$?
-"$BIN/claim-gate-delegation.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" >/dev/null 2>&1
+"$BIN/claim-gate-delegation.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" >/dev/null 2>&1
 RECLAIM_CODE=$?
 if [[ "$RESET_UNCONFIRMED_CODE" -ne 0 && "$RESET_CONFIRMED_CODE" -eq 0 && "$RECLAIM_CODE" -eq 0 ]]; then
   echo "PASS: confirmed orphaned claim can be reset and reclaimed"
@@ -178,7 +178,7 @@ fi
 # there is no owner record (interruption immediately after mkdir).
 mkdir "$LOCK_DIR"
 printf '%s\n' "$$" > "$LOCK_DIR/pid"
-if "$BIN/recover-gate-lock.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1; then
+if "$BIN/recover-gate-lock.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1; then
   echo "FAIL: recovery removed a lock owned by this live test process"
   FAILURES=$((FAILURES + 1))
 else
@@ -191,7 +191,7 @@ cat > "$FAKE_PS_DIR/ps" <<'EOF'
 printf '%s\n' 'the current process start time'
 EOF
 chmod +x "$FAKE_PS_DIR/ps"
-if PATH="$FAKE_PS_DIR:$PATH" "$BIN/recover-gate-lock.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 \
+if PATH="$FAKE_PS_DIR:$PATH" "$BIN/recover-gate-lock.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 \
   && [[ ! -e "$LOCK_DIR" ]]; then
   echo "PASS: recovery recognizes a reused PID from a different process start"
 else
@@ -203,26 +203,26 @@ rmdir "$FAKE_PS_DIR"
 rm -rf "$LOCK_DIR"
 mkdir "$LOCK_DIR"
 printf '%s\n' 99999999 > "$LOCK_DIR/pid"
-if "$BIN/recover-gate-lock.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" >/dev/null 2>&1; then
+if "$BIN/recover-gate-lock.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" >/dev/null 2>&1; then
   echo "FAIL: stale lock recovery did not require confirmation"
   FAILURES=$((FAILURES + 1))
 else
   echo "PASS: stale lock recovery requires confirmation"
 fi
-if "$BIN/recover-gate-lock.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 && [[ ! -e "$LOCK_DIR" ]]; then
+if "$BIN/recover-gate-lock.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 && [[ ! -e "$LOCK_DIR" ]]; then
   echo "PASS: confirmed stale lock is removed"
 else
   echo "FAIL: confirmed stale lock was not removed"
   FAILURES=$((FAILURES + 1))
 fi
 mkdir "$LOCK_DIR"
-if "$BIN/recover-gate-lock.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" >/dev/null 2>&1; then
+if "$BIN/recover-gate-lock.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" >/dev/null 2>&1; then
   echo "FAIL: ownerless lock recovery did not require confirmation"
   FAILURES=$((FAILURES + 1))
 else
   echo "PASS: ownerless lock recovery requires confirmation"
 fi
-if "$BIN/recover-gate-lock.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 && [[ ! -e "$LOCK_DIR" ]]; then
+if "$BIN/recover-gate-lock.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 && [[ ! -e "$LOCK_DIR" ]]; then
   echo "PASS: confirmed ownerless lock is removed"
 else
   echo "FAIL: confirmed ownerless lock was not removed"
@@ -230,7 +230,7 @@ else
 fi
 mkdir "$LOCK_DIR"
 printf '%s\n' 'orphaned start metadata' > "$LOCK_DIR/start"
-if "$BIN/recover-gate-lock.sh" "$TEST_LINEAR_ID" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 && [[ ! -e "$LOCK_DIR" ]]; then
+if "$BIN/recover-gate-lock.sh" "$TEST_ISSUE_KEY" "$TEST_SLUG" --confirm-no-live-operation >/dev/null 2>&1 && [[ ! -e "$LOCK_DIR" ]]; then
   echo "PASS: confirmed ownerless lock with orphaned start metadata is removed"
 else
   echo "FAIL: ownerless lock with orphaned start metadata was not removed"

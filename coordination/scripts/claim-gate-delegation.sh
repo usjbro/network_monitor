@@ -4,18 +4,18 @@
 # inspected and explicitly reset before retrying (see reset-gate-delegation-claim.sh).
 #
 # Usage:
-#   ./claim-gate-delegation.sh <linear-id> <slug>
+#   ./claim-gate-delegation.sh <issue-key> <slug>
 
 set -euo pipefail
 
-LINEAR_ID="${1:?usage: claim-gate-delegation.sh <linear-id> <slug>}"
-SLUG="${2:?usage: claim-gate-delegation.sh <linear-id> <slug>}"
+ISSUE_KEY="${1:?usage: claim-gate-delegation.sh <issue-key> <slug>}"
+SLUG="${2:?usage: claim-gate-delegation.sh <issue-key> <slug>}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
+GATE_FILE="$(gate_path "$ISSUE_KEY" "$SLUG")"
 if [[ ! -f "$GATE_FILE" ]]; then
   echo "no such gate: $GATE_FILE" >&2
   exit 1

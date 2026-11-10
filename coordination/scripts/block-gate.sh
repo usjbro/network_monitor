@@ -11,19 +11,19 @@
 # happened.
 #
 # Usage:
-#   ./block-gate.sh <linear-id> <slug> "<reason>"
+#   ./block-gate.sh <issue-key> <slug> "<reason>"
 
 set -euo pipefail
 
-LINEAR_ID="${1:?usage: block-gate.sh <linear-id> <slug> \"<reason>\"}"
-SLUG="${2:?usage: block-gate.sh <linear-id> <slug> \"<reason>\"}"
-REASON="${3:?usage: block-gate.sh <linear-id> <slug> \"<reason>\"}"
+ISSUE_KEY="${1:?usage: block-gate.sh <issue-key> <slug> \"<reason>\"}"
+SLUG="${2:?usage: block-gate.sh <issue-key> <slug> \"<reason>\"}"
+REASON="${3:?usage: block-gate.sh <issue-key> <slug> \"<reason>\"}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
+GATE_FILE="$(gate_path "$ISSUE_KEY" "$SLUG")"
 
 if [[ ! -f "$GATE_FILE" ]]; then
   echo "no such gate: $GATE_FILE" >&2

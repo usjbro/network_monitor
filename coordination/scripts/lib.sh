@@ -90,7 +90,7 @@ slack_post_and_record() {
 }
 
 # Validates a value intended for use as a filesystem path component (a task
-# or gate slug, or a lower-cased Linear id). Rejects anything empty, or
+# or gate slug, or a lower-cased tracker issue key such as kan-12). Rejects anything empty, or
 # containing characters other than lowercase letters, digits, and hyphens —
 # in particular this rejects "/" and "..", the exact gap an open review
 # finding flagged against new-task.sh's unvalidated TASK_SLUG (PR #220
@@ -106,16 +106,35 @@ validate_slug() {
   fi
 }
 
-# Computes the gate file path for a given Linear id + slug, validating both
-# first. linear_id is lower-cased to match this repo's existing branch
-# convention (see new-task.sh's LINEAR_ID_LOWER). The double underscore is
-# unambiguous because neither validated component can contain an underscore.
+# Computes the gate file path for a given tracker issue key + slug,
+# validating both first. The key (a Jira KAN-12, or a legacy Linear JAM-21
+# whose gate files predate the switch) is lower-cased, so both
+# kan-12__<slug>.md and existing jam-21__<slug>.md resolve. The double
+# underscore is unambiguous because neither validated component can
+# contain an underscore.
 gate_path() {
-  local linear_id_lower slug="$2"
-  linear_id_lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
-  validate_slug "$linear_id_lower" "linear-id"
+  local key_lower slug="$2"
+  key_lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  validate_slug "$key_lower" "issue-key"
   validate_slug "$slug" "slug"
-  echo "$REPO_ROOT/coordination/gates/${linear_id_lower}__${slug}.md"
+  echo "$REPO_ROOT/coordination/gates/${key_lower}__${slug}.md"
+}
+
+# Branch name for a coordination task. With an issue key it is Jira's own
+# default, KEY-<slug> with the key upper-cased, so GitHub for Jira links it
+# (ADR-007). Without one it is <prefix>/<slug>: every unkeyed branch in this
+# repo uses that prefix, which is NOT derivable from local git config —
+# `git config user.email` resolves to GitHub's noreply address and
+# `git config user.name` / `gh api user` both give "usjbro". Override with
+# COORDINATION_BRANCH_PREFIX if that handle ever changes.
+task_branch() {
+  local slug="$1" key="${2:-}"
+  if [[ -n "$key" ]]; then
+    validate_slug "$(echo "$key" | tr '[:upper:]' '[:lower:]')" "issue-key"
+    echo "$(echo "$key" | tr '[:lower:]' '[:upper:]')-${slug}"
+  else
+    echo "${COORDINATION_BRANCH_PREFIX:-jamesmbrownjr}/${slug}"
+  fi
 }
 
 # Reads a single field's value from a gate file's YAML frontmatter block
@@ -135,6 +154,16 @@ gate_field() {
       exit
     }
   ' "$gate_file"
+}
+
+# The tracker issue key recorded in a gate or task file's frontmatter:
+# issue_key on files written since the Jira switch, falling back to the
+# linear_id field that older files carry. Empty when there is neither.
+gate_field_issue_key() {
+  local key
+  key="$(gate_field "$1" issue_key)"
+  [[ -n "$key" ]] || key="$(gate_field "$1" linear_id)"
+  echo "$key"
 }
 
 # Rewrites a single frontmatter field's value in place, scoped to the same

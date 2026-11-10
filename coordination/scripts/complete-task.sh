@@ -32,7 +32,7 @@ fi
 # rewritten but before the confirmation/Slack post ever runs.
 OWNER="$(grep '^owner:' "$TASK_FILE" | cut -d' ' -f2)"
 BRANCH="$(grep '^branch:' "$TASK_FILE" | cut -d' ' -f2)"
-LINEAR_ID="$(grep '^linear_id:' "$TASK_FILE" | cut -d' ' -f2- || true)"
+ISSUE_KEY="$(gate_field_issue_key "$TASK_FILE")"
 : "${OWNER:?$TASK_FILE has no owner: line}"
 : "${BRANCH:?$TASK_FILE has no branch: line}"
 
@@ -45,8 +45,8 @@ echo "Branch: ${BRANCH}"
 echo
 echo "Now fill in the Handoff section of $TASK_FILE by hand (files changed,"
 echo "test results, risks) before a human reviews and merges."
-if [[ -n "${LINEAR_ID:-}" ]]; then
-  echo "Remember: also update ${LINEAR_ID}'s status in Linear (epic-task-cycle §2 steps 8-11) — this file and Linear must agree."
+if [[ -n "${ISSUE_KEY:-}" ]]; then
+  echo "Remember: also update ${ISSUE_KEY}'s status in Jira (epic-task-cycle §2 steps 8-11) — this file and Jira must agree."
 fi
 
 if slack_configured; then

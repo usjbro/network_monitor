@@ -38,7 +38,7 @@
 # `reclaimed` to Slack, since a takeover should stay visible.
 #
 # Usage:
-#   ./reclaim-stale-gate.sh <linear-id> <slug> --confirm-human-authorized-takeover
+#   ./reclaim-stale-gate.sh <issue-key> <slug> --confirm-human-authorized-takeover
 #
 # Exit 0 and prints "reclaimed" if this call reclaimed the gate. Exit 2 and
 # prints why ("not-delegated", "already-progressed", "commit-exists",
@@ -49,8 +49,8 @@
 
 set -euo pipefail
 
-LINEAR_ID="${1:?usage: reclaim-stale-gate.sh <linear-id> <slug> --confirm-human-authorized-takeover}"
-SLUG="${2:?usage: reclaim-stale-gate.sh <linear-id> <slug> --confirm-human-authorized-takeover}"
+ISSUE_KEY="${1:?usage: reclaim-stale-gate.sh <issue-key> <slug> --confirm-human-authorized-takeover}"
+SLUG="${2:?usage: reclaim-stale-gate.sh <issue-key> <slug> --confirm-human-authorized-takeover}"
 CONFIRM="${3:-}"
 
 if [[ "$CONFIRM" != "--confirm-human-authorized-takeover" || $# -ne 3 ]]; then
@@ -62,14 +62,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
+GATE_FILE="$(gate_path "$ISSUE_KEY" "$SLUG")"
 if [[ ! -f "$GATE_FILE" ]]; then
   echo "no such gate: $GATE_FILE" >&2
   exit 1
 fi
 
-LINEAR_ID_LOWER="$(echo "$LINEAR_ID" | tr '[:upper:]' '[:lower:]')"
-GATE_TAG="${LINEAR_ID_LOWER}__${SLUG}"
+ISSUE_KEY_LOWER="$(echo "$ISSUE_KEY" | tr '[:upper:]' '[:lower:]')"
+GATE_TAG="${ISSUE_KEY_LOWER}__${SLUG}"
 TASK_FILE="$REPO_ROOT/coordination/tasks/${SLUG}.md"
 
 _reclaim_locked() {
