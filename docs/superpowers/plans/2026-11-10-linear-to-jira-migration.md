@@ -49,14 +49,17 @@ James answered D1, D3/D4, D6 and the timing in chat on 2026-11-10. D2, D5 and D7
 |---|---|---|
 | D1 | Which Jira account is James? | **`theantimeridian` (account id `712020:9dab45a6-b5ed-42d0-b3cc-e1145efb6865`) is James** (answered in chat). Agents write to Jira through the same MCP connection, so a Jira comment cannot be shown to be human-typed. Jira comments are therefore information, never approval, the same rule as Slack connector posts. Approvals stay in chat. |
 | D2 | Where does JAM-31 (the roadmap root) go? | JAM-31 becomes a Task labelled `roadmap`. Its epics get the label `roadmap`, and its non-epic children become Tasks with a Relates link to it. |
-| D3 | Statuses | **Keep KAN's three defaults** (answered in chat). Backlog and Todo become To Do, In Progress and In Review become In Progress, and Done, Canceled and Duplicate become Done. Every issue gets the label `linear-status-<status>` (`linear-status-in-review`, `linear-status-canceled` and so on) so the original state can still be filtered. Duplicates also get a Duplicate link. |
+| D3 | Statuses | **Revised after the dry run** (answered in chat). KAN does have In Review (transition 31). Todo, In Progress, In Review and Done map one to one. Backlog becomes To Do, and Canceled and Duplicate become Done. Every issue gets the label `linear-status-<status>` (`linear-status-in-review`, `linear-status-canceled` and so on) so the original state can still be filtered. Duplicates also get a Duplicate link. |
 | D4 | Bug | **It stays a label** (`bug`) on Task, following from the D3 answer. |
 | D5 | Comments | One "Linear history" comment per issue. Each original comment appears in order under `**<author> · <ISO date>**`, split at 30,000 characters. |
 | D6 | Naming after cutover | **Jira's default** (answered in chat). Branches are `KAN-<m>-<slug>`, with no username prefix and the key kept in upper case so GitHub for Jira matches it. Gate files are `kan-<m>__<slug>.md`. Legacy `jam-*` gate and task files stay readable. |
 | D7 | Integrations at cutover | James disconnects Linear's GitHub integration, so merges stop auto-closing Linear issues, and installs GitHub for Jira. Slack keeps `slack-notify.sh`. |
 | D8 | Timing of the repo switch | **The PR is built now and merged at cutover** (answered in chat). |
 
-Since KAN has no In Review status, "In Review" in the skill and docs becomes "In Progress, plus a PR linked, plus the label `in-review`". The label is set when the PR opens and removed at Done.
+Dry-run additions (James, in chat, 2026-11-10):
+- Linear "No priority" gets the label `linear-priority-none`, because Jira's default priority is Medium.
+- Markdown checkboxes become ✅ (done) and ⬜ (open), because Jira shows `[x]` as plain text.
+- The JAM-125 dry run became KAN-4.
 
 ## Mapping (applied by Tasks 2–4)
 
@@ -69,7 +72,7 @@ Since KAN has no In Review status, "In Review" in the skill and docs becomes "In
 | Project name | label `proj-<slug>`, for example `proj-d-analysis-surfaces` |
 | Labels Feature, Improvement, Bug, Security, Web, Rust, Not Speced | lower-case kebab labels (`not-speced`) |
 | Priority 1 / 2 / 3 / 4 / 0 | Highest / High / Medium / Low / no change |
-| Backlog, Todo / In Progress, In Review / Done, Canceled, Duplicate | To Do / In Progress / Done, plus the label `linear-status-<status>` (D3); Duplicate also gets a Duplicate link |
+| Backlog, Todo / In Progress / In Review / Done, Canceled, Duplicate | To Do / In Progress / In Review / Done, plus the label `linear-status-<status>` (D3); Duplicate also gets a Duplicate link |
 | Estimate | Story point estimate, if the field exists on the type; otherwise `Estimate: n pt` in the header |
 | Delegate (an agent) | label `owner-codex` or `owner-claude-code` |
 | Assignee James | Assignee is `theantimeridian` (D1) |
@@ -173,7 +176,7 @@ Since KAN has no In Review status, "In Review" in the skill and docs becomes "In
 
 - [ ] **Step 1: Rewrite the skill.**
   - Resolve epics with JQL: `project = KAN AND issuetype = Epic AND statusCategory != Done`, then `parent = KAN-m` for its children.
-  - Statuses are To Do, In Progress and Done, plus the `in-review` label (D3), moved with `transitionJiraIssue`; look up the transition ids with `getTransitionsForJiraIssue` and never hard-code them.
+  - Statuses are To Do, In Progress, In Review and Done (D3), moved with `transitionJiraIssue`; look up the transition ids with `getTransitionsForJiraIssue` and never hard-code them.
   - PRs go under the issue's "Linked PRs", or are linked automatically by GitHub for Jira (D7).
   - Remove the Linear quirks in §2 step 8, replacing them with "verify each write with a fresh `getJiraIssue`".
   - Keep JAM-125 as the worked example, noting that it is now `KAN-<m>` per the ledger.

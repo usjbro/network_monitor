@@ -1,3 +1,17 @@
+# Linear → Jira KAN cutover (2026-11-10)
+
+The tracker is now Jira project KAN (https://theantimeridian.atlassian.net/browse/KAN). Linear is frozen and read-only. `coordination/migration/jam-to-kan.tsv` maps every old `JAM-n` to its `KAN-m`. The records below predate the switch and keep their JAM ids. Their keys now:
+
+- JAM-18 IO graph → KAN-111 (In Progress; PR #306 merged, Task 4 not started)
+- JAM-17 Follow Stream → KAN-110
+- JAM-256 / JAM-186 docs → KAN-126 / KAN-114
+- JAM-261 WHOIS test → KAN-49
+- JAM-169 (gate awaiting approval) → KAN-270
+
+The next work item is the next KAN `To Do` issue. Gate files keep their `jam-n__<slug>.md` names and now carry `issue_key`.
+
+---
+
 # JAM-256 + JAM-186 — combined documentation verification (2026-11-06)
 
 User authorised one coordinated branch/PR for both issues in live chat. Branch `jamesmbrownjr/jam-256-docs-task-oriented-analysis-guide-querying-packets-and`, worktree `.worktrees/docs-task-oriented-analysis-guide-querying-packets-and`, base `6066372`. Both local gates recorded/approved/claimed; no Slack credentials in this cloud checkout, so required statuses reported in chat. Separate read-only source audits and independent review found no blocking findings; documentation and tests only, no application changes.
