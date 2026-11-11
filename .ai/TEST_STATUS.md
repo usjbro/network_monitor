@@ -1,3 +1,26 @@
+# KAN-129 Task 2 — relay request core, admission, Pages route (2026-11-11)
+
+Linux cloud worktree, Node + Vitest 5.0.5, base main `77ab587`. Relay only; the agent does not answer `get_tcp_samples` until Task 3.
+
+- **Tests first.** Three of the four new files (`agent-request`, `agent-admission`, `tcp-samples-route`) failed to load: their modules did not exist. The isolation test showed a `tcp_samples` event reaching the SSE stream. The middleware Host-allowlist tests passed from the start, because the allowlist has no path matcher; they guard that property.
+- **Mutation checks.** Each was run, made a test fail and was restored:
+  - releasing the lease when the agent replies (the slow-reader test failed);
+  - removing the SSE defensive drop;
+  - `AgentClient` also emitting replies (3 failed);
+  - removing the partial-line guard;
+  - counting the ceiling in UTF-16 units instead of bytes;
+  - a disconnect not failing pending requests;
+  - removing the per-key admission limit.
+- **Checks.** `npm run lint`, `npx tsc --noEmit` and `npx vitest run` (97 files, 1 023 tests) all pass. The four new test files passed 3 runs in a row. `npm run build` lists `/api/tcp-samples` as a Pages route; `next-env.d.ts` was restored afterwards. `E2E_PRODUCTION=1 npx playwright test` passes 2/2.
+- **Production check** (`npm run start` with a fake authenticating agent on 9990, not committed):
+  - The stream route and the tcp-samples route share exactly one authenticated agent connection, whichever starts first.
+  - SSE carried 12 events and 0 `tcp_samples`.
+  - Guards returned 405, 403, 413, 400 and 421, each with its fixed body; replies carry `Cache-Control: no-store`.
+  - An ignoring agent gave 504 after 5.0 s.
+  - The first request before the client connected got 503.
+
+---
+
 # KAN-129 Task 1 — TCP sample rings, RTT, window scale (2026-11-11)
 
 Linux cloud worktree, stable Rust + nightly for fuzz, base main `82d68d4`. Capture agent only; no wire, relay or UI change.

@@ -52,7 +52,7 @@ See [wire-protocol.md](wire-protocol.md) for the `decrypted_payload` and `tracer
 
 Both routes share one `AgentClient` singleton (`global.__agentClient`) — there's one TCP connection to the agent regardless of how many browser tabs are watching.
 
-Sibling routes handle the three sub-projects: `app/api/enrichment/control/route.ts` + `app/api/enrichment/lookup/route.ts` (ownership enrichment, below), `app/api/traceroute/start/route.ts` + `app/api/geoip/control/route.ts` (path visualization, above).
+Sibling routes handle the three sub-projects: `app/api/enrichment/control/route.ts` + `app/api/enrichment/lookup/route.ts` (ownership enrichment, below), `app/api/traceroute/start/route.ts` + `app/api/geoip/control/route.ts` (path visualization, above). `pages/api/tcp-samples.ts` (behaviour in `lib/tcp-samples-route.ts`) is a Pages API route, not an App Router handler. A TCP stream graph fetches its flow's samples there on demand. The reply comes back on that HTTP response only, never on the SSE feed. The route uses the shared request/response core: `lib/agent-request.ts` (`AgentClient.request`), admission in `lib/agent-admission.ts`, and the one `AgentClient` from `lib/agent-client-singleton.ts`. See `docs/superpowers/specs/2026-11-11-tcp-stream-graphs-design.md` D5.
 
 ### 3. `app/page.tsx` and `components/` — the browser UI
 

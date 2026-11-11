@@ -12,6 +12,8 @@
 // that constraint entirely, since Next only applies the check to files
 // matching the app/**/route.ts convention.
 import { AgentClient } from './agent-client';
+import { getAgentClient } from './agent-client-singleton';
+import { replyTypeFor } from './agent-request';
 import { EnrichmentClient, EnrichmentMode } from './enrichment';
 import { GeoIpClient } from './geoip';
 import { buildGeoHopEvent } from './geoip-mapping';
@@ -57,14 +59,6 @@ export interface StreamGeoIpClient {
   off(event: 'result', listener: (result: { ip: string; location: unknown }) => void): unknown;
   getMode(): 'off' | 'on';
   lookup(ip: string): Promise<void> | void;
-}
-
-function getAgentClient(): AgentClient {
-  if (!global.__agentClient) {
-    global.__agentClient = new AgentClient('127.0.0.1', 9990);
-    global.__agentClient.start();
-  }
-  return global.__agentClient;
 }
 
 // Exported so app/api/enrichment/control/route.ts and
@@ -122,6 +116,10 @@ export function buildStreamResponse(deps: StreamRouteDeps = {}): Response {
   const stream = new ReadableStream({
     start(controller) {
       onEvent = (event: unknown) => {
+        // KAN-129: a correlated reply belongs to the request that asked for
+        // it. AgentClient never emits one; this is the defensive second
+        // line, so a reply can never reach another tab's feed.
+        if (replyTypeFor((event as { type?: unknown } | null)?.type)) return;
         if ((event as { type?: string }).type === 'decrypted_payload' && !decryptedPayloadAllowed) {
           return; // refused per transport gating — spec Components §5
         }

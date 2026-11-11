@@ -138,6 +138,15 @@ export async function handleTcpSamples(req: NextApiRequest, res: NextApiResponse
 - [ ] Until Task 3 lands, the agent ignores `get_tcp_samples` (unknown control type), so the route answers 504 after the timeout; tests use a fake agent that answers.
 - [ ] **Verify:** `npm run lint`, `npx tsc --noEmit`, `npx vitest run`, `npm run build` (then restore `AGENTS.md` and `next-env.d.ts`), Playwright under `E2E_PRODUCTION=1`.
 
+**As implemented in Task 2** (what Task 3 must match):
+
+- **Reply framing needs `type` first and `requestId` early.** The relay measures a reply line against its ceiling before parsing it, or before its newline has arrived. It recognises the line from its opening `{"type":"tcp_samples"` and reads its `requestId` from the first 512 characters, so it can fail that request with 502. The agent must therefore serialize `type` first (serde's internally tagged enums already do) and `requestId` right after it. Otherwise an oversized reply still never reaches anyone, but its request times out with 504 instead of failing with 502.
+- **Generation format.** The relay accepts a `generation` only as `^[0-9a-f]{16}:\d{1,20}$`, so the agent renders the epoch as 16 zero-padded lowercase hex digits (`{:016x}`).
+- **Write backlog.** The check that the agent socket's `writableLength` is at most 64 KiB is in `AgentClient.request` (503), not in admission.
+- **Reply validation.** `lib/tcp-samples-reply.ts` checks only the envelope the relay relies on: `type` and `connectionId`, with `requestId` stripped. The route also answers 502 when the reply's `connectionId` is not the one requested. Task 3 adds full validation of the sample fields in `lib/agent-mapping.ts`.
+- **Cross-site check.** The Pages route compares `Origin` with `proto://Host`, where `Host` is allowlisted by `middleware.ts`. An App Router `request.url` takes its origin from the server's own bind address instead. The two can differ only on the `Origin` fallback, which matters only for browsers that don't send `Sec-Fetch-Site`.
+- **Relay start.** A request made before the relay's agent client has connected gets 503. The graph is opened from a tab whose SSE stream has already started the client.
+
 ## Task 3 / PR 3: wire contract and agent integration
 
 **Wire** (spec D5): control `get_tcp_samples { requestId, connectionId, generation?, fromIndex? }`; event `tcp_samples` with the fields in the spec's example, columnar and delta-encoded; `capture_stats` gains `tcpSampleRings`, `tcpSampleRingBytes`, `tcpSampleRingsRecycled`.
