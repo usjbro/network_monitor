@@ -1,15 +1,15 @@
 # Assignment template
 
-Use for the Slack message that hands a gated task to an implementing agent (post it in the gate thread with `slack-notify.sh feedback <slug> claude-code "<message>" <gate-thread-ts>`). Replace everything in angle brackets and delete the sections that do not apply. Keep it factual: the Linear issue is the spec; this message adds order, constraints and how to talk back.
+Use for the Slack message that hands a gated task to an implementing agent (post it in the gate thread with `slack-notify.sh feedback <slug> claude-code "<message>" <gate-thread-ts>`). Replace everything in angle brackets and delete the sections that do not apply. Keep it factual: the Jira issue is the spec; this message adds order, constraints and how to talk back.
 
 ```
-NEXT TASK FOR <CODEX|CLAUDE CODE> (queue item <n>): <LINEAR-ID> [<priority>] <title>.
+NEXT TASK FOR <CODEX|CLAUDE CODE> (queue item <n>): <ISSUE-KEY> [<priority>] <title>.
 
 Status: <what just merged / is Done, and anything the assignee should clean up (worktree, branch)>.
 
-Gate: <gate file name> is created and approved under <James's standing instruction in a chat session on <date> / his direct approval on <date>>. It is approved and unclaimed: claim it with claim-gate-delegation.sh, then run new-task.sh (it posts the `started` message itself; do not post another), then run mark-gate-delegated.sh <linear-id> <slug> <in-session|codex> so the gate shows as delegated.
+Gate: <gate file name> is created and approved under <James's standing instruction in a chat session on <date> / his direct approval on <date>>. It is approved and unclaimed: claim it with claim-gate-delegation.sh, then run new-task.sh (it posts the `started` message itself; do not post another), then run mark-gate-delegated.sh <issue-key> <slug> <in-session|codex> so the gate shows as delegated.
 
-Scope (from the Linear issue: <url>):
+Scope (from the Jira issue: <url>):
 - <3 to 6 bullets, each a concrete behaviour or file, including what is explicitly OUT of scope and which sibling issue owns it>
 
 Constraints that must not change:
@@ -22,7 +22,7 @@ Route (from coordination/work-routing.md):
 - Agent: <role agent and why, or none>
 
 Tests first (they must fail before the change):
-- <the Linear acceptance checklist, one line each>
+- <the Jira issue's acceptance checklist, one line each>
 
 PLAN FIRST (include only for security-sensitive work): write a short design in docs/superpowers/plans/<date>-<slug>.md and post its path and a summary of the decisions below in YOUR TASK THREAD before any implementation, then wait for my reply. The plan must settle: <numbered list of the decisions to make>. I review it against docs/security-plan-review-checklist.md.
 

@@ -6,7 +6,7 @@
 #
 # Statuses with their own emoji: started, awaiting-approval, pr-opened,
 # feedback, blocked, review, done, idle (an agent has nothing claimed and
-# is looking for the next Linear issue — see AGENTS.md "Continuous Work
+# is looking for the next Jira (KAN) issue — see AGENTS.md "Continuous Work
 # Queue"), reclaimed (a stale, delegated-but-stalled gate was
 # automatically reclaimed). When each one is required is in AGENTS.md
 # "Slack Status Posts".
@@ -53,7 +53,7 @@ MESSAGE="${4:-}"
 THREAD_TS="${5:-}"
 
 # task-slug is used below to build a coordination/tasks|gates/<task-slug>.md
-# path for the slack_ts auto-lookup. It's also a gate's "<linear-id>__<slug>"
+# path for the slack_ts auto-lookup. It's also a gate's "<issue-key>__<slug>"
 # tag (which validate_slug's stricter pattern would reject for its "__"), so
 # just block the one thing that would let it escape that directory.
 case "$TASK_SLUG" in

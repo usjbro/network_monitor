@@ -38,23 +38,23 @@ assert_exits_nonzero "validate_slug rejects a slash" \
 assert_exits_zero "validate_slug accepts a normal slug" \
   "source '$LIB'; validate_slug 'field-model-typed-named' slug"
 
-assert_exits_nonzero "gate_path rejects traversal in linear-id" \
+assert_exits_nonzero "gate_path rejects traversal in the issue key" \
   "source '$LIB'; gate_path '../../etc' 'slug'"
 
 RESOLVED="$(bash -c "source '$LIB'; gate_path 'JAM-9' 'field-model-typed-named'")"
 if [[ "$RESOLVED" == *"/coordination/gates/jam-9__field-model-typed-named.md" ]]; then
-  echo "PASS: gate_path resolves and lower-cases linear-id"
+  echo "PASS: gate_path resolves and lower-cases the issue key"
 else
-  echo "FAIL: gate_path resolves and lower-cases linear-id — got '$RESOLVED'"
+  echo "FAIL: gate_path resolves and lower-cases the issue key — got '$RESOLVED'"
   FAILURES=$((FAILURES + 1))
 fi
 
 PATH_A="$(bash -c "source '$LIB'; gate_path 'JAM-1' '2-foo'")"
 PATH_B="$(bash -c "source '$LIB'; gate_path 'JAM-1-2' 'foo'")"
 if [[ "$PATH_A" != "$PATH_B" ]]; then
-  echo "PASS: distinct Linear ID and slug pairs have distinct gate paths"
+  echo "PASS: distinct issue key and slug pairs have distinct gate paths"
 else
-  echo "FAIL: distinct Linear ID and slug pairs collide at '$PATH_A'"
+  echo "FAIL: distinct issue key and slug pairs collide at '$PATH_A'"
   FAILURES=$((FAILURES + 1))
 fi
 
@@ -192,6 +192,54 @@ else
 fi
 rm -f "$RECORD_TEST_FILE" "$FAKE_BIN/curl"
 rmdir "$FAKE_BIN"
+
+# gate_field_issue_key reads the tracker key from a gate or task file:
+# issue_key on files written after the Jira switch, linear_id on legacy ones.
+KEY_NEW_FILE="$(mktemp)"
+printf -- '---\nissue_key: KAN-12\nlinear_id: JAM-99\nslug: k\n---\n' > "$KEY_NEW_FILE"
+KEY_OLD_FILE="$(mktemp)"
+printf -- '---\nlinear_id: JAM-21\nslug: k\n---\n' > "$KEY_OLD_FILE"
+KEY_NONE_FILE="$(mktemp)"
+printf -- '---\nslug: k\n---\n' > "$KEY_NONE_FILE"
+for case in "$KEY_NEW_FILE|KAN-12|prefers issue_key" "$KEY_OLD_FILE|JAM-21|falls back to legacy linear_id" "$KEY_NONE_FILE||is empty with no key"; do
+  IFS='|' read -r file want desc <<<"$case"
+  got="$(bash -c "source '$LIB'; gate_field_issue_key '$file'")"
+  if [[ "$got" == "$want" ]]; then
+    echo "PASS: gate_field_issue_key $desc"
+  else
+    echo "FAIL: gate_field_issue_key $desc — got '$got', want '$want'"
+    FAILURES=$((FAILURES + 1))
+  fi
+done
+rm -f "$KEY_NEW_FILE" "$KEY_OLD_FILE" "$KEY_NONE_FILE"
+
+# task_branch: Jira's default branch name (KEY-slug) when a key is given,
+# the plain <prefix>/<slug> otherwise.
+for case in "slug-a|KAN-12|KAN-12-slug-a" "slug-a|kan-12|KAN-12-slug-a" "slug-a||jamesmbrownjr/slug-a"; do
+  IFS='|' read -r slug key want <<<"$case"
+  got="$(bash -c "source '$LIB'; COORDINATION_BRANCH_PREFIX=jamesmbrownjr task_branch '$slug' '$key'")"
+  if [[ "$got" == "$want" ]]; then
+    echo "PASS: task_branch '$slug' '$key' is '$want'"
+  else
+    echo "FAIL: task_branch '$slug' '$key' — got '$got', want '$want'"
+    FAILURES=$((FAILURES + 1))
+  fi
+done
+assert_exits_nonzero "task_branch rejects a key with a slash" \
+  "source '$LIB'; task_branch 'slug-a' 'KAN-1/../x'"
+assert_exits_nonzero "task_branch rejects a slug with traversal" \
+  "source '$LIB'; task_branch '../../outside' 'KAN-1'"
+assert_exits_nonzero "task_branch rejects a slug with a space, with no key" \
+  "source '$LIB'; task_branch 'Foo Bar'"
+got="$(bash -c "source '$LIB'; normalize_issue_key 'kan-12'")"
+if [[ "$got" == "KAN-12" ]]; then
+  echo "PASS: normalize_issue_key upper-cases kan-12"
+else
+  echo "FAIL: normalize_issue_key upper-cases kan-12 — got '$got'"
+  FAILURES=$((FAILURES + 1))
+fi
+assert_exits_nonzero "normalize_issue_key rejects a key with a slash" \
+  "source '$LIB'; normalize_issue_key 'KAN-1/x'"
 
 if [[ $FAILURES -gt 0 ]]; then
   echo "$FAILURES test(s) failed."

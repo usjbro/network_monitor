@@ -18,7 +18,7 @@ BIN="$SCRIPT_DIR/.."
 # shellcheck disable=SC1091
 source "$BIN/lib.sh"
 FAILURES=0
-TEST_LINEAR_ID="ZZZ-999"
+TEST_ISSUE_KEY="ZZZ-999"
 RUN_ID="$$"
 
 FAKE_BIN="$(mktemp -d)"
@@ -74,12 +74,12 @@ make_branch() {
 make_delegated_gate() {
   local slug="$1" delegated_at_epoch="${2:-$(date +%s)}"
   local gate_file delegated_at
-  gate_file="$(gate_path "$TEST_LINEAR_ID" "$slug")"
+  gate_file="$(gate_path "$TEST_ISSUE_KEY" "$slug")"
   delegated_at="$(date -u -r "$delegated_at_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@${delegated_at_epoch}" +%Y-%m-%dT%H:%M:%SZ)"
   mkdir -p "$(dirname "$gate_file")"
   cat > "$gate_file" <<EOF
 ---
-linear_id: ${TEST_LINEAR_ID}
+linear_id: ${TEST_ISSUE_KEY}
 slug: ${slug}
 status: approved
 delegated: true
@@ -108,7 +108,7 @@ task: ${slug}
 owner: claude-code
 status: ${status}
 branch: ${branch}
-linear_id: ${TEST_LINEAR_ID}
+linear_id: ${TEST_ISSUE_KEY}
 depends_on: []
 created: 2026-09-25
 slack_ts:
@@ -136,7 +136,7 @@ GATE_A="$(make_delegated_gate "$SLUG_A")"
 BRANCH_A="test-reclaim-a-${RUN_ID}"
 make_branch "$BRANCH_A"
 make_task_file "$SLUG_A" "open" "$BRANCH_A" >/dev/null
-OUT_A="$(FAKE_GH_PR_LIST='[]' RECLAIM "$TEST_LINEAR_ID" "$SLUG_A" 2>/dev/null)"; RC_A=$?
+OUT_A="$(FAKE_GH_PR_LIST='[]' RECLAIM "$TEST_ISSUE_KEY" "$SLUG_A" 2>/dev/null)"; RC_A=$?
 if [[ $RC_A -eq 1 ]]; then
   echo "PASS: refuses without the explicit human-confirmation flag"
 else
@@ -155,7 +155,7 @@ fi
 SLUG_B="reclaim-test-b-${RUN_ID}"
 GATE_B="$(make_delegated_gate "$SLUG_B")"
 gate_set_field "$GATE_B" delegated false
-OUT_B="$(RECLAIM "$TEST_LINEAR_ID" "$SLUG_B" --confirm-human-authorized-takeover 2>/dev/null)"; RC_B=$?
+OUT_B="$(RECLAIM "$TEST_ISSUE_KEY" "$SLUG_B" --confirm-human-authorized-takeover 2>/dev/null)"; RC_B=$?
 if [[ $RC_B -eq 2 && "$OUT_B" == "not-delegated" ]]; then
   echo "PASS: refuses when the gate isn't delegated yet"
 else
@@ -169,7 +169,7 @@ make_delegated_gate "$SLUG_C" >/dev/null
 BRANCH_C="test-reclaim-c-${RUN_ID}"
 make_branch "$BRANCH_C"
 make_task_file "$SLUG_C" "review" "$BRANCH_C" >/dev/null
-OUT_C="$(RECLAIM "$TEST_LINEAR_ID" "$SLUG_C" --confirm-human-authorized-takeover 2>/dev/null)"; RC_C=$?
+OUT_C="$(RECLAIM "$TEST_ISSUE_KEY" "$SLUG_C" --confirm-human-authorized-takeover 2>/dev/null)"; RC_C=$?
 if [[ $RC_C -eq 2 && "$OUT_C" == "already-progressed" ]]; then
   echo "PASS: refuses when the task already recorded real progress"
 else
@@ -184,7 +184,7 @@ GATE_D="$(make_delegated_gate "$SLUG_D")"
 BRANCH_D="test-reclaim-d-${RUN_ID}"
 make_branch "$BRANCH_D"
 make_task_file "$SLUG_D" "open" "$BRANCH_D" >/dev/null
-OUT_D="$(FAKE_GH_PR_LIST='[]' RECLAIM "$TEST_LINEAR_ID" "$SLUG_D" --confirm-human-authorized-takeover 2>/dev/null)"; RC_D=$?
+OUT_D="$(FAKE_GH_PR_LIST='[]' RECLAIM "$TEST_ISSUE_KEY" "$SLUG_D" --confirm-human-authorized-takeover 2>/dev/null)"; RC_D=$?
 if [[ $RC_D -eq 0 && "$OUT_D" == "reclaimed" ]]; then
   echo "PASS: reclaims immediately with confirmation, no minimum elapsed time required"
 else
@@ -211,7 +211,7 @@ make_delegated_gate "$SLUG_E" >/dev/null
 BRANCH_E="test-reclaim-e-${RUN_ID}"
 make_branch "$BRANCH_E"
 make_task_file "$SLUG_E" "open" "$BRANCH_E" >/dev/null
-OUT_E="$(FAKE_GH_PR_LIST='[{"number":42}]' RECLAIM "$TEST_LINEAR_ID" "$SLUG_E" --confirm-human-authorized-takeover 2>/dev/null)"; RC_E=$?
+OUT_E="$(FAKE_GH_PR_LIST='[{"number":42}]' RECLAIM "$TEST_ISSUE_KEY" "$SLUG_E" --confirm-human-authorized-takeover 2>/dev/null)"; RC_E=$?
 if [[ $RC_E -eq 2 && "$OUT_E" == "pr-exists" ]]; then
   echo "PASS: refuses when a PR exists even with explicit confirmation"
 else
@@ -227,7 +227,7 @@ make_delegated_gate "$SLUG_F" >/dev/null
 BRANCH_F="test-reclaim-f-${RUN_ID}"
 make_branch "$BRANCH_F" with-commit
 make_task_file "$SLUG_F" "open" "$BRANCH_F" >/dev/null
-OUT_F="$(FAKE_GH_PR_LIST='[]' RECLAIM "$TEST_LINEAR_ID" "$SLUG_F" --confirm-human-authorized-takeover 2>/dev/null)"; RC_F=$?
+OUT_F="$(FAKE_GH_PR_LIST='[]' RECLAIM "$TEST_ISSUE_KEY" "$SLUG_F" --confirm-human-authorized-takeover 2>/dev/null)"; RC_F=$?
 if [[ $RC_F -eq 2 && "$OUT_F" == "commit-exists" ]]; then
   echo "PASS: refuses when the branch has a unique commit, even with confirmation"
 else
@@ -242,7 +242,7 @@ GATE_G="$(make_delegated_gate "$SLUG_G")"
 BRANCH_G="test-reclaim-g-${RUN_ID}"
 make_branch "$BRANCH_G"
 make_task_file "$SLUG_G" "open" "$BRANCH_G" >/dev/null
-OUT_G="$(FAKE_GH_EXIT=1 RECLAIM "$TEST_LINEAR_ID" "$SLUG_G" --confirm-human-authorized-takeover 2>/dev/null)"; RC_G=$?
+OUT_G="$(FAKE_GH_EXIT=1 RECLAIM "$TEST_ISSUE_KEY" "$SLUG_G" --confirm-human-authorized-takeover 2>/dev/null)"; RC_G=$?
 if [[ $RC_G -eq 1 ]]; then
   echo "PASS: refuses (exit 1) rather than reclaim when the PR check itself fails"
 else
@@ -271,7 +271,7 @@ make_delegated_gate "$SLUG_H" >/dev/null
 INJECTION_TARGET="$FAKE_BIN/pwned-${RUN_ID}.txt"
 BRANCH_H="--output=${INJECTION_TARGET}"
 make_task_file "$SLUG_H" "open" "$BRANCH_H" >/dev/null
-OUT_H="$(FAKE_GH_PR_LIST='[]' RECLAIM "$TEST_LINEAR_ID" "$SLUG_H" --confirm-human-authorized-takeover 2>/dev/null)"; RC_H=$?
+OUT_H="$(FAKE_GH_PR_LIST='[]' RECLAIM "$TEST_ISSUE_KEY" "$SLUG_H" --confirm-human-authorized-takeover 2>/dev/null)"; RC_H=$?
 if [[ $RC_H -eq 0 && "$OUT_H" == "reclaimed" ]]; then
   echo "PASS: a flag-shaped branch name is treated as a plain revision, not injected as a git option"
 else

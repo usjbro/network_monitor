@@ -23,7 +23,7 @@ The approved five-file `.ai/` documentation refresh is published as [PR #227](ht
 
 ## Verified Coordination Behavior
 
-Local, gitignored gate state uses validated `<linear-id>__<slug>` filenames. Approval and delegation are separate transitions; an atomic claim prevents duplicate dispatch, and incomplete claims require human-confirmed recovery. Lock metadata records owner PID/start time when available; explicit recovery refuses matching live owners. Shell tests cover creation, parsing, transitions, races, and recovery (65 passing assertions).
+Local, gitignored gate state uses validated `<issue-key>__<slug>` filenames (Jira `kan-n`, or legacy `jam-n`). Approval and delegation are separate transitions; an atomic claim prevents duplicate dispatch, and incomplete claims require human-confirmed recovery. Lock metadata records owner PID/start time when available; explicit recovery refuses matching live owners. Shell tests cover creation, parsing, transitions, races, and recovery (65 passing assertions).
 
 There is no background/cloud approval resolver. A live session may poll, and a later live session with the same persistent checkout may manually pick up a gate. Historical spec diagrams/prose should be read alongside the current scripts and `coordination/watcher-prompt.md`.
 
@@ -34,7 +34,7 @@ There is no background/cloud approval resolver. A live session may poll, and a l
 ## Known Limits / Source Disagreements
 
 - Broader project phase, roadmap completeness, and active epic statuses were not queried. Do not infer them from JAM-155 being Done.
-- Historical `CONTRIBUTING.md` GitHub-tracker wording differs from the Linear workflow in `.agents/skills/epic-task-cycle/SKILL.md`; resolve per task against current tracker evidence.
+- The tracker is Jira `KAN` (ADR-007). Linear `JAM` and the earlier GitHub-issue roadmap are history; resolve old ids through `coordination/migration/jam-to-kan.tsv`.
 - The prior September 24 source audit flagged stale host-metrics descriptions in `README.md` and `docs/architecture.md`. That finding was not re-audited here; current code/tests remain authoritative.
 - `AGENTS.md` says `coordination/` is not copied into worktrees, but the tracked scripts/docs are present in this fresh worktree. Runtime gate state and webhook lookup resolve to the main repository root through `lib.sh`.
 - Legacy `new-task.sh` path-component validation remains a separate follow-up; approval-gate validation does not fix that call site.

@@ -3,12 +3,12 @@
 # delegated work is active. Never resets a completed delegation.
 #
 # Usage:
-#   ./reset-gate-delegation-claim.sh <linear-id> <slug> --confirm-no-active-delegation
+#   ./reset-gate-delegation-claim.sh <issue-key> <slug> --confirm-no-active-delegation
 
 set -euo pipefail
 
-LINEAR_ID="${1:?usage: reset-gate-delegation-claim.sh <linear-id> <slug> --confirm-no-active-delegation}"
-SLUG="${2:?usage: reset-gate-delegation-claim.sh <linear-id> <slug> --confirm-no-active-delegation}"
+ISSUE_KEY="${1:?usage: reset-gate-delegation-claim.sh <issue-key> <slug> --confirm-no-active-delegation}"
+SLUG="${2:?usage: reset-gate-delegation-claim.sh <issue-key> <slug> --confirm-no-active-delegation}"
 CONFIRM="${3:-}"
 
 if [[ "$CONFIRM" != "--confirm-no-active-delegation" || $# -ne 3 ]]; then
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-GATE_FILE="$(gate_path "$LINEAR_ID" "$SLUG")"
+GATE_FILE="$(gate_path "$ISSUE_KEY" "$SLUG")"
 if [[ ! -f "$GATE_FILE" ]]; then
   echo "no such gate: $GATE_FILE" >&2
   exit 1

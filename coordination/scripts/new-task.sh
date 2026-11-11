@@ -3,12 +3,13 @@
 # announce it in Slack.
 #
 # Usage:
-#   ./new-task.sh <task-slug> <claude-code|codex> "<one-line goal>" [linear-id]
+#   ./new-task.sh <task-slug> <claude-code|codex> "<one-line goal>" [issue-key]
 #
-# linear-id (optional) is the parent Linear issue this task contributes to
-# (e.g. JAM-9) — recorded in the contract and folded into the branch name to
-# match this repo's <branch-prefix>/<linear-id>-<slug> convention. Leave it
-# off for coordination work with no Linear-tracked parent.
+# issue-key (optional) is the parent Jira issue this task contributes to
+# (e.g. KAN-12) — recorded in the contract as issue_key and folded into the
+# branch name as Jira's default KAN-12-<slug> (lib.sh task_branch). Leave it
+# off for coordination work with no tracked parent; the branch is then
+# <branch-prefix>/<slug>.
 #
 # Requires: git, and Slack credentials for the started post (optional — the
 # task is still created without them, just no Slack message goes out).
@@ -19,30 +20,21 @@
 
 set -euo pipefail
 
-TASK_SLUG="${1:?usage: new-task.sh <task-slug> <claude-code|codex> \"<goal>\" [linear-id]}"
-OWNER="${2:?usage: new-task.sh <task-slug> <claude-code|codex> \"<goal>\" [linear-id]}"
+TASK_SLUG="${1:?usage: new-task.sh <task-slug> <claude-code|codex> \"<goal>\" [issue-key]}"
+OWNER="${2:?usage: new-task.sh <task-slug> <claude-code|codex> \"<goal>\" [issue-key]}"
 GOAL="${3:-"<fill in>"}"
-LINEAR_ID="${4:-}"
+ISSUE_KEY="${4:-}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 TASKS_DIR="$REPO_ROOT/coordination/tasks"
 
-# Every real branch in this repo (Linear's own gitBranchName, e.g.
-# jamesmbrownjr/jam-9-...) uses this prefix — it is NOT derivable from local
-# git config: `git config user.email` resolves to GitHub's noreply address
-# (30867715+usjbro@users.noreply.github.com) and `git config user.name` /
-# `gh api user` both give "usjbro", neither of which matches. Override with
-# COORDINATION_BRANCH_PREFIX if that handle ever changes.
-BRANCH_PREFIX="${COORDINATION_BRANCH_PREFIX:-jamesmbrownjr}"
-
-if [[ -n "$LINEAR_ID" ]]; then
-  LINEAR_ID_LOWER="$(echo "$LINEAR_ID" | tr '[:upper:]' '[:lower:]')"
-  BRANCH="${BRANCH_PREFIX}/${LINEAR_ID_LOWER}-${TASK_SLUG}"
-else
-  BRANCH="${BRANCH_PREFIX}/${TASK_SLUG}"
+validate_slug "$TASK_SLUG" "task-slug"
+if [[ -n "$ISSUE_KEY" ]]; then
+  ISSUE_KEY="$(normalize_issue_key "$ISSUE_KEY")" || exit 1
 fi
+BRANCH="$(task_branch "$TASK_SLUG" "$ISSUE_KEY")"
 
 WORKTREE_DIR="$REPO_ROOT/.worktrees/${TASK_SLUG}"
 TASK_FILE="${TASKS_DIR}/${TASK_SLUG}.md"
@@ -71,7 +63,7 @@ task: ${TASK_SLUG}
 owner: ${OWNER}
 status: open
 branch: ${BRANCH}
-linear_id: ${LINEAR_ID}
+issue_key: ${ISSUE_KEY}
 depends_on: []
 created: $(date +%Y-%m-%d)
 slack_ts:
@@ -112,8 +104,8 @@ echo "Worktree:   $WORKTREE_DIR"
 echo "Branch:     $BRANCH"
 echo
 echo "Next: cd $WORKTREE_DIR && (claude / codex) — point the agent at the task file."
-if [[ -n "$LINEAR_ID" ]]; then
-  echo "Remember: also update ${LINEAR_ID}'s status in Linear when this task's status changes."
+if [[ -n "$ISSUE_KEY" ]]; then
+  echo "Remember: also update ${ISSUE_KEY}'s status in Jira when this task's status changes."
 fi
 
 if slack_configured; then
