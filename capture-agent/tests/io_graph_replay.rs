@@ -312,3 +312,47 @@ fn a_truncated_file_reports_replay_error_after_what_it_counted() {
     assert_eq!(run.totals()["all"].0, 499);
     assert!(run.not_observed_reasons().contains(&"replay_error".to_string()), "{:?}", run.not_observed_reasons());
 }
+
+#[test]
+fn aggregate_series_carry_exact_count_sum_min_max_from_the_real_agent() {
+    // JAM-18 Task 5 (spec D10). frame.len == the on-wire length in this
+    // fixture, so sum(frame.len) must equal the series' own byte total; and
+    // each DNS response arrives exactly 2 ms after its query.
+    let fixture = busy_fixture(3_000);
+    let file = write_temp("agg", &classic_pcap(&fixture.frames));
+    let run = replay(
+        &file.0,
+        "fast",
+        json!([
+            { "id": "len", "filter": "", "aggregate": { "fn": "sum", "field": "frame.len" } },
+            { "id": "rtt", "filter": "dns.time_us > 0", "aggregate": { "fn": "avg", "field": "dns.time_us" } },
+            { "id": "bad", "filter": "", "aggregate": { "fn": "max", "field": "dns.qry.name" } },
+        ]),
+    );
+    let accepted = &run.statuses[1];
+    assert_eq!(accepted["series"][0]["aggregate"], json!({ "fn": "sum", "field": "frame.len" }));
+    assert_eq!(accepted["series"][2]["ok"], false, "a non-uint aggregate field is a compile error");
+
+    let (mut len, mut rtt) = ((0u64, 0u64, 0u64), (0u64, 0u64, u64::MAX, 0u64));
+    for msg in &run.buckets {
+        for s in msg["series"].as_array().unwrap() {
+            for b in s["buckets"].as_array().unwrap() {
+                let b = b.as_array().unwrap();
+                assert_eq!(b.len(), 7, "aggregate series send 7-tuples");
+                let n = |i: usize| b[i].as_u64().unwrap();
+                match s["id"].as_str().unwrap() {
+                    "len" => {
+                        assert_eq!(n(3), n(1), "every frame has frame.len");
+                        assert_eq!(n(4), n(2), "sum(frame.len) == bytes");
+                        len = (len.0 + n(1), len.1 + n(2), len.2 + n(4));
+                    }
+                    "rtt" => rtt = (rtt.0 + n(3), rtt.1 + n(4), rtt.2.min(n(5)), rtt.3.max(n(6))),
+                    other => panic!("unexpected series {other}"),
+                }
+            }
+        }
+    }
+    assert_eq!(len.0, 3_000);
+    assert_eq!(len.1, len.2);
+    assert_eq!(rtt, (fixture.responses, 2_000 * fixture.responses, 2_000, 2_000));
+}

@@ -32,6 +32,45 @@ pub enum ByteRegion {
 /// The largest integer a JSON number carries exactly to a JS client: 2^53 - 1.
 const MAX_EXACT_JSON_UINT: u64 = (1 << 53) - 1;
 
+/// Field paths whose values are always `uint` (JAM-18 Task 5): the only
+/// fields an IO graph aggregate may name (spec D10). Kept next to the
+/// builders below, which are the only places fields are made; a test in this
+/// module checks every uint leaf they build is listed. `frame.len` is the
+/// filter's virtual field (the captured length).
+const UINT_PATHS: &[&str] = &[
+    "frame.len",
+    "eth.vlan.id",
+    "ip.ttl",
+    "ip.protocol_num",
+    "ip6.hop_limit",
+    "ip6.next_header",
+    "tcp.src_port",
+    "tcp.dst_port",
+    "tcp.seq",
+    "tcp.ack_number",
+    "tcp.window_size",
+    "udp.src_port",
+    "udp.dst_port",
+    "http.response.code",
+    "http.content_length",
+    "http.time_us",
+    "dns.id",
+    "dns.count.answers",
+    "dns.time_us",
+];
+
+/// True for a path naming a uint field (case-insensitive, as filter paths
+/// are), including each indexed DNS answer's `dns.answer.<n>.ttl`.
+pub fn is_uint_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    if UINT_PATHS.contains(&path.as_str()) {
+        return true;
+    }
+    path.strip_prefix("dns.answer.")
+        .and_then(|rest| rest.strip_suffix(".ttl"))
+        .is_some_and(|n| !n.is_empty() && n.len() <= 3 && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum FieldValue {
@@ -866,6 +905,48 @@ mod tests {
         for group in ["eth", "ip", "tcp", "http"] {
             assert!(fields.iter().any(|f| f.path == group), "missing {group}");
         }
+    }
+
+    #[test]
+    fn every_uint_leaf_the_builders_make_is_an_aggregate_field_and_nothing_else_is() {
+        // JAM-18 Task 5: IO graph aggregates accept only is_uint_path
+        // fields. Build every kind of leaf the builders make, and check the
+        // list agrees with the types they actually carry.
+        use crate::l7::{dns_test_support::response, sniff_l7};
+        use crate::parse::TcpFlags;
+        use crate::transaction::{TxnEvent, TxnProtocol};
+        let mut leaves = Vec::new();
+        let mut tcp = base_packet();
+        tcp.protocol = TransportProtocol::Tcp;
+        tcp.src_port = Some(80);
+        tcp.dst_port = Some(51000);
+        tcp.seq = Some(7);
+        tcp.tcp_flags = Some(TcpFlags { syn: false, ack: true, fin: false, rst: false, window_size: 512, ack_number: 9 });
+        tcp.vlan_tag = Some("10".into());
+        tcp.header_bytes = vec![0; 80];
+        let http = L7Info::HttpResponse { status: "200".into(), reason: Some("OK".into()), content_type: Some("text/html".into()), content_length: Some(5) };
+        leaves.extend(build_fields(&tcp, &http, LinkType::Ethernet));
+        let mut v6 = base_packet();
+        v6.ip_version = 6;
+        v6.protocol = TransportProtocol::Udp;
+        v6.src_port = Some(53);
+        v6.dst_port = Some(50_000);
+        v6.header_bytes = vec![0; 80];
+        let msg = response(0x42, "example.com", 1, 0, &[(1, 300, vec![93, 184, 216, 34])]);
+        leaves.extend(build_fields(&v6, &sniff_l7(&msg, Some(50_000)), LinkType::Ethernet));
+        leaves.extend(build_fields(&base_packet(), &L7Info::Dns { query_name: "example.com".into(), id: 1, qtype: 1 }, LinkType::Ethernet));
+        for protocol in [TxnProtocol::Dns, TxnProtocol::Http] {
+            leaves.extend(transaction_fields(&TxnEvent::Answered { protocol, service_time_us: 3, request_frame_id: Some("pkt-1".into()) }));
+        }
+        let uint: Vec<_> = leaves.iter().filter(|f| f.field_type == FieldType::Uint).map(|f| f.path.as_str()).collect();
+        for path in ["eth.vlan.id", "ip6.hop_limit", "tcp.window_size", "http.content_length", "dns.answer.0.ttl", "dns.time_us"] {
+            assert!(uint.contains(&path), "fixture lacks {path}: {uint:?}");
+        }
+        for f in &leaves {
+            assert_eq!(is_uint_path(&f.path), f.field_type == FieldType::Uint, "{} is {:?}", f.path, f.field_type);
+        }
+        assert!(is_uint_path("frame.len") && is_uint_path("TCP.Window_Size"));
+        assert!(!is_uint_path("dns.answer.x.ttl") && !is_uint_path("dns.answer..ttl") && !is_uint_path("dns.qry.name"));
     }
 
     #[test]

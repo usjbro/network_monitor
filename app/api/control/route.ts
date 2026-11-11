@@ -48,13 +48,16 @@ const MAX_IO_SERIES = 8;
 const MAX_IO_SERIES_FILTER_LEN = 2048;
 const IO_SERIES_ID = /^[a-z0-9-]{1,32}$/;
 const HEX_TOKEN = /^[0-9a-f]{8,32}$/i;
+// Task 5 aggregates (spec D10): the agent checks the field is a uint.
+const IO_AGGREGATE_FNS = ['sum', 'min', 'max', 'avg'];
+const IO_AGGREGATE_FIELD = /^[A-Za-z0-9_.]{1,64}$/;
 
 type SetIoSeries = {
   type: 'set_io_series';
   baseEpoch: string;
   baseRevision: number;
   requestId: string;
-  series: { id: string; filter: string }[];
+  series: { id: string; filter: string; aggregate?: { fn: string; field: string } }[];
 };
 
 function validateSetIoSeries(body: Record<string, unknown>): SetIoSeries | null {
@@ -67,11 +70,19 @@ function validateSetIoSeries(body: Record<string, unknown>): SetIoSeries | null 
   const clean: SetIoSeries['series'] = [];
   for (const entry of series) {
     if (typeof entry !== 'object' || entry === null) return null;
-    const { id, filter } = entry as Record<string, unknown>;
+    const { id, filter, aggregate } = entry as Record<string, unknown>;
     if (typeof id !== 'string' || !IO_SERIES_ID.test(id) || ids.has(id)) return null;
     if (typeof filter !== 'string' || filter.length > MAX_IO_SERIES_FILTER_LEN) return null;
     ids.add(id);
-    clean.push({ id, filter });
+    if (aggregate === undefined) {
+      clean.push({ id, filter });
+      continue;
+    }
+    if (typeof aggregate !== 'object' || aggregate === null) return null;
+    const { fn, field } = aggregate as Record<string, unknown>;
+    if (typeof fn !== 'string' || !IO_AGGREGATE_FNS.includes(fn)) return null;
+    if (typeof field !== 'string' || !IO_AGGREGATE_FIELD.test(field)) return null;
+    clean.push({ id, filter, aggregate: { fn, field } });
   }
   return { type: 'set_io_series', baseEpoch, baseRevision, requestId, series: clean };
 }

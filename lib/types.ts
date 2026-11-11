@@ -194,11 +194,20 @@ export interface IoSeriesError {
   position: number;
 }
 
+// Task 5 (spec D10): a series may also aggregate a uint field. The agent
+// sends count/sum/min/max whatever `fn` is; `fn` is what the chart plots.
+export type IoAggregateFn = 'sum' | 'min' | 'max' | 'avg';
+export interface IoAggregate {
+  fn: IoAggregateFn;
+  field: string;
+}
+
 export interface IoSeriesEntry {
   id: string;
   filter: string;
   ok: boolean;
   error?: IoSeriesError;
+  aggregate?: IoAggregate;
 }
 
 export interface IoSeriesStatus {
@@ -214,7 +223,12 @@ export interface IoSeriesStatus {
 }
 
 // [startMs, packets, bytes] for one 100 ms bucket. Bytes are on-wire lengths.
-export type IoBucket = [number, number, number];
+export type IoPlainBucket = [number, number, number];
+// An aggregate series' bucket adds [count, sum, min, max] over the matched
+// frames that had the field; min/max are null when count is 0. A sum above
+// 2^53 - 1 arrives as a decimal string and is held as the nearest double.
+export type IoAggregateBucket = [number, number, number, number, number, number | null, number | null];
+export type IoBucket = IoPlainBucket | IoAggregateBucket;
 
 export type IoNotObservedReason = 'interface_switch' | 'replay_error' | 'backlog' | 'unknown';
 
@@ -229,7 +243,7 @@ export interface IoSeriesBuckets {
   // Late frames not attributed to a bucket (beyond the per-message bound).
   late: number;
   // Late frames attributed to their original bucket.
-  lateBuckets: IoBucket[];
+  lateBuckets: IoPlainBucket[];
   buckets: IoBucket[];
 }
 

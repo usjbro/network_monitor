@@ -24,8 +24,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::display_filter::{self, Compiled};
 use crate::fields::Field;
 use crate::wire::{
-    IoBucket, IoBucketsJson, IoLossJson, IoNotObservedJson, IoSeriesBucketsJson, IoSeriesDefJson, IoSeriesEntryJson,
-    IoSeriesErrorJson, IoSeriesStatusJson,
+    IoAggregate, IoAggregateJson, IoBucket, IoBucketJson, IoBucketsJson, IoLossJson, IoNotObservedJson,
+    IoSeriesBucketsJson, IoSeriesDefJson, IoSeriesEntryJson, IoSeriesErrorJson, IoSeriesStatusJson,
 };
 
 pub const MAX_IO_SERIES: usize = 8;
@@ -46,11 +46,38 @@ pub const MAX_LINES_PER_TICK: usize = 8;
 /// Bound on the backlog spans kept between ticks; beyond it, the last span
 /// is widened instead of growing the list.
 pub const MAX_BACKLOG_SPANS: usize = 64;
+/// Aggregate functions a series may name (spec D10).
+pub const AGGREGATE_FNS: [&str; 4] = ["sum", "min", "max", "avg"];
+/// Longest aggregate field path accepted.
+pub const MAX_AGGREGATE_FIELD_LEN: usize = 64;
 
 pub struct CompiledSeries {
     pub id: String,
     pub filter: String,
     pub compiled: Result<Compiled, display_filter::Error>,
+    /// As sent, echoed in `io_series_status`.
+    pub aggregate: Option<IoAggregateJson>,
+    /// The aggregate's field path, lower-cased for lookup; `None` for a
+    /// plain series.
+    pub aggregate_path: Option<String>,
+}
+
+/// Compiles one series. An aggregate naming a field that is not a uint is
+/// a compile error on that series (shown, never counted), like a filter
+/// error; the rest of the set is unaffected.
+pub fn compile_series(def: &IoSeriesDefJson) -> CompiledSeries {
+    let mut compiled = display_filter::compile_for_series(&def.filter);
+    let aggregate_path = def.aggregate.as_ref().map(|a| a.field.to_ascii_lowercase());
+    if let (Ok(_), Some(a)) = (&compiled, &def.aggregate) {
+        if !crate::fields::is_uint_path(&a.field) {
+            compiled = Err(display_filter::Error {
+                message: format!("{} needs a uint field; {} is not one", a.func, a.field),
+                token: a.field.clone(),
+                position: 0,
+            });
+        }
+    }
+    CompiledSeries { id: def.id.clone(), filter: def.filter.clone(), compiled, aggregate: def.aggregate.clone(), aggregate_path }
 }
 
 pub struct SeriesSet {
@@ -108,6 +135,13 @@ pub fn validate_request(base_epoch: &str, request_id: &str, series: &[IoSeriesDe
         }
         if s.filter.chars().map(char::len_utf16).sum::<usize>() > MAX_FILTER_UTF16 {
             return Err("filter_too_long");
+        }
+        if let Some(a) = &s.aggregate {
+            let field_ok = (1..=MAX_AGGREGATE_FIELD_LEN).contains(&a.field.len())
+                && a.field.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.');
+            if !AGGREGATE_FNS.contains(&a.func.as_str()) || !field_ok {
+                return Err("invalid_aggregate");
+            }
         }
     }
     Ok(())
@@ -174,6 +208,7 @@ impl IoSeriesShared {
                         token: e.token.clone(),
                         position: e.position,
                     }),
+                    aggregate: s.aggregate.clone(),
                 })
                 .collect(),
         }
@@ -196,14 +231,7 @@ impl IoSeriesShared {
         if base_epoch != self.epoch || base_revision != state.set.revision {
             return Self::status_of(&self.epoch, &state, Some(request_id), Some("conflict"));
         }
-        let compiled = series
-            .iter()
-            .map(|s| CompiledSeries {
-                id: s.id.clone(),
-                filter: s.filter.clone(),
-                compiled: display_filter::compile_for_series(&s.filter),
-            })
-            .collect();
+        let compiled = series.iter().map(compile_series).collect();
         let set = SeriesSet { revision: state.set.revision.wrapping_add(1), series: compiled };
         if set.is_countable() {
             // Accepting a countable set is what releases the replay barrier,
@@ -269,6 +297,9 @@ pub struct Piece {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SeriesPiece {
     pub buckets: Vec<IoBucket>,
+    /// For an aggregate series, one entry per bucket in `buckets` (same
+    /// order); empty for a plain series.
+    pub aggregates: Vec<IoAggregate>,
     pub late_buckets: BTreeMap<u64, (u64, u64)>,
 }
 
@@ -285,12 +316,20 @@ fn bucket_start(ms: u64) -> u64 {
     ms - ms % BUCKET_MS
 }
 
+/// One series' on-time totals in an open bucket.
+#[derive(Debug, Clone, Copy, Default)]
+struct Counts {
+    packets: u64,
+    bytes: u64,
+    aggregate: IoAggregate,
+}
+
 pub struct Accumulator {
     pub generation: u64,
     set: Arc<SeriesSet>,
     ids: Arc<Vec<String>>,
-    /// Open buckets: start -> (frames observed, per-series (packets, bytes)).
-    open: BTreeMap<u64, (u64, Vec<(u64, u64)>)>,
+    /// Open buckets: start -> (frames observed, per-series totals).
+    open: BTreeMap<u64, (u64, Vec<Counts>)>,
     /// Late frames since the last piece, matched or not.
     late_frames: u64,
     /// Everything before this boundary is closed and reported.
@@ -344,10 +383,30 @@ impl Accumulator {
             .iter()
             .map(|s| s.compiled.as_ref().is_ok_and(|c| c.matches(&fields, frame_len)))
             .collect();
-        self.observe_matches(frame_ts_us, original_len, &matches);
+        // The aggregate value is read only for a matching frame, from the
+        // same field tree (first occurrence, spec D10).
+        let values: Vec<Option<u64>> = self
+            .set
+            .series
+            .iter()
+            .zip(&matches)
+            .map(|(s, matched)| match (&s.aggregate_path, matched) {
+                (Some(path), true) => display_filter::uint_value(&fields, frame_len, path),
+                _ => None,
+            })
+            .collect();
+        self.observe_values(frame_ts_us, original_len, &matches, &values);
     }
 
     pub fn observe_matches(&mut self, frame_ts_us: u64, original_len: u32, matches: &[bool]) {
+        self.observe_values(frame_ts_us, original_len, matches, &[]);
+    }
+
+    /// Counts one frame. `values[i]` is series `i`'s aggregate field value
+    /// for this frame, if it has one (missing entries mean none). A late
+    /// frame's value is not aggregated: like its count, it never joins an
+    /// on-time bucket.
+    pub fn observe_values(&mut self, frame_ts_us: u64, original_len: u32, matches: &[bool], values: &[Option<u64>]) {
         let ts_ms = frame_ts_us / 1000;
         let start = bucket_start(ts_ms);
         self.high_water_ms = self.high_water_ms.max(ts_ms);
@@ -365,12 +424,15 @@ impl Accumulator {
             return;
         }
         let n = self.set.series.len();
-        let (frames, counts) = self.open.entry(start).or_insert_with(|| (0, vec![(0, 0); n]));
+        let (frames, counts) = self.open.entry(start).or_insert_with(|| (0, vec![Counts::default(); n]));
         *frames += 1;
         for (i, matched) in matches.iter().enumerate() {
             if *matched {
-                counts[i].0 += 1;
-                counts[i].1 += bytes;
+                counts[i].packets += 1;
+                counts[i].bytes += bytes;
+                if let Some(Some(value)) = values.get(i) {
+                    counts[i].aggregate.add(*value);
+                }
             }
         }
     }
@@ -431,9 +493,12 @@ impl Accumulator {
         let mut frames = std::mem::take(&mut self.late_frames);
         for (start, (bucket_frames, counts)) in std::mem::replace(&mut self.open, still_open) {
             frames += bucket_frames;
-            for (i, (packets, bytes)) in counts.into_iter().enumerate() {
-                if packets > 0 {
-                    series[i].buckets.push([start, packets, bytes]);
+            for (i, c) in counts.into_iter().enumerate() {
+                if c.packets > 0 {
+                    series[i].buckets.push([start, c.packets, c.bytes]);
+                    if self.set.series[i].aggregate_path.is_some() {
+                        series[i].aggregates.push(c.aggregate);
+                    }
                 }
             }
         }
@@ -541,6 +606,9 @@ impl IoLossShared {
 /// Upper bound on one serialized `[startMs, packets, bytes]` entry: three
 /// u64s of at most 20 digits, brackets, two inner commas, one separator.
 const ENTRY_BYTES: usize = 3 * 20 + 4;
+/// Upper bound on one aggregate 7-tuple: six u64s of at most 20 digits, a
+/// quoted u128 sum of at most 39 digits, brackets, six commas, a separator.
+const AGGREGATE_ENTRY_BYTES: usize = 6 * 20 + (39 + 2) + 9;
 const SERIES_OVERHEAD_BYTES: usize = 64 + MAX_ID_LEN;
 const NOT_OBSERVED_BYTES: usize = 96;
 const MESSAGE_OVERHEAD_BYTES: usize = 512;
@@ -577,7 +645,14 @@ impl LineBuilder {
 
     fn piece_cost(piece: &Piece) -> usize {
         piece.not_observed.len() * NOT_OBSERVED_BYTES
-            + piece.series.iter().map(|s| (s.buckets.len() + s.late_buckets.len()) * ENTRY_BYTES).sum::<usize>()
+            + piece
+                .series
+                .iter()
+                .map(|s| {
+                    let per_bucket = if s.aggregates.is_empty() { ENTRY_BYTES } else { AGGREGATE_ENTRY_BYTES };
+                    s.buckets.len() * per_bucket + s.late_buckets.len() * ENTRY_BYTES
+                })
+                .sum::<usize>()
     }
 
     fn fits(&self, piece: &Piece) -> bool {
@@ -589,7 +664,12 @@ impl LineBuilder {
         self.msg.covered_to_ms = piece.covered_to_ms;
         self.msg.not_observed.extend(piece.not_observed);
         for (i, s) in piece.series.into_iter().enumerate() {
-            self.msg.series[i].buckets.extend(s.buckets);
+            if s.aggregates.is_empty() {
+                self.msg.series[i].buckets.extend(s.buckets.into_iter().map(IoBucketJson::Plain));
+            } else {
+                let entries = s.buckets.into_iter().zip(s.aggregates).map(|(b, a)| IoBucketJson::Aggregate(b, a));
+                self.msg.series[i].buckets.extend(entries);
+            }
             for (start, (p, b)) in s.late_buckets {
                 let e = self.late_maps[i].entry(start).or_insert((0, 0));
                 e.0 += p;
@@ -667,7 +747,7 @@ mod tests {
     use crate::fields::{ByteRegion, FieldType, FieldValue};
 
     fn def(id: &str, filter: &str) -> IoSeriesDefJson {
-        IoSeriesDefJson { id: id.into(), filter: filter.into() }
+        IoSeriesDefJson { id: id.into(), filter: filter.into(), aggregate: None }
     }
 
     fn shared() -> IoSeriesShared {
@@ -851,13 +931,143 @@ mod tests {
             series: filters
                 .iter()
                 .enumerate()
-                .map(|(i, f)| CompiledSeries {
-                    id: format!("s{i}"),
-                    filter: f.to_string(),
-                    compiled: display_filter::compile_for_series(f),
-                })
+                .map(|(i, f)| compile_series(&def(&format!("s{i}"), f)))
                 .collect(),
         })
+    }
+
+    fn agg_def(id: &str, filter: &str, func: &str, field: &str) -> IoSeriesDefJson {
+        IoSeriesDefJson { id: id.into(), filter: filter.into(), aggregate: Some(IoAggregateJson { func: func.into(), field: field.into() }) }
+    }
+
+    fn agg_set(defs: &[IoSeriesDefJson]) -> Arc<SeriesSet> {
+        Arc::new(SeriesSet { revision: 3, series: defs.iter().map(compile_series).collect() })
+    }
+
+    // ---- numeric-field aggregates (JAM-18 Task 5, spec D10) ----
+
+    #[test]
+    fn an_aggregate_reads_the_first_occurrence_of_its_field_and_rolls_up_count_sum_min_max() {
+        let mut a = Accumulator::new(1, agg_set(&[agg_def("win", "", "avg", "tcp.window_size"), def("all", "")]));
+        // Two occurrences in one frame: the first (512) is the value, as in filter lookup.
+        a.observe_with(us(1_000), 60, 60, || vec![uint("tcp.window_size", 512), uint("tcp.window_size", 9)]);
+        a.observe_with(us(1_010), 60, 60, || vec![uint("tcp.window_size", 100)]);
+        a.observe_with(us(1_020), 60, 60, Vec::new); // matches, but has no such field
+        let p = a.advance(1_700).unwrap();
+        assert_eq!(p.series[0].buckets, vec![[1_000, 3, 180]]);
+        assert_eq!(p.series[0].aggregates, vec![IoAggregate { count: 2, sum: 612, min: Some(100), max: Some(512) }]);
+        // A plain series carries no aggregates.
+        assert!(p.series[1].aggregates.is_empty());
+    }
+
+    #[test]
+    fn an_aggregate_counts_only_frames_its_filter_matches() {
+        let mut a = Accumulator::new(1, agg_set(&[agg_def("big", "frame.len > 100", "sum", "frame.len")]));
+        a.observe_with(us(2_000), 60, 60, Vec::new);
+        a.observe_with(us(2_010), 1514, 1514, Vec::new);
+        let p = a.advance(2_700).unwrap();
+        assert_eq!(p.series[0].buckets, vec![[2_000, 1, 1514]]);
+        assert_eq!(p.series[0].aggregates, vec![IoAggregate { count: 1, sum: 1514, min: Some(1514), max: Some(1514) }]);
+    }
+
+    #[test]
+    fn late_frames_are_not_aggregated() {
+        let mut a = Accumulator::new(1, agg_set(&[agg_def("ttl", "", "max", "ip.ttl")]));
+        a.observe_with(us(5_000), 1, 1, || vec![uint("ip.ttl", 64)]);
+        let first = a.advance(5_700).unwrap();
+        assert_eq!(first.series[0].aggregates[0].max, Some(64));
+        a.observe_with(us(5_000), 1, 1, || vec![uint("ip.ttl", 255)]); // late: its bucket already closed
+        let second = a.advance(5_800).unwrap();
+        assert!(second.series[0].aggregates.is_empty());
+        assert_eq!(second.series[0].late_buckets.get(&5_000), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn a_non_uint_aggregate_field_is_a_compile_error_on_that_series_only() {
+        let s = shared();
+        let status = s.apply("4be1a07c", 0, "c41f09aa", &[agg_def("names", "", "sum", "dns.qry.name"), agg_def("win", "tcp", "avg", "tcp.window_size")]);
+        assert_eq!(status.rejected, None);
+        assert!(!status.series[0].ok);
+        let err = status.series[0].error.as_ref().unwrap();
+        assert_eq!((err.message.as_str(), err.token.as_str()), ("sum needs a uint field; dns.qry.name is not one", "dns.qry.name"));
+        assert!(status.series[1].ok);
+        // The aggregate is echoed so every tab can rebuild the editor.
+        assert_eq!(status.series[1].aggregate, Some(IoAggregateJson { func: "avg".into(), field: "tcp.window_size".into() }));
+    }
+
+    #[test]
+    fn a_malformed_aggregate_rejects_the_whole_request() {
+        let s = shared();
+        for bad in [agg_def("a", "", "median", "ip.ttl"), agg_def("a", "", "sum", ""), agg_def("a", "", "sum", "ip ttl"), agg_def("a", "", "sum", &"x".repeat(65))] {
+            assert_eq!(s.apply("4be1a07c", 0, "c41f09aa", &[bad]).rejected.as_deref(), Some("invalid_aggregate"));
+        }
+        assert_eq!(s.status().revision, 0);
+    }
+
+    #[test]
+    fn aggregate_buckets_serialize_as_7_tuples_with_an_exact_u128_sum() {
+        let mut big = IoAggregate::default();
+        big.add(u64::MAX);
+        big.add(u64::MAX); // the sum no longer fits a u64
+        let cases = [
+            (IoBucketJson::Plain([1_000, 2, 20]), serde_json::json!([1_000, 2, 20])),
+            (
+                IoBucketJson::Aggregate([1_000, 2, 20], IoAggregate { count: 2, sum: (1 << 53) - 1, min: Some(1), max: Some(9) }),
+                serde_json::json!([1_000, 2, 20, 2, 9_007_199_254_740_991u64, 1, 9]),
+            ),
+            (
+                IoBucketJson::Aggregate([1_000, 2, 20], IoAggregate { count: 2, sum: 1 << 53, min: Some(1), max: Some(9) }),
+                serde_json::json!([1_000, 2, 20, 2, "9007199254740992", 1, 9]),
+            ),
+            (
+                IoBucketJson::Aggregate([1_000, 2, 20], big),
+                serde_json::json!([1_000, 2, 20, 2, "36893488147419103230", u64::MAX, u64::MAX]),
+            ),
+            (IoBucketJson::Aggregate([1_000, 2, 20], IoAggregate::default()), serde_json::json!([1_000, 2, 20, 0, 0, null, null])),
+        ];
+        for (bucket, expected) in cases {
+            assert_eq!(serde_json::to_value(&bucket).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn io_buckets_lines_carry_7_tuples_for_aggregate_series_only_and_stay_bounded() {
+        // From a real accumulator: 7-tuples for the aggregate series only.
+        let mut a = Accumulator::new(1, agg_set(&[agg_def("win", "", "sum", "tcp.window_size"), def("all", "")]));
+        a.observe_with(us(1_000_000), 60, 60, || vec![uint("tcp.window_size", 7)]);
+        let (lines, _) = build_lines("4be1a07c", vec![a.finalize().unwrap()], IoLossJson::default(), Vec::new());
+        let v: serde_json::Value = serde_json::from_str(lines[0].trim_end()).unwrap();
+        assert_eq!(v["series"][0]["buckets"], serde_json::json!([[1_000_000, 1, 60, 1, 7, 7, 7]]));
+        assert_eq!(v["series"][1]["buckets"], serde_json::json!([[1_000_000, 1, 60]]));
+
+        // Worst-case widths (every number at its maximum, a 39-digit sum):
+        // the splitter must budget the wider entry, or a line overflows.
+        let max = IoAggregate { count: u64::MAX, sum: u128::MAX, min: Some(u64::MAX), max: Some(u64::MAX) };
+        let ids = Arc::new(vec!["win".to_string()]);
+        let pieces: Vec<Piece> = (0..200u64)
+            .map(|i| Piece {
+                revision: 1,
+                ids: ids.clone(),
+                covered_from_ms: i * 1_000,
+                covered_to_ms: (i + 1) * 1_000,
+                not_observed: Vec::new(),
+                frames: 10,
+                series: vec![SeriesPiece { buckets: vec![[u64::MAX; 3]; 10], aggregates: vec![max; 10], late_buckets: BTreeMap::new() }],
+            })
+            .collect();
+        let (mut lines, mut rest) = build_lines("4be1a07c", pieces, IoLossJson::default(), Vec::new());
+        while !rest.is_empty() {
+            let (more, left) = build_lines("4be1a07c", rest, IoLossJson::default(), Vec::new());
+            lines.extend(more);
+            rest = left;
+        }
+        let mut total = 0;
+        for line in &lines {
+            assert!(line.len() <= MAX_LINE_BYTES, "{} bytes", line.len());
+            let v: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+            total += v["series"][0]["buckets"].as_array().unwrap().len();
+        }
+        assert_eq!(total, 2_000);
     }
 
     fn us(ms: u64) -> u64 {
@@ -1161,7 +1371,7 @@ mod tests {
             covered_to_ms: 0,
             not_observed: Vec::new(),
             frames: 0,
-            series: vec![SeriesPiece { buckets: Vec::new(), late_buckets: late }],
+            series: vec![SeriesPiece { buckets: Vec::new(), aggregates: Vec::new(), late_buckets: late }],
         };
         let (lines, _) = build_lines("4be1a07c", vec![piece], IoLossJson::default(), Vec::new());
         let v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
@@ -1180,7 +1390,7 @@ mod tests {
                 covered_to_ms: i * 1_000 + 100,
                 not_observed: Vec::new(),
                 frames: 2,
-                series: vec![SeriesPiece { buckets: vec![[i * 1_000, 2, 20]], late_buckets: BTreeMap::new() }],
+                series: vec![SeriesPiece { buckets: vec![[i * 1_000, 2, 20]], aggregates: Vec::new(), late_buckets: BTreeMap::new() }],
             };
             loss.record_backlog(&piece);
         }

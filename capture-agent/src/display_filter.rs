@@ -224,6 +224,22 @@ fn path_matches(field_path: &str, path: &str) -> bool {
     }
 }
 
+/// The value an IO graph aggregate reads (spec D10): the first field
+/// whose path matches (the same lookup a filter uses), if it is a uint.
+/// A uint past 2^53 - 1 is held as a decimal string in the field tree and
+/// is parsed back here. `path` is lower-case.
+pub fn uint_value(fields: &[Field], frame_len: u32, path: &str) -> Option<u64> {
+    if path == "frame.len" {
+        return Some(u64::from(frame_len));
+    }
+    let field = fields.iter().find(|f| path_matches(&f.path, path))?;
+    match (field.field_type, &field.value) {
+        (FieldType::Uint, Some(FieldValue::Uint(n))) => Some(*n),
+        (FieldType::Uint, Some(FieldValue::Str(s))) => s.parse().ok(),
+        _ => None,
+    }
+}
+
 /// `valueAt` from the TypeScript, for packet records. `path` is lower-case.
 fn value_at<'a>(fields: &'a [Field], frame_len: u32, path: &str) -> Option<Value<'a>> {
     if path == "frame.len" {

@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, IoBucket, IoBuckets, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -460,6 +460,12 @@ export function mapIoSeriesStatusEvent(json: unknown): IoSeriesStatus {
       const err = e.error as Record<string, unknown>;
       entry.error = { message: requireString(err, 'message'), token: requireString(err, 'token'), position: requireNumber(err, 'position') };
     }
+    if (e.aggregate !== undefined) {
+      const a = e.aggregate as Record<string, unknown>;
+      const fn = requireString(a, 'fn');
+      if (!IO_AGGREGATE_FNS.has(fn)) throw new Error(`unknown io aggregate fn "${fn}"`);
+      entry.aggregate = { fn: fn as IoAggregateFn, field: requireString(a, 'field') };
+    }
     return entry;
   });
   return {
@@ -474,12 +480,31 @@ export function mapIoSeriesStatusEvent(json: unknown): IoSeriesStatus {
 
 const IO_NOT_OBSERVED_REASONS: ReadonlySet<string> = new Set(['interface_switch', 'replay_error', 'backlog']);
 
-function mapIoBucketList(value: unknown[], key: string): IoBucket[] {
+const IO_AGGREGATE_FNS: ReadonlySet<string> = new Set(['sum', 'min', 'max', 'avg']);
+
+const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
+
+function mapIoPlainBuckets(value: unknown[], key: string): IoPlainBucket[] {
   return value.map((b) => {
-    if (!Array.isArray(b) || b.length !== 3 || !b.every((n) => typeof n === 'number' && Number.isFinite(n))) {
+    if (!Array.isArray(b) || b.length !== 3 || !b.every(isCount)) {
       throw new Error(`malformed io_buckets "${key}" entry`);
     }
-    return [b[0], b[1], b[2]] as IoBucket;
+    return [b[0], b[1], b[2]];
+  });
+}
+
+// `buckets`: 3-tuples, or 7-tuples for an aggregate series (Task 5). The sum
+// is a number, or a decimal string above 2^53 - 1; min/max may be null.
+function mapIoBuckets(value: unknown[]): IoBucket[] {
+  return value.map((b) => {
+    if (Array.isArray(b) && b.length === 3) return mapIoPlainBuckets([b], 'buckets')[0];
+    if (!Array.isArray(b) || b.length !== 7 || !b.slice(0, 4).every(isCount)) {
+      throw new Error('malformed io_buckets "buckets" entry');
+    }
+    const sum = typeof b[4] === 'string' && /^\d+$/.test(b[4]) ? Number(b[4]) : b[4];
+    const extreme = (n: unknown) => n === null || isCount(n);
+    if (!isCount(sum) || !extreme(b[5]) || !extreme(b[6])) throw new Error('malformed io_buckets "buckets" entry');
+    return [b[0], b[1], b[2], b[3], sum, b[5], b[6]] as IoAggregateBucket;
   });
 }
 
@@ -513,8 +538,8 @@ export function mapIoBucketsEvent(json: unknown): IoBuckets {
       return {
         id: requireString(s, 'id'),
         late: requireNumber(s, 'late'),
-        lateBuckets: mapIoBucketList(requireArray(s, 'lateBuckets'), 'lateBuckets'),
-        buckets: mapIoBucketList(requireArray(s, 'buckets'), 'buckets'),
+        lateBuckets: mapIoPlainBuckets(requireArray(s, 'lateBuckets'), 'lateBuckets'),
+        buckets: mapIoBuckets(requireArray(s, 'buckets')),
       };
     }),
   };

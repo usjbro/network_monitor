@@ -10,11 +10,12 @@
 //! building the browser's field tree once and evaluating every series.
 //!
 //! `io_series_end_to_end_replay_throughput` measures the real agent instead:
-//! fast-replay wall time for the same file with 0, 1 and 8 series.
+//! fast-replay wall time for the same file with 0, 1 and 8 series, and 8
+//! series that each also aggregate a numeric field (Task 5, spec D10).
 #[path = "fixtures/agent_auth.rs"]
 mod agent_auth;
 
-use capture_agent::display_filter::compile_for_series;
+use capture_agent::display_filter::{compile_for_series, uint_value};
 use capture_agent::fields::build_packet_fields;
 use capture_agent::l7::sniff_l7;
 use capture_agent::parse::{parse_packet, LinkType};
@@ -60,7 +61,19 @@ const SERIES: [&str; 8] = [
     "(tcp or udp) and frame.len < 200",
 ];
 
-fn per_frame_ns(frames: &[Vec<u8>], series: usize, rounds: usize) -> f64 {
+/// One aggregate field per series for the "8 + aggregates" runs.
+const AGG_FIELDS: [&str; 8] = [
+    "frame.len",
+    "dns.id",
+    "tcp.window_size",
+    "ip.ttl",
+    "frame.len",
+    "dns.count.answers",
+    "udp.dst_port",
+    "tcp.seq",
+];
+
+fn per_frame_ns(frames: &[Vec<u8>], series: usize, aggregates: bool, rounds: usize) -> f64 {
     let compiled: Vec<_> = SERIES[..series].iter().map(|s| compile_for_series(s).unwrap()).collect();
     let start = Instant::now();
     let mut matched = 0u64;
@@ -70,8 +83,12 @@ fn per_frame_ns(frames: &[Vec<u8>], series: usize, rounds: usize) -> f64 {
             let l7 = sniff_l7(&parsed.payload, parsed.dst_port);
             if series > 0 {
                 let tree = build_packet_fields(&parsed, &l7, LinkType::Ethernet, false);
-                for c in &compiled {
-                    matched += c.matches(&tree, u32::from(parsed.total_len)) as u64;
+                for (i, c) in compiled.iter().enumerate() {
+                    let hit = c.matches(&tree, u32::from(parsed.total_len));
+                    matched += hit as u64;
+                    if aggregates && hit {
+                        matched += uint_value(&tree, u32::from(parsed.total_len), AGG_FIELDS[i]).unwrap_or(0) & 1;
+                    }
                 }
             }
             black_box(&l7);
@@ -86,23 +103,24 @@ fn per_frame_ns(frames: &[Vec<u8>], series: usize, rounds: usize) -> f64 {
 fn io_series_per_frame_cost() {
     let frames = frames();
     let rounds = 2_000;
-    per_frame_ns(&frames, 8, 200); // warm up
+    per_frame_ns(&frames, 8, true, 200); // warm up
     let mut results = Vec::new();
-    for series in [0usize, 1, 8] {
+    for (series, aggregates) in [(0usize, false), (1, false), (8, false), (8, true)] {
         // Best of five, to keep scheduler noise out of the comparison.
-        let best = (0..5).map(|_| per_frame_ns(&frames, series, rounds)).fold(f64::INFINITY, f64::min);
-        results.push((series, best));
+        let best = (0..5).map(|_| per_frame_ns(&frames, series, aggregates, rounds)).fold(f64::INFINITY, f64::min);
+        results.push((series, aggregates, best));
     }
-    let baseline = results[0].1;
+    let baseline = results[0].2;
     println!("JAM-18 IO graph per-frame cost ({} frames x {rounds} rounds, best of 5):", frames.len());
-    for (series, ns) in &results {
-        println!("  {series} series: {ns:8.0} ns/frame  ({:.2}x baseline, +{:.0} ns)", ns / baseline, ns - baseline);
+    for (series, aggregates, ns) in &results {
+        let label = if *aggregates { " + aggregates" } else { "" };
+        println!("  {series} series{label}: {ns:8.0} ns/frame  ({:.2}x baseline, +{:.0} ns)", ns / baseline, ns - baseline);
     }
-    let ratio = results[2].1 / baseline;
-    println!("  8-series / 0-series ratio: {ratio:.2} (plan threshold: 2.00)");
+    println!("  8-series / 0-series ratio: {:.2} (plan threshold: 2.00)", results[2].2 / baseline);
+    println!("  aggregates add {:.0} ns/frame over 8 plain series", results[3].2 - results[2].2);
 }
 
-fn replay_seconds(path: &std::path::Path, series: usize) -> f64 {
+fn replay_seconds(path: &std::path::Path, series: usize, aggregates: bool) -> f64 {
     use std::io::{BufRead, BufReader, Write};
     use std::process::{Command, Stdio};
     let auth = agent_auth::AuthFixture::new();
@@ -136,7 +154,17 @@ fn replay_seconds(path: &std::path::Path, series: usize) -> f64 {
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         let status: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let list: Vec<_> = SERIES[..series].iter().enumerate().map(|(i, f)| serde_json::json!({"id": format!("s{i}"), "filter": f})).collect();
+        let list: Vec<_> = SERIES[..series]
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                if aggregates {
+                    serde_json::json!({"id": format!("s{i}"), "filter": f, "aggregate": {"fn": "avg", "field": AGG_FIELDS[i]}})
+                } else {
+                    serde_json::json!({"id": format!("s{i}"), "filter": f})
+                }
+            })
+            .collect();
         let msg = serde_json::json!({"type":"set_io_series","baseEpoch":status["epoch"],"baseRevision":0,"requestId":"0000aaaa","series":list});
         reader.get_mut().write_all(format!("{msg}\n").as_bytes()).unwrap();
         _socket = Some(reader);
@@ -176,14 +204,15 @@ fn io_series_end_to_end_replay_throughput() {
     std::fs::write(&path, &pcap).unwrap();
     println!("JAM-18 end-to-end fast replay, {count} frames (best of 3):");
     let mut results = Vec::new();
-    for series in [0usize, 1, 8] {
-        let best = (0..3).map(|_| replay_seconds(&path, series)).fold(f64::INFINITY, f64::min);
-        results.push((series, best));
+    for (series, aggregates) in [(0usize, false), (1, false), (8, false), (8, true)] {
+        let best = (0..3).map(|_| replay_seconds(&path, series, aggregates)).fold(f64::INFINITY, f64::min);
+        results.push((series, aggregates, best));
     }
     let _ = std::fs::remove_file(&path);
-    let baseline = results[0].1;
-    for (series, secs) in &results {
-        println!("  {series} series: {:7.0} ns/frame  ({:.2}x)", secs * 1e9 / count as f64, secs / baseline);
+    let baseline = results[0].2;
+    for (series, aggregates, secs) in &results {
+        let label = if *aggregates { " + aggregates" } else { "" };
+        println!("  {series} series{label}: {:7.0} ns/frame  ({:.2}x)", secs * 1e9 / count as f64, secs / baseline);
     }
-    println!("  8-series / 0-series ratio: {:.2} (plan threshold: 2.00)", results[2].1 / baseline);
+    println!("  8-series / 0-series ratio: {:.2} (plan threshold: 2.00)", results[2].2 / baseline);
 }
