@@ -48,13 +48,22 @@ const SAFE_FETCH_SITES = new Set([
  *    against the browser-driven attack this guards.
  */
 export function isCrossSiteRequest(request: NextRequest): boolean {
-  const fetchSite = request.headers.get('sec-fetch-site');
+  return isCrossSite(request.headers, request.url);
+}
+
+/**
+ * The same policy over plain headers, for a route that is not an App Router
+ * handler (KAN-129's Pages API route). `requestUrl` is this request's own
+ * absolute URL; only its origin is compared.
+ */
+export function isCrossSite(headers: { get(name: string): string | null }, requestUrl: string): boolean {
+  const fetchSite = headers.get('sec-fetch-site');
   if (fetchSite) return !SAFE_FETCH_SITES.has(fetchSite);
 
-  const origin = request.headers.get('origin');
+  const origin = headers.get('origin');
   if (origin) {
     try {
-      return new URL(origin).origin !== new URL(request.url).origin;
+      return new URL(origin).origin !== new URL(requestUrl).origin;
     } catch {
       // An unparseable Origin is not something to give the benefit of the
       // doubt to.
