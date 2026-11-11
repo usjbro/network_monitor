@@ -29,7 +29,7 @@ All 275 Linear issues (JAM-1 to JAM-275) have a row. KAN holds 32 Epics, 231 Tas
   - its type and parent match this file;
   - its ticked and unticked checkbox counts match Linear;
   - it has a "Linear history" comment exactly when Linear had comments;
-  - no signed `uploads.linear.app` URL was copied.
+  - no signed Linear upload URL was copied.
 - Links were spot-checked on KAN-109, KAN-111, KAN-170 and KAN-278. Each link call returned success and is recorded once.
 
-Linear changes made after this run are not included. They are synced at cutover.
+At cutover Linear was frozen. A delta sync of everything Linear updated after 10:45 EST found only JAM-18, changed at 10:25 EST and already current in KAN-111. Nothing needed re-applying.

@@ -76,7 +76,7 @@ If you're deliberately capturing on `lo0` and it isn't working, check `capture_s
 
 ## What does "Retransmit Anomaly" mean?
 
-The Dashboard's "Protocol Health" card shows "Retransmit Anomaly" when the average retransmission-based error rate across layers 3/4/7 crosses 0.2%. **This is a heuristic, not measured end-to-end packet loss.** Connections' `% loss` label has the same limitation; active loss measurement is tracked in [JAM-70](https://linear.app/shmishmorshin/issue/JAM-70/packet-loss-measurement). Two reasons a high value need not identify a network fault:
+The Dashboard's "Protocol Health" card shows "Retransmit Anomaly" when the average retransmission-based error rate across layers 3/4/7 crosses 0.2%. **This is a heuristic, not measured end-to-end packet loss.** Connections' `% loss` label has the same limitation; active loss measurement is tracked in [KAN-241](https://theantimeridian.atlassian.net/browse/KAN-241) (formerly JAM-70). Two reasons a high value need not identify a network fault:
 
 1. **Small sample sizes**: one flagged retransmission among five observed payload-bearing TCP segments displays 20%. Pure ACKs do not enter that denominator.
 2. **Observation ambiguity**: repeated or older sequence numbers can result from retransmissions, duplicate observations or reordering. This detector cannot establish their cause or measure radio-layer retries. The observation point, one-sided traffic and missing frames all affect interpretation. Capture drops mean observations were missed locally; they are not network packet loss.

@@ -1,3 +1,9 @@
+# Linear → Jira KAN cutover (2026-11-10)
+
+Migration and cutover: PR #309. All 275 JAM issues are in KAN, and the delta sync found no Linear changes after the run. Open gate and task files carry `issue_key: KAN-m`. Still to do (James): merge #309, disable the Linear plugin, give Codex a Jira connector, and swap the GitHub integration. Use KAN keys from here on; old JAM ids resolve through `coordination/migration/jam-to-kan.tsv`.
+
+---
+
 # JAM-256 + JAM-186 — documentation ready for combined PR (2026-11-06)
 
 One user-authorised goal, one branch: `jamesmbrownjr/jam-256-docs-task-oriented-analysis-guide-querying-packets-and`, base main `6066372`. New docs/analysis-guide.md covers implemented packet/socket/host/service-time workflows, measurements, recording/replay/export and failures. Usage reconciles stale #28/#29 notes, missing views, search, exports and replay. Capture examples use literal absolute paths plus directory preparation; command bar is explicitly not a shell. Nearby replay/security claims corrected narrowly. New tests extract/compile display examples and drive documented capture commands through the real UI router.
