@@ -20,6 +20,23 @@ import { lookupMacVendor } from '@/lib/mac-vendor';
 import { downloadBlob, packetsToJson } from '@/lib/export';
 import type { CompiledDisplayFilter } from '@/lib/display-filter';
 import { answeredBy, formatServiceTime, responseLinkOf } from '@/lib/service-time';
+import { describeDrill, type DrillInfo } from '@/lib/io-graph';
+
+/** An IO graph click-through (JAM-18 Task 4): the agent's counts for the interval. */
+export interface DrillHeader {
+  info: DrillInfo;
+  /** The series filter source, as shown in the header. */
+  filter: string;
+  /**
+   * Set when the series filter does not compile in the browser's evaluator
+   * (the agent's accepted it). The view then lists every packet in the time
+   * range and says the filter was not applied, rather than counting k
+   * against a filter it could not evaluate.
+   */
+  filterError?: string;
+  /** For tests: the time zone the interval bounds are shown in. */
+  timeZone?: string;
+}
 
 interface PacketStreamViewProps {
   packets: PacketFrame[];
@@ -42,6 +59,14 @@ interface PacketStreamViewProps {
   // Expert Info (JAM-12) row markers — optional so this component stays
   // backward compatible with call sites that never pass findings.
   findings?: Finding[];
+  // IO graph click-through (JAM-18 Task 4). A UI constraint next to the
+  // display filter, not filter grammar: only packets whose timestamp is in
+  // [fromMs, toMs) are listed. Optional, so existing call sites are unchanged.
+  timeRange?: { fromMs: number; toMs: number };
+  // The agent's counts for that interval; the header compares them with the
+  // packets actually buffered (k), computed here on every render.
+  drillHeader?: DrillHeader;
+  onClearDrill?: () => void;
 }
 
 function HexPane({ hexDump, fields, activePath, selectedPath, hoveredByte, onHoverByte, onSelectField, testId }: {
@@ -149,6 +174,9 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   displayFilter,
   displayFilterExpression,
   findings = [],
+  timeRange,
+  drillHeader,
+  onClearDrill,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isFrozen, setIsFrozen] = useState(false);
@@ -176,7 +204,22 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
     }
   }
 
-  const sharedMatches = displayFilter ? packets.filter((packet) => displayFilter({ kind: 'packet', packet })) : packets;
+  // Packet timestamps are epoch milliseconds (the frame's own time, the same
+  // clock as the IO graph's bucket keys).
+  const inRange = timeRange
+    ? packets.filter((packet) => {
+      const t = Number(packet.timestamp);
+      return t >= timeRange.fromMs && t < timeRange.toMs;
+    })
+    : packets;
+  const sharedMatches = displayFilter ? inRange.filter((packet) => displayFilter({ kind: 'packet', packet })) : inRange;
+  // k: buffered packets in the interval that match the series filter. Never clamped.
+  const drill = !timeRange || !drillHeader ? null : drillHeader.filterError
+    ? {
+      headline: `${sharedMatches.length} packets in this interval are listed, unfiltered: the series filter \`${drillHeader.filter}\` could not be evaluated here (${drillHeader.filterError}).`,
+      detail: ["The agent's count for the series is not compared, since these are not the same packets."],
+    }
+    : describeDrill(drillHeader.info, sharedMatches.length, { filter: drillHeader.filter, bufferLimit, timeZone: drillHeader.timeZone });
   const displayedPackets = sharedMatches.filter((pkt) => {
     const matchesSearch =
       pkt.protocol.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -306,7 +349,22 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
         </div>
       </div>
 
-      {displayFilter && (
+      {drill && (
+        <div data-testid="drill-header" role="status" className="text-[11px] text-sky-200 bg-sky-950/40 border border-sky-900/60 rounded p-2 space-y-1">
+          <div className="flex items-start justify-between gap-2">
+            <span className="font-bold">IO graph interval: {drill.headline}</span>
+            {onClearDrill && (
+              <button type="button" data-testid="drill-clear" onClick={onClearDrill}
+                className="px-1.5 py-0.5 rounded border border-sky-800/60 hover:bg-sky-950 whitespace-nowrap">
+                clear time range
+              </button>
+            )}
+          </div>
+          {drill.detail.map((line) => <div key={line} className="text-sky-300/80">{line}</div>)}
+        </div>
+      )}
+
+      {displayFilter && !drill && (
         <div className="text-[11px] text-slate-400" role="status">
           Display filter{displayFilterExpression ? ` (${displayFilterExpression})` : ''}: {sharedMatches.length} of {packets.length} buffered packets match; hidden packets remain buffered.
         </div>

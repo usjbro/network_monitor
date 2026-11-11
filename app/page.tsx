@@ -69,7 +69,7 @@ import { HeaderBar } from '@/components/HeaderBar';
 import { DashboardView } from '@/components/DashboardView';
 import { LayerDetailView } from '@/components/LayerDetailView';
 import { ConnectionsView } from '@/components/ConnectionsView';
-import { PacketStreamView } from '@/components/PacketStreamView';
+import { PacketStreamView, type DrillHeader } from '@/components/PacketStreamView';
 import { FindingsPanel, type FindingNavigateTarget } from '@/components/FindingsPanel';
 import { ProtocolMatrixView } from '@/components/ProtocolMatrixView';
 import { ServiceTimeView } from '@/components/ServiceTimeView';
@@ -78,7 +78,7 @@ import { InstallModal } from '@/components/InstallModal';
 import { CommandLineBar } from '@/components/CommandLineBar';
 import { compileDisplayFilter, type CompiledDisplayFilter } from '@/lib/display-filter';
 import { IoGraphView, timed, type SetIoSeriesMessage } from '@/components/IoGraphView';
-import { createHistory, ingestBuckets, ingestStatus } from '@/lib/io-graph';
+import { createHistory, drillDown, ingestBuckets, ingestStatus, type IoInterval } from '@/lib/io-graph';
 
 export default function TerminalApp() {
   // Application State
@@ -89,6 +89,14 @@ export default function TerminalApp() {
   const [ioStatus, setIoStatus] = useState<IoSeriesStatus | null>(null);
   const [ioHistory] = useState(createHistory);
   const [ioVersion, setIoVersion] = useState(0);
+  // JAM-18 Task 4: an IO graph interval opened in the Packets view. While
+  // set, it replaces the shared display filter there with the series' own
+  // filter (the shared filter itself is left as it was).
+  const [ioDrill, setIoDrill] = useState<{
+    timeRange: { fromMs: number; toMs: number };
+    header: DrillHeader;
+    predicate?: CompiledDisplayFilter;
+  } | null>(null);
   const [selectedLayerNum, setSelectedLayerNum] = useState<OSILayerNumber>(7);
   const [selectedTheme, setSelectedTheme] = useState<TerminalTheme>('sophisticated');
   const [isPaused, setIsPaused] = useState(false);
@@ -423,6 +431,24 @@ export default function TerminalApp() {
       if (ioFrame !== null) cancelAnimationFrame(ioFrame);
     };
   }, [ioHistory]); // ioHistory is one stable object; the stream is opened once
+
+  // JAM-18 Task 4: open one series' interval in the Packets view, with the
+  // agent's counts for it captured now (the header compares them with the
+  // packets buffered, which it recounts on every render).
+  const openIoDrill = (seriesId: string, interval: IoInterval, startMs: number) => {
+    const info = drillDown(ioHistory, seriesId, interval, startMs);
+    if (!info) return;
+    const filter = ioStatus?.series.find((s) => s.id === seriesId)?.filter ?? '';
+    let predicate: CompiledDisplayFilter | undefined;
+    let filterError: string | undefined;
+    if (filter.trim()) {
+      const compiled = compileDisplayFilter(filter);
+      if (compiled.ok) predicate = compiled.predicate;
+      else filterError = `${compiled.error.message} at position ${compiled.error.position}`;
+    }
+    setIoDrill({ timeRange: { fromMs: info.fromMs, toMs: info.toMs }, header: { info, filter, filterError }, predicate });
+    setActiveTab('packets');
+  };
 
   // JAM-18: replaces the agent's shared IO graph series set. The route
   // validates and forwards; the agent's answer arrives as io_series_status.
@@ -1153,9 +1179,12 @@ export default function TerminalApp() {
               decryptedSegments={decryptedSegments}
               totalObserved={captureStats?.received}
               bufferLimit={packetBufferLimit}
-              displayFilter={displayFilter?.predicate}
-              displayFilterExpression={displayFilter?.expression}
+              displayFilter={ioDrill ? ioDrill.predicate : displayFilter?.predicate}
+              displayFilterExpression={ioDrill ? ioDrill.header.filter : displayFilter?.expression}
               findings={findings}
+              timeRange={ioDrill?.timeRange}
+              drillHeader={ioDrill?.header}
+              onClearDrill={() => setIoDrill(null)}
             />
           )}
 
@@ -1184,6 +1213,7 @@ export default function TerminalApp() {
               connected={agentConnected}
               theme={themeConfig}
               onSend={sendIoSeries}
+              onDrill={openIoDrill}
             />
           )}
 

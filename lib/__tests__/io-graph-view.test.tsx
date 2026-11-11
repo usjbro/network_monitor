@@ -330,3 +330,46 @@ describe('IoGraphView: what the chart states (minors 2, 3, 4)', () => {
     expect(screen.getByTestId('io-unplaced-late')).toHaveTextContent('all 3');
   });
 });
+
+describe('IoGraphView: click-through (JAM-18 Task 4)', () => {
+  function stubRect(el: Element) {
+    el.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 260, right: 1000, bottom: 260, x: 0, y: 0, toJSON: () => ({}) });
+  }
+
+  it('a click (not a drag) pins the interval, and each series row opens its packets', () => {
+    const onDrill = vi.fn();
+    view({ onDrill });
+    const svg = screen.getByTestId('io-svg');
+    stubRect(svg);
+    // The window follows the newest data (T0 + 60 s); x = 930 is its last 1 s interval.
+    fireEvent.pointerDown(svg, { clientX: 930, pointerId: 1 });
+    fireEvent.pointerUp(svg, { clientX: 931, pointerId: 1 });
+    fireEvent.pointerLeave(svg, { pointerId: 1 });
+    // Still shown after the pointer leaves: it is pinned.
+    expect(screen.getByTestId('io-readout')).toHaveTextContent('pinned');
+    expect(screen.getByTestId('io-follow')).toHaveTextContent('live'); // a click does not pan
+    fireEvent.click(screen.getByTestId('io-drill-dns'));
+    expect(onDrill).toHaveBeenCalledWith('dns', 1000, T0 + 59_000);
+  });
+
+  it('a drag does not pin, and Escape unpins', () => {
+    view({ onDrill: vi.fn() });
+    const svg = screen.getByTestId('io-svg');
+    stubRect(svg);
+    fireEvent.pointerDown(svg, { clientX: 500, pointerId: 1 });
+    fireEvent.pointerMove(svg, { clientX: 600, pointerId: 1 });
+    fireEvent.pointerUp(svg, { clientX: 600, pointerId: 1 });
+    fireEvent.pointerLeave(svg, { pointerId: 1 });
+    expect(screen.queryByTestId('io-readout')).toBeNull();
+    fireEvent.keyDown(screen.getByTestId('io-graph'), { key: 'Enter' });
+    expect(screen.getByTestId('io-readout')).toHaveTextContent('pinned');
+    fireEvent.keyDown(screen.getByTestId('io-graph'), { key: 'Escape' });
+    expect(screen.queryByTestId('io-readout')).toBeNull();
+  });
+
+  it('without onDrill there are no packet buttons', () => {
+    view();
+    fireEvent.keyDown(screen.getByTestId('io-graph'), { key: 'Enter' });
+    expect(screen.queryByTestId('io-drill-dns')).toBeNull();
+  });
+});

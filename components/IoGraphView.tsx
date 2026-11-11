@@ -50,6 +50,11 @@ interface IoGraphViewProps {
   now?: () => number;
   /** For tests: tick label time zone. */
   timeZone?: string;
+  /**
+   * Click-through (JAM-18 Task 4): open the Packets view for one series'
+   * interval [startMs, startMs + interval). Without it, no packet buttons.
+   */
+  onDrill?: (seriesId: string, interval: IoInterval, startMs: number) => void;
 }
 
 const W = 1000;
@@ -148,15 +153,18 @@ function plotFraction(el: Element | null, clientX: number): number {
   return Math.min(1, Math.max(0, (vx - M.left) / PLOT_W));
 }
 
-export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, status, connected, theme, onSend, now, timeZone }) => {
+export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, status, connected, theme, onSend, now, timeZone, onDrill }) => {
   const [view, setView] = useState<View>({ span: DEFAULT_SPAN, endMs: null, follow: true });
   const [chosen, setChosen] = useState<IoInterval>(1000);
   const [measures, setMeasures] = useState<Record<string, Measure>>({});
   const [draft, setDraft] = useState<Draft | null>(null);
   const [sent, setSent] = useState<Sent | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
+  // A clicked interval stays shown (with its packet buttons) until Escape or
+  // another click; held as a time so it survives pan, zoom and interval changes.
+  const [pinnedMs, setPinnedMs] = useState<number | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const drag = useRef<{ x: number; end: number } | null>(null);
+  const drag = useRef<{ x: number; end: number; moved: boolean } | null>(null);
   const pointers = useRef(new Map<number, number>());
   const pinch = useRef<number | null>(null);
   const newRowCount = useRef(0);
@@ -290,6 +298,8 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
     else if (e.key === '+' || e.key === '=') { setView((v) => zoomView(v, 0.8, 0.5)); e.preventDefault(); }
     else if (e.key === '-' || e.key === '_') { setView((v) => zoomView(v, 1.25, 0.5)); e.preventDefault(); }
     else if (e.key === 'End') { goLive(); e.preventDefault(); }
+    else if (e.key === 'Enter') { setPinnedMs(windowEnd - 1); e.preventDefault(); } // pin the newest interval
+    else if (e.key === 'Escape') { setPinnedMs(null); e.preventDefault(); }
   }
 
   function onPointerDown(e: React.PointerEvent<SVGSVGElement>) {
@@ -301,7 +311,7 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
       pinch.current = Math.abs(a - b);
       drag.current = null;
     } else if (pointers.current.size === 1) {
-      drag.current = { x: e.clientX, end: windowEnd };
+      drag.current = { x: e.clientX, end: windowEnd, moved: false };
     }
   }
 
@@ -321,6 +331,9 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
       return;
     }
     if (drag.current) {
+      // A few pixels of jitter is still a click, not a pan.
+      if (!drag.current.moved && Math.abs(e.clientX - drag.current.x) <= 3) return;
+      drag.current.moved = true;
       const rect = svgRef.current!.getBoundingClientRect();
       const width = rect.width || 1;
       const dx = ((e.clientX - drag.current.x) / width) * (W / PLOT_W) * span;
@@ -330,6 +343,9 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
   }
 
   function onPointerEnd(e: React.PointerEvent<SVGSVGElement>) {
+    if (e.type === 'pointerup' && drag.current && !drag.current.moved && pointers.current.size === 1) {
+      setPinnedMs(windowStart + plotFraction(svgRef.current, e.clientX) * span);
+    }
     pointers.current.delete(e.pointerId);
     if (pointers.current.size < 2) pinch.current = null;
     drag.current = null;
@@ -347,11 +363,12 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
     if (!ok) setSent((s) => (s && s.requestId === requestId && !s.answer ? { ...s, error: RELAY_REFUSED_TEXT } : s));
   }
 
-  const hover = hoverX === null ? null : (() => {
-    const t = windowStart + hoverX * span;
-    const start = Math.floor(t / interval) * interval;
+  const readoutAt = pinnedMs ?? (hoverX === null ? null : windowStart + hoverX * span);
+  const hover = readoutAt === null ? null : (() => {
+    const start = Math.floor(readoutAt / interval) * interval;
     return {
       t: start,
+      pinned: pinnedMs !== null,
       rows: computed.perSeries.map((s, i) => ({ i, id: s.id, p: s.points.find((p) => p.startMs === start) })),
     };
   })();
@@ -376,7 +393,7 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
       aria-label="IO graph"
       aria-describedby="io-graph-keys"
     >
-      <span id="io-graph-keys" className="sr-only">Arrow keys pan, plus and minus zoom, End returns to live.</span>
+      <span id="io-graph-keys" className="sr-only">Arrow keys pan, plus and minus zoom, End returns to live, Enter pins the newest interval and Escape unpins. Click an interval to pin it and open its packets.</span>
       <span className="sr-only" aria-live="polite" data-testid="io-follow-announce">
         {view.follow ? 'Following live data' : 'Paused: press End to follow live data'}
       </span>
@@ -498,7 +515,10 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
           </svg>
           {hover && (
             <div className="absolute top-1 right-2 bg-slate-950/90 border border-slate-700 rounded px-2 py-1 space-y-0.5" data-testid="io-readout">
-              <div className="text-slate-400">{new Date(hover.t).toLocaleTimeString(undefined, { timeZone })}</div>
+              <div className="text-slate-400">
+                {new Date(hover.t).toLocaleTimeString(undefined, { timeZone })}
+                {hover.pinned && <span className="text-slate-500"> · pinned (Esc to clear)</span>}
+              </div>
               {hover.rows.map(({ i, id, p }) => (
                 <div key={id} className="flex items-center gap-2">
                   <span className={`inline-block h-2 w-2 rounded-sm ${SWATCHES[i % SWATCHES.length]}`} />
@@ -507,6 +527,12 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
                   {p && p.latePackets > 0 && <span className="text-amber-300">+{p.latePackets} late</span>}
                   {p && p.unplacedLate > 0 && <span className="text-amber-300">+{p.unplacedLate} late (interval unknown)</span>}
                   {p?.lossy && <span className="text-red-400">incomplete</span>}
+                  {hover.pinned && onDrill && (
+                    <button type="button" data-testid={`io-drill-${id}`} onClick={() => onDrill(id, interval, hover.t)}
+                      className="ml-1 px-1 rounded border border-sky-800/60 text-sky-300 hover:bg-sky-950">
+                      packets →
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

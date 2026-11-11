@@ -347,6 +347,50 @@ export function pointCount(fromMs: number, toMs: number, interval: IoInterval): 
   return Math.floor((toMs - 1) / interval) - Math.floor(fromMs / interval) + 1;
 }
 
+interface IntervalSum {
+  state: PointState;
+  packets: number;
+  bytes: number;
+  latePackets: number;
+  unplacedLate: number;
+  lossy: boolean;
+  notObservedMs: number;
+  notObservedReason?: IoNotObservedReason;
+}
+
+/** Raw on-time and late sums for one interval, with its coverage state. */
+function sumInterval(ring: Ring, series: number, start: number, interval: IoInterval, unplaced: UnplacedLate[]): IntervalSum {
+  const step = ring.resolution;
+  const { keys, packets: P, bytes: B, latePackets: L, coveredMs, notObservedMs: N, notObservedReason: R, lossy: X } = ring;
+  const capacity = ring.capacity;
+  let packets = 0;
+  let bytes = 0;
+  let latePackets = 0;
+  let covered = 0;
+  let notObservedMs = 0;
+  let reasonCode = 0;
+  let lossy = false;
+  const firstKey = start / step;
+  for (let k = 0, n = interval / step; k < n; k++) {
+    const key = firstKey + k;
+    const slot = key % capacity;
+    if (keys[slot] !== key) continue; // aged out or never written: not covered
+    const i = slot * ring.series + series;
+    packets += P[i];
+    bytes += B[i];
+    latePackets += L[i];
+    covered += coveredMs[slot];
+    notObservedMs += N[slot];
+    if (R[slot]) reasonCode = R[slot];
+    if (X[slot]) lossy = true;
+  }
+  // Not observed is the more specific signal, so it wins over unknown.
+  const state: PointState = notObservedMs > 0 ? 'notObserved' : covered >= interval ? 'value' : 'unknown';
+  let unplacedLate = 0;
+  if (unplaced.length) for (const u of unplaced) if (touches(u, start, start + interval)) unplacedLate += u.frames;
+  return { state, packets, bytes, latePackets, unplacedLate, lossy, notObservedMs, notObservedReason: reasonCode ? REASONS[reasonCode - 1] : undefined };
+}
+
 /**
  * Points for one series over [fromMs, toMs) at `interval`. Coarser
  * intervals are exact sums of the 100 ms counts the agent sent. At most
@@ -361,46 +405,18 @@ export function query(h: IoHistory, seriesId: string, interval: IoInterval, from
   const last = Math.floor((toMs - 1) / interval) * interval;
   const first = Math.max(Math.floor(fromMs / interval) * interval, last - (MAX_POINTS - 1) * interval);
   const unplacedHere = h.unplacedLate.filter((u) => u.series === series && touches(u, first, last + interval));
-  const { keys, packets: P, bytes: B, latePackets: L, coveredMs, notObservedMs: N, notObservedReason: R, lossy: X } = ring;
-  const capacity = ring.capacity;
-  const width = ring.series;
-  const slotsPer = interval / step;
   for (let start = first; start <= last; start += interval) {
-    let packets = 0;
-    let bytes = 0;
-    let latePackets = 0;
-    let covered = 0;
-    let notObservedMs = 0;
-    let reasonCode = 0;
-    let lossy = false;
-    const firstKey = start / step;
-    for (let k = 0; k < slotsPer; k++) {
-      const key = firstKey + k;
-      const slot = key % capacity;
-      if (keys[slot] !== key) continue; // aged out or never written: not covered
-      const i = slot * width + series;
-      packets += P[i];
-      bytes += B[i];
-      latePackets += L[i];
-      covered += coveredMs[slot];
-      notObservedMs += N[slot];
-      if (R[slot]) reasonCode = R[slot];
-      if (X[slot]) lossy = true;
-    }
-    // Not observed is the more specific signal, so it wins over unknown.
-    const state: PointState = notObservedMs > 0 ? 'notObserved' : covered >= interval ? 'value' : 'unknown';
-    let unplacedLate = 0;
-    if (unplacedHere.length) for (const u of unplacedHere) if (touches(u, start, start + interval)) unplacedLate += u.frames;
+    const sum = sumInterval(ring, series, start, interval, unplacedHere);
     points.push({
       startMs: start,
-      state,
-      packets: state === 'value' ? packets : 0,
-      bytes: state === 'value' ? bytes : 0,
-      latePackets,
-      unplacedLate,
-      lossy,
-      notObservedMs,
-      notObservedReason: reasonCode ? REASONS[reasonCode - 1] : undefined,
+      state: sum.state,
+      packets: sum.state === 'value' ? sum.packets : 0,
+      bytes: sum.state === 'value' ? sum.bytes : 0,
+      latePackets: sum.latePackets,
+      unplacedLate: sum.unplacedLate,
+      lossy: sum.lossy,
+      notObservedMs: sum.notObservedMs,
+      notObservedReason: sum.notObservedReason,
     });
   }
   return points;
@@ -529,4 +545,93 @@ export function newRequestId(): string {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// --- Click-through (spec D7) ---------------------------------------------
+
+/** The agent's counts for one interval of one series, for click-through. */
+export interface DrillInfo {
+  seriesId: string;
+  interval: IoInterval;
+  fromMs: number;
+  toMs: number;
+  /** On-time frames the agent counted (even in a partly not-observed interval). */
+  onTime: number;
+  /** Late frames reported against this interval's own buckets. */
+  late: number;
+  /** Late frames whose bucket is not known, from a message span touching this interval. */
+  unplacedLate: number;
+  lossy: boolean;
+  state: PointState;
+  notObservedMs: number;
+  notObservedReason?: IoNotObservedReason;
+}
+
+/** The interval of `interval` containing `atMs`, with the agent's counts for it. */
+export function drillDown(h: IoHistory, seriesId: string, interval: IoInterval, atMs: number): DrillInfo | null {
+  const series = h.ids.indexOf(seriesId);
+  const ring = h.rings.get(ringFor(interval));
+  if (series < 0 || !ring) return null;
+  const fromMs = Math.floor(atMs / interval) * interval;
+  const toMs = fromMs + interval;
+  const sum = sumInterval(ring, series, fromMs, interval, h.unplacedLate.filter((u) => u.series === series && touches(u, fromMs, toMs)));
+  return {
+    seriesId, interval, fromMs, toMs,
+    onTime: sum.packets, late: sum.latePackets, unplacedLate: sum.unplacedLate, lossy: sum.lossy,
+    state: sum.state, notObservedMs: sum.notObservedMs, notObservedReason: sum.notObservedReason,
+  };
+}
+
+const DRILL_INTERVAL_LABEL: Record<IoInterval, string> = { 100: '100 ms', 1000: '1 s', 10000: '10 s', 60000: '1 min' };
+const DRILL_REASON_LABEL: Record<IoNotObservedReason, string> = {
+  interface_switch: 'interface switch', replay_error: 'replay error', backlog: 'backlog', unknown: 'unknown reason',
+};
+
+function clockMs(ms: number, timeZone?: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3, hourCycle: 'h23', timeZone,
+  }).format(new Date(ms));
+}
+
+function durationText(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)} ms` : ms < 60_000 ? `${+(ms / 1000).toFixed(1)} s` : `${+(ms / 60_000).toFixed(1)} min`;
+}
+
+/**
+ * What the Packets view can show for a drilled interval, stated exactly
+ * (spec D7). `k` is the number of buffered packets in [fromMs, toMs) that
+ * match the series filter; it is never clamped. N is the agent's on-time
+ * count plus late frames attributed to the interval. Never suggests replay:
+ * replayed frames pass the same packet-event rate limit.
+ */
+export function describeDrill(info: DrillInfo, k: number, opts: { filter: string; bufferLimit?: number; timeZone?: string }): { headline: string; detail: string[] } {
+  const range = `${clockMs(info.fromMs, opts.timeZone)}–${clockMs(info.toMs, opts.timeZone)}`;
+  const what = opts.filter.trim() ? `${range} matching \`${opts.filter.trim()}\`` : `${range} (every frame)`;
+  const detail: string[] = [];
+  const counted = info.state !== 'unknown';
+  const n = info.onTime + info.late;
+  let headline: string;
+  if (!counted) {
+    headline = `${k} packets in ${what} are available here.`;
+    detail.push("This tab holds no agent count for this interval (it was not covered, or has aged out of this tab's history), so there is no total to compare against.");
+  } else if (k > n || info.unplacedLate > 0) {
+    headline = `${k} packets in ${what} are available here; the agent's count for this interval is incomplete (late frames).`;
+    if (info.unplacedLate > 0) detail.push(`${info.unplacedLate} late frames were reported without their interval and may belong here.`);
+  } else if (n === 0) {
+    headline = `The agent counted no packets in ${what}.`;
+  } else if (k === n) {
+    headline = `All ${n} packets in ${what} are available here.`;
+  } else {
+    headline = `${k} of ${n} packets in ${what} are available here.`;
+    const buffer = opts.bufferLimit !== undefined ? `the ${opts.bufferLimit}-packet buffer` : "this tab's packet buffer";
+    detail.push(`The other ${n - k} were counted by the agent but not sent to the browser (rate-limited to 100 packet events/s) or have aged out of ${buffer}.`);
+    detail.push('To inspect all of them, record a capture file (`capture <file.pcapng>`) and open it in an external analyzer at this time range.');
+  }
+  if (counted && info.late > 0) detail.push(`${n} includes ${info.late} late frames reported after the interval closed.`);
+  if (info.notObservedMs > 0) {
+    const why = info.notObservedReason ? ` (${DRILL_REASON_LABEL[info.notObservedReason]})` : '';
+    detail.push(`Not observed for ${durationText(info.notObservedMs)} of this ${DRILL_INTERVAL_LABEL[info.interval]} interval${why}: the agent counted nothing then, and no packets from that time can be shown.`);
+  }
+  if (info.lossy) detail.push('Frames were lost before counting in this interval (dropped by the kernel or interface, unparseable, or skipped), so the agent\'s count is itself incomplete.');
+  return { headline, detail };
 }
