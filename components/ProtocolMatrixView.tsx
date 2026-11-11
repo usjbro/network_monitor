@@ -87,6 +87,20 @@ const MeasuredShares: React.FC<{ shares: MeasuredShare[] }> = ({ shares }) => {
   );
 };
 
+// Static, illustrative per-layer header overhead (KAN-39). A Record over
+// every OSILayerNumber, so a layer without its own entry is a compile error
+// rather than silently inheriting another layer's text. Session and
+// presentation add no header of their own in the TCP/IP stack.
+const HEADER_OVERHEAD: Record<OSILayerNumber, string> = {
+  7: '0 Bytes (Raw Data)',
+  6: 'None (no separate header in TCP/IP)',
+  5: 'None (no separate header in TCP/IP)',
+  4: '+20 Bytes (TCP Header)',
+  3: '+20 Bytes (IPv4 Header)',
+  2: '+14 Bytes (Ethernet II Frame)',
+  1: '+8 Bytes (Preamble & SFD)',
+};
+
 export const ProtocolMatrixView: React.FC<ProtocolMatrixViewProps> = ({
   layers,
   theme,
@@ -145,6 +159,7 @@ export const ProtocolMatrixView: React.FC<ProtocolMatrixViewProps> = ({
           return (
             <div
               key={layer.layer}
+              data-layer-card
               onClick={() => onSelectLayer(layer.layer)}
               className={`p-3 rounded border ${theme.border} bg-slate-950/80 hover:bg-slate-900 transition cursor-pointer relative group space-y-2`}
             >
@@ -174,8 +189,8 @@ export const ProtocolMatrixView: React.FC<ProtocolMatrixViewProps> = ({
               <div className="p-2 bg-black/60 rounded border border-slate-800/80 flex items-center justify-between text-[11px] text-slate-300">
                 <div className="flex items-center space-x-2">
                   <span className="text-slate-500 font-bold">Header Overhead:</span>
-                  <span className="text-emerald-400 font-bold">
-                    {layer.layer === 7 ? '0 Bytes (Raw Data)' : layer.layer === 4 ? '+20 Bytes (TCP Header)' : layer.layer === 3 ? '+20 Bytes (IPv4 Header)' : layer.layer === 2 ? '+14 Bytes (Ethernet II Frame)' : '+4 Bytes (Preamble & PHY)'}
+                  <span className="text-emerald-400 font-bold" data-testid="header-overhead">
+                    {HEADER_OVERHEAD[layer.layer]}
                   </span>
                 </div>
 

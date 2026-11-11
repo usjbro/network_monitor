@@ -155,3 +155,38 @@ describe('ProtocolMatrixView', () => {
     expect(screen.queryByText('60.0%')).not.toBeInTheDocument();
   });
 });
+
+// KAN-39 (legacy JAM-191): every layer states its own header overhead; none
+// inherits another layer's label from a missing case.
+describe('ProtocolMatrixView header overhead labels', () => {
+  const all = ([1, 2, 3, 4, 5, 6, 7] as OSILayerNumber[]).map((n) => layerFixture(n, 0, 0));
+
+  function overheadByLayer(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const title of screen.getAllByText(/^Layer \d: /)) {
+      const card = title.closest('[data-layer-card]') as HTMLElement;
+      const label = card.querySelector('[data-testid="header-overhead"]')!;
+      out[title.textContent!.slice(0, 7)] = label.textContent!;
+    }
+    return out;
+  }
+
+  it('gives each of the 7 layers its own label', () => {
+    render(<ProtocolMatrixView layers={all} theme={theme} onSelectLayer={() => {}} />);
+    expect(overheadByLayer()).toEqual({
+      'Layer 7': '0 Bytes (Raw Data)',
+      'Layer 6': 'None (no separate header in TCP/IP)',
+      'Layer 5': 'None (no separate header in TCP/IP)',
+      'Layer 4': '+20 Bytes (TCP Header)',
+      'Layer 3': '+20 Bytes (IPv4 Header)',
+      'Layer 2': '+14 Bytes (Ethernet II Frame)',
+      'Layer 1': '+8 Bytes (Preamble & SFD)',
+    });
+  });
+
+  it('never shows physical-layer terminology on Layers 5 and 6', () => {
+    render(<ProtocolMatrixView layers={all} theme={theme} onSelectLayer={() => {}} />);
+    const labels = overheadByLayer();
+    for (const layer of ['Layer 5', 'Layer 6']) expect(labels[layer]).not.toMatch(/Preamble|PHY|SFD/);
+  });
+});
