@@ -100,8 +100,8 @@ class Ring {
       if (this.agg) {
         this.agg.count.fill(0, base, base + this.series);
         this.agg.sum.fill(0, base, base + this.series);
-        this.agg.min.fill(NaN, base, base + this.series);
-        this.agg.max.fill(NaN, base, base + this.series);
+        this.agg.min.fill(Number.NaN, base, base + this.series);
+        this.agg.max.fill(Number.NaN, base, base + this.series);
       }
     }
     if (key > this.newestKey) this.newestKey = key;
@@ -133,7 +133,7 @@ class Ring {
     if (slot < 0) return false;
     if (!this.agg) {
       const n = this.keys.length * this.series;
-      this.agg = { count: new Float64Array(n), sum: new Float64Array(n), min: new Float64Array(n).fill(NaN), max: new Float64Array(n).fill(NaN) };
+      this.agg = { count: new Float64Array(n), sum: new Float64Array(n), min: new Float64Array(n).fill(Number.NaN), max: new Float64Array(n).fill(Number.NaN) };
     }
     const i = slot * this.series + series;
     this.agg.count[i] += count;
