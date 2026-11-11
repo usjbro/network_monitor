@@ -33,7 +33,7 @@ These are implementation choices the spec leaves open. James's approval of this 
 
 | Task | Responsibility | Files | Depends on |
 | --- | --- | --- | --- |
-| 1 | Sample rings, RTT matching, window-scale parsing, `FlowTable` integration | create `capture-agent/src/tcp_samples.rs`; modify `src/lib.rs`, `src/parse.rs`, `src/flow.rs`; fuzz seeds under `capture-agent/fuzz/corpus/parse_packet/` | plan merged |
+| 1 | Sample rings, RTT matching, window-scale parsing, `FlowTable` integration | create `capture-agent/src/tcp_samples.rs`; modify `src/lib.rs`, `src/parse.rs`, `src/flow.rs` | plan merged |
 | 2 | Shared request core, admission, Pages route, relay-side `tcp_samples` handling against a fake agent | create `lib/agent-request.ts`, `lib/agent-admission.ts`, `pages/api/tcp-samples.ts`, `lib/tcp-samples-route.ts`; modify `lib/agent-client.ts`, `lib/stream-response.ts`; tests | 1 merged (no code dependency; keeps PRs serial) |
 | 3 | Wire contract, agent handler, `capture_stats` cost fields, end-to-end replay tests | modify `src/wire.rs`, `src/main.rs`, `lib/types.ts`, `lib/agent-mapping.ts`, `docs/wire-protocol.md`; create `capture-agent/tests/tcp_samples_replay.rs`, `lib/__tests__/tcp-samples-wire.test.ts` | 1, 2 |
 | 4 | Plots, entry point, polling, performance and real-agent check | create `lib/tcp-graphs.ts`, `lib/time-axis.ts`, `components/TcpGraphsView.tsx`, `e2e/tcp-graphs.spec.ts`, tests; modify `lib/io-graph.ts` (re-exports), `components/ConnectionsView.tsx`, `app/page.tsx`, `docs/usage.md` | 3 |
@@ -91,7 +91,7 @@ impl TcpSampleStore {
   - `parse.rs`: options with MSS + NOP + WS + SACK-permitted; a truncated option; length 0 and length 1 options; option list running past the header; no options;
   - `FlowTable` integration: `observe` records exactly one sample per TCP segment with the same `is_retransmit` it returns; `evict_stale` releases the rings of the flows it returns; `reset` clears all; UDP flows get no ring.
 - [ ] **Mutation checks:** break the Karn discard, the both-sides scale rule, the LRU choice and the wrap index; each must fail a test.
-- [ ] **Fuzz:** add SYN/SYN-ACK seeds with window-scale and malformed option lists as a new committed corpus directory `capture-agent/fuzz/corpus/parse_packet/` (today only `display_filter` has one); run `cargo +nightly fuzz run parse_packet -- -max_total_time=60` locally.
+- [ ] **Fuzz:** fuzz corpora are gitignored (`capture-agent/fuzz/.gitignore`), so nothing is committed there. The window-scale and malformed-option cases live in `parse.rs` unit tests; copy their frames into a local `corpus/parse_packet/` and run `cargo +nightly fuzz run parse_packet -- -max_total_time=60` locally.
 - [ ] **Verify:** `cargo build --release --locked`, `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`. Re-run the IO graph benchmark (`capture-agent/tests/io_graph_bench.rs`, 0-series case) before and after to show the per-frame cost of recording samples, and record both numbers in the PR.
 
 ## Task 2 / PR 2: shared request core, admission, Pages route
@@ -173,7 +173,7 @@ export async function handleTcpSamples(req: NextApiRequest, res: NextApiResponse
 - **§4 Sensitive data:** header metadata only; replies never broadcast (Task 2 tests); no logging of reply bodies.
 - **§5 Time:** frame timestamps; realtime = fast equality (Task 3).
 - **§6 Interfaces:** four files per wire change; tolerant mapper (Task 3).
-- **§7 Tooling:** tests first, mutation checks, parse fuzz seeds, `security-review` on Task 3.
+- **§7 Tooling:** tests first, mutation checks, a local `parse_packet` fuzz run seeded with the new option cases, `security-review` on Task 3.
 
 ## Validation for this plan PR
 
