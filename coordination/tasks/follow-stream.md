@@ -4,6 +4,7 @@ owner: claude-code
 status: open
 branch: jamesmbrownjr/jam-17-follow-stream
 linear_id: JAM-17
+issue_key: KAN-110
 depends_on: []
 created: 2026-10-31
 slack_ts:

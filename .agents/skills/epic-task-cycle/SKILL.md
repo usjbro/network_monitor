@@ -57,8 +57,11 @@ you're on, and guessing is how the wrong task gets built.
 
 Project **`KAN`** on `theantimeridian.atlassian.net` (team-managed). Issue
 types: Epic → Task/Story → Subtask; there is no level above Epic. Statuses
-are only **To Do, In Progress and Done** — there is no "In Review" (see §2
-step 8). A task issue's description links back to its parent epic and to
+are **To Do, In Progress, In Review and Done** (transitions 11, 21, 31 and
+41 on 2026-11-10, but look them up rather than trusting these). Linear's
+Backlog, Canceled and Duplicate have no Jira status: migrated issues carry
+them as the labels `linear-status-backlog`, `linear-status-canceled` and
+`linear-status-duplicate`, in To Do or Done. A task issue's description links back to its parent epic and to
 the original plan PR/document, and cross-references the **legacy issue** it
 discharges (e.g. JAM-5, JAM-133, GitHub #71/#72). Issues migrated from
 Linear carry the label `linear-jam-<n>` and a header naming their Linear
@@ -176,9 +179,8 @@ status, review status) in `Notes` instead.
    activity right after opening it, then post 🔗 `pr-opened` to Slack with
    the PR link. Any time you ask for review, feedback, or a decision while
    the item is open, also post ❓ `feedback` with the question and link.
-8. Link the PR on the task issue and mark it in review. KAN has no "In
-   Review" status: keep it **In Progress** and add the label `in-review`
-   (`editJiraIssue`). Put the PR URL in a comment, and in the description's
+8. Link the PR on the task issue and move it to **In Review**. Put the
+   PR URL in a comment, and in the description's
    "Linked PRs" list. With GitHub for Jira installed, a branch or PR title
    containing the key (`KAN-12-...`) links itself as well; check that it
    did rather than assuming it. Verify every write with a fresh
@@ -209,7 +211,7 @@ status, review status) in `Notes` instead.
     Merging follows `AGENTS.md` "Git & Commits": green CI doesn't authorize
     it. Merges use squash, the convention throughout this repo. After the
     merge, unsubscribe PR activity, set the task issue to
-    `"Done"` and remove its `in-review` label, update the Notion row (if any) to `"Done"` with a final
+    `"Done"`, update the Notion row (if any) to `"Done"` with a final
     `Notes` pointing at the merged PR, and run `complete-task.sh <slug> done`. If you
     stop an item without finishing it, post 🔴 `blocked` with the reason
     instead.
