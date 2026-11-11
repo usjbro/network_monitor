@@ -56,11 +56,11 @@ test('IO graph renders 8 series of ~1800 points and stays within a frame per upd
 
   // The one-frame budget (16.7 ms) is only meaningful against a production
   // build: `next dev` runs React in StrictMode, which renders (and runs the
-  // chart's useMemo) twice, plus dev-only checks. CI's ordinary e2e run uses
-  // the dev server, so there the bound only catches a large regression.
-  // `E2E_PRODUCTION=1 npx playwright test e2e/io-graph.spec.ts` builds and
-  // serves a production bundle (playwright.config.ts) and enforces the
-  // frame budget. Both modes assert the median of 9 runs, and log every run.
+  // chart's useMemo) twice, plus dev-only checks. CI sets E2E_PRODUCTION=1,
+  // which builds and serves a production bundle (playwright.config.ts) and
+  // enforces the frame budget. A local run without it uses `next dev`, where
+  // the bound only catches a large regression. Both modes assert the median
+  // of 9 runs, and log every run.
   const production = process.env.E2E_PRODUCTION === '1';
   const budget = production ? 16.7 : 100;
   const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];

@@ -321,6 +321,12 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit == 'true'
 
       - name: Run Playwright smoke test
+        # Against a production build (`next build --webpack` + `next start`,
+        # loopback-only; see playwright.config.ts), so the IO graph spec
+        # enforces its one-frame budget on the code that ships. James's
+        # decision on PR #307 (2026-11-11).
+        env:
+          E2E_PRODUCTION: '1'
         run: npm run test:e2e
 
       - name: Upload Playwright report
