@@ -3183,38 +3183,32 @@ async fn main() -> std::io::Result<()> {
                         // reconstructed datagram to its transport flow without
                         // counting its bytes as another physical frame.
                         // `parsed` remains the packet-event/capture-file data.
+                        // JAM-15 / KAN-129: the frame's own capture
+                        // timestamp, so transaction service times and TCP
+                        // sample rings are the traffic's, identical at any
+                        // replay speed, not whenever this thread got to it.
+                        let capture_ts_us = system_time_us(timestamp);
                         let (observe_result, txn_flow) = with_flow_observation(
                             &flow_table,
                             &replay_flow_clock,
                             mode == "replay",
                             flow_now_ms,
-                            |table| match sniff_outcome.reassembled_packet.as_ref() {
-                                Some(reassembled) => (
-                                    if mode == "replay" {
-                                        table.observe_reassembled_replay(
-                                            &parsed,
-                                            reassembled,
-                                            &l7_info,
-                                            flow_now_ms,
-                                        )
-                                    } else {
-                                        table.observe_reassembled(
-                                            &parsed,
-                                            reassembled,
-                                            &l7_info,
-                                            flow_now_ms,
-                                        )
+                            |table| {
+                                let reassembled = sniff_outcome.reassembled_packet.as_ref();
+                                (
+                                    table.observe_frame(
+                                        &parsed,
+                                        reassembled,
+                                        &l7_info,
+                                        flow_now_ms,
+                                        capture_ts_us,
+                                        mode == "replay",
+                                    ),
+                                    match reassembled {
+                                        Some(reassembled) => table.key_for(reassembled),
+                                        None => flow_ident.clone(),
                                     },
-                                    table.key_for(reassembled),
-                                ),
-                                None => (
-                                    if mode == "replay" {
-                                        table.observe_replay(&parsed, &l7_info, flow_now_ms)
-                                    } else {
-                                        table.observe(&parsed, &l7_info, flow_now_ms)
-                                    },
-                                    flow_ident.clone(),
-                                ),
+                                )
                             },
                         );
                         if let Some(id) = observe_result
@@ -3228,11 +3222,6 @@ async fn main() -> std::io::Result<()> {
                                 }));
                         }
 
-                        // JAM-15: match requests to responses on the frame's
-                        // own capture timestamp, so service time is the
-                        // traffic's, in replay as well as live, and not
-                        // whenever this thread got to the frame.
-                        let capture_ts_us = system_time_us(timestamp);
                         let txn_event = transactions.observe_frame(
                             txn_flow.as_ref().map(|(key, outbound)| (key, *outbound)),
                             &l7_info,

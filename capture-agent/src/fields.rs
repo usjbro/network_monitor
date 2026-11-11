@@ -743,7 +743,7 @@ mod tests {
         packet.src_port = Some(51000);
         packet.dst_port = Some(443);
         packet.seq = Some(1000);
-        packet.tcp_flags = Some(crate::parse::TcpFlags { syn: true, ack: false, fin: false, rst: false, window_size: 65535, ack_number: 0 });
+        packet.tcp_flags = Some(crate::parse::TcpFlags { syn: true, ack: false, fin: false, rst: false, window_size: 65535, ack_number: 0, ..Default::default() });
         let fields = transport_fields(&packet, 34);
         let tcp = fields.iter().find(|f| f.path == "tcp").unwrap();
         assert_eq!((tcp.offset, tcp.len), (34, 20));
@@ -921,7 +921,7 @@ mod tests {
         tcp.src_port = Some(80);
         tcp.dst_port = Some(51000);
         tcp.seq = Some(7);
-        tcp.tcp_flags = Some(TcpFlags { syn: false, ack: true, fin: false, rst: false, window_size: 512, ack_number: 9 });
+        tcp.tcp_flags = Some(TcpFlags { syn: false, ack: true, fin: false, rst: false, window_size: 512, ack_number: 9, ..Default::default() });
         tcp.vlan_tag = Some("10".into());
         tcp.header_bytes = vec![0; 80];
         let http = L7Info::HttpResponse { status: "200".into(), reason: Some("OK".into()), content_type: Some("text/html".into()), content_length: Some(5) };

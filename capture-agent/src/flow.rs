@@ -1,6 +1,7 @@
 use crate::dns_names::{ObservedDnsNames, DEFAULT_MAX_OBSERVED_DNS_NAMES};
 use crate::l7::{DnsAnswer, L7Info};
 use crate::parse::{ParsedPacket, TransportProtocol};
+use crate::tcp_samples::{flag, RingHandle, RingView, SegmentObservation, TcpSampleStore};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
@@ -51,6 +52,9 @@ struct FlowState {
     // function of a key that never changes for this flow's lifetime, and
     // observe() runs on every single packet.
     connection_id: String,
+    /// KAN-129: this flow's claim on a TCP sample ring. `None` until its
+    /// first TCP segment; stale once a more recent flow took the ring.
+    tcp_ring: Option<RingHandle>,
 }
 
 impl Default for FlowState {
@@ -79,8 +83,35 @@ impl Default for FlowState {
             // Always overwritten by `or_insert_with_key` at real
             // construction time — never actually read as empty.
             connection_id: String::new(),
+            tcp_ring: None,
         }
     }
+}
+
+/// The TCP header flags a sample keeps, at their on-the-wire bit positions.
+fn tcp_flags_byte(flags: &crate::parse::TcpFlags) -> u8 {
+    let mut byte = 0;
+    for (set, bit) in [
+        (flags.fin, flag::FIN),
+        (flags.syn, flag::SYN),
+        (flags.rst, flag::RST),
+        (flags.psh, flag::PSH),
+        (flags.ack, flag::ACK),
+    ] {
+        if set {
+            byte |= bit;
+        }
+    }
+    byte
+}
+
+/// A fresh random epoch per table: a new agent process is a new history, so
+/// a generation from a previous run can never match (spec D1).
+fn random_epoch() -> u64 {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0u8; 8];
+    SystemRandom::new().fill(&mut bytes).expect("system random source");
+    u64::from_be_bytes(bytes)
 }
 
 pub struct FlowSnapshot {
@@ -153,6 +184,9 @@ pub struct FlowTable {
     /// `EndpointSnapshot`, so reading a name needs no second lock. Cleared
     /// by `reset()`: the addresses belonged to the interface just left.
     observed_names: ObservedDnsNames,
+    /// KAN-129: TCP sample rings. Each flow's `RingHandle` lives in its
+    /// `FlowState`; this owns the rings themselves (plan P1).
+    tcp_samples: TcpSampleStore,
 }
 
 /// `evict_stale`'s result, split by eviction reason so a caller (the
@@ -416,7 +450,42 @@ impl FlowTable {
             last_endpoint_snapshot_ms: 0,
             last_conversation_snapshot_ms: 0,
             observed_names: ObservedDnsNames::new(DEFAULT_MAX_OBSERVED_DNS_NAMES),
+            tcp_samples: TcpSampleStore::new(random_epoch()),
         }
+    }
+
+    /// KAN-129: one captured frame, with its own capture timestamp in
+    /// microseconds for the TCP sample ring. The capture loop's single entry
+    /// point; `observe`, `observe_replay` and the reassembled variants keep
+    /// their behaviour and derive the sample time from `now_ms`.
+    pub fn observe_frame(
+        &mut self,
+        physical: &ParsedPacket,
+        reassembled: Option<&ParsedPacket>,
+        l7: &L7Info,
+        now_ms: u64,
+        frame_us: u64,
+        replay: bool,
+    ) -> Option<ObserveResult> {
+        match reassembled {
+            Some(reassembled) => {
+                self.observe_reassembled_inner(physical, reassembled, l7, now_ms, Some(frame_us), replay)
+            }
+            None => self.observe_inner(physical, l7, now_ms, Some(frame_us), true, replay),
+        }
+    }
+
+    /// KAN-129: a copy of part of this flow's TCP sample ring (plan P2: the
+    /// caller encodes it after releasing the lock). `None` when the flow is
+    /// not tracked or has no ring.
+    pub fn tcp_sample_view(&self, key: &FlowKey, from_index: u64, max: usize) -> Option<RingView> {
+        let handle = self.flows.get(key)?.tcp_ring?;
+        self.tcp_samples.view(handle, from_index, max)
+    }
+
+    /// Ring counts and cost, for `capture_stats`.
+    pub fn tcp_sample_store(&self) -> &TcpSampleStore {
+        &self.tcp_samples
     }
 
     /// Replaces the observed-name table with one of `capacity` entries
@@ -543,7 +612,7 @@ impl FlowTable {
         l7: &L7Info,
         now_ms: u64,
     ) -> Option<ObserveResult> {
-        self.observe_inner(packet, l7, now_ms, true, false)
+        self.observe_inner(packet, l7, now_ms, None, true, false)
     }
 
     /// Replay variant: expire the matching stale tuple before updating it,
@@ -555,7 +624,7 @@ impl FlowTable {
         l7: &L7Info,
         now_ms: u64,
     ) -> Option<ObserveResult> {
-        self.observe_inner(packet, l7, now_ms, true, true)
+        self.observe_inner(packet, l7, now_ms, None, true, true)
     }
 
     /// Counts the completing fragment as a physical frame, then attributes
@@ -570,12 +639,7 @@ impl FlowTable {
         l7: &L7Info,
         now_ms: u64,
     ) -> Option<ObserveResult> {
-        if physical_fragment.ip_fragment.is_none() {
-            return self.observe(physical_fragment, l7, now_ms);
-        }
-
-        let _ = self.observe(physical_fragment, &L7Info::None, now_ms);
-        self.observe_inner(reassembled, l7, now_ms, false, false)
+        self.observe_reassembled_inner(physical_fragment, reassembled, l7, now_ms, None, false)
     }
 
     /// Replay variant of `observe_reassembled`; stale flow state is expired
@@ -587,11 +651,23 @@ impl FlowTable {
         l7: &L7Info,
         now_ms: u64,
     ) -> Option<ObserveResult> {
+        self.observe_reassembled_inner(physical_fragment, reassembled, l7, now_ms, None, true)
+    }
+
+    fn observe_reassembled_inner(
+        &mut self,
+        physical_fragment: &ParsedPacket,
+        reassembled: &ParsedPacket,
+        l7: &L7Info,
+        now_ms: u64,
+        frame_us: Option<u64>,
+        replay: bool,
+    ) -> Option<ObserveResult> {
         if physical_fragment.ip_fragment.is_none() {
-            return self.observe_replay(physical_fragment, l7, now_ms);
+            return self.observe_inner(physical_fragment, l7, now_ms, frame_us, true, replay);
         }
-        let _ = self.observe_replay(physical_fragment, &L7Info::None, now_ms);
-        self.observe_inner(reassembled, l7, now_ms, false, true)
+        let _ = self.observe_inner(physical_fragment, &L7Info::None, now_ms, frame_us, true, replay);
+        self.observe_inner(reassembled, l7, now_ms, frame_us, false, replay)
     }
 
     /// Expire only the flow addressed by this packet before updating it. The
@@ -607,6 +683,9 @@ impl FlowTable {
         }
         let removed = self.flows.remove(key)?;
         self.idle_evictions += 1;
+        if let Some(handle) = removed.tcp_ring {
+            self.tcp_samples.release(handle);
+        }
         Some(removed.connection_id)
     }
 
@@ -615,6 +694,7 @@ impl FlowTable {
         packet: &ParsedPacket,
         l7: &L7Info,
         now_ms: u64,
+        frame_us: Option<u64>,
         account_protocol_hierarchy: bool,
         expire_idle_on_arrival: bool,
     ) -> Option<ObserveResult> {
@@ -828,6 +908,27 @@ impl FlowTable {
                     }
                 }
             }
+
+            // KAN-129: one sample per TCP segment, carrying the same
+            // `is_retransmit` this call returns. An IP fragment is skipped:
+            // its reassembled datagram is the segment, and is observed (and
+            // sampled) once on its own.
+            if let (Some(seq), true) = (packet.seq, packet.ip_fragment.is_none()) {
+                self.tcp_samples.record(
+                    &mut state.tcp_ring,
+                    SegmentObservation {
+                        t_us: frame_us.unwrap_or_else(|| now_ms.saturating_mul(1000)),
+                        outbound: is_outbound,
+                        seq,
+                        ack: flags.ack_number,
+                        raw_win: flags.window_size,
+                        len: u16::try_from(packet.payload.len()).unwrap_or(u16::MAX),
+                        flags: tcp_flags_byte(&flags),
+                        retransmit: is_retransmit,
+                        wscale_option: flags.window_scale,
+                    },
+                );
+            }
         }
 
         Some(ObserveResult {
@@ -911,11 +1012,15 @@ impl FlowTable {
     /// entry count as well as by time.
     pub fn evict_stale(&mut self, now_ms: u64) -> EvictedFlows {
         let mut idle = Vec::new();
+        let tcp_samples = &mut self.tcp_samples;
         self.flows.retain(|key, state| {
             let idle_ms = now_ms.saturating_sub(state.last_seen_ms);
             let stale = idle_ms > idle_threshold_ms(state, key.protocol);
             if stale {
                 idle.push(key.clone());
+                if let Some(handle) = state.tcp_ring {
+                    tcp_samples.release(handle);
+                }
             }
             !stale
         });
@@ -931,7 +1036,9 @@ impl FlowTable {
                 .collect();
             by_age.sort_by_key(|(_, last_seen_ms)| *last_seen_ms);
             for (key, _) in by_age.into_iter().take(excess) {
-                self.flows.remove(&key);
+                if let Some(handle) = self.flows.remove(&key).and_then(|state| state.tcp_ring) {
+                    self.tcp_samples.release(handle);
+                }
                 capacity.push(key);
             }
         }
@@ -1034,6 +1141,7 @@ impl FlowTable {
     pub fn reset(&mut self, local_addrs: Vec<String>) -> Vec<FlowKey> {
         self.local_addrs = local_addrs;
         self.observed_names.clear();
+        self.tcp_samples.clear();
         self.flows.drain().map(|(key, _)| key).collect()
     }
 }
@@ -2797,5 +2905,230 @@ mod tests {
             assert_eq!(well_known_protocol(port), Some(expected), "port {port}");
         }
         assert_eq!(well_known_protocol(49152), None);
+    }
+}
+
+/// KAN-129 (spec D1/D2, plan P1): `FlowTable` owns the TCP sample rings, so
+/// a ring lives exactly as long as its flow.
+#[cfg(test)]
+mod tcp_sample_tests {
+    use super::*;
+    use crate::parse::TcpFlags;
+    use crate::tcp_samples::{flag, mark, RingView, SAMPLES_PER_RING};
+
+    const LOCAL: &str = "192.168.1.10";
+    const REMOTE: &str = "93.184.216.34";
+
+    fn key(local_port: u16) -> FlowKey {
+        FlowKey {
+            protocol: TransportProtocol::Tcp,
+            local_addr: LOCAL.into(),
+            local_port,
+            remote_addr: REMOTE.into(),
+            remote_port: 443,
+        }
+    }
+
+    fn segment(local_port: u16, outbound: bool, seq: u32, flags: TcpFlags, payload: &[u8]) -> ParsedPacket {
+        let (src_ip, dst_ip, src_port, dst_port) = if outbound {
+            (LOCAL, REMOTE, local_port, 443)
+        } else {
+            (REMOTE, LOCAL, 443, local_port)
+        };
+        ParsedPacket {
+            src_mac: "aa:aa:aa:aa:aa:aa".into(),
+            dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+            src_ip: src_ip.into(),
+            dst_ip: dst_ip.into(),
+            protocol: TransportProtocol::Tcp,
+            src_port: Some(src_port),
+            dst_port: Some(dst_port),
+            tcp_flags: Some(flags),
+            seq: Some(seq),
+            ttl: 64,
+            total_len: 54 + payload.len() as u16,
+            payload: payload.to_vec(),
+            header_bytes: vec![],
+            ip_header_len: 20,
+            transport_header_len: 20,
+            ip_version: 4,
+            ip_checksum: Some(0),
+            vlan_tag: None,
+            ip_declared_payload_len: 20 + payload.len() as u32,
+            ip_fragment: None,
+        }
+    }
+
+    fn ack_flags(ack_number: u32, window_size: u16) -> TcpFlags {
+        TcpFlags { ack: true, ack_number, window_size, ..Default::default() }
+    }
+
+    fn table() -> FlowTable {
+        FlowTable::new(vec![LOCAL.to_string()])
+    }
+
+    fn view(table: &FlowTable, local_port: u16) -> Option<RingView> {
+        table.tcp_sample_view(&key(local_port), 0, SAMPLES_PER_RING)
+    }
+
+    #[test]
+    fn observe_records_one_sample_per_tcp_segment_with_its_retransmit_flag() {
+        let mut table = table();
+        let segments = [
+            segment(51000, true, 1000, ack_flags(1, 500), b"abc"),
+            segment(51000, true, 1000, ack_flags(1, 500), b"abc"), // retransmission
+            segment(51000, false, 1, ack_flags(1003, 700), b""),
+            segment(51000, true, 1003, TcpFlags { psh: true, ..ack_flags(1, 500) }, b"de"),
+        ];
+        let mut retransmits = Vec::new();
+        for (i, packet) in segments.iter().enumerate() {
+            let result = table.observe(packet, &L7Info::None, 10 + i as u64).unwrap();
+            retransmits.push(result.is_retransmit);
+        }
+        assert_eq!(retransmits, vec![false, true, false, false]);
+
+        let samples = view(&table, 51000).expect("a ring").samples;
+        assert_eq!(samples.len(), segments.len(), "exactly one sample per segment");
+        let marked: Vec<bool> = samples.iter().map(|s| s.mark & mark::RETRANSMIT != 0).collect();
+        assert_eq!(marked, retransmits, "the same is_retransmit observe returned");
+        let s = samples[3];
+        assert_eq!((s.seq, s.ack, s.win, s.len), (1003, 1, 500, 2));
+        assert_eq!(s.flags, flag::ACK | flag::PSH);
+        assert_eq!(s.mark & mark::OUTBOUND, mark::OUTBOUND);
+        assert_eq!(samples[2].mark & mark::OUTBOUND, 0);
+        assert_eq!(s.t_us, 13_000, "observe without a frame time uses now_ms in microseconds");
+    }
+
+    #[test]
+    fn observe_frame_records_the_frames_own_microsecond_timestamp() {
+        let mut table = table();
+        let data = segment(51000, true, 1000, ack_flags(1, 500), b"abc");
+        let ack = segment(51000, false, 1, ack_flags(1003, 700), b"");
+        table.observe_frame(&data, None, &L7Info::None, 5, 5_000_123, false).unwrap();
+        let result = table.observe_frame(&ack, None, &L7Info::None, 5, 5_000_456, true).unwrap();
+        assert!(!result.is_outbound);
+        let samples = view(&table, 51000).unwrap().samples;
+        assert_eq!(samples.iter().map(|s| s.t_us).collect::<Vec<_>>(), vec![5_000_123, 5_000_456]);
+        assert_eq!((samples[1].mark & mark::RTT, samples[1].rtt_us), (mark::RTT, 333));
+    }
+
+    #[test]
+    fn observe_frame_matches_the_existing_observe_paths() {
+        // Same flow bookkeeping as observe / observe_replay, plus the sample.
+        let packet = segment(51000, true, 1000, ack_flags(1, 500), b"abc");
+        for replay in [false, true] {
+            let mut a = table();
+            let mut b = table();
+            let via_frame = a.observe_frame(&packet, None, &L7Info::None, 7, 7_000, replay);
+            let via_old = if replay { b.observe_replay(&packet, &L7Info::None, 7) } else { b.observe(&packet, &L7Info::None, 7) };
+            assert_eq!(via_frame, via_old);
+            assert_eq!(a.snapshot(8).len(), b.snapshot(8).len());
+            assert_eq!(view(&a, 51000).unwrap().samples, view(&b, 51000).unwrap().samples);
+        }
+    }
+
+    #[test]
+    fn the_handshake_window_scale_reaches_the_ring() {
+        let mut table = table();
+        let syn = segment(51000, true, 999, TcpFlags { syn: true, window_size: 64_240, window_scale: Some(7), ..Default::default() }, b"");
+        let syn_ack = segment(
+            51000,
+            false,
+            4_999,
+            TcpFlags { syn: true, ack: true, ack_number: 1000, window_size: 65_535, window_scale: Some(8), ..Default::default() },
+            b"",
+        );
+        let ack = segment(51000, true, 1000, ack_flags(5_000, 502), b"");
+        for (i, p) in [syn, syn_ack, ack].iter().enumerate() {
+            table.observe(p, &L7Info::None, i as u64).unwrap();
+        }
+        let view = view(&table, 51000).unwrap();
+        assert!(view.handshake_seen && view.relative_to_isn);
+        assert_eq!(view.window_scale, Some((7, 8)));
+        assert_eq!(view.seq_base, (999, 4_999));
+        assert_eq!(view.samples[2].win, 502 << 7);
+    }
+
+    #[test]
+    fn udp_flows_get_no_ring() {
+        let mut table = table();
+        let mut udp = segment(51000, true, 0, TcpFlags::default(), b"dns?");
+        udp.protocol = TransportProtocol::Udp;
+        udp.tcp_flags = None;
+        udp.seq = None;
+        assert!(table.observe(&udp, &L7Info::None, 1).is_some());
+        assert_eq!(table.tcp_sample_store().rings(), 0);
+    }
+
+    #[test]
+    fn an_ip_fragment_records_no_sample_of_its_own() {
+        let mut table = table();
+        let mut fragment = segment(51000, true, 1000, ack_flags(1, 500), b"abc");
+        fragment.ip_fragment = Some(crate::parse::Ipv4Fragment {
+            identification: 1,
+            offset_bytes: 0,
+            more_fragments: true,
+            protocol: 6,
+            header: vec![],
+            payload: vec![],
+        });
+        table.observe(&fragment, &L7Info::None, 1);
+        assert_eq!(table.tcp_sample_store().rings(), 0);
+    }
+
+    #[test]
+    fn evict_stale_releases_the_rings_of_the_flows_it_returns() {
+        let mut table = table();
+        table.observe(&segment(51000, true, 1, ack_flags(1, 1), b"a"), &L7Info::None, 0);
+        table.observe(&segment(51001, true, 1, ack_flags(1, 1), b"a"), &L7Info::None, 1_799_000);
+        assert_eq!(table.tcp_sample_store().rings(), 2);
+        let evicted = table.evict_stale(1_800_500);
+        assert_eq!(evicted.idle, vec![key(51000)]);
+        assert_eq!(table.tcp_sample_store().rings(), 1);
+        assert!(view(&table, 51000).is_none());
+        assert!(view(&table, 51001).is_some());
+    }
+
+    #[test]
+    fn capacity_eviction_releases_rings_too() {
+        let mut table = FlowTable::new_with_capacity(vec![LOCAL.to_string()], 1);
+        table.observe(&segment(51000, true, 1, ack_flags(1, 1), b"a"), &L7Info::None, 1);
+        table.observe(&segment(51001, true, 1, ack_flags(1, 1), b"a"), &L7Info::None, 2);
+        let evicted = table.evict_stale(3);
+        assert_eq!(evicted.capacity, vec![key(51000)]);
+        assert_eq!(table.tcp_sample_store().rings(), 1);
+        assert!(view(&table, 51001).is_some());
+    }
+
+    #[test]
+    fn a_reused_tuple_gets_a_new_generation() {
+        let mut table = table();
+        let packet = segment(51000, true, 1, ack_flags(1, 1), b"a");
+        table.observe_replay(&packet, &L7Info::None, 0).unwrap();
+        let first = view(&table, 51000).unwrap().generation;
+        // Idle past the TCP threshold: observe_replay expires the old flow
+        // on arrival and starts a new one with the same tuple.
+        let result = table.observe_replay(&packet, &L7Info::None, 1_900_000).unwrap();
+        assert!(result.closed_connection_id.is_some());
+        let second = view(&table, 51000).unwrap();
+        assert_ne!(second.generation, first);
+        assert_eq!(second.generation.0, first.0, "same epoch");
+        assert_eq!(second.samples.len(), 1, "the new flow's ring starts empty");
+        assert_eq!(table.tcp_sample_store().rings(), 1, "the old ring was released, not leaked");
+    }
+
+    #[test]
+    fn reset_clears_every_ring() {
+        let mut table = table();
+        table.observe(&segment(51000, true, 1, ack_flags(1, 1), b"a"), &L7Info::None, 1);
+        table.observe(&segment(51001, true, 1, ack_flags(1, 1), b"a"), &L7Info::None, 1);
+        table.reset(vec![LOCAL.to_string()]);
+        assert_eq!((table.tcp_sample_store().rings(), table.tcp_sample_store().reserved_bytes()), (0, 0));
+        assert!(view(&table, 51000).is_none());
+    }
+
+    #[test]
+    fn every_flow_table_draws_its_own_random_epoch() {
+        assert_ne!(table().tcp_sample_store().epoch(), table().tcp_sample_store().epoch());
     }
 }

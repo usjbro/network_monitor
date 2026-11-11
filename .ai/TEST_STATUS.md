@@ -1,3 +1,15 @@
+# KAN-129 Task 1 — TCP sample rings, RTT, window scale (2026-11-11)
+
+Linux cloud worktree, stable Rust + nightly for fuzz, base main `82d68d4`. Capture agent only; no wire, relay or UI change.
+
+- Tests first: 24 of 25 new `tcp_samples` tests failed against a stub store (the 25th, "a new store allocates nothing", holds for any stub). The 4 positive window-scale parse tests failed against a stub walker. 8 of 11 new `flow::tcp_sample_tests` failed against stub `observe_frame`/`tcp_sample_view`; the other 3 are negative guards (UDP, IP fragment, reset).
+- Mutation checks, each failing at least one test and then restored: Karn discard removed (2 fail); window scale from either side (1); LRU choosing the oldest allocation (1); off-by-one wrap index (16); option walker returning on the first window-scale option despite a later malformed one (1).
+- `cargo +nightly fuzz run parse_packet -- -max_total_time=60`, seeded locally with 13 option-list frames (corpus gitignored): 2 257 866 runs, no crash.
+- `cargo build --release --locked`, `cargo test --locked` (lib 612 passed; all integration suites pass), `cargo clippy --all-targets --locked -- -D warnings`: pass.
+- `io_graph_bench` end-to-end fast replay, 0 series, ns/frame: main 3 478 / 3 778 / 3 496, this change 3 517 / 3 539 / 3 678 (runs interleaved). That is about +1 %, inside run-to-run noise.
+
+---
+
 # JAM-256 + JAM-186 — documentation verification (2026-11-06)
 
 Linux cloud checkout; Node v24.22.1, Vitest 5.0.5, base main `6066372`.
