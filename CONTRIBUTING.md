@@ -26,7 +26,7 @@ npx vitest run        # or: npm test
 npx tsc --noEmit
 npm run lint
 npm run build
-npx playwright test   # real-browser smoke test — see e2e/smoke.spec.ts
+npx playwright test   # real-browser tests against `next dev` — see e2e/; CI runs them as `E2E_PRODUCTION=1 npx playwright test` (production build, enforces the IO graph frame budget)
 ```
 
 All checks above should pass before opening a PR. CI enforces the three `cargo fuzz` commands, `cargo audit`, and `npm audit` above itself now (issues #66, #111, #112) — it's no longer only the honour system — so a PR that touches `parse.rs`, `http2.rs`, `pcapng.rs`, or `capture-agent/fuzz/**` will fail CI if any fuzz target finds a crash, and any PR at all will fail CI if `Cargo.lock`/`package-lock.json` carries a dependency with a known advisory (RustSec for Rust, `high` severity or above for npm) not already in `.github/scripts/check-npm-audit.mjs`'s allowlist (reserved for advisories with no patched version published upstream — see JAM-171), same as running these locally would show.

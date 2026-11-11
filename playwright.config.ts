@@ -45,18 +45,16 @@ export default defineConfig({
     },
   ],
   webServer: {
-    // `next dev`, matching this repo's own `npm run dev` convention (see
-    // package.json/CLAUDE.md) rather than a production build — this is a
-    // smoke test of real browser/SSE/DOM behavior, not a build artifact
-    // check (that's `npm run build` in CI's "web" job already). Keeps the
-    // loopback-only `-H 127.0.0.1` bind and `--webpack` flag CLAUDE.md
-    // says not to drop.
+    // E2E_PRODUCTION=1 (what CI sets, .github/workflows/ci.yml) builds and
+    // serves a production bundle: `next build --webpack` then `next start`.
+    // The IO graph spec (e2e/io-graph.spec.ts) enforces its one-frame
+    // budget only in that mode, since `next dev` renders twice (StrictMode)
+    // and adds dev-only checks, so its timings are not the shipped code's.
     //
-    // E2E_PRODUCTION=1 instead builds and serves a production bundle
-    // (`next build --webpack` then `next start`, still loopback-only). The
-    // IO graph spec (e2e/io-graph.spec.ts) enforces its one-frame budget
-    // only in that mode: `next dev` renders twice (StrictMode) and adds
-    // dev-only checks, so its timings are not the shipped code's.
+    // Unset (the local default), it runs `next dev`, matching this repo's
+    // own `npm run dev` convention and starting much faster. Both keep the
+    // loopback-only `-H 127.0.0.1` bind and the `--webpack` flag CLAUDE.md
+    // says not to drop.
     command: process.env.E2E_PRODUCTION === '1'
       ? `npx next build --webpack && npx next start -H 127.0.0.1 -p ${PORT}`
       : `npx next dev -H 127.0.0.1 --webpack -p ${PORT}`,
