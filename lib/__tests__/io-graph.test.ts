@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   RING_CAPACITY,
+  aggregateValue,
   allowedIntervals,
   createHistory,
   finestAllowed,
@@ -14,7 +15,7 @@ import {
   rate,
   ticks,
 } from '../io-graph';
-import type { IoBuckets, IoSeriesStatus } from '../types';
+import type { IoBucket, IoBuckets, IoSeriesStatus } from '../types';
 
 const T0 = 1_794_120_000_000; // a whole minute
 
@@ -35,7 +36,7 @@ function msg(over: Partial<IoBuckets> & { series: IoBuckets['series'] }): IoBuck
   };
 }
 
-function series(id: string, buckets: Array<[number, number, number]>, extra: Partial<IoBuckets['series'][number]> = {}) {
+function series(id: string, buckets: IoBucket[], extra: Partial<IoBuckets['series'][number]> = {}) {
   return { id, late: 0, lateBuckets: [], buckets, ...extra };
 }
 
@@ -382,5 +383,63 @@ describe('review: ticks at hour-plus steps follow local wall clock (minor 7)', (
     const labels = ticks(from, from + 24 * 3_600_000, 6, 'America/New_York').map((t) => t.label);
     expect(labels[0]).toMatch(/^10 Nov,? 00:00$/);
     expect(labels).toHaveLength(4);
+  });
+});
+
+// JAM-18 Task 5 (spec D10): numeric-field aggregates in the history.
+describe('aggregates', () => {
+  function aggHistory() {
+    const h = createHistory();
+    ingestStatus(h, { revision: 1, epoch: 'aaaabbbb', replayWaiting: false, series: [{ id: 'win', filter: '', ok: true, aggregate: { fn: 'avg', field: 'tcp.window_size' } }] });
+    ingestBuckets(h, msg({
+      coveredFromMs: T0, coveredToMs: T0 + 2000,
+      series: [series('win', [
+        [T0, 1, 60, 1, 10, 10, 10],
+        [T0 + 100, 3, 180, 3, 90, 20, 40],
+        [T0 + 200, 2, 120, 0, 0, null, null], // matched frames, none had the field
+        [T0 + 1000, 1, 60, 1, 7, 7, 7],
+      ])],
+    }));
+    return h;
+  }
+
+  it('AVG is sum / count at every interval, never an average of averages', () => {
+    const h = aggHistory();
+    const sec = query(h, 'win', 1000, T0, T0 + 2000);
+    // (10 + 90) / (1 + 3) = 25, not (10 + 30) / 2 = 20.
+    expect(aggregateValue(sec[0], 'avg', 1000)).toBe(25);
+    expect(aggregateValue(sec[1], 'avg', 1000)).toBe(7);
+    const tenSec = query(h, 'win', 10000, T0, T0 + 10000);
+    expect(tenSec[0].state).toBe('unknown'); // only 2 s of the 10 s are covered
+    const fine = query(h, 'win', 100, T0, T0 + 300);
+    expect(fine.map((p) => aggregateValue(p, 'avg', 100))).toEqual([10, 30, null]);
+  });
+
+  it('SUM, MIN and MAX roll up exactly; a count of 0 has no value', () => {
+    const h = aggHistory();
+    const sec = query(h, 'win', 1000, T0, T0 + 1000)[0];
+    expect(sec).toMatchObject({ packets: 6, aggCount: 4, aggSum: 100, aggMin: 10, aggMax: 40 });
+    expect([aggregateValue(sec, 'sum', 1000), aggregateValue(sec, 'min', 1000), aggregateValue(sec, 'max', 1000)]).toEqual([100, 10, 40]);
+    const empty = query(h, 'win', 100, T0 + 200, T0 + 300)[0];
+    expect(empty).toMatchObject({ state: 'value', packets: 2, aggCount: 0, aggMin: null, aggMax: null });
+    for (const fn of ['sum', 'min', 'max', 'avg'] as const) expect(aggregateValue(empty, fn, 100)).toBeNull();
+    // Rolled into the 1 min ring too, once the whole minute is covered.
+    expect(aggregateValue(query(h, 'win', 60000, T0, T0 + 60000)[0], 'sum', 60000)).toBeNull();
+    ingestBuckets(h, msg({ coveredFromMs: T0 + 2000, coveredToMs: T0 + 60000, series: [series('win', [])] }));
+    const minute = query(h, 'win', 60000, T0, T0 + 60000)[0];
+    expect(minute).toMatchObject({ aggCount: 5, aggSum: 107, aggMin: 7, aggMax: 40 });
+  });
+
+  it('a plain series has no aggregate values', () => {
+    const h = createHistory();
+    ingestBuckets(h, msg({ series: [series('all', [[T0, 4, 40]])] }));
+    const p = query(h, 'all', 1000, T0, T0 + 1000)[0];
+    expect(p).toMatchObject({ aggCount: 0, aggMin: null, aggMax: null });
+    expect(aggregateValue(p, 'avg', 1000)).toBeNull();
+  });
+
+  it('unknown and not-observed intervals have no aggregate value', () => {
+    const h = aggHistory();
+    expect(aggregateValue(query(h, 'win', 1000, T0 + 5000, T0 + 6000)[0], 'sum', 1000)).toBeNull();
   });
 });

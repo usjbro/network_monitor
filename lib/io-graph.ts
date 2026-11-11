@@ -15,7 +15,7 @@
 // counts, so they live exactly as long as the counts they describe: no side
 // list can be truncated while the rings still hold the data.
 
-import type { IoBuckets, IoNotObservedReason, IoSeriesStatus } from './types';
+import type { IoAggregateFn, IoBuckets, IoNotObservedReason, IoSeriesStatus } from './types';
 
 export const BUCKET_MS = 100;
 export type IoInterval = 100 | 1000 | 10000 | 60000;
@@ -52,6 +52,12 @@ class Ring {
   readonly notObservedReason: Uint8Array;
   /** Per slot: 1 if a message reporting loss covered any of the slot. */
   readonly lossy: Uint8Array;
+  /**
+   * Per (slot, series): numeric-field aggregates (Task 5), allocated on the
+   * first aggregate bucket so plain series cost nothing. min/max are NaN
+   * where no frame had the field.
+   */
+  agg: { count: Float64Array; sum: Float64Array; min: Float64Array; max: Float64Array } | null = null;
   newestKey = -Infinity;
   firstKey = Infinity;
 
@@ -91,6 +97,12 @@ class Ring {
       this.notObservedMs[slot] = 0;
       this.notObservedReason[slot] = 0;
       this.lossy[slot] = 0;
+      if (this.agg) {
+        this.agg.count.fill(0, base, base + this.series);
+        this.agg.sum.fill(0, base, base + this.series);
+        this.agg.min.fill(Number.NaN, base, base + this.series);
+        this.agg.max.fill(Number.NaN, base, base + this.series);
+      }
     }
     if (key > this.newestKey) this.newestKey = key;
     if (key < this.firstKey) this.firstKey = key;
@@ -109,6 +121,26 @@ class Ring {
       this.packets[i] += packets;
       this.bytes[i] += bytes;
     }
+    return true;
+  }
+
+  /**
+   * Adds an on-time bucket's aggregate (count, sum, min, max). Late frames
+   * never carry one. False when the bucket is older than this ring holds.
+   */
+  addAggregate(startMs: number, series: number, count: number, sum: number, min: number | null, max: number | null): boolean {
+    const slot = this.claim(Math.floor(startMs / this.resolution));
+    if (slot < 0) return false;
+    if (!this.agg) {
+      const n = this.keys.length * this.series;
+      this.agg = { count: new Float64Array(n), sum: new Float64Array(n), min: new Float64Array(n).fill(Number.NaN), max: new Float64Array(n).fill(Number.NaN) };
+    }
+    const i = slot * this.series + series;
+    this.agg.count[i] += count;
+    this.agg.sum[i] += sum;
+    // NaN (no value yet) loses every comparison, so test it explicitly.
+    if (min !== null && !(this.agg.min[i] <= min)) this.agg.min[i] = min;
+    if (max !== null && !(this.agg.max[i] >= max)) this.agg.max[i] = max;
     return true;
   }
 
@@ -280,9 +312,13 @@ export function ingestBuckets(h: IoHistory, msg: IoBuckets): void {
   const span: Span = { fromMs: msg.coveredFromMs, toMs: msg.coveredToMs };
   msg.series.forEach((s) => {
     const i = h.ids.indexOf(s.id);
-    for (const [start, packets, bytes] of s.buckets) {
+    for (const bucket of s.buckets) {
+      const [start, packets, bytes] = bucket;
       if (start < already) continue;
       for (const ring of rings) ring.add(start, i, packets, bytes, false);
+      if (bucket.length === 7) {
+        for (const ring of rings) ring.addAggregate(start, i, bucket[3], bucket[4], bucket[5], bucket[6]);
+      }
     }
     for (const [start, packets, bytes] of s.lateBuckets) {
       let placed = false;
@@ -329,6 +365,15 @@ export interface IoPoint {
   /** How much of the interval was not observed, and why (the latest reason). */
   notObservedMs: number;
   notObservedReason?: IoNotObservedReason;
+  /**
+   * Numeric-field aggregate (Task 5) over the interval's on-time frames that
+   * had the field: exact roll-ups of the agent's per-bucket values. 0 and
+   * null for a plain series, or when no frame had the field.
+   */
+  aggCount: number;
+  aggSum: number;
+  aggMin: number | null;
+  aggMax: number | null;
 }
 
 function touches(span: Span, fromMs: number, toMs: number): boolean {
@@ -356,6 +401,10 @@ interface IntervalSum {
   lossy: boolean;
   notObservedMs: number;
   notObservedReason?: IoNotObservedReason;
+  aggCount: number;
+  aggSum: number;
+  aggMin: number;
+  aggMax: number;
 }
 
 /** Raw on-time and late sums for one interval, with its coverage state. */
@@ -370,6 +419,11 @@ function sumInterval(ring: Ring, series: number, start: number, interval: IoInte
   let notObservedMs = 0;
   let reasonCode = 0;
   let lossy = false;
+  let aggCount = 0;
+  let aggSum = 0;
+  let aggMin = Infinity;
+  let aggMax = -Infinity;
+  const agg = ring.agg;
   const firstKey = start / step;
   for (let k = 0, n = interval / step; k < n; k++) {
     const key = firstKey + k;
@@ -383,12 +437,22 @@ function sumInterval(ring: Ring, series: number, start: number, interval: IoInte
     notObservedMs += N[slot];
     if (R[slot]) reasonCode = R[slot];
     if (X[slot]) lossy = true;
+    if (agg && agg.count[i] > 0) {
+      aggCount += agg.count[i];
+      aggSum += agg.sum[i];
+      if (agg.min[i] < aggMin) aggMin = agg.min[i];
+      if (agg.max[i] > aggMax) aggMax = agg.max[i];
+    }
   }
   // Not observed is the more specific signal, so it wins over unknown.
   const state: PointState = notObservedMs > 0 ? 'notObserved' : covered >= interval ? 'value' : 'unknown';
   let unplacedLate = 0;
   if (unplaced.length) for (const u of unplaced) if (touches(u, start, start + interval)) unplacedLate += u.frames;
-  return { state, packets, bytes, latePackets, unplacedLate, lossy, notObservedMs, notObservedReason: reasonCode ? REASONS[reasonCode - 1] : undefined };
+  return {
+    state, packets, bytes, latePackets, unplacedLate, lossy, notObservedMs,
+    notObservedReason: reasonCode ? REASONS[reasonCode - 1] : undefined,
+    aggCount, aggSum, aggMin, aggMax,
+  };
 }
 
 /**
@@ -407,19 +471,42 @@ export function query(h: IoHistory, seriesId: string, interval: IoInterval, from
   const unplacedHere = h.unplacedLate.filter((u) => u.series === series && touches(u, first, last + interval));
   for (let start = first; start <= last; start += interval) {
     const sum = sumInterval(ring, series, start, interval, unplacedHere);
+    const value = sum.state === 'value';
+    const agg = value && sum.aggCount > 0;
     points.push({
       startMs: start,
       state: sum.state,
-      packets: sum.state === 'value' ? sum.packets : 0,
-      bytes: sum.state === 'value' ? sum.bytes : 0,
+      packets: value ? sum.packets : 0,
+      bytes: value ? sum.bytes : 0,
       latePackets: sum.latePackets,
       unplacedLate: sum.unplacedLate,
       lossy: sum.lossy,
       notObservedMs: sum.notObservedMs,
       notObservedReason: sum.notObservedReason,
+      aggCount: agg ? sum.aggCount : 0,
+      aggSum: agg ? sum.aggSum : 0,
+      aggMin: agg ? sum.aggMin : null,
+      aggMax: agg ? sum.aggMax : null,
     });
   }
   return points;
+}
+
+/**
+ * A point's aggregate (Task 5) as the chart plots it: SUM is the interval's
+ * total, MIN/MAX its extremes, AVG sum / count over the whole interval
+ * (never an average of averages). Null where there is nothing to show: no
+ * frame had the field, or the interval is not a counted value.
+ */
+export function aggregateValue(point: IoPoint, fn: IoAggregateFn, interval: IoInterval): number | null {
+  void interval; // values are per interval, not per second
+  if (point.state !== 'value' || point.aggCount === 0) return null;
+  switch (fn) {
+    case 'sum': return point.aggSum;
+    case 'min': return point.aggMin;
+    case 'max': return point.aggMax;
+    case 'avg': return point.aggSum / point.aggCount;
+  }
 }
 
 export type Measure = 'packets' | 'bits';

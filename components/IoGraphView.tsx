@@ -10,10 +10,11 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity } from 'lucide-react';
-import type { IoSeriesStatus, ThemeConfig } from '@/lib/types';
+import type { IoAggregate, IoAggregateFn, IoSeriesStatus, ThemeConfig } from '@/lib/types';
 import {
   IO_INTERVALS,
   MAX_HISTORY_MS,
+  aggregateValue,
   allowedIntervals,
   clock,
   finestAllowed,
@@ -34,7 +35,7 @@ export type SetIoSeriesMessage = {
   baseEpoch: string;
   baseRevision: number;
   requestId: string;
-  series: { id: string; filter: string }[];
+  series: { id: string; filter: string; aggregate?: IoAggregate }[];
 };
 
 interface IoGraphViewProps {
@@ -80,6 +81,11 @@ const SWATCHES = [
 
 const INTERVAL_LABEL: Record<IoInterval, string> = { 100: '100 ms', 1000: '1 s', 10000: '10 s', 60000: '1 min' };
 const UNIT: Record<Measure, string> = { packets: 'pkt/s', bits: 'bit/s' };
+/** What a series plots, chosen per tab: a rate, or its shared aggregate (Task 5). */
+type PlotMeasure = Measure | 'agg';
+const AGGREGATE_FNS: IoAggregateFn[] = ['sum', 'min', 'max', 'avg'];
+/** At most two y-axes (spec D8): a third unit is refused, never squeezed in. */
+const MAX_AXES = 2;
 const REASON_LABEL: Record<string, string> = {
   interface_switch: 'interface switch', replay_error: 'replay error', backlog: 'backlog', unknown: 'unknown reason',
 };
@@ -98,7 +104,7 @@ const CONFLICT_TEXT = 'Series changed in another tab: review the current set bel
 const STALE_DRAFT_TEXT = 'Series changed in another tab since you started editing: applying this draft will be refused. Discard it to see the current set.';
 const UNANSWERED_TEXT = 'The series set changed before the agent answered this tab: review the current set below and resend if needed.';
 const DISCONNECTED_TEXT = 'The connection dropped before the agent answered: review the current set below and resend if needed.';
-const RELAY_REFUSED_TEXT = 'The relay refused the request: check the series ids and filter lengths.';
+const RELAY_REFUSED_TEXT = 'The relay refused the request: check the series ids, filter lengths and aggregate fields.';
 
 const REJECTION_TEXT: Record<string, string> = {
   conflict: CONFLICT_TEXT,
@@ -106,11 +112,12 @@ const REJECTION_TEXT: Record<string, string> = {
   invalid_id: 'Series ids are 1–32 characters of a–z, 0–9 and "-".',
   duplicate_id: 'Series ids must be unique.',
   filter_too_long: 'A filter is longer than 2048 characters.',
+  invalid_aggregate: 'An aggregate needs sum, min, max or avg, and a field name of letters, digits, "_" and ".".',
   invalid_request_id: 'The request id was invalid.',
   invalid_epoch: 'The agent epoch was invalid.',
 };
 
-type DraftRow = { key: string; id: string; filter: string };
+type DraftRow = { key: string; id: string; filter: string; aggregate?: IoAggregate };
 type Base = { epoch: string; revision: number };
 /** An open edit: its rows and the agent set it started from. */
 type Draft = { rows: DraftRow[]; base: Base | null };
@@ -119,7 +126,9 @@ type Sent = { requestId: string; base: Base; answer?: IoSeriesStatus; error?: st
 type View = { span: number; endMs: number | null; follow: boolean };
 
 function rowsFrom(status: IoSeriesStatus | null): DraftRow[] {
-  return status ? status.series.map((s) => ({ key: `cur-${s.id}`, id: s.id, filter: s.filter })) : [];
+  return status
+    ? status.series.map((s) => ({ key: `cur-${s.id}`, id: s.id, filter: s.filter, ...(s.aggregate ? { aggregate: s.aggregate } : {}) }))
+    : [];
 }
 
 function baseOf(status: IoSeriesStatus | null): Base | null {
@@ -156,7 +165,9 @@ function plotFraction(el: Element | null, clientX: number): number {
 export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, status, connected, theme, onSend, now, timeZone, onDrill }) => {
   const [view, setView] = useState<View>({ span: DEFAULT_SPAN, endMs: null, follow: true });
   const [chosen, setChosen] = useState<IoInterval>(1000);
-  const [measures, setMeasures] = useState<Record<string, Measure>>({});
+  const [measures, setMeasures] = useState<Record<string, PlotMeasure>>({});
+  // Set when apply is refused before sending (an aggregate with no field).
+  const [localError, setLocalError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [sent, setSent] = useState<Sent | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
@@ -196,19 +207,22 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
   const pending = sent !== null && !sent.answer && !sent.error;
   const rows = draft ? draft.rows : rowsFrom(status);
   const staleDraft = draft !== null && draft.base !== null && status !== null && !sameBase(draft.base, status);
-  const message = sent?.error
+  const message = localError
+    ?? sent?.error
     ?? (sent?.answer?.rejected ? (REJECTION_TEXT[sent.answer.rejected] ?? `Refused: ${sent.answer.rejected}`) : null)
     ?? (staleDraft && !pending ? STALE_DRAFT_TEXT : null);
 
   function edit(next: (current: DraftRow[]) => DraftRow[]) {
     if (pending) return;
     setSent(null);
+    setLocalError(null);
     setDraft((d) => (d ? { ...d, rows: next(d.rows) } : { rows: next(rowsFrom(status)), base: baseOf(status) }));
   }
 
   function discard() {
     setDraft(null);
     setSent(null);
+    setLocalError(null);
   }
 
   const latest = latestCoveredMs(history);
@@ -219,23 +233,59 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
   const interval: IoInterval = intervals.find((i) => i.interval === chosen)?.allowed ? chosen : finestAllowed(windowStart, windowEnd);
 
   const ids = history.ids;
-  const measureOf = (id: string): Measure => measures[id] ?? 'packets';
+  // The agent's aggregate for each series (shared), from the latest status.
+  const aggregates = useMemo(() => new Map((status?.series ?? []).flatMap((s) => (s.aggregate ? [[s.id, s.aggregate] as const] : []))), [status]);
+  // An aggregate series plots its aggregate unless this tab chose a rate.
+  const measureOf = (id: string): PlotMeasure => {
+    const chosenMeasure = measures[id];
+    if (chosenMeasure === 'agg' || chosenMeasure === undefined) return aggregates.has(id) ? 'agg' : 'packets';
+    return chosenMeasure;
+  };
+  const unitOf = (id: string): string => {
+    const m = measureOf(id);
+    if (m !== 'agg') return UNIT[m];
+    const a = aggregates.get(id)!;
+    // MIN, MAX and AVG of a field are in the field's own unit, so they share
+    // an axis; SUM is a per-interval total, a different unit.
+    return a.fn === 'sum' ? `sum ${a.field} per ${INTERVAL_LABEL[interval]}` : a.field;
+  };
+  const valueOf = (p: IoPoint, id: string): number | null => {
+    if (p.state !== 'value') return null;
+    const m = measureOf(id);
+    if (m === 'agg') return aggregateValue(p, aggregates.get(id)!.fn, interval);
+    return m === 'packets' ? (p.packets * 1000) / interval : (p.bytes * 8000) / interval;
+  };
+  // Units in series order; the first two get the left and right axes.
+  const units: string[] = [];
+  for (const id of ids) if (!units.includes(unitOf(id))) units.push(unitOf(id));
+  const axisOf = (id: string) => units.indexOf(unitOf(id));
 
   const computed = useMemo(() => timed('io-graph-compute', () => {
     const perSeries = ids.map((id) => ({ id, points: query(history, id, interval, windowStart, windowEnd) }));
-    const max: Record<Measure, number> = { packets: 0, bits: 0 };
-    for (const s of perSeries) {
-      const m = measureOf(s.id);
-      for (const p of s.points) if (p.state === 'value') max[m] = Math.max(max[m], rate(p, m, interval));
-    }
+    // Each point's plotted value, computed once per series (null = a gap),
+    // and the axis maxima, one per drawn unit (left, right).
+    const max = [0, 0];
+    const values = perSeries.map((s) => {
+      const axis = axisOf(s.id);
+      const out = new Array<number | null>(s.points.length);
+      for (let k = 0; k < s.points.length; k++) {
+        const v = valueOf(s.points[k], s.id);
+        out[k] = v;
+        if (v !== null && axis < MAX_AXES && v > max[axis]) max[axis] = v;
+      }
+      return out;
+    });
     const x = (ms: number) => M.left + ((ms - windowStart) / span) * PLOT_W;
-    const paths = perSeries.map((s) => {
-      const m = measureOf(s.id);
-      const top = max[m] || 1;
+    const paths = perSeries.map((s, si) => {
+      const axis = axisOf(s.id);
+      if (axis >= MAX_AXES) return { id: s.id, d: '' }; // a third unit: refused
+      const top = max[axis] || 1;
       let d = '';
       let run = 0;
-      for (const p of s.points) {
-        if (p.state !== 'value') {
+      for (let k = 0; k < s.points.length; k++) {
+        const p = s.points[k];
+        const v = values[si][k];
+        if (v === null) {
           // A lone point between gaps: a zero-length segment, drawn as a
           // dot by the round line cap.
           if (run === 1) d += 'l0,0';
@@ -243,7 +293,7 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
           continue;
         }
         const px = x(p.startMs + interval / 2).toFixed(1);
-        const py = (M.top + PLOT_H - (rate(p, m, interval) / top) * PLOT_H).toFixed(1);
+        const py = (M.top + PLOT_H - (v / top) * PLOT_H).toFixed(1);
         d += `${run > 0 ? 'L' : 'M'}${px},${py}`;
         run++;
       }
@@ -262,9 +312,10 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
       .filter((mk) => mk.ms >= windowStart && mk.ms <= windowEnd)
       .map((mk) => ({ x: x(mk.ms), reason: mk.reason }));
     return { perSeries, max, paths, shaded, lossy, late, markers };
-    // measureOf reads `measures`; version tracks history mutation.
+    // measureOf/unitOf/valueOf read `measures` and `aggregates`; version
+    // tracks history mutation.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [history, version, ids, interval, windowStart, windowEnd, span, measures]);
+  }), [history, version, ids, interval, windowStart, windowEnd, span, measures, aggregates]);
 
   // Wheel (and trackpad pinch, which arrives as ctrl+wheel) zooms around
   // the cursor. A non-passive listener, so the page does not scroll while
@@ -356,8 +407,19 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
     // An open draft sends the base it was built from; an untouched editor
     // re-sends the current set against the current revision.
     const base = draft?.base ?? baseOf(status)!;
+    const missing = rows.findIndex((r) => r.aggregate && !r.aggregate.field.trim());
+    if (missing >= 0) {
+      const row = rows[missing];
+      setLocalError(`series ${missing + 1} (${row.id}): pick a uint field for its ${row.aggregate!.fn}, or set its aggregate to none.`);
+      return;
+    }
+    setLocalError(null);
     const requestId = newRequestId();
-    const series = rows.map((r) => ({ id: r.id.trim(), filter: r.filter }));
+    const series = rows.map((r) => ({
+      id: r.id.trim(),
+      filter: r.filter,
+      ...(r.aggregate ? { aggregate: { fn: r.aggregate.fn, field: r.aggregate.field.trim() } } : {}),
+    }));
     setSent({ requestId, base });
     const ok = await onSend({ type: 'set_io_series', baseEpoch: base.epoch, baseRevision: base.revision, requestId, series });
     if (!ok) setSent((s) => (s && s.requestId === requestId && !s.answer ? { ...s, error: RELAY_REFUSED_TEXT } : s));
@@ -374,8 +436,6 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
   })();
 
   const tickList = ticks(windowStart, windowEnd, 6, timeZone);
-  const usesBits = ids.some((id) => measureOf(id) === 'bits');
-  const usesPackets = ids.some((id) => measureOf(id) === 'packets');
   const statusById = new Map(status?.series.map((s) => [s.id, s]) ?? []);
   const total = status?.series.length ?? ids.length;
   const counting = status ? status.series.filter((s) => s.ok).length : ids.length;
@@ -479,8 +539,8 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
               );
             })}
             <line x1={M.left} x2={M.left + PLOT_W} y1={M.top + PLOT_H} y2={M.top + PLOT_H} className="stroke-slate-600" />
-            {usesPackets && <AxisLabels x={M.left - 6} anchor="end" max={computed.max.packets} unit={UNIT.packets} />}
-            {usesBits && <AxisLabels x={M.left + PLOT_W + 6} anchor="start" max={computed.max.bits} unit={UNIT.bits} />}
+            {units[0] !== undefined && <AxisLabels x={M.left - 6} anchor="end" max={computed.max[0]} unit={units[0]} />}
+            {units[1] !== undefined && <AxisLabels x={M.left + PLOT_W + 6} anchor="start" max={computed.max[1]} unit={units[1]} />}
 
             {/* unknown / not-observed shading */}
             {computed.shaded.map((s, i) => (
@@ -523,7 +583,7 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
                 <div key={id} className="flex items-center gap-2">
                   <span className={`inline-block h-2 w-2 rounded-sm ${SWATCHES[i % SWATCHES.length]}`} />
                   <span className="text-slate-300">{id}</span>
-                  <span className="text-slate-100">{readout(p, measureOf(id), interval)}</span>
+                  <span className="text-slate-100">{readout(p, measureOf(id), interval, aggregates.get(id))}</span>
                   {p && p.latePackets > 0 && <span className="text-amber-300">+{p.latePackets} late</span>}
                   {p && p.unplacedLate > 0 && <span className="text-amber-300">+{p.unplacedLate} late (interval unknown)</span>}
                   {p?.lossy && <span className="text-red-400">incomplete</span>}
@@ -581,13 +641,47 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
                 className="bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-slate-200"
                 value={measureOf(row.id)}
                 onChange={(e) => {
-                  const measure = e.target.value as Measure;
+                  const measure = e.target.value as PlotMeasure;
                   setMeasures((m) => ({ ...m, [row.id]: measure }));
                 }}
               >
                 <option value="packets">packets/s</option>
                 <option value="bits">bits/s</option>
+                {aggregates.has(row.id) && (
+                  <option value="agg">{`${aggregates.get(row.id)!.fn}(${aggregates.get(row.id)!.field})`}</option>
+                )}
               </select>
+              <select
+                aria-label={`series ${i + 1} aggregate`}
+                title="Aggregate a uint field over this series' frames (shared by every tab)"
+                className="bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-slate-200 disabled:opacity-60"
+                value={row.aggregate?.fn ?? ''}
+                disabled={pending}
+                onChange={(e) => {
+                  const fn = e.target.value as IoAggregateFn | '';
+                  edit((cur) => cur.map((r) => {
+                    if (r.key !== row.key) return r;
+                    const { aggregate, ...rest } = r;
+                    return fn ? { ...rest, aggregate: { fn, field: aggregate?.field ?? '' } } : rest;
+                  }));
+                }}
+              >
+                <option value="">no aggregate</option>
+                {AGGREGATE_FNS.map((fn) => <option key={fn} value={fn}>{fn.toUpperCase()}</option>)}
+              </select>
+              {row.aggregate && (
+                <input
+                  aria-label={`series ${i + 1} aggregate field`}
+                  className="w-40 bg-slate-950 border border-slate-700 rounded px-1 py-0.5 text-slate-200 disabled:opacity-60"
+                  placeholder="uint field, e.g. tcp.window_size"
+                  value={row.aggregate.field}
+                  disabled={pending}
+                  onChange={(e) => {
+                    const field = e.target.value;
+                    edit((cur) => cur.map((r) => (r.key === row.key && r.aggregate ? { ...r, aggregate: { ...r.aggregate, field } } : r)));
+                  }}
+                />
+              )}
               <button
                 className="text-slate-500 hover:text-red-400 disabled:opacity-40"
                 disabled={pending}
@@ -596,6 +690,11 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
               >
                 ✕
               </button>
+              {ids.includes(row.id) && axisOf(row.id) >= MAX_AXES && !draft && (
+                <span className="text-amber-300 w-full pl-4" data-testid={`io-unit-refused-${row.id}`}>
+                  Not drawn: at most two y-axes ({units.slice(0, MAX_AXES).join(', ')}), and this series is in {unitOf(row.id)}. Change its measure, or another series&apos;.
+                </span>
+              )}
               {live?.error && !draft && (
                 <span className="text-red-400 w-full pl-4" data-testid={`io-error-${row.id}`}>
                   {live.error.message} at position {live.error.position}: <code>{live.error.token}</code> (not counted)
@@ -650,14 +749,19 @@ export function timed<T>(name: string, fn: () => T): T {
   return result;
 }
 
-function readout(p: IoPoint | undefined, measure: Measure, interval: IoInterval): string {
+function readout(p: IoPoint | undefined, measure: PlotMeasure, interval: IoInterval, aggregate?: IoAggregate): string {
   if (!p || p.state === 'unknown') return 'unknown';
   if (p.state === 'notObserved') {
     const why = p.notObservedReason ? ` (${REASON_LABEL[p.notObservedReason] ?? p.notObservedReason})` : '';
     const part = p.notObservedMs < interval ? `, ${formatSpan(p.notObservedMs)} of ${INTERVAL_LABEL[interval]}` : '';
     return `not observed${why}${part}`;
   }
-  return `${formatSi(rate(p, measure, interval))} ${UNIT[measure]}`;
+  if (measure === 'agg' && aggregate) {
+    const v = aggregateValue(p, aggregate.fn, interval);
+    if (v === null) return `no ${aggregate.field} (0 of ${p.packets} frames had it)`;
+    return `${aggregate.fn} ${formatSi(v)} ${aggregate.field} (${p.aggCount} of ${p.packets} frames had it)`;
+  }
+  return `${formatSi(rate(p, measure === 'agg' ? 'packets' : measure, interval))} ${UNIT[measure === 'agg' ? 'packets' : measure]}`;
 }
 
 function AxisLabels({ x, anchor, max, unit }: { x: number; anchor: 'start' | 'end'; max: number; unit: string }) {

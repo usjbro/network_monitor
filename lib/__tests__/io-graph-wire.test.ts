@@ -249,3 +249,81 @@ describe('relay replays the cached io_series_status to a new subscriber', () => 
     expect(agent.listenerCount('status')).toBe(0);
   });
 });
+
+// JAM-18 Task 5 (spec D10): numeric-field aggregates.
+describe('aggregates on the wire', () => {
+  let sendControl: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    sendControl = vi.fn();
+    global.__agentClient = { sendControl } as unknown as AgentClient;
+  });
+  afterEach(() => {
+    global.__agentClient = undefined;
+  });
+
+  it('the route forwards a series aggregate, rebuilt from its validated fields', async () => {
+    const body = { ...valid, series: [{ id: 'win', filter: 'tcp', aggregate: { fn: 'avg', field: 'tcp.window_size', extra: 1 } }] };
+    expect((await POST(req(body))).status).toBe(200);
+    expect(sendControl).toHaveBeenCalledWith({
+      ...valid, series: [{ id: 'win', filter: 'tcp', aggregate: { fn: 'avg', field: 'tcp.window_size' } }],
+    });
+  });
+
+  it('the route accepts every fn and a 64-character field, and refuses anything else', async () => {
+    for (const fn of ['sum', 'min', 'max', 'avg']) {
+      expect((await POST(req({ ...valid, series: [{ id: 'a', filter: '', aggregate: { fn, field: 'f'.repeat(64) } }] }))).status).toBe(200);
+    }
+    sendControl.mockClear();
+    for (const aggregate of [
+      { fn: 'median', field: 'ip.ttl' },
+      { fn: 'sum', field: '' },
+      { fn: 'sum', field: 'f'.repeat(65) },
+      { fn: 'sum', field: 'ip ttl' },
+      { fn: 'sum' },
+      'sum(ip.ttl)',
+      null,
+    ]) {
+      expect((await POST(req({ ...valid, series: [{ id: 'a', filter: '', aggregate }] }))).status).toBe(400);
+    }
+    expect(sendControl).not.toHaveBeenCalled();
+  });
+
+  it('io_series_status keeps a series aggregate', () => {
+    const mapped = mapIoSeriesStatusEvent({ ...statusExample, series: [{ id: 'win', filter: 'tcp', ok: true, aggregate: { fn: 'avg', field: 'tcp.window_size' } }] });
+    expect(mapped.series[0].aggregate).toEqual({ fn: 'avg', field: 'tcp.window_size' });
+    expect(mapIoSeriesStatusEvent(statusExample).series[0].aggregate).toBeUndefined();
+  });
+
+  it('io_buckets accepts 7-tuples for aggregate series and 3-tuples for the rest', () => {
+    const mapped = mapIoBucketsEvent({
+      ...bucketsExample,
+      series: [
+        { id: 'win', late: 0, lateBuckets: [[1794119999900, 1, 90]], buckets: [
+          [1794120000000, 3, 180, 2, 612, 100, 512],
+          [1794120000100, 1, 60, 0, 0, null, null], // matched, but no frame had the field
+          [1794120000200, 2, 120, 2, '36893488147419103230', 18446744073709552000, 18446744073709552000],
+        ] },
+        { id: 'all', late: 0, lateBuckets: [], buckets: [[1794120000000, 4, 192]] },
+      ],
+    });
+    const win = mapped.series[0].buckets;
+    expect(win[0]).toEqual([1794120000000, 3, 180, 2, 612, 100, 512]);
+    expect(win[1]).toEqual([1794120000100, 1, 60, 0, 0, null, null]);
+    expect(win[2][4]).toBe(36893488147419103230); // a decimal-string sum above 2^53 - 1, as the nearest double
+    expect(mapped.series[1].buckets).toEqual([[1794120000000, 4, 192]]);
+  });
+
+  it('io_buckets throws on a malformed aggregate tuple', () => {
+    for (const bad of [
+      [1, 1, 1, 1],
+      [1, 1, 1, 1, 1, 1],
+      [1, 1, 1, 1, 'not a number', 1, 1],
+      [1, 1, 1, 1, 1, 'x', 1],
+      [1, 1, 1, 1, 1, 1, 1, 1],
+    ]) {
+      expect(() => mapIoBucketsEvent({ ...bucketsExample, series: [{ id: 'a', late: 0, lateBuckets: [], buckets: [bad] }] })).toThrow();
+    }
+    // Late buckets never carry an aggregate.
+    expect(() => mapIoBucketsEvent({ ...bucketsExample, series: [{ id: 'a', late: 0, lateBuckets: [[1, 1, 1, 1, 1, 1, 1]], buckets: [] }] })).toThrow();
+  });
+});

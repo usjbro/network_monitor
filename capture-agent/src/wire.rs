@@ -641,6 +641,20 @@ pub enum ControlMessage {
 pub struct IoSeriesDefJson {
     pub id: String,
     pub filter: String,
+    /// Optional numeric-field aggregate (JAM-18 Task 5, spec D10).
+    #[serde(default)]
+    pub aggregate: Option<IoAggregateJson>,
+}
+
+/// `{"fn": "sum"|"min"|"max"|"avg", "field": "<uint path>"}`. The agent
+/// computes count, sum, min and max for every aggregate series whatever
+/// `fn` is; `fn` is the shared choice of what the chart plots.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct IoAggregateJson {
+    #[serde(rename = "fn")]
+    pub func: String,
+    pub field: String,
 }
 
 /// `io_series_status` (JAM-18): the agent's current series set, sent on
@@ -668,6 +682,8 @@ pub struct IoSeriesEntryJson {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<IoSeriesErrorJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<IoAggregateJson>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -680,6 +696,61 @@ pub struct IoSeriesErrorJson {
 
 /// One 100 ms bucket: `[startMs, packets, bytes]`.
 pub type IoBucket = [u64; 3];
+
+/// A numeric-field aggregate over the matched frames that had the field
+/// (spec D10). `count` is how many did; `min`/`max` are `None` when none did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IoAggregate {
+    pub count: u64,
+    pub sum: u128,
+    pub min: Option<u64>,
+    pub max: Option<u64>,
+}
+
+impl IoAggregate {
+    pub fn add(&mut self, value: u64) {
+        self.count += 1;
+        self.sum += u128::from(value);
+        self.min = Some(self.min.map_or(value, |m| m.min(value)));
+        self.max = Some(self.max.map_or(value, |m| m.max(value)));
+    }
+}
+
+/// A bucket on the wire: `[startMs, packets, bytes]` for a plain series,
+/// `[startMs, packets, bytes, count, sum, min, max]` for an aggregate one.
+/// `sum` is a JSON number up to 2^53 - 1 and a decimal string above it
+/// (like a uint field value); `min`/`max` are `null` when `count` is 0.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IoBucketJson {
+    Plain(IoBucket),
+    Aggregate(IoBucket, IoAggregate),
+}
+
+const MAX_EXACT_JSON_UINT: u128 = (1 << 53) - 1;
+
+impl Serialize for IoBucketJson {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        match self {
+            IoBucketJson::Plain(b) => b.serialize(serializer),
+            IoBucketJson::Aggregate(b, a) => {
+                let mut seq = serializer.serialize_seq(Some(7))?;
+                for n in b {
+                    seq.serialize_element(n)?;
+                }
+                seq.serialize_element(&a.count)?;
+                if a.sum <= MAX_EXACT_JSON_UINT {
+                    seq.serialize_element(&(a.sum as u64))?;
+                } else {
+                    seq.serialize_element(&a.sum.to_string())?;
+                }
+                seq.serialize_element(&a.min)?;
+                seq.serialize_element(&a.max)?;
+                seq.end()
+            }
+        }
+    }
+}
 
 /// `io_buckets` (JAM-18): closed 100 ms buckets for every series over
 /// `[coveredFromMs, coveredToMs)`. Buckets not listed and not inside a
@@ -724,7 +795,10 @@ pub struct IoSeriesBucketsJson {
     pub late: u64,
     /// Late frames attributed to their original bucket.
     pub late_buckets: Vec<IoBucket>,
-    pub buckets: Vec<IoBucket>,
+    /// 7-tuples for an aggregate series, 3-tuples otherwise. Late frames
+    /// carry no aggregate: their field values are not in any bucket's
+    /// aggregate, as their counts are not in any on-time count.
+    pub buckets: Vec<IoBucketJson>,
 }
 
 #[derive(Deserialize, Debug, PartialEq)]

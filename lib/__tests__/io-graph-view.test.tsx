@@ -373,3 +373,109 @@ describe('IoGraphView: click-through (JAM-18 Task 4)', () => {
     expect(screen.queryByTestId('io-drill-dns')).toBeNull();
   });
 });
+
+describe('IoGraphView: numeric-field aggregates (JAM-18 Task 5)', () => {
+  const aggStatus: IoSeriesStatus = {
+    ...status,
+    series: [
+      { id: 'all', filter: '', ok: true },
+      { id: 'win', filter: 'tcp', ok: true, aggregate: { fn: 'avg', field: 'tcp.window_size' } },
+    ],
+  };
+
+  function aggHistory(st: IoSeriesStatus = aggStatus) {
+    const h = createHistory();
+    ingestStatus(h, st);
+    for (let s = 0; s < 60; s++) {
+      const start = T0 + s * 1000;
+      ingestBuckets(h, {
+        revision: 3, epoch: 'aaaabbbb', bucketMs: 100, coveredFromMs: start, coveredToMs: start + 1000,
+        notObserved: [], loss: { kernelDropped: 0, ifDropped: 0, unparseable: 0, evaluationSkipped: 0 },
+        series: [
+          { id: 'all', late: 0, lateBuckets: [], buckets: [[start, 10, 1000]] },
+          // per second: one frame with 10 and three with 30 in total 90 -> avg 25, sum 100
+          { id: 'win', late: 0, lateBuckets: [], buckets: [[start, 1, 60, 1, 10, 10, 10], [start + 100, 3, 180, 3, 90, 20, 40]] },
+        ],
+      });
+    }
+    return h;
+  }
+
+  function stubRect(el: Element) {
+    el.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 260, right: 1000, bottom: 260, x: 0, y: 0, toJSON: () => ({}) });
+  }
+
+  it('plots an aggregate series by its shared fn on its own axis, and reads it out with its count', () => {
+    const { container } = view({ history: aggHistory(), status: aggStatus });
+    const labels = Array.from(container.querySelectorAll('text')).map((t) => t.textContent);
+    expect(labels).toContain('pkt/s'); // left: all
+    expect(labels).toContain('tcp.window_size'); // right: win
+    expect(labels).toContain('25'); // the axis top is the avg, sum / count = 100 / 4
+    expect((screen.getByLabelText('series 2 measure') as HTMLSelectElement).value).toBe('agg');
+    const svg = screen.getByTestId('io-svg');
+    stubRect(svg);
+    fireEvent.pointerMove(svg, { clientX: 927, pointerId: 1 });
+    expect(screen.getByTestId('io-readout')).toHaveTextContent('winavg 25 tcp.window_size (4 of 4 frames had it)');
+  });
+
+  it('the series can still be shown as packets/s, and a plain series offers no aggregate measure', () => {
+    view({ history: aggHistory(), status: aggStatus });
+    fireEvent.change(screen.getByLabelText('series 2 measure'), { target: { value: 'packets' } });
+    expect(screen.getByTestId('io-path-win').getAttribute('d')).not.toBe('');
+    const plain = Array.from((screen.getByLabelText('series 1 measure') as HTMLSelectElement).options).map((o) => o.value);
+    expect(plain).toEqual(['packets', 'bits']);
+  });
+
+  it('edits and sends a series aggregate, and keeps the others when resending', async () => {
+    const { onSend } = view({ history: aggHistory(), status: aggStatus });
+    fireEvent.change(screen.getByLabelText('series 1 aggregate'), { target: { value: 'max' } });
+    fireEvent.change(screen.getByLabelText('series 1 aggregate field'), { target: { value: 'frame.len' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('io-apply'));
+    });
+    const sent = (onSend as ReturnType<typeof vi.fn>).mock.calls[0][0] as SetIoSeriesMessage;
+    expect(sent.series).toEqual([
+      { id: 'all', filter: '', aggregate: { fn: 'max', field: 'frame.len' } },
+      { id: 'win', filter: 'tcp', aggregate: { fn: 'avg', field: 'tcp.window_size' } },
+    ]);
+  });
+
+  it('removing an aggregate sends the series without one; an aggregate with no field is not sent', async () => {
+    const { onSend } = view({ history: aggHistory(), status: aggStatus });
+    fireEvent.change(screen.getByLabelText('series 2 aggregate'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('series 1 aggregate'), { target: { value: 'sum' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('io-apply'));
+    });
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByTestId('io-message')).toHaveTextContent('series 1 (all): pick a uint field for its sum');
+    fireEvent.change(screen.getByLabelText('series 1 aggregate'), { target: { value: '' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('io-apply'));
+    });
+    expect((onSend as ReturnType<typeof vi.fn>).mock.calls[0][0].series).toEqual([{ id: 'all', filter: '' }, { id: 'win', filter: 'tcp' }]);
+  });
+
+  it('MIN, MAX and AVG of one field share an axis; SUM is its own unit', () => {
+    const fns: IoSeriesStatus = { ...aggStatus, series: [
+      { id: 'all', filter: '', ok: true },
+      { id: 'win', filter: 'tcp', ok: true, aggregate: { fn: 'avg', field: 'tcp.window_size' } },
+      { id: 'lo', filter: 'tcp', ok: true, aggregate: { fn: 'min', field: 'tcp.window_size' } },
+      { id: 'tot', filter: 'tcp', ok: true, aggregate: { fn: 'sum', field: 'tcp.window_size' } },
+    ] };
+    view({ history: aggHistory(fns), status: fns });
+    expect(screen.queryByTestId('io-unit-refused-lo')).toBeNull();
+    expect(screen.getByTestId('io-unit-refused-tot')).toHaveTextContent('this series is in sum tcp.window_size per 1 s');
+  });
+
+  it('a third unit is not drawn, and the editor says why', () => {
+    const three: IoSeriesStatus = { ...aggStatus, series: [...aggStatus.series, { id: 'dns', filter: 'dns', ok: true }] };
+    view({ history: aggHistory(three), status: three });
+    // dns (series 3) has the same unit as all (pkt/s): drawn.
+    expect(screen.queryByTestId('io-unit-refused-dns')).toBeNull();
+    fireEvent.change(screen.getByLabelText('series 3 measure'), { target: { value: 'bits' } });
+    // pkt/s, tcp.window_size, bit/s: the third is refused.
+    expect(screen.getByTestId('io-unit-refused-dns')).toHaveTextContent('Not drawn: at most two y-axes (pkt/s, tcp.window_size)');
+    expect(screen.getByTestId('io-path-dns').getAttribute('d')).toBe('');
+  });
+});
