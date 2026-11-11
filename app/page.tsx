@@ -77,7 +77,7 @@ import { EndpointsView } from '@/components/EndpointsView';
 import { InstallModal } from '@/components/InstallModal';
 import { CommandLineBar } from '@/components/CommandLineBar';
 import { compileDisplayFilter, type CompiledDisplayFilter } from '@/lib/display-filter';
-import { IoGraphView, type SetIoSeriesMessage } from '@/components/IoGraphView';
+import { IoGraphView, timed, type SetIoSeriesMessage } from '@/components/IoGraphView';
 import { createHistory, ingestBuckets, ingestStatus } from '@/lib/io-graph';
 
 export default function TerminalApp() {
@@ -234,6 +234,17 @@ export default function TerminalApp() {
   // Live Capture Stream — replaces the old simulation loop
   useEffect(() => {
     const source = new EventSource('/api/stream');
+    // JAM-18 (spec D8): IO graph events only mutate the history; the view
+    // re-renders at most once per animation frame, however many io_buckets
+    // and io_series_status events arrive in it.
+    let ioFrame: number | null = null;
+    const scheduleIoRender = () => {
+      if (ioFrame !== null) return;
+      ioFrame = requestAnimationFrame(() => {
+        ioFrame = null;
+        setIoVersion(ioHistory.version);
+      });
+    };
 
     source.onmessage = (event) => {
       // A single malformed/unexpected event (e.g. an agent binary built
@@ -387,12 +398,13 @@ export default function TerminalApp() {
           const status = mapIoSeriesStatusEvent(data);
           ingestStatus(ioHistory, status);
           setIoStatus(status);
-          setIoVersion(ioHistory.version);
+          scheduleIoRender();
           return;
         }
         if (data.type === 'io_buckets') {
-          ingestBuckets(ioHistory, mapIoBucketsEvent(data));
-          setIoVersion(ioHistory.version);
+          const buckets = mapIoBucketsEvent(data);
+          timed('io-graph-ingest', () => ingestBuckets(ioHistory, buckets));
+          scheduleIoRender();
           return;
         }
         if (data.type === 'geo_hop_update') {
@@ -406,7 +418,10 @@ export default function TerminalApp() {
       }
     };
 
-    return () => source.close();
+    return () => {
+      source.close();
+      if (ioFrame !== null) cancelAnimationFrame(ioFrame);
+    };
   }, [ioHistory]); // ioHistory is one stable object; the stream is opened once
 
   // JAM-18: replaces the agent's shared IO graph series set. The route

@@ -10,6 +10,10 @@
 //   - not observed (inside a notObserved range from the agent).
 // Late frames, loss and coverage are tracked separately and never merged
 // into on-time counts.
+//
+// Coverage, not-observed time and loss are kept per ring slot, next to the
+// counts, so they live exactly as long as the counts they describe: no side
+// list can be truncated while the rings still hold the data.
 
 import type { IoBuckets, IoNotObservedReason, IoSeriesStatus } from './types';
 
@@ -23,9 +27,17 @@ export const MAX_POINTS = 2000;
 export const RING_CAPACITY = { 100: 9000, 1000: 3600, 60000: 1440 } as const;
 type RingResolution = keyof typeof RING_CAPACITY;
 const RESOLUTIONS: readonly RingResolution[] = [100, 1000, 60000];
+/** The longest history any ring holds (24 h); no window is wider. */
+export const MAX_HISTORY_MS = RING_CAPACITY[60000] * 60000;
 
-// Bounds on the side lists, so a long session cannot grow them.
-const MAX_SPANS = 512;
+// Bounds on the two side lists that are not per slot. Both are rare
+// (zero-length markers; late frames whose bucket aged out of every ring),
+// and the late list's frames are also kept in a running total that is
+// never truncated.
+const MAX_MARKERS = 64;
+const MAX_UNPLACED_SPANS = 512;
+
+const REASONS: readonly IoNotObservedReason[] = ['interface_switch', 'replay_error', 'backlog', 'unknown'];
 
 class Ring {
   readonly keys: Float64Array;
@@ -33,7 +45,15 @@ class Ring {
   readonly bytes: Float64Array;
   readonly latePackets: Float64Array;
   readonly lateBytes: Float64Array;
+  /** Per slot: ms of the slot inside a covered range. */
+  readonly coveredMs: Float64Array;
+  /** Per slot: ms of the slot inside a notObserved range, and its reason. */
+  readonly notObservedMs: Float64Array;
+  readonly notObservedReason: Uint8Array;
+  /** Per slot: 1 if a message reporting loss covered any of the slot. */
+  readonly lossy: Uint8Array;
   newestKey = -Infinity;
+  firstKey = Infinity;
 
   constructor(readonly resolution: RingResolution, readonly series: number) {
     const capacity = RING_CAPACITY[resolution];
@@ -42,32 +62,46 @@ class Ring {
     this.bytes = new Float64Array(capacity * series);
     this.latePackets = new Float64Array(capacity * series);
     this.lateBytes = new Float64Array(capacity * series);
+    this.coveredMs = new Float64Array(capacity);
+    this.notObservedMs = new Float64Array(capacity);
+    this.notObservedReason = new Uint8Array(capacity);
+    this.lossy = new Uint8Array(capacity);
   }
 
-  private slot(key: number): number {
-    const capacity = this.keys.length;
-    const slot = key % capacity;
+  get capacity(): number {
+    return this.keys.length;
+  }
+
+  /**
+   * The slot for `key`, claiming (and clearing) it if it held an older key.
+   * -1 when the key is older than the ring's horizon: it is never written
+   * over a newer bucket.
+   */
+  private claim(key: number): number {
+    if (key <= this.newestKey - this.capacity) return -1;
+    const slot = key % this.capacity;
     if (this.keys[slot] !== key) {
-      // Reusing the slot evicts whatever older bucket held it.
       this.keys[slot] = key;
       const base = slot * this.series;
-      for (let i = 0; i < this.series; i++) {
-        this.packets[base + i] = 0;
-        this.bytes[base + i] = 0;
-        this.latePackets[base + i] = 0;
-        this.lateBytes[base + i] = 0;
-      }
+      this.packets.fill(0, base, base + this.series);
+      this.bytes.fill(0, base, base + this.series);
+      this.latePackets.fill(0, base, base + this.series);
+      this.lateBytes.fill(0, base, base + this.series);
+      this.coveredMs[slot] = 0;
+      this.notObservedMs[slot] = 0;
+      this.notObservedReason[slot] = 0;
+      this.lossy[slot] = 0;
     }
     if (key > this.newestKey) this.newestKey = key;
+    if (key < this.firstKey) this.firstKey = key;
     return slot;
   }
 
-  add(startMs: number, series: number, packets: number, bytes: number, late: boolean): void {
-    const key = Math.floor(startMs / this.resolution);
-    // A key older than the ring's horizon is dropped, never written over a
-    // newer bucket.
-    if (key <= this.newestKey - this.keys.length) return;
-    const i = this.slot(key) * this.series + series;
+  /** Adds a count; false when its bucket is older than this ring holds. */
+  add(startMs: number, series: number, packets: number, bytes: number, late: boolean): boolean {
+    const slot = this.claim(Math.floor(startMs / this.resolution));
+    if (slot < 0) return false;
+    const i = slot * this.series + series;
     if (late) {
       this.latePackets[i] += packets;
       this.lateBytes[i] += bytes;
@@ -75,23 +109,55 @@ class Ring {
       this.packets[i] += packets;
       this.bytes[i] += bytes;
     }
+    return true;
   }
 
-  /** The bucket at `key`, or null when it has aged out or was never written. */
-  get(key: number, series: number): { packets: number; bytes: number; latePackets: number; lateBytes: number } | null {
-    const slot = key % this.keys.length;
-    if (this.keys[slot] !== key) return null;
-    const i = slot * this.series + series;
-    return { packets: this.packets[i], bytes: this.bytes[i], latePackets: this.latePackets[i], lateBytes: this.lateBytes[i] };
+  /** Calls `fn(slot, overlapMs)` for every retained slot overlapping [fromMs, toMs). */
+  private eachSlot(fromMs: number, toMs: number, fn: (slot: number, overlapMs: number) => void): void {
+    if (!(toMs > fromMs)) return;
+    const res = this.resolution;
+    const lastKey = Math.floor((toMs - 1) / res);
+    // Older keys than one capacity behind the span's end could never be retained.
+    const firstKey = Math.max(Math.floor(fromMs / res), lastKey - this.capacity + 1);
+    for (let key = firstKey; key <= lastKey; key++) {
+      const slot = this.claim(key);
+      if (slot < 0) continue;
+      const overlap = Math.min(toMs, (key + 1) * res) - Math.max(fromMs, key * res);
+      fn(slot, overlap);
+    }
   }
 
-  /** Oldest key still retained (by capacity), given the newest written. */
-  oldestRetainedKey(): number {
-    return this.newestKey - this.keys.length + 1;
+  markCovered(fromMs: number, toMs: number): void {
+    const res = this.resolution;
+    this.eachSlot(fromMs, toMs, (slot, ms) => {
+      this.coveredMs[slot] = Math.min(res, this.coveredMs[slot] + ms);
+    });
   }
 
+  markNotObserved(fromMs: number, toMs: number, reason: IoNotObservedReason): void {
+    const res = this.resolution;
+    const code = REASONS.indexOf(reason) + 1;
+    this.eachSlot(fromMs, toMs, (slot, ms) => {
+      this.notObservedMs[slot] = Math.min(res, this.notObservedMs[slot] + ms);
+      this.notObservedReason[slot] = code;
+    });
+  }
+
+  markLoss(fromMs: number, toMs: number): void {
+    this.eachSlot(fromMs, toMs, (slot) => {
+      this.lossy[slot] = 1;
+    });
+  }
+
+  /** The slot holding `key`, or -1 when it has aged out or was never written. */
+  slotOf(key: number): number {
+    const slot = key % this.capacity;
+    return this.keys[slot] === key ? slot : -1;
+  }
+
+  /** True once the segment has written more keys than the ring holds. */
   wrapped(): boolean {
-    return Number.isFinite(this.newestKey) && this.keys.every((k) => k >= 0);
+    return Number.isFinite(this.newestKey) && this.newestKey - this.firstKey + 1 > this.capacity;
   }
 }
 
@@ -100,11 +166,13 @@ export interface Span {
   toMs: number;
 }
 
-export interface NotObservedSpan extends Span {
+export interface Marker {
+  ms: number;
   reason: IoNotObservedReason;
 }
 
-export interface LossSpan extends Span {
+export interface UnplacedLate extends Span {
+  series: number;
   frames: number;
 }
 
@@ -114,13 +182,22 @@ export interface IoHistory {
   ids: string[];
   /** Ring per resolution, built for the current revision's series. */
   rings: Map<RingResolution, Ring>;
-  covered: Span[];
-  notObserved: NotObservedSpan[];
-  loss: LossSpan[];
-  /** Late frames not attributed to a bucket, per series, with their span. */
-  unattributedLate: Array<Span & { series: number; frames: number }>;
+  /** End of the newest covered range (covered ranges abut, per the wire protocol). */
+  highWaterMs: number | null;
+  /** Zero-length notObserved markers (e.g. replay_error at end of file). */
+  markers: Marker[];
+  /**
+   * Late frames that could not be placed in a retained bucket: the scalar
+   * `late` overflow, and late buckets older than every ring. Recorded
+   * against their message's span (spec D5).
+   */
+  unplacedLate: UnplacedLate[];
+  /** Running totals of unplaced late frames per series; never truncated. */
+  unplacedLateTotal: number[];
   /** When this history segment started (first covered ms), for the horizon text. */
   startedMs: number | null;
+  /** First covered ms seen in this agent epoch (kept across revision changes). */
+  epochStartedMs: number | null;
   /** Bumped on every change, so a view can re-render cheaply. */
   version: number;
 }
@@ -131,72 +208,108 @@ export function createHistory(): IoHistory {
     revision: null,
     ids: [],
     rings: new Map(),
-    covered: [],
-    notObserved: [],
-    loss: [],
-    unattributedLate: [],
+    highWaterMs: null,
+    markers: [],
+    unplacedLate: [],
+    unplacedLateTotal: [],
     startedMs: null,
+    epochStartedMs: null,
     version: 0,
   };
 }
 
 function resetSegment(h: IoHistory, epoch: string, revision: number, ids: string[]): void {
+  if (h.epoch !== epoch) h.epochStartedMs = null;
   h.epoch = epoch;
   h.revision = revision;
   h.ids = [...ids];
   h.rings = new Map(RESOLUTIONS.map((r) => [r, new Ring(r, Math.max(ids.length, 1))]));
-  h.covered = [];
-  h.notObserved = [];
-  h.loss = [];
-  h.unattributedLate = [];
+  h.highWaterMs = null;
+  h.markers = [];
+  h.unplacedLate = [];
+  h.unplacedLateTotal = ids.map(() => 0);
   h.startedMs = null;
 }
 
-function pushBounded<T>(list: T[], item: T): void {
+function pushBounded<T>(list: T[], item: T, max: number): void {
   list.push(item);
-  if (list.length > MAX_SPANS) list.splice(0, list.length - MAX_SPANS);
+  if (list.length > max) list.splice(0, list.length - max);
+}
+
+/** Within one epoch, revisions only move forward. */
+function isOlder(h: IoHistory, epoch: string, revision: number): boolean {
+  return h.epoch === epoch && h.revision !== null && revision < h.revision;
 }
 
 /**
  * A new epoch (agent restart) or revision (series set changed) starts a
  * new history segment: bucket counts are only comparable within one
- * (epoch, revision). Applying the same status twice is a no-op.
+ * (epoch, revision). Applying the same status twice, or an older one, is
+ * a no-op.
  */
 export function ingestStatus(h: IoHistory, status: IoSeriesStatus): void {
   if (status.rejected) return; // the set did not change
   if (h.epoch === status.epoch && h.revision === status.revision) return;
+  if (isOlder(h, status.epoch, status.revision)) return;
   resetSegment(h, status.epoch, status.revision, status.series.map((s) => s.id));
   h.version++;
 }
 
+function addUnplaced(h: IoHistory, span: Span, series: number, frames: number): void {
+  h.unplacedLateTotal[series] = (h.unplacedLateTotal[series] ?? 0) + frames;
+  const last = h.unplacedLate[h.unplacedLate.length - 1];
+  if (last && last.series === series && last.fromMs === span.fromMs && last.toMs === span.toMs) last.frames += frames;
+  else pushBounded(h.unplacedLate, { ...span, series, frames }, MAX_UNPLACED_SPANS);
+}
+
 export function ingestBuckets(h: IoHistory, msg: IoBuckets): void {
+  // The agent closes a replaced set's open buckets under the old revision
+  // after announcing the new one (docs/wire-protocol.md "Revision
+  // changes"). That tail belongs to a set the chart no longer shows.
+  if (isOlder(h, msg.epoch, msg.revision)) return;
   // A new (epoch, revision), or a series the current segment does not know
   // (its status has not arrived yet), starts a segment keyed by the
   // message's own series. Checked once, before anything is added.
   if (h.epoch !== msg.epoch || h.revision !== msg.revision || msg.series.some((s) => !h.ids.includes(s.id))) {
     resetSegment(h, msg.epoch, msg.revision, msg.series.map((s) => s.id));
   }
+  const rings = [...h.rings.values()];
+  // Covered ranges abut; anything before the high-water mark was already
+  // counted, so a duplicated or overlapping message cannot count it twice.
+  const already = h.highWaterMs ?? -Infinity;
+  const span: Span = { fromMs: msg.coveredFromMs, toMs: msg.coveredToMs };
   msg.series.forEach((s) => {
     const i = h.ids.indexOf(s.id);
-    for (const ring of h.rings.values()) {
-      for (const [start, packets, bytes] of s.buckets) ring.add(start, i, packets, bytes, false);
-      for (const [start, packets, bytes] of s.lateBuckets) ring.add(start, i, packets, bytes, true);
+    for (const [start, packets, bytes] of s.buckets) {
+      if (start < already) continue;
+      for (const ring of rings) ring.add(start, i, packets, bytes, false);
     }
-    if (s.late > 0) {
-      pushBounded(h.unattributedLate, { fromMs: msg.coveredFromMs, toMs: msg.coveredToMs, series: i, frames: s.late });
+    for (const [start, packets, bytes] of s.lateBuckets) {
+      let placed = false;
+      for (const ring of rings) placed = ring.add(start, i, packets, bytes, true) || placed;
+      // Aged out of every ring: the count stays on the message span.
+      if (!placed) addUnplaced(h, span, i, packets);
     }
+    if (s.late > 0) addUnplaced(h, span, i, s.late);
   });
-  if (msg.coveredToMs > msg.coveredFromMs) {
-    const last = h.covered[h.covered.length - 1];
-    if (last && last.toMs === msg.coveredFromMs) last.toMs = msg.coveredToMs;
-    else pushBounded(h.covered, { fromMs: msg.coveredFromMs, toMs: msg.coveredToMs });
-    if (h.startedMs === null) h.startedMs = msg.coveredFromMs;
+  const coveredFrom = Math.max(msg.coveredFromMs, already);
+  if (msg.coveredToMs > coveredFrom) {
+    for (const ring of rings) ring.markCovered(coveredFrom, msg.coveredToMs);
+    h.highWaterMs = msg.coveredToMs;
+    if (h.startedMs === null) h.startedMs = coveredFrom;
+    if (h.epochStartedMs === null) h.epochStartedMs = coveredFrom;
   }
-  for (const n of msg.notObserved) pushBounded(h.notObserved, { fromMs: n.fromMs, toMs: n.toMs, reason: n.reason });
+  for (const n of msg.notObserved) {
+    if (n.toMs > n.fromMs) for (const ring of rings) ring.markNotObserved(n.fromMs, n.toMs, n.reason);
+    else pushBounded(h.markers, { ms: n.fromMs, reason: n.reason }, MAX_MARKERS);
+  }
   const frames = msg.loss.kernelDropped + msg.loss.ifDropped + msg.loss.unparseable + msg.loss.evaluationSkipped;
   // Loss is reported per message, so it shades the whole message span; it
   // is never spread across buckets as though its timing were known.
-  if (frames > 0) pushBounded(h.loss, { fromMs: msg.coveredFromMs, toMs: Math.max(msg.coveredToMs, msg.coveredFromMs + BUCKET_MS), frames });
+  if (frames > 0) {
+    const to = Math.max(msg.coveredToMs, msg.coveredFromMs + BUCKET_MS);
+    for (const ring of rings) ring.markLoss(msg.coveredFromMs, to);
+  }
   h.version++;
 }
 
@@ -209,69 +322,85 @@ export interface IoPoint {
   bytes: number;
   /** Late frames attributed to this interval, kept apart from `packets`. */
   latePackets: number;
+  /** Late frames whose own bucket is not known, from a message span touching this interval. */
+  unplacedLate: number;
   /** Loss reported in a message whose span overlaps this interval. */
   lossy: boolean;
+  /** How much of the interval was not observed, and why (the latest reason). */
+  notObservedMs: number;
+  notObservedReason?: IoNotObservedReason;
 }
 
-function overlaps(a: Span, fromMs: number, toMs: number): boolean {
-  return a.fromMs < toMs && fromMs < a.toMs;
-}
-
-function fullyCovered(h: IoHistory, fromMs: number, toMs: number): boolean {
-  // Covered spans are disjoint and in order; walk the union across [from, to).
-  let cursor = fromMs;
-  for (const s of h.covered) {
-    if (s.toMs <= cursor) continue;
-    if (s.fromMs > cursor) return false;
-    cursor = s.toMs;
-    if (cursor >= toMs) return true;
-  }
-  return false;
+function touches(span: Span, fromMs: number, toMs: number): boolean {
+  // A zero-length span touches the interval that contains its instant.
+  if (span.toMs <= span.fromMs) return fromMs <= span.fromMs && span.fromMs < toMs;
+  return span.fromMs < toMs && fromMs < span.toMs;
 }
 
 function ringFor(interval: IoInterval): RingResolution {
   return interval === 10000 ? 1000 : interval;
 }
 
+/** Interval-aligned point count for [fromMs, toMs). */
+export function pointCount(fromMs: number, toMs: number, interval: IoInterval): number {
+  if (!(toMs > fromMs)) return 0;
+  return Math.floor((toMs - 1) / interval) - Math.floor(fromMs / interval) + 1;
+}
+
 /**
  * Points for one series over [fromMs, toMs) at `interval`. Coarser
- * intervals are exact sums of the 100 ms counts the agent sent.
+ * intervals are exact sums of the 100 ms counts the agent sent. At most
+ * MAX_POINTS points; if the window would need more, the newest are kept.
  */
 export function query(h: IoHistory, seriesId: string, interval: IoInterval, fromMs: number, toMs: number): IoPoint[] {
   const series = h.ids.indexOf(seriesId);
   const ring = h.rings.get(ringFor(interval));
   const points: IoPoint[] = [];
-  if (series < 0 || !ring) return points;
+  if (series < 0 || !ring || !(toMs > fromMs)) return points;
   const step = ring.resolution;
-  const first = Math.floor(fromMs / interval) * interval;
-  // Only spans that touch the window matter; filter once, not per point.
-  const notObservedHere = h.notObserved.filter((n) => n.toMs > n.fromMs && overlaps(n, first, toMs));
-  const lossHere = h.loss.filter((l) => overlaps(l, first, toMs));
-  for (let start = first; start < toMs && points.length < MAX_POINTS; start += interval) {
-    const end = start + interval;
+  const last = Math.floor((toMs - 1) / interval) * interval;
+  const first = Math.max(Math.floor(fromMs / interval) * interval, last - (MAX_POINTS - 1) * interval);
+  const unplacedHere = h.unplacedLate.filter((u) => u.series === series && touches(u, first, last + interval));
+  const { keys, packets: P, bytes: B, latePackets: L, coveredMs, notObservedMs: N, notObservedReason: R, lossy: X } = ring;
+  const capacity = ring.capacity;
+  const width = ring.series;
+  const slotsPer = interval / step;
+  for (let start = first; start <= last; start += interval) {
     let packets = 0;
     let bytes = 0;
     let latePackets = 0;
-    let retained = true;
-    for (let t = start; t < end; t += step) {
-      const key = Math.floor(t / step);
-      if (key < ring.oldestRetainedKey()) retained = false;
-      const b = ring.get(key, series);
-      if (b) {
-        packets += b.packets;
-        bytes += b.bytes;
-        latePackets += b.latePackets;
-      }
+    let covered = 0;
+    let notObservedMs = 0;
+    let reasonCode = 0;
+    let lossy = false;
+    const firstKey = start / step;
+    for (let k = 0; k < slotsPer; k++) {
+      const key = firstKey + k;
+      const slot = key % capacity;
+      if (keys[slot] !== key) continue; // aged out or never written: not covered
+      const i = slot * width + series;
+      packets += P[i];
+      bytes += B[i];
+      latePackets += L[i];
+      covered += coveredMs[slot];
+      notObservedMs += N[slot];
+      if (R[slot]) reasonCode = R[slot];
+      if (X[slot]) lossy = true;
     }
-    const notObserved = notObservedHere.some((n) => overlaps(n, start, end));
-    const state: PointState = notObserved ? 'notObserved' : retained && fullyCovered(h, start, end) ? 'value' : 'unknown';
+    // Not observed is the more specific signal, so it wins over unknown.
+    const state: PointState = notObservedMs > 0 ? 'notObserved' : covered >= interval ? 'value' : 'unknown';
+    let unplacedLate = 0;
+    if (unplacedHere.length) for (const u of unplacedHere) if (touches(u, start, start + interval)) unplacedLate += u.frames;
     points.push({
       startMs: start,
       state,
       packets: state === 'value' ? packets : 0,
       bytes: state === 'value' ? bytes : 0,
       latePackets,
-      lossy: lossHere.some((l) => overlaps(l, start, end)),
+      unplacedLate,
+      lossy,
+      notObservedMs,
+      notObservedReason: reasonCode ? REASONS[reasonCode - 1] : undefined,
     });
   }
   return points;
@@ -287,9 +416,8 @@ export function rate(point: IoPoint, measure: Measure, interval: IoInterval): nu
 
 /** Intervals that keep the window within MAX_POINTS points per series. */
 export function allowedIntervals(fromMs: number, toMs: number): { interval: IoInterval; allowed: boolean; reason?: string }[] {
-  const span = Math.max(0, toMs - fromMs);
   return IO_INTERVALS.map((interval) => {
-    const points = Math.ceil(span / interval);
+    const points = pointCount(fromMs, toMs, interval);
     return points <= MAX_POINTS
       ? { interval, allowed: true }
       : { interval, allowed: false, reason: `${points} points per series; the limit is ${MAX_POINTS}. Zoom in or pick a coarser interval.` };
@@ -311,42 +439,89 @@ export interface Tick {
   label: string;
 }
 
+const partsFormats = new Map<string, Intl.DateTimeFormat>();
+
+/** The zone's offset from UTC at `ms` (local wall time minus UTC), in ms. */
+export function zoneOffsetMs(ms: number, timeZone?: string): number {
+  const key = timeZone ?? '';
+  let fmt = partsFormats.get(key);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+    partsFormats.set(key, fmt);
+  }
+  const p: Record<string, number> = {};
+  for (const part of fmt.formatToParts(new Date(ms))) if (part.type !== 'literal') p[part.type] = Number(part.value);
+  const wall = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
+  return wall - (ms - (((ms % 1000) + 1000) % 1000));
+}
+
+function localDay(ms: number, timeZone?: string): number {
+  return Math.floor((ms + zoneOffsetMs(ms, timeZone)) / 86_400_000);
+}
+
 /**
  * About `target` labelled ticks across [fromMs, toMs). Labels are wall-clock
  * time in `timeZone` (the viewer's own by default), with milliseconds only
- * when the step is sub-second.
+ * when the step is sub-second. Steps of a minute or more are aligned to
+ * local wall-clock multiples (so hourly ticks land on the hour in a +5:30
+ * zone, and across DST), and carry the date when the window spans days.
  */
 export function ticks(fromMs: number, toMs: number, target = 6, timeZone?: string): Tick[] {
   const span = toMs - fromMs;
   if (!(span > 0)) return [];
   const step = TICK_STEPS.find((s) => span / s <= target) ?? TICK_STEPS[TICK_STEPS.length - 1];
+  const withDate = step >= 3_600_000 && localDay(fromMs, timeZone) !== localDay(toMs - 1, timeZone);
   const format = new Intl.DateTimeFormat('en-GB', {
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit',
     hourCycle: 'h23',
     timeZone,
+    ...(withDate ? { day: 'numeric', month: 'short' } : { second: '2-digit' }),
     ...(step < 1000 ? { fractionalSecondDigits: 3 as const } : {}),
   });
   const out: Tick[] = [];
-  for (let t = Math.ceil(fromMs / step) * step; t < toMs; t += step) out.push({ ms: t, label: format.format(new Date(t)) });
+  const push = (t: number) => {
+    if (t >= fromMs && t < toMs && (out.length === 0 || t > out[out.length - 1].ms)) out.push({ ms: t, label: format.format(new Date(t)) });
+  };
+  if (step < 60_000) {
+    for (let t = Math.ceil(fromMs / step) * step; t < toMs; t += step) push(t);
+    return out;
+  }
+  // Walk local wall-clock multiples of the step and map each back to UTC.
+  let offset = zoneOffsetMs(fromMs, timeZone);
+  for (let wall = Math.ceil((fromMs + offset) / step) * step, guard = 0; guard < 1000; wall += step, guard++) {
+    let t = wall - offset;
+    const actual = zoneOffsetMs(t, timeZone);
+    if (actual !== offset) {
+      t = wall - actual;
+      offset = actual;
+    }
+    if (t >= toMs) break;
+    push(t);
+  }
   return out;
 }
 
 /** "History since 14:02:11" plus any retention limit already reached. */
 export function horizonText(h: IoHistory, interval: IoInterval, timeZone?: string): string {
   if (h.startedMs === null) return 'No IO graph data yet';
-  const fmt = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone });
   const ring = h.rings.get(ringFor(interval));
   const limit = interval === 100 ? '15 min at 100 ms' : interval === 60000 ? '24 h at 1 min' : '1 h at 1 s';
-  const parts = [`History since ${fmt.format(new Date(h.startedMs))} (this tab; lost on reload)`];
+  const parts = [`History since ${clock(h.startedMs, timeZone)} (this tab; lost on reload)`];
   if (ring?.wrapped()) parts.push(`retention limit reached: ${limit}`);
   return parts.join(' · ');
 }
 
+/** HH:MM:SS in `timeZone`. */
+export function clock(ms: number, timeZone?: string): string {
+  return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone }).format(new Date(ms));
+}
+
 /** Newest covered time, for live-follow mode. */
 export function latestCoveredMs(h: IoHistory): number | null {
-  return h.covered.length ? h.covered[h.covered.length - 1].toMs : null;
+  return h.highWaterMs;
 }
 
 /** A random hex request id for set_io_series (8–32 hex digits). */

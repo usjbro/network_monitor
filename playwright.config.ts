@@ -51,10 +51,18 @@ export default defineConfig({
     // check (that's `npm run build` in CI's "web" job already). Keeps the
     // loopback-only `-H 127.0.0.1` bind and `--webpack` flag CLAUDE.md
     // says not to drop.
-    command: `npx next dev -H 127.0.0.1 --webpack -p ${PORT}`,
+    //
+    // E2E_PRODUCTION=1 instead builds and serves a production bundle
+    // (`next build --webpack` then `next start`, still loopback-only). The
+    // IO graph spec (e2e/io-graph.spec.ts) enforces its one-frame budget
+    // only in that mode: `next dev` renders twice (StrictMode) and adds
+    // dev-only checks, so its timings are not the shipped code's.
+    command: process.env.E2E_PRODUCTION === '1'
+      ? `npx next build --webpack && npx next start -H 127.0.0.1 -p ${PORT}`
+      : `npx next dev -H 127.0.0.1 --webpack -p ${PORT}`,
     url: `http://127.0.0.1:${PORT}`,
     reuseExistingServer: false,
     env: { AGENT_TOKEN_FILE: agentTokenFile },
-    timeout: 120_000,
+    timeout: process.env.E2E_PRODUCTION === '1' ? 300_000 : 120_000,
   },
 });
