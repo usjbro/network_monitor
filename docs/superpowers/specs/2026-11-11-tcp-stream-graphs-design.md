@@ -3,7 +3,7 @@
 **Issue:** KAN-129 (legacy JAM-19, GitHub #86) — "TCP stream graphs: time/sequence, RTT and throughput per flow"
 **Epic:** KAN-18 (Analysis surfaces, legacy JAM-127)
 **Depends on:** KAN-77 / JAM-12 Expert Info (Done; its retransmission signal is reused, its rate-limited `finding` events are not). Soft: nothing else.
-**Status:** DRAFT for James's review. The four product decisions below were made by James in chat on 2026-11-11; everything else is a proposal to review.
+**Status:** APPROVED by James (merged in PR #314; "go ahead with the plan" in chat on 2026-11-11). The four product decisions below were made by James in chat on 2026-11-11. Next: the implementation plan, `docs/superpowers/plans/2026-11-11-tcp-stream-graphs.md`.
 
 ## Problem
 
