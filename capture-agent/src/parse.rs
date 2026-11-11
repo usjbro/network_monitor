@@ -39,6 +39,44 @@ pub struct TcpFlags {
     pub rst: bool,
     pub window_size: u16,
     pub ack_number: u32,
+    /// PSH, carried into KAN-129's sample flags byte.
+    pub psh: bool,
+    /// KAN-129 (spec D4): the window-scale option's shift count (RFC 7323,
+    /// kind 3), unclamped as on the wire. Present only on a SYN-flagged
+    /// segment whose option list is well formed and carries the option;
+    /// RFC 7323 §2.2 says the option means nothing on any other segment.
+    pub window_scale: Option<u8>,
+}
+
+/// Walks a TCP option list (the bytes after the fixed 20-byte header) for
+/// the window-scale option. Every bound is checked: kind 0 (EOL) ends the
+/// list, kind 1 (NOP) is one byte, every other kind needs a length byte of
+/// at least 2 that fits in what remains, and kind 3 must be exactly 3 bytes.
+/// Any violation makes the whole list untrustworthy and yields `None`, even
+/// if a window-scale option was read before it.
+pub fn tcp_window_scale_option(options: &[u8]) -> Option<u8> {
+    let mut found = None;
+    let mut i = 0;
+    while i < options.len() {
+        match options[i] {
+            0 => break,
+            1 => i += 1,
+            kind => {
+                let len = usize::from(*options.get(i + 1)?);
+                if len < 2 || len > options.len() - i {
+                    return None;
+                }
+                if kind == 3 {
+                    if len != 3 {
+                        return None;
+                    }
+                    found = found.or(Some(options[i + 2]));
+                }
+                i += len;
+            }
+        }
+    }
+    found
 }
 
 #[derive(Debug, Clone)]
@@ -381,6 +419,8 @@ fn build_parsed_packet(
                 rst: tcp.rst(),
                 window_size: tcp.window_size(),
                 ack_number: tcp.acknowledgment_number(),
+                psh: tcp.psh(),
+                window_scale: if tcp.syn() { tcp_window_scale_option(tcp.options()) } else { None },
             }),
             Some(tcp.sequence_number()),
             tcp.payload().to_vec(),
@@ -705,6 +745,117 @@ mod tests {
         assert_eq!(parsed.ip_declared_payload_len, (8 + payload.len()) as u32);
         // IPv6 fragment extension headers are out of JAM-16's scope.
         assert!(parsed.ip_fragment.is_none());
+    }
+
+    // KAN-129 (spec D4): window-scale option parsing.
+
+    /// An IPv4 TCP segment whose option bytes are exactly `options` (a
+    /// multiple of 4, at most 40), so malformed lists can be put on the wire.
+    fn tcp_with_raw_options(options: &[u8], syn: bool) -> Vec<u8> {
+        let mut tcp = TcpHeader::new(51000, 443, 1000, 65535);
+        tcp.syn = syn;
+        tcp.ack = !syn;
+        tcp.set_options_raw(options).unwrap();
+        let mut ip = Ipv4Header::new(tcp.header_len() as u16, 64, IpNumber::TCP, [192, 168, 1, 10], [93, 184, 216, 34]).unwrap();
+        ip.header_checksum = ip.calc_header_checksum();
+        tcp.checksum = tcp.calc_checksum_ipv4(&ip, &[]).unwrap();
+        let mut data = Vec::new();
+        ip.write(&mut data).unwrap();
+        tcp.write(&mut data).unwrap();
+        data
+    }
+
+    fn window_scale_on_the_wire(options: &[u8]) -> Option<u8> {
+        let parsed = parse_packet(&tcp_with_raw_options(options, true), LinkType::Raw).expect("parses");
+        assert_eq!(parsed.transport_header_len as usize, 20 + options.len());
+        parsed.tcp_flags.unwrap().window_scale
+    }
+
+    #[test]
+    fn reads_window_scale_among_mss_nop_and_sack_permitted() {
+        let mut tcp = TcpHeader::new(51000, 443, 1000, 65535);
+        tcp.syn = true;
+        tcp.set_options(&[
+            TcpOptionElement::MaximumSegmentSize(1460),
+            TcpOptionElement::Noop,
+            TcpOptionElement::WindowScale(7),
+            TcpOptionElement::SelectiveAcknowledgementPermitted,
+        ])
+        .unwrap();
+        assert_eq!(tcp_window_scale_option(tcp.options.as_slice()), Some(7));
+        assert_eq!(window_scale_on_the_wire(tcp.options.as_slice()), Some(7));
+    }
+
+    #[test]
+    fn reports_the_raw_shift_count_even_above_14() {
+        // Clamping is the sample store's job (RFC 7323 §2.3); parse reports the wire.
+        assert_eq!(window_scale_on_the_wire(&[1, 3, 3, 15]), Some(15));
+    }
+
+    #[test]
+    fn window_scale_comes_only_from_syn_segments() {
+        let parsed = parse_packet(&tcp_with_raw_options(&[1, 3, 3, 7], false), LinkType::Raw).unwrap();
+        let flags = parsed.tcp_flags.unwrap();
+        assert!(!flags.syn);
+        assert_eq!(flags.window_scale, None);
+    }
+
+    #[test]
+    fn no_options_means_no_window_scale() {
+        assert_eq!(tcp_window_scale_option(&[]), None);
+        let mut data = Vec::new();
+        PacketBuilder::ethernet2([0; 6], [1; 6]).ipv4([192, 168, 1, 10], [93, 184, 216, 34], 64).tcp(51000, 443, 1, 65535).syn().write(&mut data, &[]).unwrap();
+        assert_eq!(parse_packet(&data, LinkType::Ethernet).unwrap().tcp_flags.unwrap().window_scale, None);
+    }
+
+    #[test]
+    fn a_window_scale_option_with_the_wrong_length_is_rejected() {
+        assert_eq!(window_scale_on_the_wire(&[3, 2, 1, 1]), None, "length 2");
+        assert_eq!(window_scale_on_the_wire(&[3, 4, 7, 0]), None, "length 4");
+    }
+
+    #[test]
+    fn length_zero_and_length_one_options_are_rejected_without_looping() {
+        assert_eq!(window_scale_on_the_wire(&[8, 0, 1, 1, 3, 3, 7, 1]), None, "length 0");
+        assert_eq!(window_scale_on_the_wire(&[8, 1, 1, 1, 3, 3, 7, 1]), None, "length 1");
+    }
+
+    #[test]
+    fn an_option_running_past_the_header_is_rejected() {
+        assert_eq!(window_scale_on_the_wire(&[1, 1, 3, 3]), None, "window scale cut short");
+        assert_eq!(window_scale_on_the_wire(&[1, 1, 1, 3]), None, "no room for the length byte");
+        assert_eq!(window_scale_on_the_wire(&[3, 3, 7, 1, 8, 10, 0, 0]), None, "a later option overruns");
+        assert_eq!(tcp_window_scale_option(&[3, 3]), None, "truncated mid-option");
+    }
+
+    #[test]
+    fn end_of_option_list_stops_the_walk() {
+        assert_eq!(window_scale_on_the_wire(&[3, 3, 7, 0, 8, 0, 0, 0]), Some(7), "bytes after EOL are padding");
+        assert_eq!(window_scale_on_the_wire(&[0, 3, 3, 7]), None, "the option after EOL is not read");
+    }
+
+    #[test]
+    fn window_scale_ignores_bytes_after_the_ip_payload() {
+        // An Ethernet trailer after the IP datagram must not shift where
+        // options are read from.
+        let mut data = Vec::new();
+        PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv4([192, 168, 1, 10], [93, 184, 216, 34], 64)
+            .tcp(51000, 443, 1, 65535)
+            .syn()
+            .options(&[TcpOptionElement::WindowScale(5)])
+            .unwrap()
+            .write(&mut data, &[])
+            .unwrap();
+        data.extend_from_slice(&[3, 3, 9, 0xaa, 0xaa, 0xaa]);
+        assert_eq!(parse_packet(&data, LinkType::Ethernet).unwrap().tcp_flags.unwrap().window_scale, Some(5));
+    }
+
+    #[test]
+    fn psh_is_parsed() {
+        let mut data = Vec::new();
+        PacketBuilder::ethernet2([0; 6], [1; 6]).ipv4([192, 168, 1, 10], [93, 184, 216, 34], 64).tcp(51000, 443, 1, 65535).psh().write(&mut data, b"x").unwrap();
+        assert!(parse_packet(&data, LinkType::Ethernet).unwrap().tcp_flags.unwrap().psh);
     }
 
     #[test]

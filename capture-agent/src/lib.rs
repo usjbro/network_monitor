@@ -22,6 +22,7 @@ pub mod tls_decrypt;
 pub mod tls_handshake;
 pub mod tls_stream;
 pub mod traceroute;
+pub mod tcp_samples;
 pub mod transaction;
 pub mod wire;
 

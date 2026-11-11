@@ -94,6 +94,14 @@ impl TcpSampleStore {
 - [ ] **Fuzz:** fuzz corpora are gitignored (`capture-agent/fuzz/.gitignore`), so nothing is committed there. The window-scale and malformed-option cases live in `parse.rs` unit tests; copy their frames into a local `corpus/parse_packet/` and run `cargo +nightly fuzz run parse_packet -- -max_total_time=60` locally.
 - [ ] **Verify:** `cargo build --release --locked`, `cargo test --locked`, `cargo clippy --all-targets --locked -- -D warnings`. Re-run the IO graph benchmark (`capture-agent/tests/io_graph_bench.rs`, 0-series case) before and after to show the per-frame cost of recording samples, and record both numbers in the PR.
 
+**As implemented in Task 1** (differences from the interfaces above; Task 3 builds on these):
+
+- **Ring handles.** Each flow's `RingHandle` lives in its `FlowState` (`tcp_ring`), not in a store map keyed by `FlowKey`. So `TcpSampleStore` takes `record(&mut Option<RingHandle>, obs)`, `release(RingHandle)` and `view(RingHandle, from_index, max)`, and recording costs no extra `FlowKey` hash or clone per packet. Task 3 calls `FlowTable::tcp_sample_view(&FlowKey, from_index, max)` and `FlowTable::tcp_sample_store()` for the `capture_stats` counts.
+- **Recycled rings.** A flow whose ring was recycled keeps no ring afterwards (spec D1 allocates on a flow's first segment). Its handle is stale and `tcp_sample_view` returns `None`. This also stops more than 128 interleaved flows from endlessly taking rings from each other.
+- **Window scale and PSH.** These are new `TcpFlags` fields (`window_scale`, `psh`), not a `ParsedPacket` field. The option walker reads etherparse's `TcpSlice::options()`, not the tail of `header_bytes`, because the tail is not the TCP header when a frame carries an Ethernet trailer.
+- **Frame timestamps.** The capture loop calls `FlowTable::observe_frame(physical, reassembled, l7, now_ms, frame_us, replay)` with `system_time_us(timestamp)`. The existing `observe*` methods are unchanged for their callers and derive the sample time from `now_ms`.
+- **Karn's discard.** It drops every outstanding entry that ends after the retransmission's start; entries are in sequence order. So it can also drop RTT for later in-flight data, but it never gives a wrong sample.
+
 ## Task 2 / PR 2: shared request core, admission, Pages route
 
 **Interfaces (new):**
