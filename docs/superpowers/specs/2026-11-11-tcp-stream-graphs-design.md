@@ -99,8 +99,7 @@ Samples are fetched on demand by the tab that opened the graph, never broadcast 
   "found": true, "stale": false, "generation": "4be1a07c9d22f310:17",
   "handshakeSeen": true, "windowScale": { "local": 7, "remote": 8 },
   "seqBase": { "outbound": 1294467712, "inbound": 3011845120 }, "relativeTo": "isn",
-  "handshakeRttUs": 23110,
-  "firstIndex": 18230, "nextIndex": 22326, "droppedOlder": 18230,
+  "firstIndex": 18230, "nextIndex": 21302, "more": true, "droppedOlder": 18230,
   "samples": {
     "tUs": [1794120000000000, 1200, 1350],
     "seq": [0, 1, 1449], "ack": [0, 1, 1], "win": [65535, 131328, 131328],
@@ -109,10 +108,11 @@ Samples are fetched on demand by the tab that opened the graph, never broadcast 
 }
 ```
 
-  - **Columnar and delta-encoded:** `tUs[0]` is absolute (µs since the epoch), the rest are deltas from the previous sample; `seq`/`ack` are relative to `seqBase` per direction. This keeps 4 096 samples at about 200 KiB of JSON (about 8 numbers of ~6 characters each per sample), under the 256 KiB line ceiling, which the agent asserts before writing.
-  - **Paging and live follow:** samples are indexed by a per-ring monotonic `u64` index. `fromIndex` asks for samples at or after it; the reply returns at most 4 096 from `max(fromIndex, firstIndex)` and `nextIndex`. A reader polls once per second while the graph is open and live, sending its `nextIndex`, so each poll returns only new samples. If `fromIndex < firstIndex`, older samples were overwritten: the reply's `droppedOlder` says how many, and the plot shows the gap.
+  - **Columnar and delta-encoded:** `tUs[0]` is absolute (µs since the epoch), the rest are deltas from the previous sample; `seq`/`ack` are relative to `seqBase` per direction. Deltas are signed, because a replayed file's timestamps can go backwards. A sample costs at most 79 bytes of JSON with every column at its maximum, so a reply holds at most **3 072** samples (242 688 bytes plus the envelope), under the 256 KiB line ceiling for every possible value. The agent still measures the line before writing it. *(Amended 2026-11-12, plan amendment A1: first written as 4 096 samples at "about 200 KiB", which holds only for typical values.)*
+  - **Paging and live follow:** samples are indexed by a per-ring monotonic `u64` index. `fromIndex` asks for samples at or after it; the reply returns at most 3 072 from `max(fromIndex, firstIndex)`, the `nextIndex` to ask for next, and `more: true` when the ring already holds samples at or after it, so a reader asks again at once. A full ring takes two requests. A reader polls once per second while the graph is open and live, sending its `nextIndex`, so each poll returns only new samples. If `fromIndex < firstIndex`, older samples were overwritten: the reply's `droppedOlder` says how many, and the plot shows the gap.
   - **Absent cases:** `found: false` (no ring: not TCP, not tracked, or never allocated a ring), `stale: true` (generation changed). Both carry no samples.
-- Agent side: answered synchronously from memory, bounded work (one ring), never subject to the packet-event limiter. If unflushed reply bytes on the relay connection exceed 512 KiB, answer `{ "busy": true }` (relay 503).
+- Agent side: answered synchronously from memory, bounded work (one ring), never subject to the packet-event limiter. The reply is written inline on the requesting connection's own task and only to that connection, never broadcast. That task answers one request before it reads the next, so a connection holds at most one unflushed reply (256 KiB). *(Amended 2026-11-12, plan amendment A2: first written as a `{ "busy": true }` answer above 512 KiB of unflushed bytes, which the agent's write path cannot measure. `busy` is not part of the wire contract.)*
+  - **No handshake RTT in the reply.** The agent keeps the handshake RTT only at millisecond resolution; it stays on the connection as `latencyMs`. *(Amended 2026-11-12, plan amendment A4: the example first carried `handshakeRttUs`.)*
 - Updated together, per the repo's wire rule: `capture-agent/src/wire.rs`, `lib/types.ts`, `lib/agent-mapping.ts`, `docs/wire-protocol.md`, tests on both sides.
 
 ### D6. Plots — **scope decided: the issue's four plots plus tcptrace overlays (James, 2026-11-11)**
@@ -156,7 +156,7 @@ Plus the request path: AgentClient correlation (timeout, abort, disconnect, late
 ## Security-plan review (`docs/security-plan-review-checklist.md`)
 
 - **§1 Bounds:** every store and reply bounded (D1, D3, D5), counted by reserved capacity; limit and limit+1 tests for each.
-- **§2 Failure semantics:** absent, stale, busy and overwritten history are explicit states, never empty plots presented as data.
+- **§2 Failure semantics:** absent, stale and overwritten history are explicit states, never empty plots presented as data.
 - **§3 Cryptography:** not applicable (no payload; random request IDs and epochs from the system RNG).
 - **§4 Sensitive data:** header metadata only; the same fields already appear in `packet` events. Replies go only to the requesting HTTP client, never to the SSE broadcast.
 - **§5 Time:** frame timestamps only; replay-speed equality test.

@@ -11,9 +11,9 @@
 - `tcp_samples` replies never reach the SSE feed or `EventEmitter('event')` listeners (spec D5).
 - Bounds (spec D1, D3, D5), each tested at the limit and limit + 1:
   - 4 096 samples per ring; 128 rings; 32-byte samples; 256 outstanding-data entries per direction per ring.
-  - Reply line ≤ 256 KiB including LF; at most 4 096 samples per reply.
+  - Reply line ≤ 256 KiB including LF; at most 3 072 samples per reply (amendment A1; first written as 4 096).
   - Relay: 4 `tcp_samples` requests in flight, 1 per `connectionId`, 256 KiB reservation per slot held until HTTP finish/close/error; agent socket `writableLength` > 64 KiB → 503; 5 000 ms correlation timeout.
-  - Agent: unflushed reply bytes on the relay connection > 512 KiB → `busy`.
+  - Agent: at most one unflushed reply (≤ 256 KiB) per relay connection, by writing it inline (amendment A2; first written as a `busy` answer above 512 KiB).
 - Frame timestamps only (`system_time_us(timestamp)`), never wall time, so replay at any speed gives identical rings.
 - Tests first in every task; show the new test failing for the missing behaviour before implementing (CLAUDE.md workflow step 4).
 - Wire changes update `capture-agent/src/wire.rs`, `lib/types.ts`, `lib/agent-mapping.ts` and `docs/wire-protocol.md` in the same PR.
@@ -147,13 +147,50 @@ export async function handleTcpSamples(req: NextApiRequest, res: NextApiResponse
 - **Cross-site check.** The Pages route compares `Origin` with `proto://Host`, where `Host` is allowlisted by `middleware.ts`. An App Router `request.url` takes its origin from the server's own bind address instead. The two can differ only on the `Origin` fallback, which matters only for browsers that don't send `Sec-Fetch-Site`.
 - **Relay start.** A request made before the relay's agent client has connected gets 503. The graph is opened from a tab whose SSE stream has already started the client.
 
+## Task 3 amendments (2026-11-12)
+
+A readiness check against `main` at `9f23fcf` found five gaps in Task 3 as first written (KAN-129, comment of 2026-11-12). A1, A2 and A4 change spec D5, which this PR updates to match; James's approval of this PR adopts them. The Task 3 section below already reflects all five.
+
+### A1. A reply holds at most 3 072 samples
+
+The first plan promised that 4 096 samples fit the 256 KiB reply line. They do not. With every column at its maximum a sample costs 79 bytes: a `tUs` delta of 21 (a sign and 20 digits), `seq`, `ack`, `win` and `rttUs` 10 each, `len` 5, `flags` 3, `mark` 2, and 8 separators. That is about 316 KiB for 4 096. Ordinary values also get there: a flow past 1 GB with scaled windows and 100 ms between samples is just over the ceiling.
+
+- A reply carries at most **3 072** samples. 3 072 × 79 = 242 688 bytes, which leaves 19 456 for the envelope, so the ceiling holds for every possible value. A full ring takes two requests.
+- `nextIndex` is the index to ask for next, not the ring's write index. The reply carries `more: true` when the ring already holds samples at or after `nextIndex`, so Task 4 asks again at once and does not wait for its next poll.
+- `tUs` deltas are signed. Frame timestamps in a replayed file can go backwards; the delta is then negative and never clamped, so the reader sees the capture's real order.
+- The agent still measures the encoded line before writing it. A line over the ceiling is a bug: the agent does not write it, logs one line to stderr, and the request ends as a 504 at the relay. A test reaches this through a test-only lower ceiling.
+- Rejected: paging by a byte budget (the encoding would depend on the data), and raising the ceiling to 384 KiB (it changes Task 2's merged constants and takes the relay's reservation from 1 MiB to 1.5 MiB).
+
+### A2. No `busy`: the reply is written inline
+
+The first plan had the agent answer `busy` when unflushed reply bytes on the relay connection passed 512 KiB. The agent has nothing to measure that with. Its connection task writes each line with `write_half.write_all(..).await` inside its `select!` loop (`capture-agent/src/main.rs`, the `rx.recv()` arm); there is no outbound queue and no byte count. The relay merged in Task 2 has no handling for a `busy` reply either.
+
+- The handler writes the reply inline, on the same task. That task reads one control line, answers it, and reads the next only after `write_all` returns. So a connection never holds more than one unflushed reply, at most 256 KiB, which is inside the spec's 512 KiB without a counter.
+- `busy` is removed from the wire contract.
+- While a reply drains, that connection's events wait in the broadcast buffer (1 024 lines) and overflow is counted by the existing lag counter, as it already is for a relay that reads slowly.
+- Rejected: a writer task per connection fed by a byte-counted queue. It would match the first wording, but it moves every event write for every connection onto a new path, a larger change to the agent's hot path than Task 3 otherwise needs.
+
+### A3. Resolving `connectionId` to a flow
+
+`FlowTable::tcp_sample_view` takes a `FlowKey`, and nothing maps an id back to one. Task 3 adds `FlowKey::from_connection_id(&str) -> Option<FlowKey>`: accept only the `Tcp-` prefix, split the rest once on `-`, split each half on its last `:` into address and port, then require `key.connection_id() == id`. That equality makes the parse exact for IPv6 and rejects every other spelling. `None`, a non-TCP id or a key not in the table gives `found: false`. The lookup is one hash, with no scan under the flow lock.
+
+### A4. `handshakeRttUs` is not sent
+
+`RingView` holds no handshake RTT, and the only one the agent keeps is `FlowState.rtt_ms`, at millisecond resolution. The reply drops the field. The handshake RTT stays where it is today, as `latencyMs` on the connection, and the RTT plot uses the per-ACK `rttUs` samples.
+
+### A5. The reply goes only to the requester
+
+The handler writes the `tcp_samples` line to the requesting connection's own `write_half`. It never goes through the broadcast channel, so no other connection can receive it and the packet-event limiter never counts it.
+
 ## Task 3 / PR 3: wire contract and agent integration
 
-**Wire** (spec D5): control `get_tcp_samples { requestId, connectionId, generation?, fromIndex? }`; event `tcp_samples` with the fields in the spec's example, columnar and delta-encoded; `capture_stats` gains `tcpSampleRings`, `tcpSampleRingBytes`, `tcpSampleRingsRecycled`.
+**Wire** (spec D5, as amended above): control `get_tcp_samples { requestId, connectionId, generation?, fromIndex? }`; event `tcp_samples` with the fields in the spec's example, columnar and delta-encoded; `capture_stats` gains `tcpSampleRings`, `tcpSampleRingBytes`, `tcpSampleRingsRecycled`.
 
 - [ ] **Tests first:**
-  - Rust `wire.rs`: decode of `get_tcp_samples` (missing/oversized fields rejected as the existing control decoders do); encoding of a full 4 096-sample reply with worst-case values stays ≤ 256 KiB (asserted before write) and decodes back to the same samples; absent cases (`found:false`, `stale:true`, `busy:true`) carry no samples;
-  - handler: unknown `connectionId` → `found:false`; mismatched `generation` → `stale:true`; `fromIndex` paging returns at most 4 096 from `max(fromIndex, firstIndex)` with correct `nextIndex` and `droppedOlder`; unflushed bytes > 512 KiB → `busy`; the reply is not counted against the packet-event limiter;
+  - Rust `wire.rs`: decode of `get_tcp_samples` (missing/oversized fields rejected as the existing control decoders do); a 3 072-sample reply with every field at its maximum, negative `tUs` deltas included, stays ≤ 256 KiB and decodes back to the same samples; `type` is the first key and `requestId` the second; absent cases (`found:false`, `stale:true`) carry no samples;
+  - `FlowKey::from_connection_id` (A3): IPv4 and IPv6 round trips; `Udp-` ids; a missing or non-numeric port; an extra `-`; a 128-character id; an id that parses but is not in canonical form;
+  - handler: unknown `connectionId` → `found:false`; mismatched `generation` → `stale:true`; `fromIndex` paging returns at most 3 072 from `max(fromIndex, firstIndex)` with correct `nextIndex`, `more` and `droppedOlder`, at 3 072 and 3 073 available; a full ring read in two pages equals the ring; an encoded line over a test-only lower ceiling is not written (A1);
+  - reply path (A2, A5): with a broadcast subscriber attached, a request on one connection puts no `tcp_samples` line on the subscriber and is not counted against the packet-event limiter; a peer that sends 8 requests and reads nothing leaves the agent holding one reply, the capture loop and other connections keep running, and the lag counter rises instead of memory;
   - TS mapper: both directions of delta decoding, `seqBase` per direction, unknown fields ignored, unknown enum values visible as unknown, malformed arrays (lengths differ, non-numbers) throw;
   - end to end (`capture-agent/tests/tcp_samples_replay.rs`, real binary, replayed generated pcaps): a bulk transfer's ring is a monotonic staircase; a forced retransmission is marked; a zero-window episode is marked; a handshake with window scale on both sides gives scaled windows, on one side only gives raw windows; RTT samples equal the fixture's ACK delay; `REPLAY_SPEED=realtime` and `fast` give identical replies; the cost fields in `capture_stats` match `reserved_bytes`.
 - [ ] **Docs:** `docs/wire-protocol.md` sections for `get_tcp_samples`, `tcp_samples` and the new `capture_stats` fields, including the capture-point RTT caveat.
@@ -185,7 +222,7 @@ export async function handleTcpSamples(req: NextApiRequest, res: NextApiResponse
 ## Security checklist (`docs/security-plan-review-checklist.md`) → where proven
 
 - **§1 Bounds:** every bound above at limit and limit + 1 (Tasks 1–3); relay admission and slow-reader tests (Task 2).
-- **§2 Failure semantics:** `found`, `stale`, `busy`, overwritten history and 429/503/504 are explicit in the reply and the UI (Tasks 3, 4).
+- **§2 Failure semantics:** `found`, `stale`, overwritten history and 429/503/504 are explicit in the reply and the UI (Tasks 3, 4).
 - **§3 Cryptography:** request IDs and ring epochs from the system RNG (`crypto.randomBytes`, `ring::rand::SystemRandom`).
 - **§4 Sensitive data:** header metadata only; replies never broadcast (Task 2 tests); no logging of reply bodies.
 - **§5 Time:** frame timestamps; realtime = fast equality (Task 3).
