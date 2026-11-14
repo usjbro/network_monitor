@@ -10,7 +10,7 @@
     "build": "next build --webpack",
     "start": "next start -H 127.0.0.1",
     "lint": "eslint . --max-warnings 0",
-    "clean": "next clean",
+    "clean": "node -e \"require('fs').rmSync('.next',{recursive:true,force:true})\"",
     "test": "vitest run",
     "test:e2e": "playwright test"
   },

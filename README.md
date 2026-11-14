@@ -72,7 +72,7 @@ npx osi-inspect <command> [args...]
 npm run build     # production build
 npm run start      # run production build (also binds to 127.0.0.1 only)
 npm run lint       # eslint .
-npm run clean      # next clean
+npm run clean      # delete the .next build cache
 npm test           # vitest run — lib/__tests__/
 ```
 
