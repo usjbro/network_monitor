@@ -183,7 +183,64 @@ export interface CaptureStats {
   // JAM-18: the replay is waiting for a first IO-graph series set
   // (REPLAY_WAIT_FOR_IO_SERIES=1). Absent means not waiting.
   replayWaiting?: boolean;
+  // KAN-129: TCP sample rings held, their reserved capacity in bytes (not
+  // their fill), and rings taken from the least recently active flow.
+  // Undefined from an older agent: unknown, not zero.
+  tcpSampleRings?: number;
+  tcpSampleRingBytes?: number;
+  tcpSampleRingsRecycled?: number;
 }
+
+// KAN-129 TCP stream graphs (docs/wire-protocol.md "tcp_samples"): one page
+// of a flow's sample ring, header metadata only.
+// TCP header flag bits, at their on-the-wire positions.
+export const TCP_SAMPLE_FLAG = { FIN: 1, SYN: 2, RST: 4, PSH: 8, ACK: 16 } as const;
+// Agent-computed marks. Bits not listed here are kept in `mark` as sent.
+export const TCP_SAMPLE_MARK = { OUTBOUND: 1, RETRANSMIT: 2, WIN_SCALED: 4, ZERO_WINDOW: 8, RTT: 16 } as const;
+
+export interface TcpSample {
+  // Frame timestamp, µs since the epoch (capture time live, recorded time in replay).
+  tUs: number;
+  // Relative to the sender's `seqBase`.
+  seq: number;
+  // Relative to the receiver's `seqBase`; 0 without the ACK flag.
+  ack: number;
+  // Scaled when `mark` has WIN_SCALED, else raw.
+  win: number;
+  len: number;
+  flags: number;
+  mark: number;
+  // Valid when `mark` has RTT.
+  rttUs: number;
+  outbound: boolean;
+}
+
+// `isn`: both bases are the captured SYNs' ISNs. `firstSeen`: the handshake
+// was not captured, so sequence is relative to the first seen segment.
+export type TcpSamplesRelativeTo = 'isn' | 'firstSeen' | 'unknown';
+
+export type TcpSamplesPage =
+  | { found: false; connectionId: string }
+  | { found: true; stale: true; connectionId: string; generation: string }
+  | {
+      found: true;
+      stale: false;
+      connectionId: string;
+      generation: string;
+      handshakeSeen: boolean;
+      // null: scaling not negotiated in a captured handshake; windows are raw.
+      windowScale: { local: number; remote: number } | null;
+      seqBase: { outbound: number; inbound: number };
+      relativeTo: TcpSamplesRelativeTo;
+      firstIndex: number;
+      // Index to ask for next.
+      nextIndex: number;
+      // The ring already holds samples at or after `nextIndex`.
+      more: boolean;
+      // Samples before `firstIndex` the request asked for but the ring overwrote.
+      droppedOlder: number;
+      samples: TcpSample[];
+    };
 
 // IO graph (JAM-18, docs/wire-protocol.md "io_series_status"/"io_buckets").
 // One shared series set per agent; edits are compare-and-swap on

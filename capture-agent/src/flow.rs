@@ -24,6 +24,22 @@ impl FlowKey {
             self.protocol, self.local_addr, self.local_port, self.remote_addr, self.remote_port
         )
     }
+
+    /// KAN-129 plan A3: the TCP flow a `connection_id()` names, or `None`.
+    /// Only the exact canonical spelling is accepted: the parsed key must
+    /// render back to `id` byte for byte, which rejects leading zeros,
+    /// signs, uncompressed IPv6 and every other alias of the same flow.
+    pub fn from_connection_id(id: &str) -> Option<FlowKey> {
+        fn endpoint(half: &str) -> Option<(String, u16)> {
+            let (addr, port) = half.rsplit_once(':')?;
+            Some((addr.parse::<std::net::IpAddr>().ok()?.to_string(), port.parse().ok()?))
+        }
+        let (local, remote) = id.strip_prefix("Tcp-")?.split_once('-')?;
+        let (local_addr, local_port) = endpoint(local)?;
+        let (remote_addr, remote_port) = endpoint(remote)?;
+        let key = FlowKey { protocol: TransportProtocol::Tcp, local_addr, local_port, remote_addr, remote_port };
+        (key.connection_id() == id).then_some(key)
+    }
 }
 
 struct FlowState {
@@ -3130,5 +3146,273 @@ mod tcp_sample_tests {
     #[test]
     fn every_flow_table_draws_its_own_random_epoch() {
         assert_ne!(table().tcp_sample_store().epoch(), table().tcp_sample_store().epoch());
+    }
+
+    // ---- Task 3: the `get_tcp_samples` handler (`wire::answer_tcp_samples`) ----
+
+    use crate::wire::{self, TcpSamplesRequest, TCP_SAMPLES_MAX_LINE_BYTES, TCP_SAMPLES_MAX_PER_REPLY};
+    use serde_json::Value;
+    use std::sync::Mutex;
+
+    const RID: &str = "0123456789abcdef0123456789abcdef";
+
+    /// A table holding one flow on `local_port` with `n` outbound segments.
+    fn table_with(local_port: u16, n: usize) -> Mutex<FlowTable> {
+        let mut table = table();
+        for i in 0..n {
+            let packet = segment(local_port, true, 1000 + i as u32, ack_flags(1, 500), b"x");
+            table.observe(&packet, &L7Info::None, 10 + i as u64).unwrap();
+        }
+        Mutex::new(table)
+    }
+
+    fn ask(table: &Mutex<FlowTable>, connection_id: &str, generation: Option<String>, from_index: u64) -> Value {
+        let request = TcpSamplesRequest {
+            request_id: RID.into(),
+            connection_id: connection_id.into(),
+            generation,
+            from_index,
+        };
+        let line = wire::answer_tcp_samples(table, &request, TCP_SAMPLES_MAX_LINE_BYTES).expect("a reply line");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn id(local_port: u16) -> String {
+        key(local_port).connection_id()
+    }
+
+    fn generation_of(table: &Mutex<FlowTable>, local_port: u16) -> String {
+        wire::render_generation(view(&table.lock().unwrap(), local_port).unwrap().generation)
+    }
+
+    fn page(reply: &Value) -> (u64, u64, bool, u64, usize) {
+        (
+            reply["firstIndex"].as_u64().unwrap(),
+            reply["nextIndex"].as_u64().unwrap(),
+            reply["more"].as_bool().unwrap(),
+            reply["droppedOlder"].as_u64().unwrap(),
+            reply["samples"]["tUs"].as_array().unwrap().len(),
+        )
+    }
+
+    #[test]
+    fn handler_answers_found_false_for_unknown_or_unparseable_ids() {
+        let table = table_with(51000, 3);
+        for unknown in [id(52000), "Udp-192.168.1.10:5353-224.0.0.251:5353".into(), "not a flow \u{1}€".into(), "Tcp-192.168.1.10:51000-93.184.216.34:0443".into()] {
+            let reply = ask(&table, &unknown, None, 0);
+            assert_eq!(reply["found"], false, "{unknown}");
+            assert_eq!(reply["connectionId"].as_str(), Some(unknown.as_str()), "echoed byte for byte");
+            assert!(reply.get("samples").is_none());
+        }
+        assert_eq!(ask(&table, &id(51000), None, 0)["found"], true);
+    }
+
+    #[test]
+    fn handler_answers_stale_for_a_mismatched_or_malformed_generation() {
+        let table = table_with(51000, 3);
+        let current = generation_of(&table, 51000);
+        let (epoch, counter) = current.split_once(':').unwrap();
+        for asked in [
+            format!("{epoch}:{}", counter.parse::<u64>().unwrap() + 1),
+            format!("{epoch}:{}", u64::MAX),
+            format!("{epoch}:18446744073709551616"),
+            format!("{}:{counter}", epoch.to_uppercase()),
+            "garbage".into(),
+        ] {
+            let reply = ask(&table, &id(51000), Some(asked.clone()), 0);
+            assert_eq!((reply["found"].as_bool(), reply["stale"].as_bool()), (Some(true), Some(true)), "{asked}");
+            assert_eq!(reply["generation"].as_str(), Some(current.as_str()));
+            assert!(reply.get("samples").is_none());
+        }
+        assert_eq!(ask(&table, &id(51000), Some(current), 0)["stale"], false);
+    }
+
+    #[test]
+    fn handler_from_index_at_or_past_the_write_index_returns_nothing() {
+        let table = table_with(51000, 5);
+        assert_eq!(page(&ask(&table, &id(51000), None, 5)), (0, 5, false, 0, 0));
+        assert_eq!(page(&ask(&table, &id(51000), None, 900)), (0, 5, false, 0, 0), "nextIndex is the write index");
+    }
+
+    #[test]
+    fn handler_pages_at_most_3072_samples() {
+        assert_eq!(TCP_SAMPLES_MAX_PER_REPLY, 3072);
+        let exact = table_with(51000, 3072);
+        assert_eq!(page(&ask(&exact, &id(51000), None, 0)), (0, 3072, false, 0, 3072));
+        let over = table_with(51000, 3073);
+        assert_eq!(page(&ask(&over, &id(51000), None, 0)), (0, 3072, true, 0, 3072));
+        assert_eq!(page(&ask(&over, &id(51000), None, 3072)), (0, 3073, false, 0, 1));
+        assert_eq!(page(&ask(&over, &id(51000), None, 100)), (0, 3073, false, 0, 2973));
+    }
+
+    #[test]
+    fn handler_counts_overwritten_history_and_reads_a_full_ring_in_two_pages() {
+        let n = SAMPLES_PER_RING + 1000;
+        let table = table_with(51000, n);
+        let first = (n - SAMPLES_PER_RING) as u64;
+        let one = ask(&table, &id(51000), None, 0);
+        assert_eq!(page(&one), (first, first + 3072, true, first, 3072));
+        let two = ask(&table, &id(51000), None, one["nextIndex"].as_u64().unwrap());
+        assert_eq!(page(&two), (first, n as u64, false, 0, SAMPLES_PER_RING - 3072));
+
+        let seq = |r: &Value| -> Vec<u64> { r["samples"]["seq"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect() };
+        let joined: Vec<u64> = seq(&one).into_iter().chain(seq(&two)).collect();
+        let ring = view(&table.lock().unwrap(), 51000).unwrap();
+        let base = ring.seq_base.0;
+        let expected: Vec<u64> = ring.samples.iter().map(|s| u64::from(s.seq.wrapping_sub(base))).collect();
+        assert_eq!(joined, expected, "two pages equal the ring");
+    }
+
+    #[test]
+    fn capture_stats_cost_reports_live_rings_by_reserved_capacity() {
+        use crate::tcp_samples::{MAX_RINGS, RING_RESERVED_BYTES};
+        let mut table = table();
+        assert_eq!(wire::TcpSampleCostJson::of(table.tcp_sample_store()), wire::TcpSampleCostJson::default());
+        for port in 0..(MAX_RINGS as u16 + 2) {
+            table.observe(&segment(40000 + port, true, 1, ack_flags(1, 500), b"x"), &L7Info::None, 10 + u64::from(port)).unwrap();
+        }
+        let cost = wire::TcpSampleCostJson::of(table.tcp_sample_store());
+        assert_eq!(
+            cost,
+            wire::TcpSampleCostJson {
+                tcp_sample_rings: MAX_RINGS as u64,
+                tcp_sample_ring_bytes: (MAX_RINGS * RING_RESERVED_BYTES) as u64,
+                tcp_sample_rings_recycled: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn handler_writes_nothing_over_a_lower_ceiling() {
+        let table = table_with(51000, 10);
+        let request = TcpSamplesRequest { request_id: RID.into(), connection_id: id(51000), generation: None, from_index: 0 };
+        let line = wire::answer_tcp_samples(&table, &request, TCP_SAMPLES_MAX_LINE_BYTES).unwrap();
+        assert_eq!(wire::answer_tcp_samples(&table, &request, line.len()), Some(line.clone()));
+        assert_eq!(wire::answer_tcp_samples(&table, &request, line.len() - 1), None);
+    }
+}
+
+/// KAN-129 plan A3: `FlowKey::from_connection_id` accepts exactly the ids
+/// `connection_id()` produces for TCP flows.
+#[cfg(test)]
+mod from_connection_id_tests {
+    use super::*;
+
+    fn tcp(local_addr: &str, local_port: u16, remote_addr: &str, remote_port: u16) -> FlowKey {
+        FlowKey {
+            protocol: TransportProtocol::Tcp,
+            local_addr: local_addr.into(),
+            local_port,
+            remote_addr: remote_addr.into(),
+            remote_port,
+        }
+    }
+
+    #[test]
+    fn ipv4_round_trips() {
+        let key = tcp("192.168.1.10", 51000, "93.184.216.34", 443);
+        assert_eq!(key.connection_id(), "Tcp-192.168.1.10:51000-93.184.216.34:443");
+        assert_eq!(FlowKey::from_connection_id(&key.connection_id()), Some(key));
+    }
+
+    #[test]
+    fn ipv6_round_trips_on_the_last_colon_of_each_half() {
+        let key = tcp("fe80::1", 0, "2001:db8::ff00:42:8329", 65535);
+        assert_eq!(FlowKey::from_connection_id(&key.connection_id()), Some(key));
+        let mapped = tcp("::ffff:192.0.2.1", 80, "::", 1);
+        assert_eq!(FlowKey::from_connection_id(&mapped.connection_id()), Some(mapped));
+    }
+
+    #[test]
+    fn non_tcp_ids_are_rejected() {
+        for id in [
+            "Udp-192.168.1.10:5353-224.0.0.251:5353",
+            "Icmp-192.168.1.10:0-8.8.8.8:0",
+            "tcp-192.168.1.10:51000-93.184.216.34:443",
+            "TCP-192.168.1.10:51000-93.184.216.34:443",
+            "192.168.1.10:51000-93.184.216.34:443",
+        ] {
+            assert_eq!(FlowKey::from_connection_id(id), None, "{id}");
+        }
+    }
+
+    #[test]
+    fn malformed_ids_are_rejected() {
+        for id in [
+            "",
+            "Tcp-",
+            "Tcp-192.168.1.10-93.184.216.34:443",
+            "Tcp-192.168.1.10:-93.184.216.34:443",
+            "Tcp-192.168.1.10:abc-93.184.216.34:443",
+            "Tcp-192.168.1.10:51000-93.184.216.34",
+            "Tcp-192.168.1.10:51000-93.184.216.34:65536",
+            "Tcp-192.168.1.10:51000-93.184.216.34:443-1.2.3.4:5",
+            "Tcp-192.168.1.10:51000--93.184.216.34:443",
+            "Tcp-192.168.1.10:51000-93.184.216.34:443 ",
+            "Tcp-host.example:51000-93.184.216.34:443",
+            "Tcp-[fe80::1]:51000-93.184.216.34:443",
+        ] {
+            assert_eq!(FlowKey::from_connection_id(id), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn non_canonical_spellings_of_a_real_flow_are_rejected() {
+        for id in [
+            "Tcp-192.168.1.10:51000-93.184.216.34:0443",
+            "Tcp-192.168.1.10:51000-93.184.216.34:+443",
+            "Tcp-192.168.001.010:51000-93.184.216.34:443",
+            "Tcp-fe80:0:0:0:0:0:0:1:51000-93.184.216.34:443",
+            "Tcp-FE80::1:51000-93.184.216.34:443",
+        ] {
+            assert_eq!(FlowKey::from_connection_id(id), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn a_128_character_id_is_handled() {
+        let key = tcp("2001:db8:aaaa:bbbb:cccc:dddd:eeee:ffff", 65535, "2001:db8:1111:2222:3333:4444:5555:6666", 65535);
+        let id = key.connection_id();
+        let padded = format!("{id}{}", "0".repeat(128 - id.len()));
+        assert_eq!(padded.len(), 128);
+        assert_eq!(FlowKey::from_connection_id(&padded), None);
+        assert_eq!(FlowKey::from_connection_id(&id), Some(key));
+    }
+
+    /// Property: every TCP key whose addresses are std-formatted round-trips.
+    /// A fixed-seed xorshift stands in for a property-testing crate, so no
+    /// dependency is added and failures reproduce.
+    #[test]
+    fn every_std_formatted_tcp_key_round_trips() {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let addr = |next: &mut dyn FnMut() -> u64| -> String {
+            let a = next();
+            if a.is_multiple_of(2) {
+                std::net::Ipv4Addr::from((a >> 32) as u32).to_string()
+            } else {
+                // Zero out random groups so `::` compression is exercised.
+                let mut groups = [0u16; 8];
+                let mask = next();
+                for (i, g) in groups.iter_mut().enumerate() {
+                    if mask >> i & 1 == 1 {
+                        *g = (next() >> 16) as u16;
+                    }
+                }
+                std::net::Ipv6Addr::from(groups).to_string()
+            }
+        };
+        for _ in 0..10_000 {
+            let local = addr(&mut next);
+            let remote = addr(&mut next);
+            let key = tcp(&local, next() as u16, &remote, next() as u16);
+            let id = key.connection_id();
+            assert_eq!(FlowKey::from_connection_id(&id), Some(key), "{id}");
+        }
     }
 }

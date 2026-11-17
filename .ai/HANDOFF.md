@@ -1,3 +1,9 @@
+# KAN-129 Task 3 — wire contract and agent handler (2026-11-17)
+
+Claude implemented Task 3 per plan amendments A1–A5 (#318), James-approved gate `kan-129__tcp-graphs-task3`. `get_tcp_samples` decodes with A3 limits; `tcp_samples` replies (≤ 3 072 samples, signed `tUs` deltas, capped at 2^53 − 1) are written inline to the requesting connection only, via `serve_connection` (loop moved out of `main()` unchanged). `FlowKey::from_connection_id` is exact-canonical. `capture_stats` gains three ring-cost fields. TS `mapTcpSamplesReply`; docs in `docs/wire-protocol.md`. Next: Task 4 (plots/entry point) needs James's choice of implementer. James merges.
+
+---
+
 # KAN-280 — PR #320 review update (2026-11-17)
 
 PR https://github.com/usjbro/network_monitor/pull/320 is open; Jira is In Review. Claude's only blocking finding (raw floating-point tooltip precision) is fixed with at most two decimal places and a red/green regression. Full 1,031 tests, lint and build pass; final independent code and security reviews found no actionable issues. Push this update, confirm CI at the new head and request Claude re-review. James owns merge. Test-harness duplication is tracked separately as KAN-281; KPI metrics and the reported Next.js advisory remain separate follow-ups.

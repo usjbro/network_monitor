@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TCP_SAMPLE_MARK, TcpSample, TcpSamplesPage, TcpSamplesRelativeTo, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -165,6 +165,107 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     observedNameEvictions: typeof w.observedNameEvictions === 'number' ? w.observedNameEvictions : undefined,
     // JAM-18: omitted by the agent when false.
     replayWaiting: w.replayWaiting === true ? true : undefined,
+    // KAN-129: absent from an older agent, and then unknown, not zero.
+    tcpSampleRings: typeof w.tcpSampleRings === 'number' ? w.tcpSampleRings : undefined,
+    tcpSampleRingBytes: typeof w.tcpSampleRingBytes === 'number' ? w.tcpSampleRingBytes : undefined,
+    tcpSampleRingsRecycled: typeof w.tcpSampleRingsRecycled === 'number' ? w.tcpSampleRingsRecycled : undefined,
+  };
+}
+
+const TCP_SAMPLE_COLUMNS = ['tUs', 'seq', 'ack', 'win', 'len', 'flags', 'mark', 'rttUs'] as const;
+const TCP_SAMPLES_RELATIVE_TO: ReadonlySet<string> = new Set(['isn', 'firstSeen']);
+
+function tcpSamplesObject(value: unknown, what: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error(`malformed tcp_samples: ${what}`);
+  return value as Record<string, unknown>;
+}
+
+function tcpSamplesBool(obj: Record<string, unknown>, key: string): boolean {
+  if (typeof obj[key] !== 'boolean') throw new Error(`malformed tcp_samples: ${key}`);
+  return obj[key] as boolean;
+}
+
+function tcpSamplesString(obj: Record<string, unknown>, key: string): string {
+  if (typeof obj[key] !== 'string') throw new Error(`malformed tcp_samples: ${key}`);
+  return obj[key] as string;
+}
+
+// An integer in [min, max]; anything else (a string, a fraction, an unsafe
+// integer) throws, so a sample is exact or rejected, never approximated.
+function tcpSamplesInt(value: unknown, what: string, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new Error(`malformed tcp_samples: ${what}`);
+  }
+  return value;
+}
+
+const U32_MAX = 2 ** 32 - 1;
+const TCP_SAMPLE_COLUMN_MAX: Record<(typeof TCP_SAMPLE_COLUMNS)[number], number> = {
+  tUs: Number.MAX_SAFE_INTEGER,
+  seq: U32_MAX,
+  ack: U32_MAX,
+  win: U32_MAX,
+  len: 0xffff,
+  flags: 0xff,
+  mark: 0xff,
+  rttUs: U32_MAX,
+};
+
+// KAN-129 `tcp_samples` (docs/wire-protocol.md): columnar and
+// delta-encoded on the wire, returned here as one object per sample with
+// absolute timestamps. Sequence numbers stay relative to `seqBase`.
+export function mapTcpSamplesReply(json: unknown): TcpSamplesPage {
+  const w = tcpSamplesObject(json, 'not an object');
+  const connectionId = tcpSamplesString(w, 'connectionId');
+  if (!tcpSamplesBool(w, 'found')) return { found: false, connectionId };
+  const generation = tcpSamplesString(w, 'generation');
+  if (tcpSamplesBool(w, 'stale')) return { found: true, stale: true, connectionId, generation };
+
+  const index = (key: string) => tcpSamplesInt(w[key], key, 0, Number.MAX_SAFE_INTEGER);
+  const seqBase = tcpSamplesObject(w.seqBase, 'seqBase');
+  const windowScale = w.windowScale === null ? null : tcpSamplesObject(w.windowScale, 'windowScale');
+  const columns = tcpSamplesObject(w.samples, 'samples');
+  const cols = TCP_SAMPLE_COLUMNS.map((name) => {
+    const col = columns[name];
+    if (!Array.isArray(col)) throw new Error(`malformed tcp_samples: samples.${name}`);
+    return col;
+  });
+  const count = cols[0].length;
+  if (cols.some((col) => col.length !== count)) throw new Error('malformed tcp_samples: column lengths differ');
+
+  const samples: TcpSample[] = [];
+  let tUs = 0;
+  for (let i = 0; i < count; i++) {
+    const [t, seq, ack, win, len, flags, mark, rttUs] = TCP_SAMPLE_COLUMNS.map((name, c) => {
+      const max = TCP_SAMPLE_COLUMN_MAX[name];
+      // Every timestamp after the first is a signed delta.
+      return tcpSamplesInt(cols[c][i], `samples.${name}[${i}]`, name === 'tUs' && i > 0 ? -max : 0, max);
+    });
+    tUs = tcpSamplesInt(i === 0 ? t : tUs + t, `reconstructed tUs[${i}]`, 0, Number.MAX_SAFE_INTEGER);
+    samples.push({ tUs, seq, ack, win, len, flags, mark, rttUs, outbound: (mark & TCP_SAMPLE_MARK.OUTBOUND) !== 0 });
+  }
+
+  const relativeTo = tcpSamplesString(w, 'relativeTo');
+  return {
+    found: true,
+    stale: false,
+    connectionId,
+    generation,
+    handshakeSeen: tcpSamplesBool(w, 'handshakeSeen'),
+    windowScale: windowScale && {
+      local: tcpSamplesInt(windowScale.local, 'windowScale.local', 0, 0xff),
+      remote: tcpSamplesInt(windowScale.remote, 'windowScale.remote', 0, 0xff),
+    },
+    seqBase: {
+      outbound: tcpSamplesInt(seqBase.outbound, 'seqBase.outbound', 0, U32_MAX),
+      inbound: tcpSamplesInt(seqBase.inbound, 'seqBase.inbound', 0, U32_MAX),
+    },
+    relativeTo: (TCP_SAMPLES_RELATIVE_TO.has(relativeTo) ? relativeTo : 'unknown') as TcpSamplesRelativeTo,
+    firstIndex: index('firstIndex'),
+    nextIndex: index('nextIndex'),
+    more: tcpSamplesBool(w, 'more'),
+    droppedOlder: index('droppedOlder'),
+    samples,
   };
 }
 

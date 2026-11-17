@@ -1,3 +1,14 @@
+# KAN-129 Task 3 verification — 2026-11-17
+
+- `cargo test --locked` (capture-agent): every suite passes; lib 638, bin 91, new `tests/tcp_samples_replay.rs` 5 (real binary, generated pcaps, realtime = fast).
+- `cargo clippy --all-targets --locked -- -D warnings`: clean.
+- Mutations, each failing a test then restored: 3 072 cap, `nextIndex` sum, `from_connection_id` round-trip equality, stale check, reply routed through broadcast, handler removed (all 5 e2e fail), TS reconstructed-timestamp guard.
+- Worst-case reply (every column at max, 384-byte escaped id): 219 841 bytes ≤ 262 144.
+- `npm run lint`, `npx tsc --noEmit`, `npx vitest run` (99 files / 1 056 tests), `npm run build`: pass; `next-env.d.ts` restored after build.
+- `security-review` on the diff: no findings.
+
+---
+
 # KAN-280 review follow-up — 2026-11-17
 
 - Precision regression: failed on raw `8.632047904191618` output, passed after formatting to `8.63 Mbps` (also checks `0.125` -> `0.13 Mbps`). All 12 focused tests pass.
