@@ -245,6 +245,12 @@ export function mapTcpSamplesReply(json: unknown): TcpSamplesPage {
     samples.push({ tUs, seq, ack, win, len, flags, mark, rttUs, outbound: (mark & TCP_SAMPLE_MARK.OUTBOUND) !== 0 });
   }
 
+  // The page runs from nextIndex − count to nextIndex and starts at or
+  // after firstIndex; a reader paging by nextIndex relies on both.
+  const firstIndex = index('firstIndex');
+  const nextIndex = index('nextIndex');
+  if (nextIndex - count < firstIndex) throw new Error('malformed tcp_samples: indices do not cover the samples');
+
   const relativeTo = tcpSamplesString(w, 'relativeTo');
   return {
     found: true,
@@ -253,16 +259,17 @@ export function mapTcpSamplesReply(json: unknown): TcpSamplesPage {
     generation,
     handshakeSeen: tcpSamplesBool(w, 'handshakeSeen'),
     windowScale: windowScale && {
-      local: tcpSamplesInt(windowScale.local, 'windowScale.local', 0, 0xff),
-      remote: tcpSamplesInt(windowScale.remote, 'windowScale.remote', 0, 0xff),
+      // RFC 7323: the agent clamps shift counts to 14.
+      local: tcpSamplesInt(windowScale.local, 'windowScale.local', 0, 14),
+      remote: tcpSamplesInt(windowScale.remote, 'windowScale.remote', 0, 14),
     },
     seqBase: {
       outbound: tcpSamplesInt(seqBase.outbound, 'seqBase.outbound', 0, U32_MAX),
       inbound: tcpSamplesInt(seqBase.inbound, 'seqBase.inbound', 0, U32_MAX),
     },
     relativeTo: (TCP_SAMPLES_RELATIVE_TO.has(relativeTo) ? relativeTo : 'unknown') as TcpSamplesRelativeTo,
-    firstIndex: index('firstIndex'),
-    nextIndex: index('nextIndex'),
+    firstIndex,
+    nextIndex,
     more: tcpSamplesBool(w, 'more'),
     droppedOlder: index('droppedOlder'),
     samples,

@@ -106,6 +106,9 @@ pub struct RingView {
     pub generation: (u64, u64),
     /// Index of the oldest sample still held.
     pub first_index: u64,
+    /// Index of `samples[0]`: `max(from_index, first_index)`, at most
+    /// `next_index`.
+    pub start_index: u64,
     /// Index the next recorded sample will get.
     pub next_index: u64,
     /// Both the SYN and the SYN-ACK of this flow were captured.
@@ -463,6 +466,7 @@ impl TcpSampleStore {
         Some(RingView {
             generation: (self.epoch, ring.counter),
             first_index: ring.first_index(),
+            start_index: start,
             next_index: ring.next_index,
             handshake_seen: ring.handshake().is_some(),
             window_scale: ring.window_scale(),

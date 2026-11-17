@@ -1011,8 +1011,7 @@ pub fn tcp_samples_reply(request: &TcpSamplesRequest, view: Option<RingView>) ->
         columns.mark.push(s.mark);
         columns.rtt_us.push(s.rtt_us);
     }
-    let start = request.from_index.max(view.first_index).min(view.next_index);
-    let next_index = start + view.samples.len() as u64;
+    let next_index = view.start_index + view.samples.len() as u64;
     reply.page = Some(TcpSamplesPageJson {
         handshake_seen: view.handshake_seen,
         window_scale: view.window_scale.map(|(local, remote)| WindowScaleJson { local, remote }),
@@ -2099,6 +2098,7 @@ mod tcp_samples_tests {
         RingView {
             generation: (0xfeed_beef, 3),
             first_index,
+            start_index: first_index,
             next_index,
             handshake_seen: true,
             window_scale: Some((7, 8)),
@@ -2224,7 +2224,9 @@ mod tcp_samples_tests {
         let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 4), Some(ring_view(10, 20, vec![sample(1, true, 1000, 0); 3]))))).unwrap();
         assert_eq!((reply["nextIndex"].as_u64(), reply["more"].as_bool(), reply["droppedOlder"].as_u64()), (Some(13), Some(true), Some(6)));
         // fromIndex past the write index: empty, not more, nextIndex = write index.
-        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 99), Some(ring_view(10, 20, vec![]))))).unwrap();
+        let mut past = ring_view(10, 20, vec![]);
+        past.start_index = 20;
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 99), Some(past)))).unwrap();
         assert_eq!((reply["nextIndex"].as_u64(), reply["more"].as_bool(), reply["droppedOlder"].as_u64()), (Some(20), Some(false), Some(0)));
         assert_eq!(reply["samples"]["tUs"], json!([]));
     }
