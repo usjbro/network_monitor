@@ -1,3 +1,17 @@
+# KAN-280 verification — 2026-11-16
+
+- `npm test -- lib/__tests__/bandwidth-history.test.ts lib/__tests__/dashboard-view-system-stats.test.tsx lib/__tests__/page-system-stats-handling.test.tsx`: 11/11 pass after restoring implementation.
+- Regression evidence: original page/component plus an unbounded helper produced six expected failures (capacity, samples, reset precondition, zero height, units, empty state). Isolated removal of interface reset produced the expected stale-bar failure. All temporary mutations restored. Logs: `/private/tmp/kan280-regression-red.log`, `/private/tmp/kan280-reset-red.log`.
+- `npm test` outside sandbox: 98 files, 1,030 tests passed. Sandbox attempt could not bind test sockets and was stopped. Log: `/private/tmp/kan280-tests-unrestricted.log`.
+- `npm run lint`: pass. `npm run build`: pass on retry, including TypeScript. First build exited after reporting a Next.js security advisory; no dependency change or suppression was made. Log: `/private/tmp/kan280-build.log`.
+- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: pass, to run the existing real agent for browser verification. No Rust source changed.
+- Real Chromium + production Next server on 127.0.0.1:3138 + real capture-agent on lo0: four measured ticks rendered, zero RX bars and positive TX bars (~8.65 Mbps) with Mbps tooltips. Generated bounded UDP loopback traffic. Screenshot `/private/tmp/kan280-live-browser.png`; script `/private/tmp/kan280-browser.cjs`. First assertion inspected only RX; corrected to inspect both directions because loopback traffic is attributed to TX. Processes stopped after checks.
+- `codex review --uncommitted`: no actionable regressions; independently ran the 11 focused tests. Log `/private/tmp/kan280-resumed-review.log`.
+- `./node_modules/.bin/playwright test`: 2/2 pass (browser relay smoke and IO graph).
+- `git diff --check`: pass.
+
+---
+
 # KAN-129 Task 2 — relay request core, admission, Pages route (2026-11-11)
 
 Linux cloud worktree, Node + Vitest 5.0.5, base main `77ab587`. Relay only; the agent does not answer `get_tcp_samples` until Task 3.

@@ -1,3 +1,11 @@
+# KAN-280 — dashboard bandwidth histogram (2026-11-16)
+
+Resumed the stopped Codex session in `.worktrees/dashboard-bandwidth-histogram`, branch `KAN-280-dashboard-bandwidth-histogram`, after James confirmed it stopped and said to continue. Gate reclaimed and delegated; existing implementation preserved and verified. History now consumes measured system_stats ticks, retains 60 samples, and clears on interface_changed. Histogram has zero-height idle bars, decimal Mbps tooltips and a waiting state.
+
+Implementation and local verification complete; publish PR and inspect CI/review. James owns merge. See TEST_STATUS and HANDOFF for evidence.
+
+---
+
 # Linear → Jira KAN cutover (2026-11-10)
 
 The tracker is now Jira project KAN (https://theantimeridian.atlassian.net/browse/KAN). Linear is frozen and read-only. `coordination/migration/jam-to-kan.tsv` maps every old `JAM-n` to its `KAN-m`. The records below predate the switch and keep their JAM ids. Their keys now:
