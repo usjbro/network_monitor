@@ -1,3 +1,9 @@
+# KAN-280 — PR #320 review update (2026-11-17)
+
+PR https://github.com/usjbro/network_monitor/pull/320 is open; Jira is In Review. Claude's only blocking finding (raw floating-point tooltip precision) is fixed with at most two decimal places and a red/green regression. Full 1,031 tests, lint and build pass; final independent code and security reviews found no actionable issues. Push this update, confirm CI at the new head and request Claude re-review. James owns merge. Test-harness duplication is tracked separately as KAN-281; KPI metrics and the reported Next.js advisory remain separate follow-ups.
+
+---
+
 # KAN-280 — dashboard bandwidth histogram (2026-11-16)
 
 Resumed the stopped Codex session in `.worktrees/dashboard-bandwidth-histogram`, branch `KAN-280-dashboard-bandwidth-histogram`, after James confirmed it stopped and said to continue. Gate reclaimed and delegated; existing implementation preserved and verified. History now consumes measured system_stats ticks, retains 60 samples, and clears on interface_changed. Histogram has zero-height idle bars, decimal Mbps tooltips and a waiting state.

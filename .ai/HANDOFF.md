@@ -1,3 +1,9 @@
+# KAN-280 — PR #320 review update (2026-11-17)
+
+PR https://github.com/usjbro/network_monitor/pull/320 is open; Jira is In Review. Claude's only blocking finding (raw floating-point tooltip precision) is fixed with at most two decimal places and a red/green regression. Full 1,031 tests, lint and build pass; final independent code and security reviews found no actionable issues. Push this update, confirm CI at the new head and request Claude re-review. James owns merge. Test-harness duplication is tracked separately as KAN-281; KPI metrics and the reported Next.js advisory remain separate follow-ups.
+
+---
+
 # KAN-280 — resumed histogram fix (2026-11-16)
 
 James confirmed the previous session stopped, then instructed continuation. Reclaimed the gate and resumed its existing worktree; no duplicate branch. Six source/test files implement and cover measured 60-tick RX/TX history, interface reset, zero-height idle bars, Mbps tooltips and waiting state. No wire, agent, dependency or config changes.

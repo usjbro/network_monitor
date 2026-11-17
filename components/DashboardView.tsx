@@ -182,8 +182,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
                 {/* Hover Tooltip */}
                 <div className="hidden group-hover:block absolute bottom-full mb-1 bg-slate-900 border border-slate-700 text-[10px] text-slate-200 p-1.5 rounded shadow-xl z-20 whitespace-nowrap">
-                  <div>RX: {rxVal} Mbps</div>
-                  <div>TX: {txVal} Mbps</div>
+                  <div>RX: {Number(rxVal.toFixed(2))} Mbps</div>
+                  <div>TX: {Number(txVal.toFixed(2))} Mbps</div>
                 </div>
               </div>
             );

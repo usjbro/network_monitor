@@ -66,6 +66,12 @@ describe('DashboardView system_stats rendering', () => {
     expect(screen.queryByText(/waiting for bandwidth data/i)).not.toBeInTheDocument();
   });
 
+  it('keeps measured rate tooltips readable with at most two decimal places', () => {
+    render(<DashboardView {...baseProps} stats={liveStats} historyRx={[8.632047904191618]} historyTx={[0.125]} />);
+    expect(screen.getByText('RX: 8.63 Mbps')).toBeInTheDocument();
+    expect(screen.getByText('TX: 0.13 Mbps')).toBeInTheDocument();
+  });
+
   it('shows "—" placeholders in the KPI cards before any system_stats event arrives', () => {
     render(<DashboardView {...baseProps} stats={null} />);
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
