@@ -1,3 +1,28 @@
+# KAN-280 review follow-up — 2026-11-17
+
+- Precision regression: failed on raw `8.632047904191618` output, passed after formatting to `8.63 Mbps` (also checks `0.125` -> `0.13 Mbps`). All 12 focused tests pass.
+- `npm test`: 98 files / 1,031 tests pass. First run hit unrelated enrichment-client fixture cleanup ENOTEMPTY; one full rerun passed. Log `/private/tmp/kan280-tests-final.log`.
+- `npm run lint` and `npm run build`: pass after precision fix; build includes TypeScript. Log `/private/tmp/kan280-build-final.log`.
+- Independent code and security review of the complete diff plus precision change: no actionable findings. Log `/private/tmp/kan280-final-reviews.log`.
+- Original PR head 2f5764b: every CI check passed and merge state CLEAN. A new CI run is required for the precision commit.
+- Existing real-agent/browser and Playwright evidence below covers the unchanged pipeline/layout; follow-up changes only text precision.
+
+---
+
+# KAN-280 verification — 2026-11-16
+
+- `npm test -- lib/__tests__/bandwidth-history.test.ts lib/__tests__/dashboard-view-system-stats.test.tsx lib/__tests__/page-system-stats-handling.test.tsx`: 11/11 pass after restoring implementation.
+- Regression evidence: original page/component plus an unbounded helper produced six expected failures (capacity, samples, reset precondition, zero height, units, empty state). Isolated removal of interface reset produced the expected stale-bar failure. All temporary mutations restored. Logs: `/private/tmp/kan280-regression-red.log`, `/private/tmp/kan280-reset-red.log`.
+- `npm test` outside sandbox: 98 files, 1,030 tests passed. Sandbox attempt could not bind test sockets and was stopped. Log: `/private/tmp/kan280-tests-unrestricted.log`.
+- `npm run lint`: pass. `npm run build`: pass on retry, including TypeScript. First build exited after reporting a Next.js security advisory; no dependency change or suppression was made. Log: `/private/tmp/kan280-build.log`.
+- `cargo build --release --locked --manifest-path capture-agent/Cargo.toml`: pass, to run the existing real agent for browser verification. No Rust source changed.
+- Real Chromium + production Next server on 127.0.0.1:3138 + real capture-agent on lo0: four measured ticks rendered, zero RX bars and positive TX bars (~8.65 Mbps) with Mbps tooltips. Generated bounded UDP loopback traffic. Screenshot `/private/tmp/kan280-live-browser.png`; script `/private/tmp/kan280-browser.cjs`. First assertion inspected only RX; corrected to inspect both directions because loopback traffic is attributed to TX. Processes stopped after checks.
+- `codex review --uncommitted`: no actionable regressions; independently ran the 11 focused tests. Log `/private/tmp/kan280-resumed-review.log`.
+- `./node_modules/.bin/playwright test`: 2/2 pass (browser relay smoke and IO graph).
+- `git diff --check`: pass.
+
+---
+
 # KAN-129 Task 2 — relay request core, admission, Pages route (2026-11-11)
 
 Linux cloud worktree, Node + Vitest 5.0.5, base main `77ab587`. Relay only; the agent does not answer `get_tcp_samples` until Task 3.

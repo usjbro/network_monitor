@@ -34,6 +34,7 @@ import {
   IoSeriesStatus,
 } from '@/lib/types';
 import { THEMES } from '@/lib/osi-engine';
+import { appendBandwidthSample } from '@/lib/bandwidth-history';
 import {
   mapAgentStatusEvent,
   mapCaptureConfigErrorEvent,
@@ -320,7 +321,10 @@ export default function TerminalApp() {
           setCaptureStats(mapCaptureStatsEvent(data));
         }
         if (data.type === 'system_stats') {
-          setStats(mapSystemStatsEvent(data));
+          const nextStats = mapSystemStatsEvent(data);
+          setStats(nextStats);
+          setHistoryRx((history) => appendBandwidthSample(history, nextStats.rxTotalMbps));
+          setHistoryTx((history) => appendBandwidthSample(history, nextStats.txTotalMbps));
         }
         if (data.type === 'agent_status') {
           setAgentMode(mapAgentStatusEvent(data));
@@ -349,10 +353,10 @@ export default function TerminalApp() {
         }
         if (data.type === 'interface_changed') {
           // system_stats (above) is the enduring source of truth for the
-          // active interfaceName/ipAddress — this event exists only so a
-          // successful switch clears any earlier rejection right away,
-          // rather than leaving a stale error banner up for another ~1s
-          // until the next system_stats tick would otherwise imply it.
+          // active interfaceName/ipAddress. Clear the previous interface's
+          // bandwidth samples and any rejected-switch banner immediately.
+          setHistoryRx([]);
+          setHistoryTx([]);
           setInterfaceError(null);
         }
         if (data.type === 'interface_error') {

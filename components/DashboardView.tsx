@@ -159,10 +159,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
         {/* Visual Bar Plot Graph */}
         <div className="h-28 w-full flex items-end space-x-1 pt-2 bg-black/40 rounded p-2 overflow-x-auto">
+          {historyRx.length === 0 && (
+            <p className="m-auto text-slate-400">Waiting for bandwidth data…</p>
+          )}
           {historyRx.map((rxVal, idx) => {
             const txVal = historyTx[idx] || 0;
-            const rxHeight = Math.min(100, Math.max(8, (rxVal / maxRxTx) * 100));
-            const txHeight = Math.min(100, Math.max(8, (txVal / maxRxTx) * 100));
+            const rxHeight = (rxVal / maxRxTx) * 100;
+            const txHeight = (txVal / maxRxTx) * 100;
 
             return (
               <div key={idx} className="flex-1 flex items-end justify-center space-x-0.5 h-full group relative">
@@ -179,8 +182,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
                 {/* Hover Tooltip */}
                 <div className="hidden group-hover:block absolute bottom-full mb-1 bg-slate-900 border border-slate-700 text-[10px] text-slate-200 p-1.5 rounded shadow-xl z-20 whitespace-nowrap">
-                  <div>RX: {formatSpeed(rxVal * 1024 * 1024)}</div>
-                  <div>TX: {formatSpeed(txVal * 1024 * 1024)}</div>
+                  <div>RX: {Number(rxVal.toFixed(2))} Mbps</div>
+                  <div>TX: {Number(txVal.toFixed(2))} Mbps</div>
                 </div>
               </div>
             );

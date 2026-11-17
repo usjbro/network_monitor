@@ -20,6 +20,16 @@ class FakeEventSource {
   close(): void {}
 }
 
+function sendStats(source: FakeEventSource, rxTotalMbps: number, txTotalMbps: number) {
+  source.onmessage!({ data: JSON.stringify({
+    type: 'system_stats',
+    stats: {
+      hostname: 'capture-host', interfaceName: 'en0', ipAddress: '192.168.1.104',
+      rxTotalMbps, txTotalMbps, rxPpsTotal: 10, txPpsTotal: 5, totalPacketsCaptured: 100,
+    },
+  }) } as MessageEvent);
+}
+
 describe('TerminalApp system_stats stream handling', () => {
   let originalEventSource: typeof EventSource;
 
@@ -43,6 +53,45 @@ describe('TerminalApp system_stats stream handling', () => {
   afterEach(() => {
     cleanup();
     global.EventSource = originalEventSource;
+  });
+
+  it('renders both consecutive system_stats ticks as RX/TX bandwidth bars', () => {
+    const { container } = render(<TerminalApp />);
+    const source = FakeEventSource.instances[0];
+    // Same render batch catches stale state updates that would lose the first tick.
+    act(() => { sendStats(source, 10, 5); sendStats(source, 20, 2); });
+    const rxBars = container.getElementsByClassName('bg-emerald-500/80');
+    const txBars = container.getElementsByClassName('bg-sky-500/80');
+    expect(rxBars).toHaveLength(2);
+    expect(txBars).toHaveLength(2);
+    expect(rxBars[0]).toHaveStyle({ height: '50%' });
+    expect(rxBars[1]).toHaveStyle({ height: '100%' });
+    expect(txBars[0]).toHaveStyle({ height: '25%' });
+    expect(txBars[1]).toHaveStyle({ height: '10%' });
+    expect(screen.getByText('RX: 10 Mbps')).toBeInTheDocument();
+    expect(screen.getByText('RX: 20 Mbps')).toBeInTheDocument();
+    expect(screen.getByText('TX: 5 Mbps')).toBeInTheDocument();
+    expect(screen.getByText('TX: 2 Mbps')).toBeInTheDocument();
+  });
+
+  it('clears bandwidth history on interface_changed and starts with the next tick', () => {
+    const { container } = render(<TerminalApp />);
+    const source = FakeEventSource.instances[0];
+    act(() => { sendStats(source, 10, 5); });
+    expect(container.getElementsByClassName('bg-emerald-500/80')).toHaveLength(1);
+    act(() => {
+      source.onmessage!({ data: JSON.stringify({
+        type: 'interface_changed', interface: { name: 'lo0', ipAddress: '127.0.0.1' },
+      }) } as MessageEvent);
+    });
+    expect(container.getElementsByClassName('bg-emerald-500/80')).toHaveLength(0);
+    expect(container.getElementsByClassName('bg-sky-500/80')).toHaveLength(0);
+    expect(screen.getByText(/waiting for bandwidth data/i)).toBeInTheDocument();
+    act(() => { sendStats(source, 3, 1); });
+    expect(container.getElementsByClassName('bg-emerald-500/80')).toHaveLength(1);
+    expect(container.getElementsByClassName('bg-sky-500/80')).toHaveLength(1);
+    expect(screen.getByText('RX: 3 Mbps')).toBeInTheDocument();
+    expect(screen.queryByText('RX: 10 Mbps')).not.toBeInTheDocument();
   });
 
   it('shows a placeholder, not a fabricated hostname, before any system_stats event arrives', () => {
