@@ -1,3 +1,19 @@
+# KAN-280 — PR #320 review update (2026-11-17)
+
+PR https://github.com/usjbro/network_monitor/pull/320 is open; Jira is In Review. Claude's only blocking finding (raw floating-point tooltip precision) is fixed with at most two decimal places and a red/green regression. Full 1,031 tests, lint and build pass; final independent code and security reviews found no actionable issues. Push this update, confirm CI at the new head and request Claude re-review. James owns merge. Test-harness duplication is tracked separately as KAN-281; KPI metrics and the reported Next.js advisory remain separate follow-ups.
+
+---
+
+# KAN-280 — resumed histogram fix (2026-11-16)
+
+James confirmed the previous session stopped, then instructed continuation. Reclaimed the gate and resumed its existing worktree; no duplicate branch. Six source/test files implement and cover measured 60-tick RX/TX history, interface reset, zero-height idle bars, Mbps tooltips and waiting state. No wire, agent, dependency or config changes.
+
+Fresh full Vitest (1,030), lint, production build and real-agent browser validation pass; independent Codex review found no findings. TEST_STATUS records regression mutation evidence and commands. Next.js emitted a security advisory on the first build; the retry passed, but the advisory warrants a separate dependency follow-up.
+
+Task contract records commit/push/PR authorization; James merges. Publish PR, request Claude review in task Slack thread, check CI, update Jira to In Review. Do not mark Done before merge.
+
+---
+
 # Linear → Jira KAN cutover (2026-11-10)
 
 Migration and cutover: PR #309. All 275 JAM issues are in KAN, and the delta sync found no Linear changes after the run. Open gate and task files carry `issue_key: KAN-m`. Still to do (James): merge #309, disable the Linear plugin, give Codex a Jira connector, and swap the GitHub integration. Use KAN keys from here on; old JAM ids resolve through `coordination/migration/jam-to-kan.tsv`.

@@ -40,6 +40,38 @@ const liveStats: SystemStats = {
 };
 
 describe('DashboardView system_stats rendering', () => {
+  it('shows a waiting message until bandwidth samples arrive', () => {
+    render(<DashboardView {...baseProps} stats={null} />);
+    expect(screen.getByText(/waiting for bandwidth data/i)).toBeInTheDocument();
+  });
+
+  it('renders idle samples at zero height, with positive samples proportional to the peak', () => {
+    const { container } = render(
+      <DashboardView {...baseProps} stats={liveStats} historyRx={[0, 10]} historyTx={[0, 5]} />
+    );
+    const rxBars = container.getElementsByClassName('bg-emerald-500/80');
+    const txBars = container.getElementsByClassName('bg-sky-500/80');
+    expect(rxBars).toHaveLength(2);
+    expect(txBars).toHaveLength(2);
+    expect(rxBars[0]).toHaveStyle({ height: '0%' });
+    expect(txBars[0]).toHaveStyle({ height: '0%' });
+    expect(rxBars[1]).toHaveStyle({ height: '100%' });
+    expect(txBars[1]).toHaveStyle({ height: '50%' });
+  });
+
+  it('labels measured histogram rates in decimal Mbps', () => {
+    render(<DashboardView {...baseProps} stats={liveStats} historyRx={[10]} historyTx={[2.5]} />);
+    expect(screen.getByText('RX: 10 Mbps')).toBeInTheDocument();
+    expect(screen.getByText('TX: 2.5 Mbps')).toBeInTheDocument();
+    expect(screen.queryByText(/waiting for bandwidth data/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps measured rate tooltips readable with at most two decimal places', () => {
+    render(<DashboardView {...baseProps} stats={liveStats} historyRx={[8.632047904191618]} historyTx={[0.125]} />);
+    expect(screen.getByText('RX: 8.63 Mbps')).toBeInTheDocument();
+    expect(screen.getByText('TX: 0.13 Mbps')).toBeInTheDocument();
+  });
+
   it('shows "—" placeholders in the KPI cards before any system_stats event arrives', () => {
     render(<DashboardView {...baseProps} stats={null} />);
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
