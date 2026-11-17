@@ -21,6 +21,20 @@ const ALLOWLIST = new Set([
   // regression for an advisory with no exploitation path here. Revisit if
   // a patched `braces` is ever published.
   "GHSA-vfj7-8cjw-p6xm",
+  // picomatch: ReDoS via single-branch repeated extglobs such as `+(*)`
+  // (GHSA-fc5q-39xc-vjpf / CVE-2026-112366), added 2026-11-17 (KAN-282).
+  // Affected range "<= 4.0.7" with no patched version: 4.0.7 is the latest
+  // release. The maintainer disputes the CVE ("Don't let untrusted users
+  // define regular expressions") and closed the fix PR, micromatch/
+  // picomatch#235, unmerged. Snyk revoked its copy as "not a vulnerability".
+  // Exploiting it needs an attacker-controlled glob *pattern*. Here
+  // picomatch is reached only through dev tooling (vitest -> vite /
+  // tinyglobby, and eslint-config-next -> fast-glob -> micromatch), which
+  // only matches patterns from our own config. Nothing in lib/, app/,
+  // components/ or bin/ imports it. npm's suggested fixes are major
+  // downgrades (vitest 3.1.4, eslint-config-next 14.2.35). Remove this
+  // entry if the GHSA is withdrawn or a patched picomatch ships.
+  "GHSA-fc5q-39xc-vjpf",
 ]);
 
 const SEVERITY_ORDER = { info: 0, low: 1, moderate: 2, high: 3, critical: 4 };
