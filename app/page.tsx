@@ -249,8 +249,11 @@ export default function TerminalApp() {
   const [tcpGraphState, setTcpGraphState] = useState<TcpGraphState | null>(null);
   const [tcpGraphError, setTcpGraphError] = useState<number | null>(null);
   const tcpPoller = useRef<TcpSamplesPoller | null>(null);
-  const tcpGraphsLive = agentConnected && !isPaused;
+  // Polled only while it is on screen: the panel lives in the Sockets tab.
+  const tcpGraphsLive = agentConnected && !isPaused && activeTab === 'connections';
   const openTcpGraphs = (connectionId: string) => {
+    // Already open: its poller holds the samples, so keep what is shown.
+    if (connectionId === tcpGraphsFor) return;
     setTcpGraphsFor(connectionId);
     setTcpGraphState(emptyTcpGraphState(connectionId));
     setTcpGraphError(null);
@@ -1050,6 +1053,7 @@ export default function TerminalApp() {
         <nav className={`bg-slate-950 border-b ${themeConfig.border} px-3 py-1.5 flex items-center space-x-1 overflow-x-auto text-xs`}>
           <button
             onClick={() => setActiveTab('dashboard')}
+            data-testid="tab-dashboard"
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded transition font-bold ${
               activeTab === 'dashboard'
                 ? themeConfig.highlight

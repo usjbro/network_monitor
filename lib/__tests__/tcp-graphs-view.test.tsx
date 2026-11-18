@@ -124,6 +124,21 @@ describe('TcpGraphsView', () => {
     expect(screen.getByTestId('tcp-status')).toHaveTextContent(/has no samples for this flow/i);
   });
 
+  it('fits the time range of the samples even when a replay steps back in time', () => {
+    // A merged or reordered capture: the newest sample by index is not the latest.
+    const samples = [...flow(), s(T0 + 500, false, { seq: 1, ack: 601, win: 2560 })];
+    view(stateOf(samples));
+    const xs = [...(screen.getByTestId('tcp-data-path').getAttribute('d') ?? '').matchAll(/M([-\d.]+),/g)].map((m) => Number(m[1]));
+    expect(xs).toHaveLength(5);
+    // All inside the plot (left margin 64, right edge 788).
+    for (const x of xs) expect(x).toBeGreaterThanOrEqual(64), expect(x).toBeLessThanOrEqual(788);
+  });
+
+  it('is a labelled region for the keys it handles', () => {
+    view(stateOf(flow()));
+    expect(screen.getByRole('region', { name: /tcp graphs/i })).toBe(screen.getByTestId('tcp-graphs'));
+  });
+
   it('zooms with the keyboard and closes', () => {
     const onClose = vi.fn();
     view(stateOf(flow()), { onClose });

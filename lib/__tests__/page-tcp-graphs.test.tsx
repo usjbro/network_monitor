@@ -134,6 +134,26 @@ describe('TCP graphs from the Sockets view', () => {
     expect(screen.getByTestId('tcp-plot-seq')).toBeInTheDocument();
   });
 
+  it('keeps the samples held when TCP graphs is clicked again for the open flow', async () => {
+    open();
+    await screen.findByTestId('tcp-plot-seq');
+    emit({ type: 'connection_status', connected: false });
+    fireEvent.click(screen.getByRole('button', { name: /^tcp graphs$/i }));
+    expect(screen.getByTestId('tcp-plot-seq')).toBeInTheDocument();
+  });
+
+  it('stops polling when the Sockets tab is left, and resumes on return', async () => {
+    open();
+    await screen.findByTestId('tcp-plot-seq');
+    fireEvent.click(screen.getByTestId('tab-dashboard'));
+    const after = samplesCalls.length;
+    await new Promise((r) => setTimeout(r, 1300));
+    expect(samplesCalls.length).toBe(after);
+    fireEvent.click(screen.getByTestId('tab-connections'));
+    expect(screen.getByTestId('tcp-plot-seq')).toBeInTheDocument();
+    await waitFor(() => expect(samplesCalls.length).toBeGreaterThan(after), { timeout: 2500 });
+  });
+
   it('omits the reference line without a handshake RTT, and shows a retry message when busy', async () => {
     samplesStatus = 429;
     const { latencyMs: _omit, ...noLatency } = TCP;

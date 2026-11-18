@@ -21,6 +21,13 @@ describe('time-axis', () => {
     expect(zoomView(v, 100, 0.5, 1000, 60_000).span).toBe(60_000);
   });
 
+  it('labels sub-100 ms windows (the TCP graphs zoom to 1 ms)', () => {
+    const t0 = Date.UTC(2026, 10, 17, 12, 0, 0);
+    const out = ticks(t0 + 0.3, t0 + 5.3, 6, 'UTC');
+    expect(out.length).toBeGreaterThanOrEqual(3);
+    expect(out[0].label).toBe('12:00:00.001');
+  });
+
   it('keeps the right edge live while following', () => {
     const v = { span: 10_000, endMs: null, follow: true, extra: 'kept' };
     expect(zoomView(v, 2, 0.1, 1000, 60_000)).toEqual({ span: 20_000, endMs: null, follow: true, extra: 'kept' });
