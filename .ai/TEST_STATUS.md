@@ -1,3 +1,8 @@
+# KAN-288 Karn discard spec amendment — 2026-11-18
+
+- New test `karn_discards_entries_sent_after_the_retransmitted_range` passes on the existing code (it pins current behaviour). Mutation check: an overlap-only discard (the old spec wording) fails it, and no other lib test; restored.
+- `cargo test --locked`: all pass (lib 639, 1 ignored). `cargo clippy --all-targets --locked -- -D warnings`: clean. `rustfmt --check src/tcp_samples.rs`: clean (the crate-wide `cargo fmt --check` already reports diffs in other files; CI does not run it).
+
 # KAN-129 Task 4 review fixes — 2026-11-18
 
 - New tests written first and seen failing for the right reason: `tcp-graphs` +4 (open zero window to newest, gap ends span, whole-bin edges both sides, partly covered bins omitted), `time-axis` +1 (sub-100 ms ticks), `tcp-graphs-view` +1 (fit by min/max time), `page-tcp-graphs` +2 (re-click keeps state, tab leave stops polling and resumes). Then +1 `heldValues` (Codex) and +1 region role (Sonar S6848), both red first. Then +3 throughput edge-bin tests (from SYN, ended by FIN/RST/found:false, flow shorter than a bin), red first.
