@@ -2493,6 +2493,7 @@ fn build_capture_stats_json(
         idle_evictions,
         observed_name_evictions,
         replay_waiting: false,
+        tcp_sample_cost: wire::TcpSampleCostJson::default(),
     }
 }
 
@@ -3547,6 +3548,7 @@ async fn main() -> std::io::Result<()> {
                     observed_name_evictions,
                     direction_attribution_unavailable,
                     protocol_hierarchy,
+                    tcp_sample_cost,
                 ) = {
                     let mut ft = flow_table.lock().unwrap();
                     // Read under the same lock that protects replay-clock
@@ -3584,6 +3586,7 @@ async fn main() -> std::io::Result<()> {
                         // as `snapshots` above — cheap (a handful of nodes)
                         // and lets the JSON conversion happen after release.
                         ft.protocol_hierarchy().clone(),
+                        wire::TcpSampleCostJson::of(ft.tcp_sample_store()),
                     )
                 };
                 let processes = process_map.lock().unwrap();
@@ -3851,6 +3854,7 @@ async fn main() -> std::io::Result<()> {
                     observed_name_evictions,
                 );
                 stats_json.replay_waiting = io_shared.replay_waiting();
+                stats_json.tcp_sample_cost = tcp_sample_cost;
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::CaptureStats {
                     stats: stats_json,
                 }));
@@ -4015,6 +4019,7 @@ async fn main() -> std::io::Result<()> {
         let current_link_type = current_link_type.clone();
         let hostname = hostname.clone();
         let io_shared = io_shared.clone();
+        let flow_table = flow_table.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half);
@@ -4032,189 +4037,263 @@ async fn main() -> std::io::Result<()> {
                 return;
             }
             drop(pending);
-            let mut rx = trace_tx.subscribe();
-            // JAM-18: tell this (re)connected relay the current IO-graph
-            // series set directly, rather than broadcasting it to everyone.
-            let bootstrap = wire::encode_event(&wire::AgentEvent::IoSeriesStatus {
-                status: Box::new(io_shared.status()),
-            });
-            if write_half.write_all(bootstrap.as_bytes()).await.is_err() {
-                return;
-            }
-            let mut reader = reader.lines();
+            let shared = ConnectionShared {
+                paused,
+                keylog_watcher,
+                decrypt_state,
+                trace_tx,
+                relay_lagged_events,
+                capture_config_tx,
+                writer_tx,
+                writer_active,
+                capture_config_state,
+                current_interface,
+                current_link_type,
+                hostname,
+                io_shared,
+                flow_table,
+            };
+            serve_connection(reader, write_half, &shared).await;
+        });
+    }
+}
 
-            loop {
-                tokio::select! {
-                    line = reader.next_line() => {
-                        match line {
-                            Ok(Some(text)) => {
-                                let message = match wire::classify_control_line(&text) {
-                                    wire::ControlLine::Message(message) => Some(message),
-                                    wire::ControlLine::Ignored => None,
-                                    wire::ControlLine::NotJson => {
-                                        // Not this protocol — most likely a
-                                        // browser's cross-protocol POST
-                                        // (JAM-175). Close before reading
-                                        // its body, whose JSON lines would
-                                        // otherwise each run as a control.
-                                        eprintln!("capture-agent: closing control connection: non-JSON line received");
-                                        break;
-                                    }
-                                };
-                                match message {
-                                    Some(wire::ControlMessage::Pause) => paused.store(true, Ordering::Relaxed),
-                                    Some(wire::ControlMessage::Resume) => paused.store(false, Ordering::Relaxed),
-                                    Some(wire::ControlMessage::RegisterDecryptEligible { pid, keylog_path }) => {
-                                        keylog_watcher.lock().unwrap().register_eligible_pid(pid, PathBuf::from(keylog_path));
-                                    }
-                                    Some(wire::ControlMessage::UnregisterDecryptEligible { pid }) => {
-                                        keylog_watcher.lock().unwrap().unregister_pid(pid);
-                                        decrypt_state.lock().unwrap().retain(|_, connection| connection.pid != pid);
-                                    }
-                                    Some(wire::ControlMessage::TraceRoute { target_ip }) => {
-                                        // Traceroute is on-demand only (never
-                                        // automatic) and bounded (hop
-                                        // ceiling/timeouts enforced inside
-                                        // traceroute::run_traceroute) — spawn
-                                        // it on its own task so a trace (up
-                                        // to 45s) never blocks this
-                                        // connection's control-message read
-                                        // loop or its event forwarding.
-                                        let tx = trace_tx.clone();
-                                        tokio::spawn(async move {
-                                            let result = capture_agent::traceroute::run_traceroute(&target_ip, |hop| {
-                                                let hop_json = wire::TracerouteHopJson {
-                                                    target_ip: target_ip.clone(),
-                                                    hop_number: hop.hop_number,
-                                                    hop_ip: hop.hop_ip,
-                                                    rtt_ms: hop.rtt_ms,
-                                                };
-                                                let _ = tx.send(wire::encode_event(&wire::AgentEvent::TracerouteHop {
-                                                    hop: Box::new(hop_json),
-                                                }));
-                                            })
-                                            .await;
-                                            if let Err(e) = result {
-                                                eprintln!("capture-agent: traceroute to {target_ip} failed: {e}");
-                                            }
-                                        });
-                                    }
-                                    Some(wire::ControlMessage::SetCaptureFilter { filter }) => {
-                                        // Actually applying this needs the
-                                        // live `pcap::Capture` handle, which
-                                        // only ever lives on the capture
-                                        // thread — queue it there rather
-                                        // than touch `cap` from this async
-                                        // task (see CaptureConfigRequest).
-                                        let _ = capture_config_tx.send(CaptureConfigRequest::SetFilter(filter));
-                                    }
-                                    Some(wire::ControlMessage::SetIoSeries { base_epoch, base_revision, request_id, series }) => {
-                                        // JAM-18: validated, compiled and
-                                        // compare-and-swapped under one lock;
-                                        // every relay sees the outcome.
-                                        let status = io_shared.apply(&base_epoch, base_revision, &request_id, &series);
-                                        let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::IoSeriesStatus {
-                                            status: Box::new(status),
+/// What one relay connection's task shares with the rest of the agent.
+struct ConnectionShared {
+    paused: Arc<AtomicBool>,
+    keylog_watcher: Arc<Mutex<KeyLogWatcher>>,
+    decrypt_state: Arc<Mutex<DecryptState>>,
+    trace_tx: broadcast::Sender<String>,
+    relay_lagged_events: Arc<AtomicU64>,
+    capture_config_tx: mpsc::Sender<CaptureConfigRequest>,
+    writer_tx: mpsc::SyncSender<WriterCommand>,
+    writer_active: Arc<AtomicBool>,
+    capture_config_state: Arc<Mutex<wire::CaptureConfigJson>>,
+    current_interface: Arc<Mutex<(String, String)>>,
+    current_link_type: Arc<Mutex<parse::LinkType>>,
+    hostname: String,
+    io_shared: Arc<capture_agent::io_series::IoSeriesShared>,
+    flow_table: Arc<Mutex<FlowTable>>,
+}
+
+/// One authenticated relay connection: the IO-series bootstrap, then
+/// control lines in and broadcast events out until either side closes.
+/// Generic over its reader and writer so tests can drive it through
+/// `tokio::io::duplex` (KAN-129 plan A2).
+async fn serve_connection<R, W>(reader: R, mut write_half: W, shared: &ConnectionShared)
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let ConnectionShared {
+        paused,
+        keylog_watcher,
+        decrypt_state,
+        trace_tx,
+        relay_lagged_events,
+        capture_config_tx,
+        writer_tx,
+        writer_active,
+        capture_config_state,
+        current_interface,
+        current_link_type,
+        hostname,
+        io_shared,
+        flow_table,
+    } = shared;
+    let mut rx = trace_tx.subscribe();
+    // JAM-18: tell this (re)connected relay the current IO-graph
+    // series set directly, rather than broadcasting it to everyone.
+    let bootstrap = wire::encode_event(&wire::AgentEvent::IoSeriesStatus {
+        status: Box::new(io_shared.status()),
+    });
+    if write_half.write_all(bootstrap.as_bytes()).await.is_err() {
+        return;
+    }
+    let mut reader = reader.lines();
+
+    loop {
+        tokio::select! {
+            line = reader.next_line() => {
+                match line {
+                    Ok(Some(text)) => {
+                        let message = match wire::classify_control_line(&text) {
+                            wire::ControlLine::Message(message) => Some(message),
+                            wire::ControlLine::Ignored => None,
+                            wire::ControlLine::NotJson => {
+                                // Not this protocol — most likely a
+                                // browser's cross-protocol POST
+                                // (JAM-175). Close before reading
+                                // its body, whose JSON lines would
+                                // otherwise each run as a control.
+                                eprintln!("capture-agent: closing control connection: non-JSON line received");
+                                break;
+                            }
+                        };
+                        match message {
+                            Some(wire::ControlMessage::Pause) => paused.store(true, Ordering::Relaxed),
+                            Some(wire::ControlMessage::Resume) => paused.store(false, Ordering::Relaxed),
+                            Some(wire::ControlMessage::RegisterDecryptEligible { pid, keylog_path }) => {
+                                keylog_watcher.lock().unwrap().register_eligible_pid(pid, PathBuf::from(keylog_path));
+                            }
+                            Some(wire::ControlMessage::UnregisterDecryptEligible { pid }) => {
+                                keylog_watcher.lock().unwrap().unregister_pid(pid);
+                                decrypt_state.lock().unwrap().retain(|_, connection| connection.pid != pid);
+                            }
+                            Some(wire::ControlMessage::TraceRoute { target_ip }) => {
+                                // Traceroute is on-demand only (never
+                                // automatic) and bounded (hop
+                                // ceiling/timeouts enforced inside
+                                // traceroute::run_traceroute) — spawn
+                                // it on its own task so a trace (up
+                                // to 45s) never blocks this
+                                // connection's control-message read
+                                // loop or its event forwarding.
+                                let tx = trace_tx.clone();
+                                tokio::spawn(async move {
+                                    let result = capture_agent::traceroute::run_traceroute(&target_ip, |hop| {
+                                        let hop_json = wire::TracerouteHopJson {
+                                            target_ip: target_ip.clone(),
+                                            hop_number: hop.hop_number,
+                                            hop_ip: hop.hop_ip,
+                                            rtt_ms: hop.rtt_ms,
+                                        };
+                                        let _ = tx.send(wire::encode_event(&wire::AgentEvent::TracerouteHop {
+                                            hop: Box::new(hop_json),
                                         }));
+                                    })
+                                    .await;
+                                    if let Err(e) = result {
+                                        eprintln!("capture-agent: traceroute to {target_ip} failed: {e}");
                                     }
-                                    Some(wire::ControlMessage::SetSnaplen { bytes }) => {
-                                        let _ = capture_config_tx.send(CaptureConfigRequest::SetSnaplen(bytes));
-                                    }
-                                    Some(wire::ControlMessage::ListInterfaces) => {
-                                        // Doesn't touch the open capture
-                                        // handle at all — just enumerates
-                                        // devices, so this runs directly
-                                        // here rather than round-tripping
-                                        // through the capture thread.
-                                        let interfaces = pcap::Device::list()
-                                            .map(|devices| {
-                                                devices
-                                                    .iter()
-                                                    .filter(|d| is_capturable(d))
-                                                    .map(|d| wire::InterfaceJson {
-                                                        name: d.name.clone(),
-                                                        addresses: local_addrs_for(d),
-                                                    })
-                                                    .collect()
+                                });
+                            }
+                            Some(wire::ControlMessage::SetCaptureFilter { filter }) => {
+                                // Actually applying this needs the
+                                // live `pcap::Capture` handle, which
+                                // only ever lives on the capture
+                                // thread — queue it there rather
+                                // than touch `cap` from this async
+                                // task (see CaptureConfigRequest).
+                                let _ = capture_config_tx.send(CaptureConfigRequest::SetFilter(filter));
+                            }
+                            Some(wire::ControlMessage::SetIoSeries { base_epoch, base_revision, request_id, series }) => {
+                                // JAM-18: validated, compiled and
+                                // compare-and-swapped under one lock;
+                                // every relay sees the outcome.
+                                let status = io_shared.apply(&base_epoch, base_revision, &request_id, &series);
+                                let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::IoSeriesStatus {
+                                    status: Box::new(status),
+                                }));
+                            }
+                            Some(wire::ControlMessage::SetSnaplen { bytes }) => {
+                                let _ = capture_config_tx.send(CaptureConfigRequest::SetSnaplen(bytes));
+                            }
+                            Some(wire::ControlMessage::ListInterfaces) => {
+                                // Doesn't touch the open capture
+                                // handle at all — just enumerates
+                                // devices, so this runs directly
+                                // here rather than round-tripping
+                                // through the capture thread.
+                                let interfaces = pcap::Device::list()
+                                    .map(|devices| {
+                                        devices
+                                            .iter()
+                                            .filter(|d| is_capturable(d))
+                                            .map(|d| wire::InterfaceJson {
+                                                name: d.name.clone(),
+                                                addresses: local_addrs_for(d),
                                             })
-                                            .unwrap_or_default();
-                                        let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::InterfaceList { interfaces }));
-                                    }
-                                    Some(wire::ControlMessage::SetInterface { name }) => {
-                                        // Reopening the capture handle and
-                                        // reassigning FlowTable's local_addrs
-                                        // (issue #69) both need to happen on
-                                        // the capture thread, same reason as
-                                        // SetCaptureFilter/SetSnaplen above.
-                                        let _ = capture_config_tx.send(CaptureConfigRequest::SwitchInterface(name));
-                                    }
-                                    Some(wire::ControlMessage::StartCaptureFile { path, ring, autostop }) => {
-                                        let config_error = ring
-                                            .as_ref()
-                                            .and_then(|r| validate_ring_config(r).err())
-                                            .or_else(|| autostop.as_ref().and_then(|a| validate_autostop_config(a).err()));
-                                        if let Some(message) = config_error {
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::InterfaceList { interfaces }));
+                            }
+                            Some(wire::ControlMessage::SetInterface { name }) => {
+                                // Reopening the capture handle and
+                                // reassigning FlowTable's local_addrs
+                                // (issue #69) both need to happen on
+                                // the capture thread, same reason as
+                                // SetCaptureFilter/SetSnaplen above.
+                                let _ = capture_config_tx.send(CaptureConfigRequest::SwitchInterface(name));
+                            }
+                            Some(wire::ControlMessage::StartCaptureFile { path, ring, autostop }) => {
+                                let config_error = ring
+                                    .as_ref()
+                                    .and_then(|r| validate_ring_config(r).err())
+                                    .or_else(|| autostop.as_ref().and_then(|a| validate_autostop_config(a).err()));
+                                if let Some(message) = config_error {
+                                    let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError { message }));
+                                } else if writer_active.load(Ordering::Relaxed) {
+                                    let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError {
+                                        message: "a capture file is already active — stop it first".to_string(),
+                                    }));
+                                } else {
+                                    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                                    match validate_capture_file_path(&path, &cwd) {
+                                        Ok(resolved) => {
+                                            let idb = pcapng::InterfaceDescriptionBlock {
+                                                interface_name: current_interface.lock().unwrap().0.clone(),
+                                                link_type: *current_link_type.lock().unwrap(),
+                                                snaplen: capture_config_state.lock().unwrap().snaplen,
+                                            };
+                                            let _ = writer_tx.send(WriterCommand::Start {
+                                                path: resolved,
+                                                ring,
+                                                autostop,
+                                                idb,
+                                                hostname: hostname.clone(),
+                                                agent_version: env!("CARGO_PKG_VERSION").to_string(),
+                                            });
+                                        }
+                                        Err(message) => {
                                             let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError { message }));
-                                        } else if writer_active.load(Ordering::Relaxed) {
-                                            let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError {
-                                                message: "a capture file is already active — stop it first".to_string(),
-                                            }));
-                                        } else {
-                                            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                                            match validate_capture_file_path(&path, &cwd) {
-                                                Ok(resolved) => {
-                                                    let idb = pcapng::InterfaceDescriptionBlock {
-                                                        interface_name: current_interface.lock().unwrap().0.clone(),
-                                                        link_type: *current_link_type.lock().unwrap(),
-                                                        snaplen: capture_config_state.lock().unwrap().snaplen,
-                                                    };
-                                                    let _ = writer_tx.send(WriterCommand::Start {
-                                                        path: resolved,
-                                                        ring,
-                                                        autostop,
-                                                        idb,
-                                                        hostname: hostname.clone(),
-                                                        agent_version: env!("CARGO_PKG_VERSION").to_string(),
-                                                    });
-                                                }
-                                                Err(message) => {
-                                                    let _ = trace_tx.send(wire::encode_event(&wire::AgentEvent::CaptureFileError { message }));
-                                                }
-                                            }
                                         }
                                     }
-                                    Some(wire::ControlMessage::StopCaptureFile) => {
-                                        // Idempotent, matching pause/resume's
-                                        // existing tolerance for a redundant
-                                        // call — the writer thread's Stop
-                                        // handler already no-ops when there's
-                                        // no writer open.
-                                        let _ = writer_tx.send(WriterCommand::Stop);
+                                }
+                            }
+                            Some(wire::ControlMessage::StopCaptureFile) => {
+                                // Idempotent, matching pause/resume's
+                                // existing tolerance for a redundant
+                                // call — the writer thread's Stop
+                                // handler already no-ops when there's
+                                // no writer open.
+                                let _ = writer_tx.send(WriterCommand::Stop);
+                            }
+                            Some(wire::ControlMessage::GetTcpSamples(request)) => {
+                                // KAN-129 plan A2/A5: answered inline on this task and
+                                // written only to this connection, never broadcast. The
+                                // next control line is read only after this write
+                                // returns, so a connection holds at most one unflushed
+                                // reply.
+                                if let Some(reply) = wire::answer_tcp_samples(flow_table, &request, wire::TCP_SAMPLES_MAX_LINE_BYTES) {
+                                    if write_half.write_all(reply.as_bytes()).await.is_err() {
+                                        break;
                                     }
-                                    None => {}
                                 }
                             }
-                            _ => break,
+                            None => {}
                         }
                     }
-                    event = rx.recv() => {
-                        match event {
-                            Ok(line) => {
-                                if write_half.write_all(line.as_bytes()).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                eprintln!("capture-agent: client lagged, dropped {skipped} events");
-                                relay_lagged_events.fetch_add(skipped, Ordering::Relaxed);
-                                continue;
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
+                    _ => break,
                 }
             }
-        });
+            event = rx.recv() => {
+                match event {
+                    Ok(line) => {
+                        if write_half.write_all(line.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        eprintln!("capture-agent: client lagged, dropped {skipped} events");
+                        relay_lagged_events.fetch_add(skipped, Ordering::Relaxed);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
     }
 }
 
@@ -5835,4 +5914,154 @@ fn exclude_live_control_capture(packet: &parse::ParsedPacket, live: bool) -> boo
     matches!(packet.protocol, parse::TransportProtocol::Tcp)
         && ((packet.src_ip == "127.0.0.1" && packet.src_port == Some(9990))
             || (packet.dst_ip == "127.0.0.1" && packet.dst_port == Some(9990)))
+}
+
+/// KAN-129 plan A2/A5: `get_tcp_samples` is answered inline on the
+/// requesting connection's task and only to that connection.
+#[cfg(test)]
+mod tcp_samples_reply_path_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::time::timeout;
+
+    const LOCAL: &str = "192.168.1.10";
+    const REMOTE: &str = "93.184.216.34";
+
+    fn flow_table_with_samples(n: u32) -> Arc<Mutex<FlowTable>> {
+        let mut table = FlowTable::new(vec![LOCAL.to_string()]);
+        for i in 0..n {
+            let packet = parse::ParsedPacket {
+                src_mac: "aa:aa:aa:aa:aa:aa".into(),
+                dst_mac: "bb:bb:bb:bb:bb:bb".into(),
+                src_ip: LOCAL.into(),
+                dst_ip: REMOTE.into(),
+                protocol: parse::TransportProtocol::Tcp,
+                src_port: Some(51000),
+                dst_port: Some(443),
+                tcp_flags: Some(parse::TcpFlags { ack: true, ack_number: 1, window_size: 500, ..Default::default() }),
+                seq: Some(1000 + i),
+                ttl: 64,
+                total_len: 55,
+                payload: vec![b'x'],
+                header_bytes: vec![],
+                ip_header_len: 20,
+                transport_header_len: 20,
+                ip_version: 4,
+                ip_checksum: Some(0),
+                vlan_tag: None,
+                ip_declared_payload_len: 21,
+                ip_fragment: None,
+            };
+            table.observe(&packet, &l7::L7Info::None, 10 + u64::from(i)).unwrap();
+        }
+        Arc::new(Mutex::new(table))
+    }
+
+    fn shared(trace_tx: &broadcast::Sender<String>, flow_table: &Arc<Mutex<FlowTable>>) -> ConnectionShared {
+        let (capture_config_tx, _) = mpsc::channel();
+        let (writer_tx, _) = mpsc::sync_channel(1);
+        ConnectionShared {
+            paused: Arc::new(AtomicBool::new(false)),
+            keylog_watcher: Arc::new(Mutex::new(KeyLogWatcher::new())),
+            decrypt_state: Arc::new(Mutex::new(HashMap::new())),
+            trace_tx: trace_tx.clone(),
+            relay_lagged_events: Arc::new(AtomicU64::new(0)),
+            capture_config_tx,
+            writer_tx,
+            writer_active: Arc::new(AtomicBool::new(false)),
+            capture_config_state: Arc::new(Mutex::new(wire::CaptureConfigJson { filter: None, snaplen: 65535 })),
+            current_interface: Arc::new(Mutex::new(("en0".into(), LOCAL.into()))),
+            current_link_type: Arc::new(Mutex::new(parse::LinkType::Ethernet)),
+            hostname: "test-host".into(),
+            io_shared: Arc::new(capture_agent::io_series::IoSeriesShared::with_random_epoch()),
+            flow_table: flow_table.clone(),
+        }
+    }
+
+    /// Starts `serve_connection` on one end of a duplex pipe with an
+    /// internal buffer of `buffer` bytes; returns the peer's end and the
+    /// connection's shared state.
+    fn connect(
+        trace_tx: &broadcast::Sender<String>,
+        flow_table: &Arc<Mutex<FlowTable>>,
+        buffer: usize,
+    ) -> (DuplexStream, Arc<ConnectionShared>) {
+        let (agent_end, peer) = tokio::io::duplex(buffer);
+        let shared = Arc::new(shared(trace_tx, flow_table));
+        let task_shared = shared.clone();
+        tokio::spawn(async move {
+            let (read_half, write_half) = tokio::io::split(agent_end);
+            serve_connection(BufReader::new(read_half), write_half, &task_shared).await;
+        });
+        (peer, shared)
+    }
+
+    fn request_line(n: u8) -> String {
+        format!(
+            "{{\"type\":\"get_tcp_samples\",\"requestId\":\"{:032x}\",\"connectionId\":\"Tcp-{LOCAL}:51000-{REMOTE}:443\"}}\n",
+            n
+        )
+    }
+
+    async fn next_line<R: tokio::io::AsyncBufRead + Unpin>(lines: &mut tokio::io::Lines<R>) -> serde_json::Value {
+        let line = timeout(Duration::from_secs(5), lines.next_line()).await.expect("a line in time").unwrap().expect("open");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reply_goes_only_to_the_requester_and_blocks_only_its_own_connection() {
+        let (trace_tx, _keep) = broadcast::channel::<String>(4);
+        let flow_table = flow_table_with_samples(200);
+        let one_reply = wire::answer_tcp_samples(&flow_table, &match wire::classify_control_line(&request_line(1)) {
+            wire::ControlLine::Message(wire::ControlMessage::GetTcpSamples(r)) => r,
+            _ => unreachable!(),
+        }, wire::TCP_SAMPLES_MAX_LINE_BYTES).unwrap();
+        let buffer = 1024;
+        assert!(one_reply.len() > 4 * buffer, "the reply must not fit the pipe");
+
+        let (mut requester, requester_state) = connect(&trace_tx, &flow_table, buffer);
+        let (bystander, _bystander_state) = connect(&trace_tx, &flow_table, 64 * 1024);
+        let mut bystander = BufReader::new(bystander).lines();
+        assert_eq!(next_line(&mut bystander).await["type"], "io_series_status");
+
+        // Two requests with a `pause` between them; the requester reads
+        // nothing, so the first reply fills the pipe and parks its task.
+        requester
+            .write_all(format!("{}{}{}", request_line(1), "{\"type\":\"pause\"}\n", request_line(2)).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!requester_state.paused.load(Ordering::Relaxed), "the line after the first request is still unread");
+
+        // The other connection keeps receiving broadcast events, and none of
+        // them is a tcp_samples reply.
+        for n in 0..10 {
+            trace_tx.send(format!("{{\"type\":\"test_event\",\"n\":{n}}}\n")).unwrap();
+            let event = next_line(&mut bystander).await;
+            assert_eq!((event["type"].as_str(), event["n"].as_u64()), (Some("test_event"), Some(n)));
+        }
+        assert!(!requester_state.paused.load(Ordering::Relaxed));
+
+        // Draining: both replies, in order, then the events that survived in
+        // the 4-slot channel; the six it overwrote are counted as lag.
+        let mut requester = BufReader::new(requester).lines();
+        assert_eq!(next_line(&mut requester).await["type"], "io_series_status");
+        let (mut replies, mut events) = (Vec::new(), Vec::new());
+        while replies.len() < 2 || events.len() < 4 {
+            let line = next_line(&mut requester).await;
+            match line["type"].as_str() {
+                Some("tcp_samples") => replies.push(line["requestId"].as_str().unwrap().to_string()),
+                Some("test_event") => events.push(line["n"].as_u64().unwrap()),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(replies, vec![format!("{:032x}", 1), format!("{:032x}", 2)]);
+        assert_eq!(events, vec![6, 7, 8, 9]);
+        assert_eq!(requester_state.relay_lagged_events.load(Ordering::Relaxed), 6);
+        assert!(requester_state.paused.load(Ordering::Relaxed));
+
+        // No tcp_samples line ever reached the broadcast channel.
+        trace_tx.send("{\"type\":\"test_event\",\"n\":99}\n".into()).unwrap();
+        assert_eq!(next_line(&mut bystander).await["n"], 99);
+    }
 }

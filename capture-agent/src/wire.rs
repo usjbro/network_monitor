@@ -1,4 +1,7 @@
+use crate::flow::{FlowKey, FlowTable};
+use crate::tcp_samples::{flag, mark, relative_seq, RingView, TcpSampleStore};
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -348,6 +351,14 @@ pub enum AgentEvent {
     ServiceTimeUpdate {
         summaries: Vec<ServiceTimeSummaryJson>,
     },
+    /// KAN-129: the reply to one `get_tcp_samples`. Written only to the
+    /// requesting connection, never broadcast (plan A5). Flattened so `type`
+    /// is the first key and `requestId` the second, which the relay's
+    /// framing relies on.
+    TcpSamples {
+        #[serde(flatten)]
+        reply: Box<TcpSamplesJson>,
+    },
 }
 
 /// One capturable network interface, as reported in response to a
@@ -522,6 +533,30 @@ pub struct CaptureStatsJson {
     /// set (`REPLAY_WAIT_FOR_IO_SERIES=1`). Omitted when false.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub replay_waiting: bool,
+    /// KAN-129 (spec D1): the TCP sample rings' cost.
+    #[serde(flatten)]
+    pub tcp_sample_cost: TcpSampleCostJson,
+}
+
+/// `tcpSampleRings` (live rings), `tcpSampleRingBytes` (their reserved
+/// capacity, not their fill) and `tcpSampleRingsRecycled` (cumulative
+/// rings taken from the least recently active flow).
+#[derive(Serialize, Debug, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpSampleCostJson {
+    pub tcp_sample_rings: u64,
+    pub tcp_sample_ring_bytes: u64,
+    pub tcp_sample_rings_recycled: u64,
+}
+
+impl TcpSampleCostJson {
+    pub fn of(store: &TcpSampleStore) -> Self {
+        TcpSampleCostJson {
+            tcp_sample_rings: store.rings() as u64,
+            tcp_sample_ring_bytes: store.reserved_bytes() as u64,
+            tcp_sample_rings_recycled: store.recycled(),
+        }
+    }
 }
 
 /// Host/interface identity and aggregate throughput, sent once per tick
@@ -634,6 +669,11 @@ pub enum ControlMessage {
         request_id: String,
         series: Vec<IoSeriesDefJson>,
     },
+    /// KAN-129: one page of a flow's TCP sample ring, answered inline to
+    /// this connection only. Decoding enforces plan A3's input limits; a
+    /// message outside them fails to decode and is ignored like an unknown
+    /// control type.
+    GetTcpSamples(TcpSamplesRequest),
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -813,6 +853,204 @@ pub struct RingConfigJson {
 pub struct AutostopConfigJson {
     pub mode: String,
     pub threshold: u64,
+}
+
+/// KAN-129 plan A1: at most this many samples per `tcp_samples` reply. At
+/// 79 bytes per sample with every column at its maximum, 3 072 samples fit
+/// the line ceiling below for every possible value.
+pub const TCP_SAMPLES_MAX_PER_REPLY: usize = 3072;
+/// The relay's ceiling for one `tcp_samples` line, LF included.
+pub const TCP_SAMPLES_MAX_LINE_BYTES: usize = 256 * 1024;
+/// The relay allows 128 UTF-16 units, at most 384 bytes of UTF-8.
+pub const TCP_SAMPLES_MAX_CONNECTION_ID_BYTES: usize = 384;
+
+/// `get_tcp_samples`, validated (plan A3): `requestId` is exactly 32
+/// lowercase hex characters and `connectionId` 1 to 384 bytes.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(try_from = "RawTcpSamplesRequest")]
+pub struct TcpSamplesRequest {
+    pub request_id: String,
+    pub connection_id: String,
+    /// Compared with the ring's rendered generation as a string, so any
+    /// value that is not exactly what this agent renders reads as stale.
+    pub generation: Option<String>,
+    pub from_index: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawTcpSamplesRequest {
+    request_id: String,
+    connection_id: String,
+    #[serde(default)]
+    generation: Option<String>,
+    #[serde(default)]
+    from_index: Option<u64>,
+}
+
+impl TryFrom<RawTcpSamplesRequest> for TcpSamplesRequest {
+    type Error = &'static str;
+
+    fn try_from(raw: RawTcpSamplesRequest) -> Result<Self, Self::Error> {
+        let id = raw.request_id.as_bytes();
+        if id.len() != 32 || !id.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err("requestId must be 32 lowercase hex characters");
+        }
+        if raw.connection_id.is_empty() || raw.connection_id.len() > TCP_SAMPLES_MAX_CONNECTION_ID_BYTES {
+            return Err("connectionId must be 1 to 384 bytes");
+        }
+        Ok(TcpSamplesRequest {
+            request_id: raw.request_id,
+            connection_id: raw.connection_id,
+            generation: raw.generation,
+            from_index: raw.from_index.unwrap_or(0),
+        })
+    }
+}
+
+/// A ring generation as the wire carries it: 16 lowercase hex digits of the
+/// epoch, a colon, the decimal counter.
+pub fn render_generation((epoch, counter): (u64, u64)) -> String {
+    format!("{epoch:016x}:{counter}")
+}
+
+/// `tcp_samples`. `found: false` and `stale: true` carry no page.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpSamplesJson {
+    pub request_id: String,
+    pub connection_id: String,
+    pub found: bool,
+    pub stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub page: Option<TcpSamplesPageJson>,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpSamplesPageJson {
+    pub handshake_seen: bool,
+    /// `null` when scaling was not negotiated in a captured handshake.
+    pub window_scale: Option<WindowScaleJson>,
+    pub seq_base: SeqBaseJson,
+    /// `"isn"` when both bases are ISNs, else `"firstSeen"`.
+    pub relative_to: &'static str,
+    pub first_index: u64,
+    /// The first returned index plus the number returned (plan A1); not
+    /// the ring's write index.
+    pub next_index: u64,
+    pub more: bool,
+    pub dropped_older: u64,
+    pub samples: TcpSampleColumnsJson,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq)]
+pub struct WindowScaleJson {
+    pub local: u8,
+    pub remote: u8,
+}
+
+#[derive(Serialize, Debug, Clone, Copy, PartialEq)]
+pub struct SeqBaseJson {
+    pub outbound: u32,
+    pub inbound: u32,
+}
+
+/// Columnar samples. `tUs[0]` is absolute µs since the epoch, capped at
+/// 2^53 − 1; the rest are signed deltas from the previous (capped) value.
+/// `seq` is relative to the sender's `seqBase`, `ack` to the receiver's,
+/// and `ack` is 0 on a segment without the ACK flag.
+#[derive(Serialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpSampleColumnsJson {
+    pub t_us: Vec<i64>,
+    pub seq: Vec<u32>,
+    pub ack: Vec<u32>,
+    pub win: Vec<u32>,
+    pub len: Vec<u16>,
+    pub flags: Vec<u8>,
+    pub mark: Vec<u8>,
+    pub rtt_us: Vec<u32>,
+}
+
+/// Builds the reply from the ring copy taken under the flow lock (plan P2).
+pub fn tcp_samples_reply(request: &TcpSamplesRequest, view: Option<RingView>) -> TcpSamplesJson {
+    let mut reply = TcpSamplesJson {
+        request_id: request.request_id.clone(),
+        connection_id: request.connection_id.clone(),
+        found: false,
+        stale: false,
+        generation: None,
+        page: None,
+    };
+    let Some(view) = view else { return reply };
+    let generation = render_generation(view.generation);
+    reply.found = true;
+    reply.stale = request.generation.as_ref().is_some_and(|asked| *asked != generation);
+    reply.generation = Some(generation);
+    if reply.stale {
+        return reply;
+    }
+
+    let (out_base, in_base) = view.seq_base;
+    let mut columns = TcpSampleColumnsJson::default();
+    let mut previous: Option<i64> = None;
+    for s in &view.samples {
+        // Capped at 2^53 − 1, so every delta of two capped values fits i64.
+        let t = s.t_us.min(MAX_EXACT_JSON_UINT as u64) as i64;
+        columns.t_us.push(previous.map_or(t, |p| t - p));
+        previous = Some(t);
+        let (own, other) = if s.mark & mark::OUTBOUND != 0 { (out_base, in_base) } else { (in_base, out_base) };
+        columns.seq.push(relative_seq(s.seq, own));
+        columns.ack.push(if s.flags & flag::ACK != 0 { relative_seq(s.ack, other) } else { 0 });
+        columns.win.push(s.win);
+        columns.len.push(s.len);
+        columns.flags.push(s.flags);
+        columns.mark.push(s.mark);
+        columns.rtt_us.push(s.rtt_us);
+    }
+    let next_index = view.start_index + view.samples.len() as u64;
+    reply.page = Some(TcpSamplesPageJson {
+        handshake_seen: view.handshake_seen,
+        window_scale: view.window_scale.map(|(local, remote)| WindowScaleJson { local, remote }),
+        seq_base: SeqBaseJson { outbound: out_base, inbound: in_base },
+        relative_to: if view.relative_to_isn { "isn" } else { "firstSeen" },
+        first_index: view.first_index,
+        next_index,
+        more: next_index < view.next_index,
+        dropped_older: view.first_index.saturating_sub(request.from_index),
+        samples: columns,
+    });
+    reply
+}
+
+/// The encoded line, or `None` when it would exceed `max_line_bytes` (a
+/// bug by plan A1; the caller writes nothing and the relay times out).
+pub fn encode_tcp_samples_reply(reply: TcpSamplesJson, max_line_bytes: usize) -> Option<String> {
+    let line = encode_event(&AgentEvent::TcpSamples { reply: Box::new(reply) });
+    if line.len() > max_line_bytes {
+        eprintln!("capture-agent: tcp_samples reply of {} bytes exceeds the {max_line_bytes}-byte ceiling; not sent", line.len());
+        return None;
+    }
+    Some(line)
+}
+
+/// The whole handler: copy at most one page under the lock, release it,
+/// then build and measure the line (plan P2).
+pub fn answer_tcp_samples(
+    flow_table: &Mutex<FlowTable>,
+    request: &TcpSamplesRequest,
+    max_line_bytes: usize,
+) -> Option<String> {
+    let view = FlowKey::from_connection_id(&request.connection_id).and_then(|key| {
+        flow_table
+            .lock()
+            .unwrap()
+            .tcp_sample_view(&key, request.from_index, TCP_SAMPLES_MAX_PER_REPLY)
+    });
+    encode_tcp_samples_reply(tcp_samples_reply(request, view), max_line_bytes)
 }
 
 pub fn encode_event(event: &AgentEvent) -> String {
@@ -1574,9 +1812,15 @@ mod tests {
                 idle_evictions: 6,
                 observed_name_evictions: 4,
                 replay_waiting: false,
+                tcp_sample_cost: TcpSampleCostJson {
+                    tcp_sample_rings: 3,
+                    tcp_sample_ring_bytes: 405_000,
+                    tcp_sample_rings_recycled: 11,
+                },
             },
         };
         let line = encode_event(&event);
+        assert!(line.contains("\"tcpSampleRings\":3,\"tcpSampleRingBytes\":405000,\"tcpSampleRingsRecycled\":11"), "{line}");
         assert!(line.ends_with('\n'));
         assert!(line.contains("\"type\":\"capture_stats\""));
         assert!(line.contains("\"received\":1000"));
@@ -1761,4 +2005,280 @@ pub enum AuthenticateMessage {
 pub enum AuthenticatedMessage {
     #[serde(rename = "authenticated")]
     Authenticated,
+}
+
+/// KAN-129 Task 3: `get_tcp_samples` decoding limits (plan A3) and the
+/// `tcp_samples` reply's encoding and size bound (plan A1).
+#[cfg(test)]
+mod tcp_samples_tests {
+    use super::*;
+    use crate::tcp_samples::TcpSample;
+    use serde_json::{json, Value};
+
+    const RID: &str = "0123456789abcdef0123456789abcdef";
+    const CID: &str = "Tcp-192.168.1.10:51000-93.184.216.34:443";
+
+    fn decode(value: Value) -> Option<TcpSamplesRequest> {
+        match classify_control_line(&value.to_string()) {
+            ControlLine::Message(ControlMessage::GetTcpSamples(request)) => Some(request),
+            ControlLine::Message(other) => panic!("decoded as {other:?}"),
+            ControlLine::Ignored => None,
+            ControlLine::NotJson => panic!("not json"),
+        }
+    }
+
+    fn request(extra: Value) -> Value {
+        let mut message = json!({ "type": "get_tcp_samples", "requestId": RID, "connectionId": CID });
+        message.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        message
+    }
+
+    #[test]
+    fn decodes_a_minimal_request_with_defaults() {
+        assert_eq!(
+            decode(request(json!({}))),
+            Some(TcpSamplesRequest {
+                request_id: RID.into(),
+                connection_id: CID.into(),
+                generation: None,
+                from_index: 0,
+            })
+        );
+        let full = decode(request(json!({ "generation": "00000000feedbeef:7", "fromIndex": 9, "extra": 1 }))).unwrap();
+        assert_eq!((full.generation.as_deref(), full.from_index), (Some("00000000feedbeef:7"), 9));
+    }
+
+    #[test]
+    fn request_id_must_be_exactly_32_lowercase_hex() {
+        assert!(decode(request(json!({ "requestId": &RID[..31] }))).is_none(), "31");
+        assert!(decode(request(json!({ "requestId": RID }))).is_some(), "32");
+        assert!(decode(request(json!({ "requestId": format!("{RID}0") }))).is_none(), "33");
+        assert!(decode(request(json!({ "requestId": RID.to_uppercase() }))).is_none(), "upper");
+        assert!(decode(request(json!({ "requestId": format!("{}g", &RID[..31]) }))).is_none(), "non-hex");
+        assert!(decode(request(json!({ "requestId": 5 }))).is_none(), "number");
+    }
+
+    #[test]
+    fn connection_id_must_be_1_to_384_bytes() {
+        assert!(decode(request(json!({ "connectionId": "" }))).is_none(), "empty");
+        assert!(decode(request(json!({ "connectionId": "x" }))).is_some(), "1");
+        // Multi-byte UTF-8: 128 three-byte characters are 384 bytes.
+        assert!(decode(request(json!({ "connectionId": "€".repeat(128) }))).is_some(), "384");
+        assert!(decode(request(json!({ "connectionId": format!("{}x", "€".repeat(128)) }))).is_none(), "385");
+        assert!(decode(request(json!({ "connectionId": "x".repeat(384) }))).is_some(), "384 ascii");
+        assert!(decode(request(json!({ "connectionId": "x".repeat(385) }))).is_none(), "385 ascii");
+    }
+
+    #[test]
+    fn a_malformed_generation_still_decodes_so_it_can_be_answered_stale() {
+        for generation in [
+            format!("{:016x}:{}", 1, u64::MAX),
+            format!("{:016x}:18446744073709551616", 1),
+            "nothex".into(),
+            "".into(),
+        ] {
+            let decoded = decode(request(json!({ "generation": generation }))).expect("decodes");
+            assert_eq!(decoded.generation.as_deref(), Some(generation.as_str()));
+        }
+        assert!(decode(request(json!({ "fromIndex": -1 }))).is_none(), "negative fromIndex");
+        assert!(decode(request(json!({ "fromIndex": 1.5 }))).is_none(), "fractional fromIndex");
+    }
+
+    fn sample(t_us: u64, outbound: bool, seq: u32, ack: u32) -> TcpSample {
+        let mut s = TcpSample::default();
+        s.t_us = t_us;
+        s.seq = seq;
+        s.ack = ack;
+        s.flags = flag::ACK;
+        s.mark = if outbound { mark::OUTBOUND } else { 0 };
+        s
+    }
+
+    fn ring_view(first_index: u64, next_index: u64, samples: Vec<TcpSample>) -> RingView {
+        RingView {
+            generation: (0xfeed_beef, 3),
+            first_index,
+            start_index: first_index,
+            next_index,
+            handshake_seen: true,
+            window_scale: Some((7, 8)),
+            seq_base: (1000, 5000),
+            relative_to_isn: true,
+            samples,
+        }
+    }
+
+    fn req(generation: Option<&str>, from_index: u64) -> TcpSamplesRequest {
+        TcpSamplesRequest {
+            request_id: RID.into(),
+            connection_id: CID.into(),
+            generation: generation.map(Into::into),
+            from_index,
+        }
+    }
+
+    /// Inverse of the encoding, for round-trip checks: absolute
+    /// timestamps and raw sequence numbers back from the JSON.
+    fn decode_samples(reply: &Value) -> Vec<TcpSample> {
+        let s = &reply["samples"];
+        let col = |name: &str| -> Vec<i128> {
+            s[name].as_array().unwrap().iter().map(|v| v.as_i64().map(i128::from).or(v.as_u64().map(i128::from)).unwrap()).collect()
+        };
+        let (out_base, in_base) = (reply["seqBase"]["outbound"].as_u64().unwrap() as u32, reply["seqBase"]["inbound"].as_u64().unwrap() as u32);
+        let (t, seq, ack, win, len, flags, marks, rtt) =
+            (col("tUs"), col("seq"), col("ack"), col("win"), col("len"), col("flags"), col("mark"), col("rttUs"));
+        let mut at: i128 = 0;
+        (0..t.len())
+            .map(|i| {
+                at = if i == 0 { t[0] } else { at + t[i] };
+                let mut out = TcpSample::default();
+                out.t_us = at as u64;
+                out.mark = marks[i] as u8;
+                out.flags = flags[i] as u8;
+                let outbound = out.mark & mark::OUTBOUND != 0;
+                let (own, other) = if outbound { (out_base, in_base) } else { (in_base, out_base) };
+                out.seq = (seq[i] as u32).wrapping_add(own);
+                out.ack = if out.flags & flag::ACK != 0 { (ack[i] as u32).wrapping_add(other) } else { 0 };
+                out.win = win[i] as u32;
+                out.len = len[i] as u16;
+                out.rtt_us = rtt[i] as u32;
+                out
+            })
+            .collect()
+    }
+
+    fn encode(reply: TcpSamplesJson) -> String {
+        encode_tcp_samples_reply(reply, TCP_SAMPLES_MAX_LINE_BYTES).expect("fits")
+    }
+
+    #[test]
+    fn type_is_the_first_key_and_request_id_the_second() {
+        for view in [None, Some(ring_view(0, 1, vec![sample(5, true, 1000, 5000)]))] {
+            let line = encode(tcp_samples_reply(&req(None, 0), view));
+            assert!(line.starts_with(&format!("{{\"type\":\"tcp_samples\",\"requestId\":\"{RID}\",")), "{line}");
+            assert!(line.ends_with('\n') && !line[..line.len() - 1].contains('\n'));
+        }
+    }
+
+    #[test]
+    fn found_reply_carries_the_page_and_spec_fields() {
+        let view = ring_view(10, 13, vec![sample(1_000_000, true, 1000, 5000), sample(1_000_100, false, 5001, 1449), sample(1_000_050, true, 1449, 5002)]);
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(Some("00000000feedbeef:3"), 10), Some(view)))).unwrap();
+        assert_eq!(reply["found"], true);
+        assert_eq!(reply["stale"], false);
+        assert_eq!(reply["connectionId"], CID);
+        assert_eq!(reply["generation"], "00000000feedbeef:3");
+        assert_eq!(reply["handshakeSeen"], true);
+        assert_eq!(reply["windowScale"], json!({ "local": 7, "remote": 8 }));
+        assert_eq!(reply["seqBase"], json!({ "outbound": 1000, "inbound": 5000 }));
+        assert_eq!(reply["relativeTo"], "isn");
+        assert_eq!((reply["firstIndex"].as_u64(), reply["nextIndex"].as_u64()), (Some(10), Some(13)));
+        assert_eq!((reply["more"].as_bool(), reply["droppedOlder"].as_u64()), (Some(false), Some(0)));
+        assert_eq!(reply["samples"]["tUs"], json!([1_000_000, 100, -50]), "signed deltas");
+        assert_eq!(reply["samples"]["seq"], json!([0, 1, 449]));
+        assert_eq!(reply["samples"]["ack"], json!([0, 449, 2]));
+        assert!(reply.get("handshakeRttUs").is_none() && reply.get("busy").is_none());
+    }
+
+    #[test]
+    fn raw_windows_and_a_midstream_join_are_explicit() {
+        let mut view = ring_view(0, 0, vec![]);
+        view.window_scale = None;
+        view.relative_to_isn = false;
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 0), Some(view)))).unwrap();
+        assert_eq!(reply["windowScale"], Value::Null);
+        assert_eq!(reply["relativeTo"], "firstSeen");
+    }
+
+    #[test]
+    fn absent_cases_carry_no_samples() {
+        let not_found: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 0), None))).unwrap();
+        assert_eq!(not_found, json!({ "type": "tcp_samples", "requestId": RID, "connectionId": CID, "found": false, "stale": false }));
+
+        for generation in ["00000000feedbeef:4", "00000000FEEDBEEF:3", "feedbeef:3", "00000000feedbeef:03", "x"] {
+            let stale: Value = serde_json::from_str(&encode(tcp_samples_reply(
+                &req(Some(generation), 0),
+                Some(ring_view(0, 1, vec![sample(1, true, 1000, 0)])),
+            )))
+            .unwrap();
+            assert_eq!(
+                stale,
+                json!({ "type": "tcp_samples", "requestId": RID, "connectionId": CID, "found": true, "stale": true, "generation": "00000000feedbeef:3" }),
+                "{generation}"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_id_is_echoed_byte_for_byte() {
+        let odd = "Tcp-\u{2028}\"\\<x>\u{0}€";
+        let mut request = req(None, 0);
+        request.connection_id = odd.into();
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&request, None))).unwrap();
+        assert_eq!(reply["connectionId"].as_str(), Some(odd));
+    }
+
+    #[test]
+    fn paging_fields_follow_plan_a1() {
+        // fromIndex before firstIndex: overwritten history is counted.
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 4), Some(ring_view(10, 20, vec![sample(1, true, 1000, 0); 3]))))).unwrap();
+        assert_eq!((reply["nextIndex"].as_u64(), reply["more"].as_bool(), reply["droppedOlder"].as_u64()), (Some(13), Some(true), Some(6)));
+        // fromIndex past the write index: empty, not more, nextIndex = write index.
+        let mut past = ring_view(10, 20, vec![]);
+        past.start_index = 20;
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 99), Some(past)))).unwrap();
+        assert_eq!((reply["nextIndex"].as_u64(), reply["more"].as_bool(), reply["droppedOlder"].as_u64()), (Some(20), Some(false), Some(0)));
+        assert_eq!(reply["samples"]["tUs"], json!([]));
+    }
+
+    /// Plan A1's bound: a full page with every column at its maximum,
+    /// `mark` at 255, alternating huge signed deltas and a timestamp above
+    /// 2^53 − 1 stays within the line ceiling and decodes back.
+    #[test]
+    fn a_full_page_at_every_maximum_fits_and_round_trips() {
+        let cap = (1u64 << 53) - 1;
+        let samples: Vec<TcpSample> = (0..TCP_SAMPLES_MAX_PER_REPLY)
+            .map(|i| {
+                let mut s = TcpSample::default();
+                s.t_us = match i % 3 { 0 => 0, 1 => u64::MAX, _ => cap - 1 };
+                s.mark = 255;
+                s.flags = 255;
+                s.seq = 999; // outbound base 1000: relative u32::MAX
+                s.ack = 4999; // inbound base 5000: relative u32::MAX
+                s.win = u32::MAX;
+                s.len = u16::MAX;
+                s.rtt_us = u32::MAX;
+                s
+            })
+            .collect();
+        let mut view = ring_view(u64::MAX - 10_000, u64::MAX - 1, samples.clone());
+        view.generation = (u64::MAX, u64::MAX);
+        let mut request = req(Some(&render_generation((u64::MAX, u64::MAX))), u64::MAX - 10_000);
+        request.connection_id = "\u{0}".repeat(TCP_SAMPLES_MAX_CONNECTION_ID_BYTES);
+        let line = encode_tcp_samples_reply(tcp_samples_reply(&request, Some(view)), TCP_SAMPLES_MAX_LINE_BYTES)
+            .expect("a full page at every maximum fits the ceiling");
+        assert!(line.len() <= TCP_SAMPLES_MAX_LINE_BYTES, "{} bytes", line.len());
+
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        let expected: Vec<TcpSample> = samples
+            .iter()
+            .map(|s| {
+                let mut s = *s;
+                s.t_us = s.t_us.min(cap);
+                s
+            })
+            .collect();
+        assert_eq!(decode_samples(&reply), expected);
+        for v in reply["samples"]["tUs"].as_array().unwrap() {
+            assert!(v.as_i64().is_some_and(|n| n.unsigned_abs() <= cap), "{v}");
+        }
+    }
+
+    #[test]
+    fn a_line_over_the_ceiling_is_not_returned() {
+        let view = ring_view(0, 2, vec![sample(1, true, 1000, 0); 2]);
+        let line = encode(tcp_samples_reply(&req(None, 0), Some(view.clone())));
+        assert_eq!(encode_tcp_samples_reply(tcp_samples_reply(&req(None, 0), Some(view.clone())), line.len()), Some(line.clone()));
+        assert_eq!(encode_tcp_samples_reply(tcp_samples_reply(&req(None, 0), Some(view)), line.len() - 1), None);
+    }
 }

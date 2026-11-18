@@ -367,7 +367,10 @@ Sent once per tick (~1 second), immediately after that tick's `layer_update`. Re
     "totalConnectionsObserved": 812,
     "capacityEvictions": 0,
     "idleEvictions": 47,
-    "observedNameEvictions": 0
+    "observedNameEvictions": 0,
+    "tcpSampleRings": 12,
+    "tcpSampleRingBytes": 1648608,
+    "tcpSampleRingsRecycled": 0
   }
 }
 ```
@@ -385,7 +388,8 @@ Field notes:
 - `totalConnectionsObserved` — the "N" half of an honest "showing N of M" horizon (JAM-6/GitHub #73): a cumulative count of every distinct flow this session's `FlowTable` has ever observed. A repeat packet on an already-tracked flow never inflates this, so it climbs only as genuinely new connections appear.
 - `capacityEvictions`/`idleEvictions` — two independent reasons a flow can leave the table. `capacityEvictions` counts flows dropped because the table exceeded its capacity ceiling (`MAX_FLOWS`) — a nonzero, growing value here means this session is losing still-active flows under memory pressure, a materially different health signal from ordinary churn. `idleEvictions` counts flows evicted for going idle past their status-appropriate threshold — normal connection turnover, not a capacity concern.
 - `observedNameEvictions` — cumulative count of observed DNS names (the `observedName` source on `endpoint_update`) dropped because the name table reached `MAX_OBSERVED_DNS_NAMES`, soonest-to-expire first. Names that simply expired are not counted. A nonzero, growing value means `observedName` may be absent for hosts whose DNS answer was seen earlier. The mapper treats it as optional (unlike its sibling counters): an agent that predates it omits the field, and the mapper then leaves it `undefined` rather than 0. The Connections view shows nothing for either `undefined` or 0 (it only displays a positive count).
-- All nine counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
+- `tcpSampleRings`, `tcpSampleRingBytes`, `tcpSampleRingsRecycled` (KAN-129) — the cost of the per-flow TCP sample rings behind `tcp_samples`. `tcpSampleRings` is the number of rings held now (at most 128); `tcpSampleRingBytes` is their **reserved capacity**, not their fill (each ring reserves its full 4 096 × 32-byte sample buffer and both directions' 256-entry RTT tables from the start, 137 384 bytes in the current build, so at most about 17.6 MB); `tcpSampleRingsRecycled` is a cumulative count of rings taken from the least recently active flow because all 128 were in use. The first two rise and fall with the flows that own rings and are cleared by a `set_interface` switch; only `tcpSampleRingsRecycled` is a counter. The mapper treats all three as optional and leaves them `undefined` (unknown, not 0) for an older agent.
+- The other nine counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
 
 Any connection's `packetLoss` (in `connection_update`) is derived purely from observed TCP retransmits — it has no way to know about packets the kernel or the relay itself lost before ever reaching that computation. A nonzero `dropped`/`ifDropped`/`relayLaggedEvents`/`unparseableFrames` here means `packetLoss` figures elsewhere in this same tick may under-report actual loss; the UI treats these two as independent signals (see `app/page.tsx`'s capture-degraded banner and `ConnectionsView`'s loss-column caveat) rather than trying to merge them into one number.
 
@@ -665,6 +669,35 @@ Closed 100 ms buckets for every series, sent from the 1 s emitter tick. Flat. Ne
 - **Revision changes.** On a new set, the old set's open buckets are closed and reported under the old revision, and counting restarts under the new one. A browser keys history by `(epoch, revision)`.
 - **Cost** (JAM-18 Task 2 benchmark, `capture-agent/tests/io_graph_bench.rs`, one development machine): while any series is configured, the agent builds a field tree for every frame. End to end in fast replay of 200 000 mixed frames: 3 742 ns/frame with no series, 7 277 with 1, 7 804 with 8 (2.09×). Almost all of it is the field tree; evaluating 8 filters instead of 1 adds about 0.5 µs. With no series configured the cost is one atomic load per frame. Re-run with aggregates (Task 5, same machine): 3 566 ns/frame with no series, 8 091 with 8 plain series, 8 406 with 8 series that each also aggregate a field (about 0.3 µs more); per frame, outside the agent, aggregates added 193 ns over 8 plain series.
 
+### `tcp_samples` (KAN-129)
+
+The reply to one `get_tcp_samples` (below): one page of a TCP flow's sample ring, written **only to the agent connection that asked** and never through the broadcast channel, so it never reaches another relay connection, the SSE feed or any `on('event')` listener. The relay correlates it by `requestId` (`lib/agent-request.ts`) and returns it, with `requestId` removed, as the body of that `POST /api/tcp-samples` response. Flat. Design: `docs/superpowers/specs/2026-11-11-tcp-stream-graphs-design.md` D5, as amended by the plan's A1–A5.
+
+```json
+{"type":"tcp_samples","requestId":"9f2c41d07e1a4b6c8d3e5f708192a3b4","connectionId":"Tcp-192.168.1.10:51000-93.184.216.34:443",
+ "found":true,"stale":false,"generation":"4be1a07c9d22f310:17",
+ "handshakeSeen":true,"windowScale":{"local":7,"remote":8},
+ "seqBase":{"outbound":1294467712,"inbound":3011845120},"relativeTo":"isn",
+ "firstIndex":18230,"nextIndex":21302,"more":true,"droppedOlder":18230,
+ "samples":{"tUs":[1794120000000000,1200,1350],"seq":[0,1,1449],"ack":[0,1,1],"win":[65535,131328,131328],
+            "len":[0,1448,1448],"flags":[2,24,24],"mark":[1,1,3],"rttUs":[0,0,0]}}
+```
+
+- **Key order.** `type` is the first key and `requestId` the second: the relay recognises a reply line before parsing it, so a line that reaches it over the ceiling fails its request with 502. (The agent never sends such a line; see Bounds.)
+- **Absent cases carry no page.** `found: false` (the id is not a TCP flow the agent tracks, does not parse, or the flow has no ring) has only `type`, `requestId`, `connectionId`, `found`, `stale`. `stale: true` (the request's `generation` is not the ring's current one) adds the current `generation` and nothing else; the reader discards what it holds and starts again from index 0.
+- `connectionId` is echoed byte for byte, even when it does not parse (the relay answers 502 when it differs from what it sent).
+- `generation` — `"<epoch>:<counter>"`: 16 lowercase hex digits of a random per-process epoch, then the decimal ring counter. A ring reused for another flow, or a flow that reappears on the same tuple, gets a new generation.
+- `handshakeSeen` — both the SYN and the SYN-ACK were captured. `windowScale` — `{local, remote}` shift counts (clamped to 14) when both captured SYNs carried the option; `null` means windows are raw. `relativeTo` — `isn` when both `seqBase` values are the captured ISNs, `firstSeen` when a direction's handshake was not captured and its base is its first seen sequence number. The mapper turns any other value into `unknown`.
+- **Columns.** `samples` holds eight arrays of equal length, one entry per captured segment of either direction, in capture order:
+  - `tUs` — `tUs[0]` is the frame timestamp in µs since the epoch (capture time live, recorded time in replay); every later entry is a **signed** delta from the previous sample, negative when a replayed file's timestamps go backwards. A timestamp above 2^53 − 1 is sent as 2^53 − 1, so every value is exact in JSON.
+  - `seq` — relative to the sending direction's `seqBase`, across the 2^32 wrap. `ack` — relative to the receiving direction's `seqBase`, 0 on a segment without ACK.
+  - `win` — scaled when `mark` has `WIN_SCALED`, otherwise the raw header value. `len` — TCP payload bytes. `flags` — header flags at their wire positions (FIN 1, SYN 2, RST 4, PSH 8, ACK 16).
+  - `mark` — agent marks: `OUTBOUND` 1 (sent by the local side), `RETRANSMIT` 2, `WIN_SCALED` 4, `ZERO_WINDOW` 8, `RTT` 16. Bits a client does not know are kept as sent.
+  - `rttUs` — valid when `mark` has `RTT`: the time from the first transmission of the data this ACK newly acknowledges to the ACK, under Karn's rule (no sample for retransmitted data). **RTT is measured at the capture point**, not end to end: on the host that sent the data it approximates the path RTT; captured in the middle of the path, it covers only the part beyond the capture point. The handshake RTT is not in this reply; it stays on the connection as `latencyMs`.
+- **Paging.** Each sample has a per-ring `u64` index. A reply returns at most **3 072** samples from `max(fromIndex, firstIndex)`. `firstIndex` is the oldest index the ring still holds; `nextIndex` is the first returned index plus the number returned, the index to ask for next; `more: true` means the ring already holds samples at or after `nextIndex`, so the reader asks again at once. A `fromIndex` at or past the ring's write index returns no samples, `more: false`, and `nextIndex` equal to the write index (which can be lower than the `fromIndex` asked for). `droppedOlder` is `firstIndex − fromIndex` when `fromIndex < firstIndex` (samples asked for that the ring had already overwritten), else 0. A full ring (4 096 samples) takes two requests.
+- **Bounds.** 3 072 samples cost at most 79 bytes each with every column at its maximum, so every reply fits the 256 KiB line ceiling (LF included) whatever the values. The agent still measures the line before writing it; an over-ceiling line is a bug, is not written, and is logged as one stderr line with its size (never its contents), and the request ends as a 504 at the relay.
+- **Mapper.** `mapTcpSamplesReply` (`lib/agent-mapping.ts`) returns one object per sample with absolute timestamps and an `outbound` flag, keeps `seq`/`ack` relative, and ignores unknown fields. It throws on columns of different lengths, non-integers, out-of-range values (including a window shift above 14), a reconstructed timestamp or index that is not a non-negative safe integer, and indices that do not cover the page (`nextIndex − samples < firstIndex`).
+
 ## Relay → browser (SSE, not the raw agent protocol)
 
 `app/api/stream/route.ts` re-wraps agent events as Server-Sent Events (`data: <json>\n\n`) and adds one synthetic event type the agent itself never sends:
@@ -756,6 +789,19 @@ Refuses to begin at all if free space on the target volume is already below a fi
 ```
 
 Replaces the agent's single shared series set (every tab sees the same set). Compare-and-swap: accepted only if `baseEpoch` and `baseRevision` match the agent's current epoch and revision (from the latest `io_series_status`), checked and swapped under one lock, so two edits from the same base can never both win; a mismatch is refused as `conflict`, never silently overwritten. An empty `series` list turns counting off. `/api/control` validates before forwarding and forwards only these fields, rebuilt: at most 8 series; `id` matching `^[a-z0-9-]{1,32}$` and unique; `filter` at most 2048 characters (UTF-16 code units — the display-filter limit, not BPF's 1024); `baseRevision` an integer 0..2^32-1; `requestId` and `baseEpoch` 8–32 hex digits; an optional `aggregate` with `fn` one of `sum`, `min`, `max`, `avg` and `field` 1–64 characters of letters, digits, `_` and `.` (otherwise `invalid_aggregate`, refusing the whole request). Whether `field` is a uint field is checked by the agent per series (see `io_series_status`); the uint fields are listed in `UINT_PATHS` in `capture-agent/src/fields.rs`, plus each DNS answer's `dns.answer.<n>.ttl`. The agent re-validates everything and answers with `io_series_status`.
+
+### `get_tcp_samples` (KAN-129)
+
+```json
+{"type":"get_tcp_samples","requestId":"9f2c41d07e1a4b6c8d3e5f708192a3b4","connectionId":"Tcp-192.168.1.10:51000-93.184.216.34:443",
+ "generation":"4be1a07c9d22f310:17","fromIndex":21302}
+```
+
+Sent only by `pages/api/tcp-samples.ts` (`lib/tcp-samples-route.ts`), never by `/api/control`, whose allowlist does not include it. The relay creates `requestId` (128 random bits); the browser supplies `connectionId` (a `connection_update` `id`), the optional `generation` from its last reply and the optional `fromIndex` (default 0).
+
+- **Input limits** (agent side). `requestId` must be exactly 32 lowercase hex characters and `connectionId` 1 to 384 bytes; `fromIndex`, when present, a non-negative integer. A message outside these cannot have come from this relay and is ignored, like an unknown control type. Every message inside them gets one `tcp_samples` reply, except in the over-ceiling case under `tcp_samples` Bounds, where nothing is written and the relay's request times out with 504. The relay must therefore keep its timeout.
+- **Lookup.** `connectionId` resolves to a flow only in its exact canonical form: `Tcp-<local addr>:<port>-<remote addr>:<port>`, addresses as Rust's standard formatting writes them (IPv6 compressed, no brackets). Leading zeros, signs, an uncompressed IPv6 address and every other spelling give `found: false`. A `generation` that is present and is not exactly the ring's current one (including one in the wrong format) gives `stale: true`.
+- **Answered inline.** The connection's task reads the request, copies at most one page of the ring under the flow lock, releases the lock, encodes the reply and writes it, and reads its next control line only after that write returns. So a connection never holds more than one unflushed reply (at most 256 KiB), and a slow reader holds back only its own connection: its events wait in the broadcast buffer meanwhile and, past its 1 024 lines, are counted in `relayLaggedEvents` when the connection next reads them. The packet-event limiter does not apply.
 
 **`REPLAY_WAIT_FOR_IO_SERIES=1`** (startup, only with `REPLAY_FILE`; unset or empty means off, any other value fails startup): the replay reader waits before reading the first frame until a `set_io_series` with at least one compiling series is accepted. Because that message arrives through a browser's `/api/control` call, a subscriber exists by then and receives every bucket of the file. While waiting, `capture_stats` and `io_series_status` report `replayWaiting: true`. Without it, a replay that finishes before series are set has no IO graph.
 
