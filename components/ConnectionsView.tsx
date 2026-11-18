@@ -2,6 +2,7 @@
 
 import React, { useState } from 'react';
 import {
+  Activity,
   Download,
   Filter,
   Lock,
@@ -37,6 +38,8 @@ interface ConnectionsViewProps {
   traceroute?: Record<string, TracerouteHop[]>;
   traceInFlight?: Record<string, boolean>;
   onTraceRoute?: (connectionId: string, remoteAddr: string) => void;
+  // KAN-129: opens the TCP graphs panel for a TCP flow (app/page.tsx polls).
+  onOpenTcpGraphs?: (connectionId: string) => void;
   // True when the agent's capture_stats event (issue #61) reports nonzero
   // kernel/driver drops or relay lag — the per-connection loss % below is
   // retransmit-derived and only trustworthy when this is false.
@@ -70,6 +73,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   traceroute,
   traceInFlight,
   onTraceRoute,
+  onOpenTcpGraphs,
   captureDegraded,
   totalObserved,
   capacityEvictions,
@@ -381,16 +385,29 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           </div>
 
           {/* Trace Route: on-demand only, never triggered automatically */}
-          {onTraceRoute && (
+          {(onTraceRoute || (onOpenTcpGraphs && selectedConn.transportProtocol === 'TCP')) && (
             <div className="pt-2 border-t border-slate-800">
-              <button
-                onClick={() => onTraceRoute(selectedConn.id, selectedConn.remoteAddr)}
-                disabled={traceInFlight?.[selectedConn.id]}
-                className="flex items-center space-x-1 px-2.5 py-1 rounded border text-[11px] transition bg-slate-800/80 border-slate-700 hover:border-slate-500 text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-700"
-              >
-                <Route className="h-3 w-3" />
-                <span>Trace Route</span>
-              </button>
+              <div className="flex items-center space-x-2">
+                {onTraceRoute && (
+                  <button
+                    onClick={() => onTraceRoute(selectedConn.id, selectedConn.remoteAddr)}
+                    disabled={traceInFlight?.[selectedConn.id]}
+                    className="flex items-center space-x-1 px-2.5 py-1 rounded border text-[11px] transition bg-slate-800/80 border-slate-700 hover:border-slate-500 text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:border-slate-700"
+                  >
+                    <Route className="h-3 w-3" />
+                    <span>Trace Route</span>
+                  </button>
+                )}
+                {onOpenTcpGraphs && selectedConn.transportProtocol === 'TCP' && (
+                  <button
+                    onClick={() => onOpenTcpGraphs(selectedConn.id)}
+                    className="flex items-center space-x-1 px-2.5 py-1 rounded border text-[11px] transition bg-slate-800/80 border-slate-700 hover:border-slate-500 text-slate-300"
+                  >
+                    <Activity className="h-3 w-3" />
+                    <span>TCP graphs</span>
+                  </button>
+                )}
+              </div>
 
               {traceroute?.[selectedConn.id] && (
                 <table className="mt-2 w-full text-left text-[11px]">

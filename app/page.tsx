@@ -80,6 +80,9 @@ import { CommandLineBar } from '@/components/CommandLineBar';
 import { compileDisplayFilter, type CompiledDisplayFilter } from '@/lib/display-filter';
 import { IoGraphView, timed, type SetIoSeriesMessage } from '@/components/IoGraphView';
 import { createHistory, drillDown, ingestBuckets, ingestStatus, type IoInterval } from '@/lib/io-graph';
+import { TcpGraphsView } from '@/components/TcpGraphsView';
+import { emptyState as emptyTcpGraphState, type TcpGraphState } from '@/lib/tcp-graphs';
+import { TcpSamplesPoller, fetchTcpSamples } from '@/lib/tcp-samples-poll';
 
 export default function TerminalApp() {
   // Application State
@@ -239,6 +242,34 @@ export default function TerminalApp() {
   // the SSE effect. A ref (not state) because it's write-once-per-trace
   // bookkeeping that should never itself trigger a re-render.
   const targetIpToConnectionId = useRef<Map<string, string>>(new Map());
+
+  // KAN-129: the TCP graphs panel for one flow, polled from
+  // /api/tcp-samples while it is open and the capture is live.
+  const [tcpGraphsFor, setTcpGraphsFor] = useState<string | null>(null);
+  const [tcpGraphState, setTcpGraphState] = useState<TcpGraphState | null>(null);
+  const [tcpGraphError, setTcpGraphError] = useState<number | null>(null);
+  const tcpPoller = useRef<TcpSamplesPoller | null>(null);
+  const tcpGraphsLive = agentConnected && !isPaused;
+  const openTcpGraphs = (connectionId: string) => {
+    setTcpGraphsFor(connectionId);
+    setTcpGraphState(emptyTcpGraphState(connectionId));
+    setTcpGraphError(null);
+  };
+  useEffect(() => {
+    if (tcpGraphsFor === null) return;
+    const poller = new TcpSamplesPoller(tcpGraphsFor, fetchTcpSamples, { onState: setTcpGraphState, onError: setTcpGraphError });
+    tcpPoller.current = poller;
+    return () => {
+      poller.stop();
+      tcpPoller.current = null;
+    };
+  }, [tcpGraphsFor]);
+  useEffect(() => {
+    const poller = tcpPoller.current;
+    if (!poller) return;
+    if (tcpGraphsLive) poller.start();
+    else poller.stop();
+  }, [tcpGraphsFor, tcpGraphsLive]);
 
   // Live Capture Stream — replaces the old simulation loop
   useEffect(() => {
@@ -1043,6 +1074,7 @@ export default function TerminalApp() {
 
           <button
             onClick={() => setActiveTab('connections')}
+            data-testid="tab-connections"
             className={`flex items-center space-x-1.5 px-3 py-1.5 rounded transition font-bold ${
               activeTab === 'connections'
                 ? themeConfig.highlight
@@ -1152,6 +1184,7 @@ export default function TerminalApp() {
               traceroute={traceroute}
               traceInFlight={traceInFlight}
               onTraceRoute={handleTraceRoute}
+              onOpenTcpGraphs={openTcpGraphs}
               captureDegraded={captureDegraded}
               totalObserved={captureStats?.totalConnectionsObserved}
               capacityEvictions={captureStats?.capacityEvictions}
@@ -1160,6 +1193,17 @@ export default function TerminalApp() {
               displayFilter={displayFilter?.predicate}
               displayFilterExpression={displayFilter?.expression}
               findings={findings}
+            />
+          )}
+
+          {activeTab === 'connections' && tcpGraphsFor !== null && tcpGraphState && (
+            <TcpGraphsView
+              key={tcpGraphsFor}
+              state={tcpGraphState}
+              error={tcpGraphError}
+              theme={themeConfig}
+              latencyMs={connections.find((c) => c.id === tcpGraphsFor)?.latencyMs}
+              onClose={() => setTcpGraphsFor(null)}
             />
           )}
 

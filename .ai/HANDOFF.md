@@ -1,3 +1,9 @@
+# KAN-129 Task 4 — plots and entry point (2026-11-17)
+
+Claude implemented Task 4 (James chose Claude; gate `kan-129__tcp-graphs-task4` approved in chat), uncommitted in `.worktrees/tcp-graphs-task4`. New: `lib/tcp-graphs.ts` (accumulate/series/throughput, pure), `lib/tcp-samples-poll.ts` (1 s poll, ≤4 `more`/stale follow-ups per tick, one request in flight, stop aborts), `lib/time-axis.ts` (ticks/clock/zoom/plotFraction moved from io-graph, re-exported), `components/TcpGraphsView.tsx` (4 SVGs = spec D6's 5 items; steps, never interpolation), "TCP graphs" button on TCP flows next to Trace Route, polling only while open and agent connected and not paused, `docs/usage.md` section. No agent or wire changes. Source disagreement: agent Karn discard (`discard_from`) drops every later outstanding entry, not only overlapping ones as spec D3 says (documented as costing samples, never wrong) — the real-agent check lost exactly one RTT to it. Next: James asks for commit/PR; then Slack pr-opened + Codex review, Jira In Review. James merges.
+
+---
+
 # KAN-129 Task 3 — wire contract and agent handler (2026-11-17)
 
 Claude implemented Task 3 per plan amendments A1–A5 (#318), James-approved gate `kan-129__tcp-graphs-task3`. `get_tcp_samples` decodes with A3 limits; `tcp_samples` replies (≤ 3 072 samples, signed `tUs` deltas, capped at 2^53 − 1) are written inline to the requesting connection only, via `serve_connection` (loop moved out of `main()` unchanged). `FlowKey::from_connection_id` is exact-canonical. `capture_stats` gains three ring-cost fields. TS `mapTcpSamplesReply`; docs in `docs/wire-protocol.md`. Next: Task 4 (plots/entry point) needs James's choice of implementer. James merges.

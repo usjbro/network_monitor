@@ -17,6 +17,9 @@ export class FakeAgentDouble {
   private buffers = new WeakMap<net.Socket, string>();
   private controlMessages: unknown[] = [];
   private authenticated = new Set<net.Socket>();
+  // Answers request/response controls (e.g. get_tcp_samples) on the socket
+  // that asked; a null return sends nothing.
+  responder: ((msg: Record<string, unknown>) => Record<string, unknown> | null) | null = null;
 
   async start(): Promise<void> {
     const token = readAgentToken(ensureE2EAgentCredential());
@@ -41,7 +44,10 @@ export class FakeAgentDouble {
           }
           if (line.trim().length === 0) continue;
           try {
-            this.controlMessages.push(JSON.parse(line));
+            const message = JSON.parse(line);
+            this.controlMessages.push(message);
+            const reply = this.responder?.(message);
+            if (reply) socket.write(JSON.stringify(reply) + '\n');
           } catch {
             // Not this double's problem — a malformed control message is
             // exactly what the relay itself should be tolerant of.

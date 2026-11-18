@@ -1,3 +1,12 @@
+# KAN-129 Task 4 verification — 2026-11-17
+
+- New tests written first and seen failing (missing module / missing behaviour): `tcp-graphs` 16, `time-axis` 3, `tcp-samples-poll` 11, `tcp-graphs-view` 8, `page-tcp-graphs` 5. Mutations each failing a test, then restored: gap break, 4 096 cap, page overlap, follow-up cap, stop guard, abort on stop, live gating, poller stop on close, latencyMs reference line.
+- `npm run lint`, `npx tsc --noEmit`, `npx vitest run` (104 files / 1 102 tests): pass. Existing IO graph tests unchanged after the time-axis move.
+- `E2E_PRODUCTION=1 npx playwright test` (includes `next build --webpack`): 3 pass. TCP graphs, full 4 096 ring in pages 3 072 + 1 024: key update median 2.6 ms, live poll (reply parsed → commit) median 10.8 ms, budget 16.7. IO graph unchanged (key 3.1 ms). `next-env.d.ts` restored.
+- Real-agent check: release agent replayed a generated classic pcap (handshake wscale 7/7, 300 × 1 000 B segments, ACK 2 ms later, retransmission of seg 50 after seg 60, zero window 300 ms after seg 149, FIN both ways) into `next start` + Chromium. Plots: 300 data dots + 1 red retransmission, 299 RTT points all 2 000 µs, 1 zero-window shade, 2 FIN marks, window "scaled" (65 536 = 512 ≪ 7), horizon "0 older dropped", reference line from the 10 ms handshake. Missing RTT is the ACK for seg 60, dropped by the agent's Karn `discard_from` (see HANDOFF). First screenshot showed sloped window/ACK lines across the stall and clipped FIN labels; fixed (steps, edge-anchored marks) with red/green tests and rechecked. Scripts and screenshot in the session scratchpad (not committed).
+
+---
+
 # KAN-129 Task 3 verification — 2026-11-17
 
 - `cargo test --locked` (capture-agent): every suite passes; lib 638, bin 91, new `tests/tcp_samples_replay.rs` 5 (real binary, generated pcaps, realtime = fast).
