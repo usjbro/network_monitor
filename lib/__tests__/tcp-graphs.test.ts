@@ -234,6 +234,29 @@ describe('throughput', () => {
     expect(late.map((b) => b.startUs)).toEqual([T0 + 4000, T0 + 6000]);
   });
 
+  it('keeps the first bin when the flow was captured from its SYN: nothing came before it', () => {
+    const all = bulk(4).map((x) => ({ ...x, tUs: x.tUs + 500 }));
+    const bins = throughput(fed(page(0, all.length, all)), T0, T0 + 10_000, 2000);
+    expect(bins[0]).toEqual({ startUs: T0, outbound: 0, inbound: 0 });
+    expect(bins.map((b) => b.startUs)).toEqual([T0, T0 + 2000, T0 + 4000, T0 + 6000]);
+  });
+
+  it('keeps the last bin once the flow has ended: nothing more will arrive', () => {
+    const all = [...bulk(4), s(T0 + 9000, true, { flags: F.FIN | F.ACK, seq: 401, ack: 1, len: 50 }), s(T0 + 9500, false, { flags: F.FIN | F.ACK, seq: 1, ack: 452 })];
+    const ended = fed(page(0, all.length, all));
+    expect(throughput(ended, T0, T0 + 10_000, 2000).at(-1)).toEqual({ startUs: T0 + 8000, outbound: 50, inbound: 0 });
+    // A reset ends it too, and so does the agent dropping the flow.
+    const reset = [...bulk(4), s(T0 + 9000, false, { flags: F.RST, seq: 1 })];
+    expect(throughput(fed(page(0, reset.length, reset)), T0, T0 + 10_000, 2000).at(-1)?.startUs).toBe(T0 + 8000);
+    const gone = accumulate(fed(page(0, 11, bulk(4))), { found: false, connectionId: ID });
+    expect(throughput(gone, T0, T0 + 10_000, 2000).at(-1)?.startUs).toBe(T0 + 8000);
+  });
+
+  it('draws a flow shorter than one bin once it has ended', () => {
+    const short = [s(T0 + 100, true, { flags: F.SYN }), s(T0 + 400, true, { seq: 1, len: 10 }), s(T0 + 700, false, { flags: F.RST })];
+    expect(throughput(fed(page(0, short.length, short)), T0, T0 + 1000, 1000)).toEqual([{ startUs: T0, outbound: 10, inbound: 0 }]);
+  });
+
   it('picks the interval from the visible window', () => {
     expect(throughputIntervalUs(1_000_000)).toBe(5000);
     expect(throughputIntervalUs(60_000_000)).toBe(500_000);

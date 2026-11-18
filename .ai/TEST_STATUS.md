@@ -1,8 +1,8 @@
 # KAN-129 Task 4 review fixes — 2026-11-18
 
-- New tests written first and seen failing for the right reason: `tcp-graphs` +4 (open zero window to newest, gap ends span, whole-bin edges both sides, partly covered bins omitted), `time-axis` +1 (sub-100 ms ticks), `tcp-graphs-view` +1 (fit by min/max time), `page-tcp-graphs` +2 (re-click keeps state, tab leave stops polling and resumes). Then +1 `heldValues` (Codex) and +1 region role (Sonar S6848), both red first.
-- `npm run lint`, `npx tsc --noEmit`: pass. `npx vitest run`: final run 104 files / 1 112 tests pass. Two earlier runs each failed one `enrichment-client.test.ts` test (ENOTEMPTY in afterEach; file untouched here, 18/18 alone 3×): KAN-286.
-- `E2E_PRODUCTION=1 npx playwright test e2e/tcp-graphs.spec.ts e2e/io-graph.spec.ts`: 2 pass; TCP key update median 2.3 ms, live poll median 10.6 ms (budget 16.7).
+- New tests written first and seen failing for the right reason: `tcp-graphs` +4 (open zero window to newest, gap ends span, whole-bin edges both sides, partly covered bins omitted), `time-axis` +1 (sub-100 ms ticks), `tcp-graphs-view` +1 (fit by min/max time), `page-tcp-graphs` +2 (re-click keeps state, tab leave stops polling and resumes). Then +1 `heldValues` (Codex) and +1 region role (Sonar S6848), both red first. Then +3 throughput edge-bin tests (from SYN, ended by FIN/RST/found:false, flow shorter than a bin), red first.
+- `npm run lint`, `npx tsc --noEmit`: pass. `npx vitest run`: final run 104 files / 1 115 tests pass (one earlier run after the edge-bin fix failed one enrichment-client test: KAN-286). Two earlier runs each failed one `enrichment-client.test.ts` test (ENOTEMPTY in afterEach; file untouched here, 18/18 alone 3×): KAN-286.
+- `E2E_PRODUCTION=1 npx playwright test e2e/tcp-graphs.spec.ts e2e/io-graph.spec.ts`: 2 pass; TCP key update median 2.5 ms, live poll median 11.0 ms (budget 16.7).
 
 # KAN-129 Task 4 verification — 2026-11-17
 

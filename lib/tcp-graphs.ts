@@ -236,18 +236,40 @@ export function timeRange(state: TcpGraphState): [number, number] | null {
   return [lo, hi];
 }
 
+/** Whether the agent will send no more samples: a reset, FIN both ways, or the flow gone. */
+function ended(state: TcpGraphState): boolean {
+  if (state.found === false) return true;
+  let finOut = false;
+  let finIn = false;
+  for (const x of state.samples) {
+    if (has(x.flags, TCP_SAMPLE_FLAG.RST)) return true;
+    if (has(x.flags, TCP_SAMPLE_FLAG.FIN)) {
+      if (x.outbound) finOut = true;
+      else finIn = true;
+    }
+  }
+  return finOut && finIn;
+}
+
 /**
  * Payload bytes per `binUs`, both directions, for the bins (aligned to
  * multiples of `binUs`) that overlap [fromUs, toUs). Each bin counts every
- * sample in it, so one cut by the window edge reads as when it is in view;
- * a bin the held samples only partly cover (before the oldest, past the
- * newest) is left out, not drawn as a dip.
+ * sample in it, so one cut by the window edge reads as when it is in view.
+ * A bin the held samples only partly cover is left out, not drawn as a
+ * dip: the first when samples before the oldest held were missed (joined
+ * late, or dropped), the last while the flow may still send. A flow
+ * captured from its SYN has nothing before it, and one that has ended
+ * nothing after it, so those edge bins are whole.
  */
 export function throughput(state: TcpGraphState, fromUs: number, toUs: number, binUs: number): ThroughputBin[] {
   const range = timeRange(state);
   if (!range) return [];
-  const first = Math.max(Math.floor(fromUs / binUs), Math.ceil(range[0] / binUs)) * binUs;
-  const count = Math.max(0, Math.min(Math.floor((range[1] - first) / binUs), Math.ceil((toUs - first) / binUs)));
+  const head = state.samples[0];
+  const fromStart = head.index === 0 && has(head.flags, TCP_SAMPLE_FLAG.SYN);
+  const oldestBin = (fromStart ? Math.floor(range[0] / binUs) : Math.ceil(range[0] / binUs)) * binUs;
+  const first = Math.max(Math.floor(fromUs / binUs) * binUs, oldestBin);
+  const held = ended(state) ? Math.floor((range[1] - first) / binUs) + 1 : Math.floor((range[1] - first) / binUs);
+  const count = Math.max(0, Math.min(held, Math.ceil((toUs - first) / binUs)));
   const bins: ThroughputBin[] = Array.from({ length: count }, (_, i) => ({ startUs: first + i * binUs, outbound: 0, inbound: 0 }));
   for (const x of state.samples) {
     if (x.len === 0) continue;
