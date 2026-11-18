@@ -29,6 +29,7 @@ import {
   type IoPoint,
   type Measure,
 } from '@/lib/io-graph';
+import { plotFraction as timeAxisFraction, zoomView as zoomTimeView, type TimeView } from '@/lib/time-axis';
 
 export type SetIoSeriesMessage = {
   type: 'set_io_series';
@@ -123,7 +124,7 @@ type Base = { epoch: string; revision: number };
 type Draft = { rows: DraftRow[]; base: Base | null };
 /** Our last set_io_series, latched once answered (or abandoned). */
 type Sent = { requestId: string; base: Base; answer?: IoSeriesStatus; error?: string };
-type View = { span: number; endMs: number | null; follow: boolean };
+type View = TimeView;
 
 function rowsFrom(status: IoSeriesStatus | null): DraftRow[] {
   return status
@@ -143,23 +144,14 @@ function nextId(rows: DraftRow[]): string {
   for (let i = 1; ; i++) if (!rows.some((r) => r.id === `s${i}`)) return `s${i}`;
 }
 
-const clampSpan = (span: number) => Math.min(MAX_SPAN, Math.max(MIN_SPAN, span));
-
 /** Zoom by `factor` around the fraction `frac` of the plot width. */
 function zoomView(v: View, factor: number, frac: number): View {
-  const span = clampSpan(v.span * factor);
-  // While following live, zoom keeps the right edge on the newest data.
-  if (v.follow || v.endMs === null) return { ...v, span };
-  const anchor = v.endMs - v.span + frac * v.span;
-  return { ...v, span, endMs: anchor + (1 - frac) * span };
+  return zoomTimeView(v, factor, frac, MIN_SPAN, MAX_SPAN);
 }
 
 /** Fraction of the plot width under `clientX`, for an svg element. */
 function plotFraction(el: Element | null, clientX: number): number {
-  const rect = el?.getBoundingClientRect();
-  if (!rect || rect.width === 0) return 0;
-  const vx = ((clientX - rect.left) / rect.width) * W;
-  return Math.min(1, Math.max(0, (vx - M.left) / PLOT_W));
+  return timeAxisFraction(el, clientX, W, M.left, PLOT_W);
 }
 
 export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, status, connected, theme, onSend, now, timeZone, onDrill }) => {
