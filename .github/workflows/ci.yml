@@ -127,7 +127,9 @@ jobs:
       - name: Decide whether this run needs to fuzz
         id: filter
         run: |
-          # Issue #66: fuzzing is slow (4 x 30s per run, plus a nightly
+          # Issue #66: fuzzing is slow (7 x 30s per run: parse_packet,
+          # http2_reassembly, pcapng_reader, stream_reassembly,
+          # l7_transactions, display_filter and follow_store, plus a nightly
           # toolchain + cargo-fuzz install) relative to the rest of CI, so
           # an ordinary PR only pays that cost when it touches the files
           # these targets actually cover or the fuzz harness itself.
@@ -144,6 +146,9 @@ jobs:
           # bound is what the l7_transactions target asserts.
           # src/display_filter.rs joined with JAM-18: it compiles untrusted
           # IO-graph series filters from the browser (display_filter target).
+          # src/follow.rs, src/redact.rs and src/follow_response.rs joined
+          # with JAM-17 (KAN-110): Follow Stream retains attacker-shaped
+          # payload and masks credentials in it (follow_store target).
           # Every push to main always fuzzes regardless of paths, so a
           # regression can never land unobserved via an unrelated path
           # (e.g. a dependency bump, like this same issue's own fix).
@@ -155,7 +160,7 @@ jobs:
           changed="$(git diff --name-only "$merge_base" ${{ github.sha }})"
           echo "Changed files vs merge-base:"
           echo "$changed"
-          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|src/pcapng\.rs|src/reassembly\.rs|src/l7\.rs|src/transaction\.rs|src/dns_names\.rs|src/display_filter\.rs|fuzz/)'; then
+          if echo "$changed" | grep -qE '^capture-agent/(src/parse\.rs|src/http2\.rs|src/pcapng\.rs|src/reassembly\.rs|src/l7\.rs|src/transaction\.rs|src/dns_names\.rs|src/display_filter\.rs|src/follow\.rs|src/redact\.rs|src/follow_response\.rs|fuzz/)'; then
             echo "run_fuzz=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_fuzz=false" >> "$GITHUB_OUTPUT"
@@ -232,6 +237,13 @@ jobs:
       - name: Fuzz display_filter
         if: steps.filter.outputs.run_fuzz == 'true'
         run: cargo +nightly fuzz run display_filter -- -max_total_time=30
+
+      # JAM-17 (KAN-110). Follow Stream's retained-payload store: asserts the
+      # reserved-capacity and flow caps, that pending, TLS and masked bytes
+      # are never emitted, and that emitted bytes never change.
+      - name: Fuzz follow_store
+        if: steps.filter.outputs.run_fuzz == 'true'
+        run: cargo +nightly fuzz run follow_store -- -max_total_time=30
 
       - name: Upload crash artifacts
         if: failure() && steps.filter.outputs.run_fuzz == 'true'

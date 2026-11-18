@@ -1,3 +1,9 @@
+# KAN-110 Follow Stream Task 1 — bounded store (2026-11-18)
+
+James chose Claude for Task 1 of `docs/superpowers/plans/2026-11-05-follow-stream.md` (gate `jam-17__follow-stream-bounded-store`, delegated in-session). Worktree `.worktrees/follow-stream-bounded-store`, branch `KAN-110-follow-stream-bounded-store`. Scope: `capture-agent/src/follow.rs` (store, D3 classifier, D7 scanner, D7a zeroization), `follow_store` fuzz target and CI wiring. Not hooked into `main.rs`; no wire change. Implemented and verified, uncommitted. Next: James asks for commit/PR; security review and Codex review before merge; James merges.
+
+---
+
 # KAN-280 — PR #320 review update (2026-11-17)
 
 PR https://github.com/usjbro/network_monitor/pull/320 is open; Jira is In Review. Claude's only blocking finding (raw floating-point tooltip precision) is fixed with at most two decimal places and a red/green regression. Full 1,031 tests, lint and build pass; final independent code and security reviews found no actionable issues. Push this update, confirm CI at the new head and request Claude re-review. James owns merge. Test-harness duplication is tracked separately as KAN-281; KPI metrics and the reported Next.js advisory remain separate follow-ups.
