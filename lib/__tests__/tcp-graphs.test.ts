@@ -5,6 +5,7 @@ import {
   MAX_SAMPLES,
   accumulate,
   emptyState,
+  heldValues,
   requestFor,
   series,
   throughput,
@@ -144,6 +145,20 @@ describe('series', () => {
     expect(tail.zeroWindow.inbound).toEqual([{ fromUs: T0 + 8000, toUs: T0 + 8000, open: true }]);
   });
 
+  it('shades a window still zero up to the newest sample held, whoever sent it', () => {
+    // The sender keeps probing after the receiver's zero window.
+    const all = [...bulk(4, { zeroAt: 3 }), s(T0 + 9000, true, { seq: 401, ack: 1, len: 1 }), s(T0 + 9500, true, { seq: 401, ack: 1, len: 1 })];
+    const out = series(fed(page(0, all.length, all)), 'outbound');
+    expect(out.zeroWindow.inbound).toEqual([{ fromUs: T0 + 8000, toUs: T0 + 9500, open: true }]);
+  });
+
+  it('ends a zero-window span at a gap rather than shading across it', () => {
+    // Index 6 is the zero window; 8, the reopening, was overwritten unread.
+    const all = bulk(4, { zeroAt: 1 });
+    const out = series(fed(page(0, 8, all.slice(0, 8)), page(9, all.length, all.slice(9), { droppedOlder: 1 })), 'outbound');
+    expect(out.zeroWindow.inbound).toEqual([{ fromUs: T0 + 5000, toUs: all[7].tUs, open: false }]);
+  });
+
   it('marks RST and FIN in either direction', () => {
     const all = [...bulk(1), s(T0 + 9000, true, { flags: F.FIN | F.ACK, seq: 101 }), s(T0 + 9500, false, { flags: F.RST, seq: 1 })];
     const out = series(fed(page(0, all.length, all)), 'outbound');
@@ -179,14 +194,44 @@ describe('series', () => {
   });
 });
 
+describe('heldValues', () => {
+  it('includes a step held across the window, not only points inside it', () => {
+    const line = [{ tUs: 0, value: 10 }, { tUs: 100, value: 20 }, { tUs: 200, value: 30 }];
+    // Zoomed between samples: 20 holds from 100 to 200 across [120, 180].
+    expect(heldValues([line], 120, 180)).toEqual([20]);
+    expect(heldValues([line], 50, 150)).toEqual([10, 20]);
+    // A line's last point does not extend past itself.
+    expect(heldValues([line], 250, 300)).toEqual([]);
+  });
+});
+
 describe('throughput', () => {
   it('sums payload bytes per bin and direction', () => {
     const state = fed(page(0, 11, bulk(4)));
-    const bins = throughput(state, T0, T0 + 10_000, 5000);
+    const bins = throughput(state, T0, T0 + 8000, 2000);
     expect(bins).toEqual([
-      { startUs: T0, outbound: 200, inbound: 0 },
-      { startUs: T0 + 5000, outbound: 200, inbound: 0 },
+      { startUs: T0, outbound: 0, inbound: 0 },
+      { startUs: T0 + 2000, outbound: 100, inbound: 0 },
+      { startUs: T0 + 4000, outbound: 100, inbound: 0 },
+      { startUs: T0 + 6000, outbound: 200, inbound: 0 },
     ]);
+  });
+
+  it('counts whole bins, so a bin cut by the window edge reads the same as when it is all in view', () => {
+    const state = fed(page(0, 11, bulk(4)));
+    // Data at T0+3000 sits before the window start, inside its first bin.
+    expect(throughput(state, T0 + 3500, T0 + 8000, 2000)[0]).toEqual({ startUs: T0 + 2000, outbound: 100, inbound: 0 });
+    // And at the right edge: data at T0+4500, after a window ending T0+4200.
+    expect(throughput(state, T0, T0 + 4200, 2000).at(-1)).toEqual({ startUs: T0 + 4000, outbound: 100, inbound: 0 });
+  });
+
+  it('leaves out bins the held samples only partly cover, instead of drawing a dip', () => {
+    const all = bulk(4);
+    // Newest held is T0+8000: [T0+8000, T0+10000) has barely begun.
+    expect(throughput(fed(page(0, all.length, all)), T0, T0 + 10_000, 2000).map((b) => b.startUs)).toEqual([T0, T0 + 2000, T0 + 4000, T0 + 6000]);
+    // Joined late (oldest held T0+3000): [T0+2000, T0+4000) is only part-seen.
+    const late = throughput(fed(page(3, all.length, all.slice(3), { droppedOlder: 3 })), T0 + 2000, T0 + 10_000, 2000);
+    expect(late.map((b) => b.startUs)).toEqual([T0 + 4000, T0 + 6000]);
   });
 
   it('picks the interval from the visible window', () => {

@@ -132,13 +132,37 @@ function lines(samples: IndexedSample[], include: (x: IndexedSample) => boolean,
   return out;
 }
 
+/**
+ * The values of step `lines` drawn over [fromUs, toUs]: each point holds
+ * until the next, so one before the window still counts while it is held.
+ */
+export function heldValues(lines: LinePoint[][], fromUs: number, toUs: number): number[] {
+  const out: number[] = [];
+  for (const l of lines) {
+    for (let i = 0; i < l.length; i++) {
+      const until = i + 1 < l.length ? l[i + 1].tUs : l[i].tUs;
+      if (l[i].tUs <= toUs && until >= fromUs) out.push(l[i].value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Spans where `outbound`'s advertised window is zero. A zero window holds
+ * until that side advertises again, so a span still open runs to the newest
+ * sample held; a gap ends it at the last sample before the gap.
+ */
 function zeroSpans(samples: IndexedSample[], outbound: boolean): ZeroWindowSpan[] {
   const out: ZeroWindowSpan[] = [];
   let from: number | null = null;
-  let last = 0;
+  let prev: IndexedSample | null = null;
   for (const x of samples) {
+    if (prev && x.index !== prev.index + 1 && from !== null) {
+      out.push({ fromUs: from, toUs: prev.tUs, open: false });
+      from = null;
+    }
+    prev = x;
     if (x.outbound !== outbound || has(x.flags, TCP_SAMPLE_FLAG.RST)) continue;
-    last = x.tUs;
     const zero = x.win === 0 || has(x.mark, TCP_SAMPLE_MARK.ZERO_WINDOW);
     if (zero && from === null) from = x.tUs;
     else if (!zero && from !== null) {
@@ -146,7 +170,7 @@ function zeroSpans(samples: IndexedSample[], outbound: boolean): ZeroWindowSpan[
       from = null;
     }
   }
-  if (from !== null) out.push({ fromUs: from, toUs: last, open: true });
+  if (from !== null && prev) out.push({ fromUs: from, toUs: prev.tUs, open: true });
   return out;
 }
 
@@ -200,14 +224,35 @@ export interface ThroughputBin {
   inbound: number;
 }
 
-/** Payload bytes per `binUs` over [fromUs, toUs), both directions. */
+/** Earliest and latest `tUs` held (capture order need not be time order), or null. */
+export function timeRange(state: TcpGraphState): [number, number] | null {
+  if (!state.samples.length) return null;
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const x of state.samples) {
+    if (x.tUs < lo) lo = x.tUs;
+    if (x.tUs > hi) hi = x.tUs;
+  }
+  return [lo, hi];
+}
+
+/**
+ * Payload bytes per `binUs`, both directions, for the bins (aligned to
+ * multiples of `binUs`) that overlap [fromUs, toUs). Each bin counts every
+ * sample in it, so one cut by the window edge reads as when it is in view;
+ * a bin the held samples only partly cover (before the oldest, past the
+ * newest) is left out, not drawn as a dip.
+ */
 export function throughput(state: TcpGraphState, fromUs: number, toUs: number, binUs: number): ThroughputBin[] {
-  const first = Math.floor(fromUs / binUs) * binUs;
-  const count = Math.max(0, Math.ceil((toUs - first) / binUs));
+  const range = timeRange(state);
+  if (!range) return [];
+  const first = Math.max(Math.floor(fromUs / binUs), Math.ceil(range[0] / binUs)) * binUs;
+  const count = Math.max(0, Math.min(Math.floor((range[1] - first) / binUs), Math.ceil((toUs - first) / binUs)));
   const bins: ThroughputBin[] = Array.from({ length: count }, (_, i) => ({ startUs: first + i * binUs, outbound: 0, inbound: 0 }));
   for (const x of state.samples) {
-    if (x.len === 0 || x.tUs < fromUs || x.tUs >= toUs) continue;
+    if (x.len === 0) continue;
     const bin = bins[Math.floor((x.tUs - first) / binUs)];
+    if (!bin) continue;
     if (x.outbound) bin.outbound += x.len;
     else bin.inbound += x.len;
   }

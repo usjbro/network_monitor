@@ -9,7 +9,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, X } from 'lucide-react';
 import type { ThemeConfig } from '@/lib/types';
-import { series, throughput, throughputIntervalUs, type Direction, type LinePoint, type TcpGraphState } from '@/lib/tcp-graphs';
+import { heldValues, series, throughput, throughputIntervalUs, timeRange, type Direction, type LinePoint, type TcpGraphState } from '@/lib/tcp-graphs';
 import { clock, plotFraction, ticks, zoomView, type TimeView } from '@/lib/time-axis';
 
 interface TcpGraphsViewProps {
@@ -116,8 +116,8 @@ export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, them
 
   const s = useMemo(() => series(state, direction), [state, direction]);
   const samples = state.samples;
-  const oldest = samples.length ? samples[0].tUs : 0;
-  const newest = samples.length ? samples[samples.length - 1].tUs : 0;
+  // By time, not index: a replayed or merged capture can step back in time.
+  const [oldest, newest] = useMemo(() => timeRange(state) ?? [0, 0], [state]);
   const fitSpan = Math.min(MAX_SPAN_US, Math.max(MIN_SPAN_US, newest - oldest));
   const span = fit ? fitSpan : view.span;
   const end = fit || view.follow || view.endMs === null ? newest : view.endMs;
@@ -169,8 +169,8 @@ export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, them
   // 1–2. Time/sequence with the ACK and receive-window lines.
   const seqVals = [
     ...s.data.filter((p) => visible(p.tUs)).map((p) => p.seqEnd),
-    ...s.ack.flat().filter((p) => visible(p.tUs)).map((p) => p.value),
-    ...s.window.flat().filter((p) => visible(p.tUs)).map((p) => p.value),
+    ...heldValues(s.ack, start, end),
+    ...heldValues(s.window, start, end),
   ];
   const [seqMin, seqMax] = extent(seqVals);
   const seq: Scale = { x, y: linear(seqMin, seqMax) };
@@ -192,7 +192,7 @@ export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, them
     bins.map((b) => `M${x(b.startUs).toFixed(1)},${tp.y(b[key] * perSecond).toFixed(1)}H${x(b.startUs + binUs).toFixed(1)}`).join('');
 
   // 5. Advertised window per advertiser.
-  const winVals = [...s.advertised.outbound, ...s.advertised.inbound].flat().filter((p) => visible(p.tUs)).map((p) => p.value);
+  const winVals = [...heldValues(s.advertised.outbound, start, end), ...heldValues(s.advertised.inbound, start, end)];
   const [, winMax] = extent(winVals);
   const win: Scale = { x, y: linear(0, winMax) };
   const shade = (from: number, to: number) => ({ x: x(from), width: Math.max(2, x(to) - x(from)) });
@@ -214,6 +214,7 @@ export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, them
     <div
       ref={rootRef}
       data-testid="tcp-graphs"
+      role="region"
       tabIndex={0}
       onKeyDown={onKeyDown}
       className={`p-3.5 rounded border ${theme.border} ${theme.cardBg} space-y-2 outline-none`}
