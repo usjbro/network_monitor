@@ -238,8 +238,10 @@ impl Outstanding {
     /// of the bytes from `seq` on ambiguous, so every entry ending after
     /// `seq` is discarded. Entries are pushed in sequence order (only
     /// non-retransmitted segments are, and those advance `max_seq_seen`), so
-    /// they are a suffix. This can also drop entries past the retransmitted
-    /// range; that costs RTT samples, never a wrong one.
+    /// they are a suffix. Entries past the retransmitted range go too, as
+    /// spec D3 requires: their cumulative ACK usually waits for the
+    /// retransmission to fill the hole, so their RTT would be inflated.
+    /// That costs RTT samples, never gives a wrong one.
     fn discard_from(&mut self, seq: u32) {
         while self.len > 0 && seq_after(self.end_seq[self.at(self.len - 1)], seq) {
             self.len -= 1;
@@ -807,7 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn karn_a_retransmission_discards_the_entries_it_overlaps() {
+    fn karn_a_retransmission_discards_the_entry_it_overlaps() {
         let mut store = TcpSampleStore::new(EPOCH);
         let mut h = None;
         store.record(&mut h, data(1_000, true, 100, 50));
@@ -844,6 +846,25 @@ mod tests {
         );
         store.record(&mut h, ack(3_600, false, 200));
         assert_eq!(last(&store, h).mark & mark::RTT, 0);
+    }
+
+    #[test]
+    fn karn_discards_entries_sent_after_the_retransmitted_range() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        store.record(&mut h, data(1_000, true, 100, 50)); // ends 150, lost
+        store.record(&mut h, data(1_100, true, 150, 50)); // ends 200
+        let mut again = data(3_000, true, 100, 50);
+        again.retransmit = true;
+        store.record(&mut h, again);
+        // The cumulative ACK for 150..200 waited for the retransmission, so
+        // timing it from 1 100 would give an inflated RTT.
+        store.record(&mut h, ack(3_100, false, 200));
+        assert_eq!(
+            last(&store, h).mark & mark::RTT,
+            0,
+            "a later entry is discarded too"
+        );
     }
 
     #[test]

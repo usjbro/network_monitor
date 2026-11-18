@@ -63,7 +63,7 @@ pub struct TcpSample {
 Per direction, the ring keeps a bounded table of **outstanding data**: for each non-retransmitted segment with `len > 0`, `(end_seq = seq + len, t_us)`, at most 256 entries per direction (the oldest is dropped beyond that, and the sample loses its RTT, not correctness).
 
 - When a segment in the **opposite** direction carries `ACK` with `ack` at or beyond an outstanding `end_seq` (wrapping compare), the RTT is `now − t_us` of the **newest** such outstanding entry, and every entry it covers is removed. The RTT goes on the ACK's sample (`rtt_us`, `mark` bit 4).
-- **Karn's rule:** when a segment is marked retransmitted, every outstanding entry overlapping its range is discarded, so an ACK that might acknowledge either the original or the retransmission yields no RTT.
+- **Karn's rule:** when a segment is marked retransmitted, every outstanding entry that ends after the retransmission's `seq` is discarded (wrapping compare), so an ACK that might acknowledge either the original or the retransmission yields no RTT. Entries are in sequence order, so this removes a suffix of the table: the entries the retransmission overlaps and every later in-flight entry. The later entries are dropped on purpose: the cumulative ACK that covers them usually comes only once the retransmission fills the hole, so timing them from their own send would overstate the RTT. This costs RTT samples, never gives a wrong one. Entries that end at or before `seq` keep their RTT. (Amended 2026-11-18, KAN-288: the first version discarded only overlapping entries; the agent has always used this rule.)
 - Duplicate ACKs (no new data acknowledged) yield no RTT.
 - Cost: 2 × 256 × 12 B = 6 KiB per ring, allocated with the ring; 128 rings ≈ 0.75 MiB, inside the reported reserved bytes.
 - **Labelling (capture point):** RTT for **outbound** data is shown as "round trip from this host's capture point"; RTT for **inbound** data as "this host's ACK delay (not network latency)". The UI shows the outbound one by default.
@@ -146,7 +146,7 @@ Jira shows **KAN-110 (Follow Stream) as Done**, but Follow Stream has not been i
 | Criterion (KAN-129) | Met by | Tested by |
 | --- | --- | --- |
 | Time/sequence plot for a real TCP flow shows the staircase, retransmissions marked | D2, D6 (1) | Rust: ring contents for a fixture flow with a forced retransmission; component test of the plot; real-agent check (replayed fixture with a retransmit) |
-| RTT sampled continuously, not once at handshake | D3 | Rust: per-ACK samples, Karn exclusion on retransmit, duplicate ACK yields none, outstanding-table bound |
+| RTT sampled continuously, not once at handshake | D3 | Rust: per-ACK samples, Karn exclusion on retransmit (overlapping and later entries), duplicate ACK yields none, outstanding-table bound |
 | Zero-window stall visually identifiable | D2 zero-window mark, D6 (2) and (5) | Rust: zero-window flag; component test; real-agent check with a zero-window fixture |
 | Per-flow retention bounded, cost reported | D1 | Rust: 4 096-sample wrap with `droppedOlder`, 128-ring recycling of the least recently active, release on flow eviction and interface switch, reserved bytes in `capture_stats` |
 | Rust tests cover sample collection; plot renders for a short fixture | D1–D4, D6 | as above, plus window-scale option parsing (fuzz seeds included) and a fixture flow rendered end to end in Playwright |

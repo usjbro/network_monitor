@@ -85,7 +85,7 @@ impl TcpSampleStore {
   - the 129th flow recycles the ring of the flow with the oldest last sample, increments `recycled`, and gives the new ring a new generation; a reused tuple also gets a new generation;
   - `release` and `clear` free rings; `reserved_bytes` equals rings × (4 096 × 32 + 2 × 256 × 12) plus fixed overhead, and is 0 with no rings;
   - sequence base: ISN when a SYN was seen (`relative_to_isn`), first seen sequence otherwise; wrapping arithmetic across 2^32;
-  - RTT: an ACK covering outstanding data yields `now − t` of the newest covered entry and the RTT mark; a duplicate ACK yields none; Karn: after a retransmission overlapping an entry, the next ACK yields none; the 257th outstanding entry evicts the oldest; RTT goes on the ACK's sample;
+  - RTT: an ACK covering outstanding data yields `now − t` of the newest covered entry and the RTT mark; a duplicate ACK yields none; Karn: after a retransmission, an ACK covering an entry it overlaps or any later entry yields none, and an entry ending at or before the retransmission's start keeps its RTT; the 257th outstanding entry evicts the oldest; RTT goes on the ACK's sample;
   - window scale: applied only when both the SYN and the SYN-ACK carried the option (shift clamped to 14); never applied to the SYN/SYN-ACK's own window; midstream join leaves windows raw with the scaled bit clear;
   - zero-window mark only on an ACK-bearing segment with window 0;
   - `parse.rs`: options with MSS + NOP + WS + SACK-permitted; a truncated option; length 0 and length 1 options; option list running past the header; no options;
@@ -100,7 +100,7 @@ impl TcpSampleStore {
 - **Recycled rings.** A flow whose ring was recycled keeps no ring afterwards (spec D1 allocates on a flow's first segment). Its handle is stale and `tcp_sample_view` returns `None`. This also stops more than 128 interleaved flows from endlessly taking rings from each other.
 - **Window scale and PSH.** These are new `TcpFlags` fields (`window_scale`, `psh`), not a `ParsedPacket` field. The option walker reads etherparse's `TcpSlice::options()`, not the tail of `header_bytes`, because the tail is not the TCP header when a frame carries an Ethernet trailer.
 - **Frame timestamps.** The capture loop calls `FlowTable::observe_frame(physical, reassembled, l7, now_ms, frame_us, replay)` with `system_time_us(timestamp)`. The existing `observe*` methods are unchanged for their callers and derive the sample time from `now_ms`.
-- **Karn's discard.** It drops every outstanding entry that ends after the retransmission's start; entries are in sequence order. So it can also drop RTT for later in-flight data, but it never gives a wrong sample.
+- **Karn's discard.** It drops every outstanding entry that ends after the retransmission's start; entries are in sequence order. So it can also drop RTT for later in-flight data, but it never gives a wrong sample. Spec D3 was amended to this rule (KAN-288).
 
 ## Task 2 / PR 2: shared request core, admission, Pages route
 
