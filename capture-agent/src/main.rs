@@ -2577,6 +2577,15 @@ async fn main() -> std::io::Result<()> {
         mode == "replay",
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    // KAN-110 Task 2 (JAM-17): Follow Stream is a startup opt-in; only then
+    // is RELAY_PORT read, and a bad value fails opted-in startup loudly. The
+    // port is excluded from live capture for the life of the process,
+    // across `set_interface` switches; replay never excludes anything.
+    let follow_relay_port = capture_agent::follow_config::resolve_relay_port(
+        std::env::var("FOLLOW_STREAM").ok().as_deref(),
+        std::env::var("RELAY_PORT").ok().as_deref(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     println!(
         "capture-agent: mode={mode} interface={interface_name}{}",
         replay_source
@@ -3155,7 +3164,7 @@ async fn main() -> std::io::Result<()> {
                         };
                         // Authentication is plaintext on this private loopback channel.
                         // Exclude before reassembly, flow/payload events and raw recording.
-                        if exclude_live_control_capture(&parsed, mode == "live") {
+                        if exclude_live_control_capture(&parsed, mode == "live", follow_relay_port) {
                             continue;
                         }
                         // JAM-16: sniff through reassembly, so a request line
@@ -5486,14 +5495,14 @@ mod control_capture_privacy_tests {
         // Full, split-token and reverse-direction ACK frames all belong to the private transport.
         for payload in [&auth[..], &token[..], b"{\"type\":\"authenticated\"}\n"] {
             let p = frame([127, 0, 0, 2], [127, 0, 0, 1], 42000, 9990, payload);
-            assert!(exclude_live_control_capture(&p, true));
+            assert!(exclude_live_control_capture(&p, true, None));
             assert!(
-                !exclude_live_control_capture(&p, false),
+                !exclude_live_control_capture(&p, false, None),
                 "replay data must remain intact"
             );
         }
         let reply = frame([127, 0, 0, 1], [127, 0, 0, 2], 9990, 42000, b"reply");
-        assert!(exclude_live_control_capture(&reply, true));
+        assert!(exclude_live_control_capture(&reply, true, None));
         for p in [
             frame([127, 0, 0, 1], [127, 0, 0, 1], 42000, 8080, b"ordinary"),
             frame([192, 0, 2, 1], [192, 0, 2, 2], 42000, 9990, b"remote"),
@@ -5505,9 +5514,120 @@ mod control_capture_privacy_tests {
                 b"different loopback service",
             ),
         ] {
-            assert!(!exclude_live_control_capture(&p, true));
+            assert!(!exclude_live_control_capture(&p, true, None));
         }
     }
+    fn frame6(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr, src_port: u16, dst_port: u16) -> parse::ParsedPacket {
+        let mut data = Vec::new();
+        etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv6(src.octets(), dst.octets(), 64)
+            .tcp(src_port, dst_port, 1, 65535)
+            .write(&mut data, b"HTTP/1.1 200 OK\r\n")
+            .unwrap();
+        parse::parse_packet(&data, parse::LinkType::Ethernet).unwrap()
+    }
+
+    fn udp(src: [u8; 4], dst: [u8; 4], port: u16) -> parse::ParsedPacket {
+        let mut data = Vec::new();
+        etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv4(src, dst, 64)
+            .udp(42000, port, )
+            .write(&mut data, b"dns")
+            .unwrap();
+        parse::parse_packet(&data, parse::LinkType::Ethernet).unwrap()
+    }
+
+    /// An IPv6 TCP fragment: the parser keeps no IPv6 fragment state, so it
+    /// arrives with no transport and no ports.
+    fn fragment6(src: std::net::Ipv6Addr, dst: std::net::Ipv6Addr, offset: u16, more: bool) -> parse::ParsedPacket {
+        let frag = etherparse::Ipv6FragmentHeader::new(
+            etherparse::IpNumber::TCP,
+            etherparse::IpFragOffset::try_new(offset).unwrap(),
+            more,
+            7,
+        );
+        let payload = [b'a'; 64];
+        let ip = etherparse::Ipv6Header {
+            traffic_class: 0,
+            flow_label: Default::default(),
+            payload_length: (frag.header_len() + payload.len()) as u16,
+            next_header: etherparse::IpNumber::IPV6_FRAGMENTATION_HEADER,
+            hop_limit: 64,
+            source: src.octets(),
+            destination: dst.octets(),
+        };
+        let mut data = Vec::new();
+        ip.write(&mut data).unwrap();
+        frag.write(&mut data).unwrap();
+        data.extend(payload);
+        parse::parse_packet(&data, parse::LinkType::Raw).unwrap()
+    }
+
+    #[test]
+    fn with_follow_stream_on_relay_frames_are_excluded_both_ways() {
+        let lo6 = std::net::Ipv6Addr::LOCALHOST;
+        for port in [3000, 3100] {
+            for p in [
+                frame([127, 0, 0, 1], [127, 0, 0, 1], 52000, port, b"POST /api/follow-stream"),
+                frame([127, 0, 0, 1], [127, 0, 0, 1], port, 52000, b"{\"data\":\"...\"}"),
+                frame([127, 0, 0, 2], [127, 0, 0, 3], 52000, port, b"other loopback address"),
+                frame6(lo6, lo6, 52000, port),
+                frame6(lo6, lo6, port, 52000),
+            ] {
+                assert!(exclude_live_control_capture(&p, true, Some(port)), "relay {port} frame kept");
+                assert!(!exclude_live_control_capture(&p, false, Some(port)), "replay data must remain intact");
+            }
+        }
+        // The agent's own transport stays excluded too.
+        let control = frame([127, 0, 0, 2], [127, 0, 0, 1], 42000, 9990, b"auth");
+        assert!(exclude_live_control_capture(&control, true, Some(3100)));
+    }
+
+    #[test]
+    fn with_follow_stream_on_unrelated_traffic_is_kept() {
+        let doc = "2001:db8::1".parse().unwrap();
+        for p in [
+            frame([127, 0, 0, 1], [127, 0, 0, 1], 52000, 8080, b"other loopback app"),
+            frame([192, 0, 2, 1], [192, 0, 2, 2], 52000, 3100, b"remote 3100"),
+            frame6(doc, doc, 52000, 3100),
+            udp([127, 0, 0, 1], [127, 0, 0, 1], 3100),
+        ] {
+            assert!(!exclude_live_control_capture(&p, true, Some(3100)));
+        }
+    }
+
+    #[test]
+    fn with_follow_stream_off_a_loopback_app_on_the_default_relay_port_is_kept() {
+        let lo6 = std::net::Ipv6Addr::LOCALHOST;
+        for p in [frame([127, 0, 0, 1], [127, 0, 0, 1], 52000, 3000, b"some app"), frame6(lo6, lo6, 52000, 3000)] {
+            assert!(!exclude_live_control_capture(&p, true, None));
+        }
+    }
+
+    #[test]
+    fn with_follow_stream_on_every_loopback_tcp_fragment_is_excluded() {
+        let lo6 = std::net::Ipv6Addr::LOCALHOST;
+        for (offset, more) in [(0, true), (8, false)] {
+            let mut ip = etherparse::Ipv4Header::new(64, 64, etherparse::IpNumber::TCP, [127, 0, 0, 2], [127, 0, 0, 3]).unwrap();
+            ip.more_fragments = more;
+            ip.fragment_offset = etherparse::IpFragOffset::try_new(offset).unwrap();
+            let mut data = ip.to_bytes().to_vec();
+            data.extend([b'a'; 64]);
+            let v4 = parse::parse_packet(&data, parse::LinkType::Raw).unwrap();
+            assert!(!exclude_live_control_capture(&v4, true, None), "feature off keeps the 127.0.0.1-only rule");
+            assert!(exclude_live_control_capture(&v4, true, Some(3000)));
+            assert!(!exclude_live_control_capture(&v4, false, Some(3000)));
+
+            let v6 = fragment6(lo6, lo6, offset, more);
+            assert!(v6.src_port.is_none() && matches!(v6.protocol, parse::TransportProtocol::Other));
+            assert!(!exclude_live_control_capture(&v6, true, None), "feature off is unchanged for IPv6");
+            assert!(exclude_live_control_capture(&v6, true, Some(3000)));
+            assert!(!exclude_live_control_capture(&v6, false, Some(3000)));
+            let doc = "2001:db8::1".parse().unwrap();
+            assert!(!exclude_live_control_capture(&fragment6(doc, doc, offset, more), true, Some(3000)));
+        }
+    }
+
     #[test]
     fn live_loopback_tcp_fragments_are_excluded_without_ports() {
         for (offset, more) in [(0, true), (8, false)] {
@@ -5524,17 +5644,17 @@ mod control_capture_privacy_tests {
             let mut data = ip.to_bytes().to_vec();
             data.extend([b'a'; 64]);
             let mut p = parse::parse_packet(&data, parse::LinkType::Raw).unwrap();
-            assert!(exclude_live_control_capture(&p, true));
-            assert!(!exclude_live_control_capture(&p, false));
+            assert!(exclude_live_control_capture(&p, true, None));
+            assert!(!exclude_live_control_capture(&p, false, None));
             p.ip_fragment.as_mut().unwrap().protocol = 17;
             assert!(
-                !exclude_live_control_capture(&p, true),
+                !exclude_live_control_capture(&p, true, None),
                 "non-TCP fragments are unaffected"
             );
             p.ip_fragment.as_mut().unwrap().protocol = 6;
             p.src_ip = "192.0.2.1".into();
             assert!(
-                !exclude_live_control_capture(&p, true),
+                !exclude_live_control_capture(&p, true, None),
                 "non-loopback fragments are unaffected"
             );
         }
@@ -5893,7 +6013,14 @@ mod tls_decrypt_state_tests {
 /// A non-first IPv4 TCP fragment has no ports; conservatively omit loopback
 /// TCP fragments involving our listening address rather than persist credentials.
 /// Replay remains byte-faithful, and unrelated unfragmented traffic is retained.
-fn exclude_live_control_capture(packet: &parse::ParsedPacket, live: bool) -> bool {
+///
+/// KAN-110 Task 2: with Follow Stream on (`relay_port` is `Some`), the
+/// relay's loopback HTTP traffic carries retained stream content, so it is
+/// omitted too, on any loopback address pair, IPv4 or IPv6. Its fragments
+/// cannot be matched by port, so every loopback TCP fragment is omitted, and
+/// every loopback IPv6 packet whose transport the parser could not decode
+/// (an IPv6 fragment arrives that way). With it off, behaviour is unchanged.
+fn exclude_live_control_capture(packet: &parse::ParsedPacket, live: bool, relay_port: Option<u16>) -> bool {
     if !live {
         return false;
     }
@@ -5909,11 +6036,18 @@ fn exclude_live_control_capture(packet: &parse::ParsedPacket, live: bool) -> boo
         .as_ref()
         .is_some_and(|fragment| fragment.protocol == 6)
     {
-        return packet.src_ip == "127.0.0.1" || packet.dst_ip == "127.0.0.1";
+        return relay_port.is_some() || packet.src_ip == "127.0.0.1" || packet.dst_ip == "127.0.0.1";
     }
-    matches!(packet.protocol, parse::TransportProtocol::Tcp)
-        && ((packet.src_ip == "127.0.0.1" && packet.src_port == Some(9990))
-            || (packet.dst_ip == "127.0.0.1" && packet.dst_port == Some(9990)))
+    if relay_port.is_some() && packet.ip_version == 6 && matches!(packet.protocol, parse::TransportProtocol::Other) {
+        return true;
+    }
+    if !matches!(packet.protocol, parse::TransportProtocol::Tcp) {
+        return false;
+    }
+    let relay = relay_port.is_some_and(|port| packet.src_port == Some(port) || packet.dst_port == Some(port));
+    relay
+        || (packet.src_ip == "127.0.0.1" && packet.src_port == Some(9990))
+        || (packet.dst_ip == "127.0.0.1" && packet.dst_port == Some(9990))
 }
 
 /// KAN-129 plan A2/A5: `get_tcp_samples` is answered inline on the

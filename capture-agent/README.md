@@ -67,6 +67,40 @@ activity.
 See [../docs/wire-protocol.md](../docs/wire-protocol.md) for the full JSON
 event contract this binary produces.
 
+## Follow Stream (`FOLLOW_STREAM`, `RELAY_PORT`)
+
+Follow Stream (KAN-110, in progress) retains a selected TCP flow's bytes so
+the UI can show the conversation. It is off unless the agent starts with
+exactly `FOLLOW_STREAM=1`; unset, empty or any other value leaves it off.
+Today the setting only does the step below; the stream itself arrives in
+later tasks.
+
+With it on, the relay's own HTTP traffic would carry retained content back
+over loopback, so live capture drops it before reassembly, flow events and
+raw recording. `RELAY_PORT` names the port the Next.js relay serves on
+(default 3000). It selects traffic to exclude; it never changes what the
+agent binds. Only the agent reads it. To run the relay on another port,
+start both with the same port:
+
+    cd capture-agent && RELAY_PORT=3100 FOLLOW_STREAM=1 cargo run --release --locked
+    npm run dev -- -p 3100          # from the repo root; production: PORT=3100 npm run start
+
+If `next dev` moves to 3001 because 3000 is taken, the agent still excludes
+3000; relaunch it with `RELAY_PORT=3001`. A later task makes the agent
+refuse stream requests from a relay on a port it does not exclude, instead
+of trusting that the two settings agree.
+
+With Follow Stream on, `RELAY_PORT` must be a plain decimal port from 1 to
+65535 (no sign or spaces), or startup fails. With it off, `RELAY_PORT` is
+never read, so a bad value cannot stop the agent and a loopback app on port
+3000 stays visible.
+
+Visibility cost: a fragmented IP packet's later fragments carry no ports,
+so with Follow Stream on, live capture drops every loopback TCP fragment
+(IPv4 and IPv6) and every loopback IPv6 packet whose transport could not be
+decoded. Unfragmented loopback traffic on other ports stays visible. Replay
+is never filtered.
+
 ## Replaying a capture file instead of live traffic
 
 Set `REPLAY_FILE` to a path before starting the agent to read a previously
@@ -123,10 +157,13 @@ with `pid: 0`.
 | `REPLAY_SPEED` | `realtime` to pace by recorded timestamps; otherwise as fast as possible | Startup |
 | `MAX_FLOWS` | Flow-table capacity ceiling (default 10,000) | Startup |
 | `MAX_OBSERVED_DNS_NAMES` | Observed DNS name table capacity (default 16,384) | Startup |
+| `FOLLOW_STREAM` | `1` turns on Follow Stream; anything else leaves it off | Startup |
+| `RELAY_PORT` | The relay's port, excluded from live capture (default 3000); read only with `FOLLOW_STREAM=1` | Startup |
 
-All six are read once at startup. Invalid `CAPTURE_INTERFACE` and
+All eight are read once at startup. Invalid `CAPTURE_INTERFACE` and
 nonpositive/non-numeric `MAX_FLOWS` or `MAX_OBSERVED_DNS_NAMES` fail startup;
-blank values are unset. `REPLAY_FILE` must name a readable supported file.
+blank values are unset. With `FOLLOW_STREAM=1`, an unset `RELAY_PORT` is the
+default, and a blank or invalid one fails startup. `REPLAY_FILE` must name a readable supported file.
 `REPLAY_LOCAL_ADDRS` only splits/trims strings, and only exact
 `REPLAY_SPEED=realtime` selects pacing; other speed values select fast mode.
 See [../docs/architecture.md](../docs/architecture.md)'s

@@ -1,3 +1,9 @@
+# KAN-110 Follow Stream Task 2 — startup ports and pre-pipeline exclusion (2026-11-19)
+
+James approved P2 and chose Claude in chat (gate `kan-110__follow-stream-startup-ports`, delegated in-session). Worktree `.worktrees/follow-stream-startup-ports`, branch `KAN-110-follow-stream-startup-ports`. New `capture-agent/src/follow_config.rs` (`follow_enabled`, `parse_relay_port`, `resolve_relay_port`); `exclude_live_control_capture` takes `relay_port: Option<u16>`, read once in `main`. P2's `relayPort` request field and `ack_number` feeding are Task 3. Next: PR, reviews; James merges.
+
+---
+
 # KAN-293 Follow Stream RST anchor resync + gap at RST (2026-11-19)
 
 James chose Claude for KAN-293, the RST-over-a-hole gap, and Follow Stream Task 2 (P2 approved). Worktree `.worktrees/rst-anchor-resync`, branch `KAN-293-rst-anchor-resync`. Design (option a): a trusted segment from a confirmed side carries its peer's `seq_hi` forward to its ACK, or replaces an unconfirmed peer's anchors; an accepted RST first turns open holes into gaps. Tuple reuse deliberately not resynced (a forger can produce a self-consistent SYN pair for free). Next: PR, reviews; then Task 2 in its own worktree.
