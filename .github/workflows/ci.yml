@@ -146,9 +146,11 @@ jobs:
           # bound is what the l7_transactions target asserts.
           # src/display_filter.rs joined with JAM-18: it compiles untrusted
           # IO-graph series filters from the browser (display_filter target).
-          # src/follow.rs, src/redact.rs and src/follow_response.rs joined
-          # with JAM-17 (KAN-110): Follow Stream retains attacker-shaped
-          # payload and masks credentials in it (follow_store target).
+          # src/follow.rs and src/redact.rs joined with JAM-17 (KAN-110):
+          # Follow Stream retains attacker-shaped payload and masks
+          # credentials in it (follow_store target). src/follow_response.rs
+          # is listed ahead of time: the plan's Task 3 creates it and extends
+          # the same target, so it is covered from its first commit.
           # Every push to main always fuzzes regardless of paths, so a
           # regression can never land unobserved via an unrelated path
           # (e.g. a dependency bump, like this same issue's own fix).

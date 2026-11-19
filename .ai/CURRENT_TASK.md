@@ -1,6 +1,6 @@
 # KAN-110 Follow Stream Task 1 — bounded store (2026-11-18)
 
-James chose Claude for Task 1 of `docs/superpowers/plans/2026-11-05-follow-stream.md` (gate `jam-17__follow-stream-bounded-store`, delegated in-session). Worktree `.worktrees/follow-stream-bounded-store`, branch `KAN-110-follow-stream-bounded-store`. Scope: `capture-agent/src/follow.rs` (store, D3 classifier, D7 scanner, D7a zeroization), `follow_store` fuzz target and CI wiring. Not hooked into `main.rs`; no wire change. Implemented and verified, uncommitted. Next: James asks for commit/PR; security review and Codex review before merge; James merges.
+James chose Claude for Task 1 of `docs/superpowers/plans/2026-11-05-follow-stream.md` (gate `jam-17__follow-stream-bounded-store`, delegated in-session). Worktree `.worktrees/follow-stream-bounded-store`, branch `KAN-110-follow-stream-bounded-store`. Scope: `capture-agent/src/follow.rs` (store, D3 classifier, D7 scanner, D7a zeroization), `follow_store` fuzz target and CI wiring. Not hooked into `main.rs`; no wire change. PR #327 open (security review: no findings). /code-review fixes 1–5 and cleanups approved by James and applied in a follow-up commit; the RST sequence check is tracked separately. Next: CI, Codex review; James merges.
 
 ---
 
