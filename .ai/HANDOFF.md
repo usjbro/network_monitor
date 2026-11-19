@@ -1,6 +1,6 @@
 # KAN-292 Follow Stream RST sequence validation (2026-11-19)
 
-- Change: `capture-agent/src/follow.rs` (`rst_acceptable`, `DirState::track` with `seq_hi`/`last_ack`, `RST_WINDOW_BYTES`, `FollowSegment::ack_number`); fuzz target derives `ack_number` from the peer cursor. A segment more than 1 MiB from the tracked position is untrusted (doesn't move it or record its ACK); a capture loss over 1 MiB in one direction therefore leaves that side's RST unbelieved until idle eviction.
+- Change: `capture-agent/src/follow.rs` (`rst_acceptable`, `DirState::track` with `seq_hi`/`last_ack`, `RST_WINDOW_BYTES`, `FollowSegment::ack_number`); fuzz target derives `ack_number` from the peer cursor. Anchors judge an RST only once their direction is confirmed (created the entry, or mutually acknowledged with a confirmed peer), so a forged first segment on a silent side plants nothing usable. A segment more than 1 MiB from the tracked position is untrusted (doesn't move it or record its ACK); a capture loss over 1 MiB in one direction therefore leaves that side's RST unbelieved until idle eviction.
 - Deliberate choice: fixed 1 MiB acceptance bound instead of RFC 5961's receive window, which a passive monitor cannot see. Out-of-window RSTs are ignored (the flow ends later by FIN or idle eviction).
 - Not addressed: an accepted RST that closes a direction with an open hole still records no gap (noted on #327).
 
