@@ -1,3 +1,9 @@
+# KAN-292 review fixes (2026-11-19)
+
+/code-review on merged PR #329 (James: "go ahead"). Worktree `.worktrees/rst-review-fixes`, branch `KAN-292-rst-review-fixes`. The ACK-only RST clause now applies only to a sender that is not confirmed, so at most two windows apply to any RST (≥ 2,048 blind guesses); a SYN|RST no longer creates an entry; `open_cleartext` sends ACK-bearing data; `ahead` replaced by `tcp_samples::seq_after`. Anchor resync after >1 MiB capture loss, tuple reuse and lagging ACKs is KAN-293 (needs a design choice). Next: PR, review; James merges.
+
+---
+
 # KAN-292 Follow Stream RST sequence validation (2026-11-19)
 
 James chose to do KAN-292 before Follow Stream Task 2. Worktree `.worktrees/follow-rst-window`, branch `KAN-292-follow-rst-window`. `FollowEntry::ingest` now believes an RST only at or up to `RST_WINDOW_BYTES` (1 MiB) past its sender's tracked position or the receiver's last ACK, or, with ACK set, when it acknowledges at or behind the other side's position (option B, chosen by James). Positions (`seq_hi`, `last_ack`) are tracked on every trusted segment, independent of storage, so TLS/capped flows still close. A rejected RST changes nothing, not even activity or `seen`. `FollowSegment` gains `ack_number`. Store still not wired into `main.rs`. Next: PR, reviews; James merges. Task 2 still awaits James's P2 approval and an implementer choice.

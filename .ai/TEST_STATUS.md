@@ -1,3 +1,9 @@
+# KAN-292 review fixes (2026-11-19)
+
+`cargo test --locked`: 842 passed, 0 failed. Clippy `-D warnings` clean; release build OK; `follow_store` fuzz 47,657 runs clean in 121 s (20,877 more after the SYN|RST normalization). Four new tests; removing the SYN|RST normalization fails both SYN|RST tests; disabling `at_sender` still fails 4 tests with the ACK-bearing fixture; the two rejection tests failed before the fix, and planted reverts of the `!sender.confirmed` gate and of the RST-start exclusion are each caught. `a_planted_segment_does_not_stop_a_refused_connection_from_closing` guards the gate choice (gating on `seq_hi.is_none()` instead would let a forger block a refused-connection RST).
+
+---
+
 # KAN-292 (2026-11-19)
 
 `cargo test --locked`: 838 passed, 0 failed (earlier runs had transient failures under parallel contention — `io_graph_replay` "agent did not publish isolated credential", which passes 5/5 serially; reruns clean). Clippy `-D warnings` clean; release build OK; `follow_store` fuzz 20,288 runs clean. Thirteen RST tests; each rejection/regression test failed before its change; planted removals of the tracker's window gate and of the confirmation filter are each caught.

@@ -201,7 +201,7 @@ impl Default for Outstanding {
 
 /// `a` is strictly after `b` in sequence space (RFC 1982 serial
 /// arithmetic, as `flow.rs`'s retransmit detection does it).
-fn seq_after(a: u32, b: u32) -> bool {
+pub(crate) fn seq_after(a: u32, b: u32) -> bool {
     (a.wrapping_sub(b) as i32) > 0
 }
 
