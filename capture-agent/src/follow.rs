@@ -44,12 +44,13 @@ pub const MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
 pub const CHUNK_BYTES: usize = 16 * 1024;
 /// Out-of-order window: bytes held ahead of the contiguous edge, per direction.
 pub const REORDER_BYTES: u32 = 64 * 1024;
-/// KAN-292: how far past a direction's next expected sequence an RST may
-/// sit and still be accepted (RFC 5961 §3 accepts the receive window; a
-/// passive monitor cannot see that, so it uses a fixed bound). A blind
-/// forger needs about 2^32 / 2^20 = 4,096 guesses per flow. Larger than the
-/// reorder window because a legitimate RST may follow sent bytes the
-/// capture never saw.
+/// KAN-292: how far past an anchor (the sender's position, or the
+/// receiver's last ACK) an RST may sit and still be accepted. RFC 5961 §3
+/// uses the receive window, which a passive monitor cannot see, so this is
+/// a fixed bound. The two windows usually overlap, so a blind forger needs
+/// about 2^32 / 2^20 = 4,096 guesses per flow, and never fewer than 2,048.
+/// Larger than the reorder window because a legitimate RST may follow sent
+/// bytes the capture never saw.
 pub const RST_WINDOW_BYTES: u32 = 1 << 20;
 /// How long (capture time) a hole may stay open before it becomes a gap.
 pub const REORDER_MS: u64 = 2_000;
@@ -154,7 +155,9 @@ pub struct Turn {
 #[derive(Clone, Copy)]
 pub struct FollowSegment<'a> {
     pub seq: u32,
-    /// Meaningful only when `ack` is set.
+    /// The TCP header's acknowledgment number (`ParsedPacket` `ack_number`),
+    /// meaningful only when `ack` is set. RST validation reads it (KAN-292),
+    /// so the capture path must pass the real value, never a placeholder.
     pub ack_number: u32,
     pub syn: bool,
     pub ack: bool,
@@ -284,6 +287,21 @@ type Entries = HashMap<FlowKey, Box<FollowEntry>>;
 /// so remove/insert churn never grows it (`audit` checks). `capacity()` is
 /// not the table size: it shrinks as deleted slots build up.
 const MAP_RESERVE: usize = 2 * MAX_FLOWS;
+
+/// Distance between two sequence numbers, either way round.
+fn seq_distance(a: u32, b: u32) -> u32 {
+    (a.wrapping_sub(b) as i32).unsigned_abs()
+}
+
+/// `a` is later than `b` in sequence space.
+fn ahead(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) > 0
+}
+
+/// `x` is at or up to `RST_WINDOW_BYTES` past `anchor`.
+fn at_or_past(x: u32, anchor: u32) -> bool {
+    x.wrapping_sub(anchor) <= RST_WINDOW_BYTES
+}
 
 /// Closed entries go first, then the least recently active, then the oldest.
 fn pressure_victim(entries: &Entries) -> Option<FlowKey> {
@@ -434,6 +452,12 @@ type Cut = (u32, StopReason);
 
 struct DirState {
     base: Option<u32>,
+    /// KAN-292: one past the highest sequence this direction's sender has
+    /// used, tracked on every segment whatever storage does, so an RST can
+    /// be judged after the direction stops storing (TLS, caps, limits).
+    seq_hi: Option<u32>,
+    /// The last ACK this direction's sender sent, from trusted segments only.
+    last_ack: Option<u32>,
     start_captured: bool,
     /// Sequence-space bytes consumed from `base`, gaps included.
     edge: u64,
@@ -459,6 +483,8 @@ impl DirState {
     fn new() -> Self {
         DirState {
             base: None,
+            seq_hi: None,
+            last_ack: None,
             start_captured: false,
             edge: 0,
             fin_at: None,
@@ -497,9 +523,27 @@ impl DirState {
         matches!(self.tls, TlsState::Tls)
     }
 
-    /// The next sequence number this direction's sender will use, if known.
-    fn next_seq(&self) -> Option<u32> {
-        self.base.map(|b| b.wrapping_add(self.edge as u32))
+    /// Follows the sender's sequence position. A segment more than
+    /// `RST_WINDOW_BYTES` from it is not trusted: it neither moves the
+    /// position nor records its ACK, so a blind forger cannot plant a place
+    /// for a later RST to land.
+    fn track(&mut self, seg: &FollowSegment<'_>) {
+        let end = seg
+            .seq
+            .wrapping_add(seg.payload.len() as u32)
+            .wrapping_add(u32::from(seg.syn) + u32::from(seg.fin));
+        match self.seq_hi {
+            None => self.seq_hi = Some(end),
+            Some(hi) if seq_distance(seg.seq, hi) <= RST_WINDOW_BYTES => {
+                if ahead(end, hi) {
+                    self.seq_hi = Some(end);
+                }
+            }
+            Some(_) => return,
+        }
+        if seg.ack && self.last_ack.is_none_or(|a| ahead(seg.ack_number, a)) {
+            self.last_ack = Some(seg.ack_number);
+        }
     }
 
     fn accepting(&self) -> bool {
@@ -1400,27 +1444,34 @@ impl FollowEntry {
         }
     }
 
-    /// KAN-292: an RST is believed only near where its sender's stream is.
-    /// A sender we have seen must be at or just past its next sequence; one
-    /// that has sent nothing (a refused SYN, a midstream start) must
-    /// acknowledge near the other direction's next sequence.
+    /// KAN-292: an RST is believed only where its sender could be. Each
+    /// window is one-sided, at or up to `RST_WINDOW_BYTES` past an anchor:
+    /// the sender's own position, or the receiver's last ACK (RFC 5961
+    /// checks against the receive point; a host that lost its state replies
+    /// with seq = that ACK, RFC 9293 §3.10.7.1). A sender seen to send
+    /// nothing may instead acknowledge the other side's position, as a
+    /// refused SYN does.
     fn rst_acceptable(&self, i: usize, seg: &FollowSegment<'_>) -> bool {
-        let within = |x: u32, next: u32| x.wrapping_sub(next) <= RST_WINDOW_BYTES;
-        if let Some(next) = self.dirs[i].next_seq() {
-            return within(seg.seq, next);
-        }
-        let Some(next) = self.dirs[1 - i].next_seq() else { return false };
-        seg.ack && (within(seg.ack_number, next) || within(next, seg.ack_number))
+        let (sender, receiver) = (&self.dirs[i], &self.dirs[1 - i]);
+        sender.seq_hi.is_some_and(|hi| at_or_past(seg.seq, hi))
+            || receiver.last_ack.is_some_and(|a| at_or_past(seg.seq, a))
+            || (seg.ack && receiver.seq_hi.is_some_and(|hi| at_or_past(hi, seg.ack_number)))
     }
 
     fn ingest(&mut self, outbound: bool, seg: FollowSegment<'_>, ctx: &mut Ctx) {
         let i = if outbound == self.c2s_outbound { 0 } else { 1 };
-        self.dirs[i].seen = self.dirs[i].seen.saturating_add(seg.payload.len() as u64);
-        if self.rst || (seg.rst && !self.rst_acceptable(i, &seg)) {
+        if seg.rst && !self.rst && !self.rst_acceptable(i, &seg) {
             // A forged or stale RST changes nothing, not even activity.
             return;
         }
         self.last_activity_ms = seg.now_ms;
+        self.dirs[i].seen = self.dirs[i].seen.saturating_add(seg.payload.len() as u64);
+        if !seg.rst {
+            self.dirs[i].track(&seg);
+        }
+        if self.rst {
+            return;
+        }
         if seg.rst {
             self.rst = true;
             for d in &mut self.dirs {
@@ -1745,19 +1796,25 @@ mod tests {
     }
 
     fn seg(seq: u32, payload: &[u8], now_ms: u64) -> FollowSegment<'_> {
-        FollowSegment { seq, ack_number: 0, syn: false, ack: true, fin: false, rst: false, payload, now_ms }
+        FollowSegment { seq, ack_number: 0, syn: false, ack: false, fin: false, rst: false, payload, now_ms }
     }
 
+    /// A SYN+ACK acknowledges the client's SYN at `C_ISN`.
     fn syn(seq: u32, ack: bool, now_ms: u64) -> FollowSegment<'static> {
-        FollowSegment { seq, ack_number: 0, syn: true, ack, fin: false, rst: false, payload: &[], now_ms }
+        FollowSegment { seq, ack_number: if ack { C0 } else { 0 }, syn: true, ack, fin: false, rst: false, payload: &[], now_ms }
     }
 
     fn fin(seq: u32, payload: &[u8], now_ms: u64) -> FollowSegment<'_> {
-        FollowSegment { seq, ack_number: 0, syn: false, ack: true, fin: true, rst: false, payload, now_ms }
+        FollowSegment { seq, ack_number: 0, syn: false, ack: false, fin: true, rst: false, payload, now_ms }
     }
 
     fn rst(seq: u32, now_ms: u64) -> FollowSegment<'static> {
-        FollowSegment { seq, ack_number: 0, syn: false, ack: true, fin: false, rst: true, payload: &[], now_ms }
+        FollowSegment { seq, ack_number: 0, syn: false, ack: false, fin: false, rst: true, payload: &[], now_ms }
+    }
+
+    /// A data segment that acknowledges `ack_number`.
+    fn seg_ack(seq: u32, payload: &[u8], ack_number: u32, now_ms: u64) -> FollowSegment<'_> {
+        FollowSegment { seq, ack_number, syn: false, ack: true, fin: false, rst: false, payload, now_ms }
     }
 
     /// An RST that acknowledges `ack_number`, as from a side that sent nothing.
@@ -2787,7 +2844,7 @@ mod tests {
         let k = key();
         let (c_next, _) = open_cleartext(&mut store, &k);
         let generation = store.with_entry(&id(&k), |e| e.unwrap().generation());
-        for seq in [c_next.wrapping_add(RST_WINDOW_BYTES + 1), c_next.wrapping_sub(1), c_next ^ 0x8000_0000] {
+        for seq in [c_next.wrapping_add(RST_WINDOW_BYTES + 1), C0.wrapping_sub(1), c_next ^ 0x8000_0000] {
             store.ingest(&k, true, rst(seq, T0 + 3_000));
             assert!(!is_closed(&store, &k), "seq {seq:#x} closed the flow");
         }
@@ -2819,5 +2876,68 @@ mod tests {
         assert!(!is_closed(&store, &k));
         store.ingest(&k, false, rst_ack(9, 516, true, T0));
         assert!(is_closed(&store, &k));
+    }
+
+    #[test]
+    fn an_rst_after_more_than_a_window_of_unstored_tls_data_still_closes() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        open(&mut store, &k);
+        store.ingest(&k, true, seg(C0, b"\x16\x03\x01\x00\x30\x01\x00\x00\x2c\x03\x03", T0));
+        let record = vec![0x17u8; 16 * 1024];
+        let mut s_next = S0;
+        for _ in 0..(2 * RST_WINDOW_BYTES as usize / record.len()) {
+            store.ingest(&k, false, seg(s_next, &record, T0));
+            s_next = s_next.wrapping_add(record.len() as u32);
+        }
+        assert_eq!(snap(&store, &k, Direction::S2c).class, Classification::Tls);
+        store.ingest(&k, false, rst(s_next, T0));
+        assert!(is_closed(&store, &k), "a real RST after unstored bytes was ignored");
+    }
+
+    #[test]
+    fn an_rst_at_the_receivers_last_ack_is_accepted_behind_the_senders_position() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, s_next) = open_cleartext(&mut store, &k);
+        store.ingest(&k, false, seg(s_next, &[b'x'; 10_000], T0 + 3_000));
+        // The client has acknowledged only up to `s_next`; the server lost
+        // its state and answers with seq = that ACK (RFC 9293 §3.10.7.1).
+        store.ingest(&k, true, seg_ack(c_next, b"y", s_next, T0 + 3_000));
+        store.ingest(&k, false, rst(s_next, T0 + 3_000));
+        assert!(is_closed(&store, &k));
+    }
+
+    #[test]
+    fn a_silent_side_rst_without_ack_matches_the_peers_last_ack() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        store.ingest(&k, true, seg_ack(500, b"GET / HTTP/1.1\r\n", 9_000, T0));
+        store.ingest(&k, false, rst(9_000 ^ 0x8000_0000, T0));
+        assert!(!is_closed(&store, &k));
+        store.ingest(&k, false, rst(9_000, T0));
+        assert!(is_closed(&store, &k));
+    }
+
+    #[test]
+    fn a_forged_segment_far_ahead_cannot_move_where_an_rst_is_believed() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, _) = open_cleartext(&mut store, &k);
+        let far = c_next.wrapping_add(4 * RST_WINDOW_BYTES);
+        store.ingest(&k, true, seg(far, b"zz", T0 + 3_000));
+        store.ingest(&k, true, rst(far.wrapping_add(2), T0 + 3_000));
+        assert!(!is_closed(&store, &k));
+    }
+
+    #[test]
+    fn a_rejected_rst_is_not_counted_as_seen() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, _) = open_cleartext(&mut store, &k);
+        let before = snap(&store, &k, Direction::C2s).seen;
+        let forged = FollowSegment { rst: true, ..seg(c_next ^ 0x8000_0000, &[b'q'; 1_400], T0 + 3_000) };
+        store.ingest(&k, true, forged);
+        assert_eq!(snap(&store, &k, Direction::C2s).seen, before);
     }
 }

@@ -1,6 +1,6 @@
 # KAN-292 (2026-11-19)
 
-`cargo test --locked`: 830 passed, 0 failed (a first run had 5 `io_graph_replay` failures under parallel contention — "agent did not publish isolated credential"; that file passes 5/5 serially and the full rerun is clean). Clippy `-D warnings` clean; release build OK. Five new RST tests; the three rejection tests failed before the change.
+`cargo test --locked`: 835 passed, 0 failed (earlier runs had transient failures under parallel contention — `io_graph_replay` "agent did not publish isolated credential", which passes 5/5 serially; reruns clean). Clippy `-D warnings` clean; release build OK; `follow_store` fuzz 24,817 runs clean. Ten RST tests; each rejection/regression test failed before its change; a planted removal of the tracker's window gate is caught.
 
 ---
 

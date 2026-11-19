@@ -1,6 +1,6 @@
 # KAN-292 Follow Stream RST sequence validation (2026-11-19)
 
-James chose to do KAN-292 before Follow Stream Task 2. Worktree `.worktrees/follow-rst-window`, branch `KAN-292-follow-rst-window`. `FollowEntry::ingest` now believes an RST only near its sender's next sequence (within `RST_WINDOW_BYTES` = 1 MiB), or, from a side that sent nothing, only when it acknowledges near the other side's next sequence. A rejected RST changes nothing, not even activity. `FollowSegment` gains `ack_number`. Store still not wired into `main.rs`. Next: PR, reviews; James merges. Task 2 still awaits James's P2 approval and an implementer choice.
+James chose to do KAN-292 before Follow Stream Task 2. Worktree `.worktrees/follow-rst-window`, branch `KAN-292-follow-rst-window`. `FollowEntry::ingest` now believes an RST only at or up to `RST_WINDOW_BYTES` (1 MiB) past its sender's tracked position or the receiver's last ACK, or, with ACK set, when it acknowledges at or behind the other side's position (option B, chosen by James). Positions (`seq_hi`, `last_ack`) are tracked on every trusted segment, independent of storage, so TLS/capped flows still close. A rejected RST changes nothing, not even activity or `seen`. `FollowSegment` gains `ack_number`. Store still not wired into `main.rs`. Next: PR, reviews; James merges. Task 2 still awaits James's P2 approval and an implementer choice.
 
 ---
 
