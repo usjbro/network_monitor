@@ -875,9 +875,11 @@ impl DirState {
         self.fin_at.map_or(end, |f| end.min(f))
     }
 
-    /// Declares every open hole a gap once the oldest has waited 2 s.
-    fn expire_holes(&mut self, now_ms: u64, d: Direction, turns: &mut Vec<Turn>, ctx: &mut Ctx) {
-        while self.accepting() && self.ooo.as_ref().is_some_and(|o| now_ms.saturating_sub(o.since_ms) >= REORDER_MS) {
+    /// Declares every open hole a gap once the oldest has waited 2 s, or at
+    /// once when `now` (no more bytes can arrive).
+    fn expire_holes(&mut self, now_ms: u64, now: bool, d: Direction, turns: &mut Vec<Turn>, ctx: &mut Ctx) {
+        let due = |o: &Ooo| now || now_ms.saturating_sub(o.since_ms) >= REORDER_MS;
+        while self.accepting() && self.ooo.as_ref().is_some_and(due) {
             let before = self.edge;
             let Some(held) = self.first_held() else { break };
             let first = self.fin_at.map_or(held, |f| held.min(f));
@@ -1395,7 +1397,7 @@ impl FollowEntry {
 
     fn settle(&mut self, now_ms: u64, ctx: &mut Ctx) {
         for i in 0..2 {
-            self.dirs[i].expire_holes(now_ms, Direction::from_index(i), &mut self.turns, ctx);
+            self.dirs[i].expire_holes(now_ms, false, Direction::from_index(i), &mut self.turns, ctx);
         }
         if std::mem::take(&mut ctx.turn_limit) {
             self.stop_both(StopReason::TurnLimit);
@@ -1446,10 +1448,16 @@ impl FollowEntry {
 
     /// Follows direction `i`'s sequence position and last ACK for RST
     /// checks. Once anchored, a segment more than `RST_WINDOW_BYTES` from
-    /// the position is not trusted, so a blind forger cannot move it. Until
-    /// a direction is confirmed its anchors judge nothing, and a segment
-    /// that proves knowledge of the confirmed peer (its ACK lands at or just
-    /// behind the peer's position) replaces whatever was planted first.
+    /// the position is not trusted, so it moves nothing. Until a direction
+    /// is confirmed its anchors judge nothing, and a segment that proves
+    /// knowledge of the confirmed peer (its ACK lands at or just behind the
+    /// peer's position) replaces whatever was planted first. A trusted
+    /// segment from a confirmed side also carries its peer forward to its
+    /// ACK (KAN-293), so a direction whose bytes the capture lost catches up.
+    ///
+    /// A reused 4-tuple is not resynced: a new connection's two sides agree
+    /// only with each other, which a blind forger can produce for free, so
+    /// the old entry stays until it is evicted.
     fn track(&mut self, i: usize, seg: &FollowSegment<'_>) {
         let first = self.dirs.iter().all(|d| d.seq_hi.is_none());
         let peer = &self.dirs[1 - i];
@@ -1478,12 +1486,27 @@ impl FollowEntry {
             _ => return,
         }
         d.confirmed |= first || proves;
-        // A confirmed side acknowledging the peer's position confirms it.
-        let acked = d.confirmed && d.last_ack.is_some();
-        let ack = d.last_ack;
+        // KAN-293: a confirmed side's ACK says where its peer has got to,
+        // even past bytes the capture missed. Moving the peer takes a
+        // trusted segment from this side, so it costs a blind forger as
+        // many guesses as an RST does.
+        let Some(ack) = d.last_ack.filter(|_| d.confirmed) else { return };
         let peer = &mut self.dirs[1 - i];
-        if acked && peer.seq_hi.zip(ack).is_some_and(|(hi, a)| at_or_past(hi, a)) {
-            peer.confirmed = true;
+        match peer.seq_hi {
+            None => {}
+            Some(hi) if peer.confirmed => {
+                if seq_after(ack, hi) {
+                    peer.seq_hi = Some(ack);
+                }
+            }
+            // Acknowledging the peer's position confirms it.
+            Some(hi) if at_or_past(hi, ack) => peer.confirmed = true,
+            // The peer's anchors were not its own: the ACK replaces them.
+            Some(_) => {
+                peer.seq_hi = Some(ack);
+                peer.last_ack = None;
+                peer.confirmed = true;
+            }
         }
     }
 
@@ -1503,8 +1526,13 @@ impl FollowEntry {
         }
         if seg.rst {
             self.rst = true;
-            for d in &mut self.dirs {
-                d.close(ctx);
+            for i in 0..2 {
+                // Holes before held bytes can never fill now: they are gaps.
+                self.dirs[i].expire_holes(seg.now_ms, true, Direction::from_index(i), &mut self.turns, ctx);
+                self.dirs[i].close(ctx);
+            }
+            if std::mem::take(&mut ctx.turn_limit) {
+                self.stop_both(StopReason::TurnLimit);
             }
         } else {
             let d = &mut self.dirs[i];
@@ -3047,5 +3075,78 @@ mod tests {
         store.ingest(&k, true, FollowSegment { rst: true, ..syn(0x1234, false, T0 + 3_000) });
         assert_eq!(store.with_entry(&id(&k), |e| e.map(|e| e.generation())), Some(generation));
         assert_eq!(emitted(&store, &k, Direction::C2s), b"GET / HTTP/1.1\r\n");
+    }
+
+    // ---------- KAN-293: anchor resync, and gaps at an RST ----------
+
+    /// Sends `total` bytes from `from` in 16 KiB segments without ACK, as
+    /// a bulk sender's data would be seen; returns the next sequence.
+    fn send_bulk(store: &mut FollowStore, k: &FlowKey, outbound: bool, from: u32, total: u32, now_ms: u64) -> u32 {
+        let block = vec![b'x'; 16 * 1024];
+        let mut seq = from;
+        for _ in 0..total.div_ceil(block.len() as u32) {
+            store.ingest(k, outbound, seg(seq, &block, now_ms));
+            seq = seq.wrapping_add(block.len() as u32);
+        }
+        seq
+    }
+
+    #[test]
+    fn a_peers_ack_resyncs_a_direction_after_more_than_a_window_of_capture_loss() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, s_next) = open_cleartext(&mut store, &k);
+        // The capture misses 2 MiB of the server's data; the client's ACK
+        // shows where the server got to.
+        let resumed = s_next.wrapping_add(2 * RST_WINDOW_BYTES);
+        store.ingest(&k, true, seg_ack(c_next, b"y", resumed, T0 + 3_000));
+        // More than a window past that ACK, so only the server's own
+        // position can vouch for its RST.
+        let s_end = send_bulk(&mut store, &k, false, resumed, RST_WINDOW_BYTES + 64 * 1024, T0 + 3_000);
+        store.ingest(&k, false, rst(s_end, T0 + 3_000));
+        assert!(is_closed(&store, &k), "the server's position never caught up after the loss");
+    }
+
+    #[test]
+    fn a_confirmed_ack_replaces_an_anchor_the_peers_lagging_acks_could_not() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        store.ingest(&k, true, seg(500, b"GET / HTTP/1.1\r\n", T0));
+        store.ingest(&k, false, seg(77_000_000, b"a", T0)); // planted first
+        let c_next = send_bulk(&mut store, &k, true, 516, 2 * RST_WINDOW_BYTES, T0);
+        // The real server's ACKs lag more than a window behind the client.
+        store.ingest(&k, false, seg_ack(9_000, b"b", 516, T0));
+        // The client's ACK is where the real server is.
+        store.ingest(&k, true, seg_ack(c_next, b"c", 9_001, T0));
+        let s_end = send_bulk(&mut store, &k, false, 9_001, RST_WINDOW_BYTES + 64 * 1024, T0);
+        store.ingest(&k, false, rst(s_end, T0));
+        assert!(is_closed(&store, &k));
+    }
+
+    #[test]
+    fn an_unconfirmed_sides_ack_does_not_move_its_peer() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        store.ingest(&k, true, seg(500, b"GET / HTTP/1.1\r\n", T0));
+        // A forged server segment acknowledges far past the client.
+        let far = 516 + (1 << 30);
+        store.ingest(&k, false, seg_ack(77_000_000, b"a", far, T0));
+        store.ingest(&k, true, rst(far, T0));
+        assert!(!is_closed(&store, &k));
+        store.ingest(&k, true, rst(516, T0));
+        assert!(is_closed(&store, &k), "the client's real position was moved");
+    }
+
+    #[test]
+    fn an_rst_over_an_open_hole_records_the_hole_as_a_gap() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, _) = open_cleartext(&mut store, &k);
+        store.ingest(&k, true, seg(c_next + 10, b"abc", T0 + 3_000));
+        store.ingest(&k, true, rst(c_next + 13, T0 + 3_000));
+        let s = snap(&store, &k, Direction::C2s);
+        assert!(s.closed);
+        assert_eq!(s.gaps, vec![Gap { at: 16, missing: 10, reason: GapReason::Missing }]);
+        assert_eq!(s.stored, 16 + 3, "bytes held past the hole are kept");
     }
 }
