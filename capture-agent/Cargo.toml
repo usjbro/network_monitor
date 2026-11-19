@@ -38,3 +38,8 @@ etherparse = { version = "0.20", features = ["std"] }
 # is the "historically-unmaintained" crate http2.rs already calls out, so
 # this vendors a locally-patched copy rather than waiting on a release.
 fluke-hpack = { path = "vendor/fluke-hpack" }
+
+[lints.rust]
+# cargo-fuzz builds with `--cfg fuzzing`; `follow::FollowStore::audit` is
+# compiled for it (and for tests) only.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

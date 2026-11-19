@@ -62,6 +62,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "follow_store"
+path = "fuzz_targets/follow_store.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 # Mirrors capture-agent/Cargo.toml's patch (this fuzz crate is its own
 # Cargo workspace, with its own lockfile, so the parent's [patch] section

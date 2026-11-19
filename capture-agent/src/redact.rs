@@ -12,7 +12,7 @@ pub fn is_sensitive_header_name(name: &str) -> bool {
     SENSITIVE_HEADER_NAMES.contains(&name.to_ascii_lowercase().as_str())
 }
 
-fn looks_like_bearer_token(value: &str) -> bool {
+pub(crate) fn looks_like_bearer_token(value: &str) -> bool {
     value
         .trim_start()
         .get(.."bearer ".len())

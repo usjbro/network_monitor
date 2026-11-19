@@ -1,3 +1,11 @@
+# KAN-110 Follow Stream Task 1 — 2026-11-18
+
+- Red: 46 `follow::` tests written first; `cargo test --locked follow::` failed to compile (module/API missing).
+- Green: `cargo test --locked` all pass (820 across suites, 0 failed; 46 `follow::`). `cargo clippy --all-targets --locked -- -D warnings` clean. `cargo build --release --locked` ok. `cargo +nightly fuzz run follow_store -- -max_total_time=40`: 25 228 runs, no failure.
+- Mutations, each caught then restored: credential values unmasked (4 tests fail), pending bytes emittable (8 tests fail; fuzz target fails in seconds with "pending bytes emitted"), chunk freed without zeroizing (release-path test fails).
+
+---
+
 # KAN-288 Karn discard spec amendment — 2026-11-18
 
 - New test `karn_discards_entries_sent_after_the_retransmitted_range` passes on the existing code (it pins current behaviour). Mutation check: an overlap-only discard (the old spec wording) fails it, and no other lib test; restored.
