@@ -1,3 +1,9 @@
+# KAN-292 (2026-11-19)
+
+`cargo test --locked`: 830 passed, 0 failed (a first run had 5 `io_graph_replay` failures under parallel contention — "agent did not publish isolated credential"; that file passes 5/5 serially and the full rerun is clean). Clippy `-D warnings` clean; release build OK. Five new RST tests; the three rejection tests failed before the change.
+
+---
+
 # KAN-110 Follow Stream Task 1 — 2026-11-18
 
 - Red: 46 `follow::` tests written first; `cargo test --locked follow::` failed to compile (module/API missing).

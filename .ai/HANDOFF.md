@@ -1,3 +1,11 @@
+# KAN-292 Follow Stream RST sequence validation (2026-11-19)
+
+- Change: `capture-agent/src/follow.rs` (`rst_acceptable`, `DirState::next_seq`, `RST_WINDOW_BYTES`, `FollowSegment::ack_number`); fuzz target derives `ack_number` from the peer cursor.
+- Deliberate choice: fixed 1 MiB acceptance bound instead of RFC 5961's receive window, which a passive monitor cannot see. Out-of-window RSTs are ignored (the flow ends later by FIN or idle eviction).
+- Not addressed: an accepted RST that closes a direction with an open hole still records no gap (noted on #327).
+
+---
+
 # KAN-110 Follow Stream Task 1 — bounded store (2026-11-18)
 
 Uncommitted in `.worktrees/follow-stream-bounded-store`: new `src/follow.rs` (API per plan, plus `FollowEntry::direction()` metadata view, `flow_count()`, `audit()` under `cfg(any(test, fuzzing))`), `redact::looks_like_bearer_token` widened to `pub(crate)`, `fuzz/fuzz_targets/follow_store.rs` + bin, CI fuzz path regex and step, `[lints.rust] check-cfg` for `cfg(fuzzing)` in `capture-agent/Cargo.toml`. Deliberate deviations for the PR description: (1) metadata vectors grow by budget-charged doubling, not allocated at cap size on first use, because 256 × 4 096 turns × 24 B = 24 MiB exceeds the 16 MiB global cap; they hold no payload; (2) an upgrade is also confirmed by a ClientHello/ServerHello header at the suspect offset, not only a chain; (3) uncertain masks include the CR before LF, credential masks exclude it (spec wording for each); (4) at `redaction_limit` the store cuts at the start of the line whose mask failed; (5) a pending direction that stops (cap) or closes is classified at once; a suspect at close is released, as the spec says for the partial-header holdback. Noticed, not changed: fuzz target `tls_record_stream` is registered but CI never runs it. Next: commit/PR when James asks; run security-review on the diff before pushing.
