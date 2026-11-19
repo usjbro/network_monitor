@@ -230,7 +230,7 @@ fn window_index(pos: u64) -> usize {
 /// evicted to make room. The entry being worked on is never in `others`.
 struct Ctx<'a> {
     reserved: &'a mut usize,
-    others: Option<&'a mut HashMap<FlowKey, FollowEntry>>,
+    others: Option<&'a mut Entries>,
     last_cut_ms: Option<u64>,
     turn_limit: bool,
     truncated: bool,
@@ -265,8 +265,18 @@ impl Ctx<'_> {
     }
 }
 
+/// Entries are boxed so the map's slots stay small and moving an entry out
+/// for one packet's work moves a pointer, not the entry.
+type Entries = HashMap<FlowKey, Box<FollowEntry>>;
+
+/// The map is reserved for twice the flow cap. With at most half its usable
+/// capacity occupied, hashbrown reclaims deleted slots by rehashing in place
+/// rather than allocating a larger table, so remove/insert churn never grows
+/// it; `FollowStore::recharge_map` charges any change it does see anyway.
+const MAP_RESERVE: usize = 2 * MAX_FLOWS;
+
 /// Closed entries go first, then the least recently active, then the oldest.
-fn pressure_victim(entries: &HashMap<FlowKey, FollowEntry>) -> Option<FlowKey> {
+fn pressure_victim(entries: &Entries) -> Option<FlowKey> {
     entries
         .iter()
         .min_by_key(|(_, e)| (!e.closed(), e.last_activity_ms, e.insertion))
@@ -301,7 +311,7 @@ fn map_estimate(cap: usize) -> usize {
     if cap == 0 {
         return 0;
     }
-    (cap * 8).div_ceil(7).next_power_of_two() * (std::mem::size_of::<(FlowKey, FollowEntry)>() + 1)
+    (cap * 8).div_ceil(7).next_power_of_two() * (std::mem::size_of::<(FlowKey, Box<FollowEntry>)>() + 1)
 }
 
 fn is_tchar(b: u8) -> bool {
@@ -621,6 +631,8 @@ impl DirState {
         let new_turn = !matches!(turns.last(), Some(t) if t.dir == d);
         if new_turn {
             if turns.len() >= MAX_TURNS_PER_FLOW {
+                self.contig = 0;
+                self.stop(StopReason::TurnLimit);
                 ctx.turn_limit = true;
                 return;
             }
@@ -760,7 +772,7 @@ impl DirState {
         // A segment past the window forces the earliest hole closed as a gap,
         // repeatedly, until it fits.
         while pos + bytes.len() as u64 > self.edge + u64::from(REORDER_BYTES) {
-            let hole_end = self.first_held().unwrap_or(pos).min(pos);
+            let hole_end = self.hole_end(pos);
             if hole_end <= self.edge || !self.declare_gap(hole_end - self.edge, now_ms, ctx) {
                 return;
             }
@@ -812,14 +824,28 @@ impl DirState {
         self.check_fin(ctx);
     }
 
+    /// Where the hole at the edge ends: the first held byte or `limit`,
+    /// whichever is earlier, and never past the FIN.
+    fn hole_end(&self, limit: u64) -> u64 {
+        let end = self.first_held().unwrap_or(limit).min(limit);
+        self.fin_at.map_or(end, |f| end.min(f))
+    }
+
     /// Declares every open hole a gap once the oldest has waited 2 s.
     fn expire_holes(&mut self, now_ms: u64, d: Direction, turns: &mut Vec<Turn>, ctx: &mut Ctx) {
         while self.accepting() && self.ooo.as_ref().is_some_and(|o| now_ms.saturating_sub(o.since_ms) >= REORDER_MS) {
-            let Some(first) = self.first_held() else { break };
+            let before = self.edge;
+            let first = self.hole_end(u64::MAX);
             if first > self.edge && !self.declare_gap(first - self.edge, now_ms, ctx) {
                 break;
             }
             self.drain(now_ms, d, turns, ctx);
+            self.check_fin(ctx);
+            if self.edge == before {
+                // Nothing held can ever become contiguous (it lies past the FIN).
+                self.free_ooo(ctx);
+                break;
+            }
         }
         if !self.accepting() {
             self.free_ooo(ctx);
@@ -873,34 +899,24 @@ impl DirState {
                 self.tls = TlsState::Pending { since_ms, cand: c };
                 return None;
             }
-            self.tls = TlsState::Cleartext { at: c, suspect_since: None };
+            // A candidate still undecided at `c` has already been withheld
+            // since the pending deadline started; it does not get a new one.
+            self.tls = TlsState::Cleartext { at: c, suspect_since: since_ms };
         }
         let TlsState::Cleartext { mut at, suspect_since } = self.tls else { return None };
         let mut since = suspect_since;
         while at < self.stored {
-            if since.is_none() {
-                if !(0x14..=0x17).contains(&self.byte(at)) {
-                    at += 1;
-                    continue;
-                }
-                if at + 5 > self.stored {
-                    if self.prefix_at(at) && !last {
-                        break;
-                    }
-                    at += 1;
-                    continue;
-                }
-                if self.header_at(at).is_none() {
-                    at += 1;
-                    continue;
-                }
-                since = Some(now_ms);
-            }
-            let Some((content_type, len)) = self.header_at(at) else {
+            let first = self.byte(at);
+            let header = if (0x14..=0x17).contains(&first) { self.header_at(at) } else { None };
+            let Some((content_type, len)) = header else {
                 since = None;
+                if (0x14..=0x17).contains(&first) && at + 5 > self.stored && self.prefix_at(at) && !last {
+                    break;
+                }
                 at += 1;
                 continue;
             };
+            let suspect_since = *since.get_or_insert(now_ms);
             if content_type == 0x16 && at + 6 <= self.stored && matches!(self.byte(at + 5), 0x01 | 0x02) {
                 return Some(TlsEvent::Upgrade(at));
             }
@@ -909,11 +925,15 @@ impl DirState {
                 if self.header_at(next).is_some() {
                     return Some(TlsEvent::Upgrade(at));
                 }
-            } else if !last && since.is_some_and(|s| now_ms.saturating_sub(s) < CLASSIFY_MS) {
+            } else if !last && now_ms.saturating_sub(suspect_since) < CLASSIFY_MS {
                 break;
             }
             since = None;
             at += 1;
+        }
+        // A deadline belongs to the header at `at`; with no bytes there, none.
+        if at >= self.stored {
+            since = None;
         }
         self.tls = TlsState::Cleartext { at, suspect_since: since };
         None
@@ -1163,9 +1183,6 @@ impl DirState {
     /// Drops every stored byte and the metadata describing them (D3 `tls`).
     fn drop_all(&mut self, ctx: &mut Ctx) {
         self.truncate(0, ctx);
-        while self.chunks.pop().is_some() {
-            ctx.refund(CHUNK_BYTES);
-        }
         release_vec(&mut self.chunks, ctx);
         release_vec(&mut self.gaps, ctx);
         release_vec(&mut self.ranges, ctx);
@@ -1214,7 +1231,6 @@ impl DirState {
 
 /// One retained flow. Exposes metadata and masked copies, never raw bytes.
 pub struct FollowEntry {
-    id: String,
     fixed_heap: usize,
     generation: Generation,
     insertion: u64,
@@ -1414,7 +1430,7 @@ pub struct FollowStore {
     epoch: u64,
     counter: u64,
     insertions: u64,
-    entries: HashMap<FlowKey, FollowEntry>,
+    entries: Entries,
     reserved: usize,
     map_bytes: usize,
     last_cut_ms: Option<u64>,
@@ -1468,9 +1484,8 @@ impl FollowStore {
             return false;
         };
         if self.entries.capacity() == 0 {
-            self.entries.reserve(MAX_FLOWS);
-            self.map_bytes = map_estimate(self.entries.capacity());
-            self.reserved += self.map_bytes;
+            self.entries.reserve(MAP_RESERVE);
+            self.recharge_map();
         }
         if self.entries.len() >= MAX_FLOWS {
             if let Some(victim) = pressure_victim(&self.entries) {
@@ -1478,8 +1493,8 @@ impl FollowStore {
             }
         }
         let key = key.clone();
-        let id = key.connection_id();
-        let fixed_heap = key.local_addr.capacity() + key.remote_addr.capacity() + id.capacity();
+        let fixed_heap =
+            key.local_addr.capacity() + key.remote_addr.capacity() + std::mem::size_of::<FollowEntry>();
         let mut ctx = Ctx {
             reserved: &mut self.reserved,
             others: Some(&mut self.entries),
@@ -1497,8 +1512,7 @@ impl FollowStore {
         };
         self.counter = counter;
         self.insertions += 1;
-        let entry = FollowEntry {
-            id,
+        let entry = Box::new(FollowEntry {
             fixed_heap,
             generation: Generation { epoch: self.epoch, counter },
             insertion: self.insertions,
@@ -1510,22 +1524,27 @@ impl FollowStore {
             last_activity_ms: seg.now_ms,
             turns: Vec::new(),
             dirs: [DirState::new(), DirState::new()],
-        };
+        });
         self.entries.insert(key, entry);
+        self.recharge_map();
         true
     }
 
-    pub fn ingest(&mut self, key: &FlowKey, outbound: bool, segment: FollowSegment<'_>) {
-        // Only replacement of a terminal tuple starts a new generation.
-        if segment.syn && self.entries.get(key).is_some_and(FollowEntry::closed) {
-            self.remove(key);
+    /// Charges the flow index at its real capacity, evicting if a change
+    /// pushed the store over its cap.
+    fn recharge_map(&mut self) {
+        let now = map_estimate(self.entries.capacity());
+        self.reserved = self.reserved - self.map_bytes + now;
+        self.map_bytes = now;
+        while self.reserved > MAX_TOTAL_BYTES {
+            let Some(victim) = pressure_victim(&self.entries) else { break };
+            self.remove(&victim);
         }
-        if !self.entries.contains_key(key) {
-            let starts = segment.syn || (!segment.payload.is_empty() && !segment.rst);
-            if !starts || !self.create(key, outbound, &segment) {
-                return;
-            }
-        }
+    }
+
+    /// Runs `work` on one entry with every other entry available for
+    /// eviction, so growth never fails only because of which path did it.
+    fn with_ctx(&mut self, key: &FlowKey, work: impl FnOnce(&mut FollowEntry, &mut Ctx)) {
         let Some((key, mut entry)) = self.entries.remove_entry(key) else { return };
         let mut ctx = Ctx {
             reserved: &mut self.reserved,
@@ -1534,22 +1553,32 @@ impl FollowStore {
             turn_limit: false,
             truncated: false,
         };
-        entry.ingest(outbound, segment, &mut ctx);
+        work(&mut entry, &mut ctx);
         self.entries.insert(key, entry);
+        self.recharge_map();
+    }
+
+    pub fn ingest(&mut self, key: &FlowKey, outbound: bool, segment: FollowSegment<'_>) {
+        // Only replacement of a terminal tuple starts a new generation.
+        if segment.syn && self.entries.get(key).is_some_and(|e| e.closed()) {
+            self.remove(key);
+        }
+        if !self.entries.contains_key(key) {
+            let starts = segment.syn || (!segment.payload.is_empty() && !segment.rst);
+            if !starts || !self.create(key, outbound, &segment) {
+                return;
+            }
+        }
+        self.with_ctx(key, |entry, ctx| entry.ingest(outbound, segment, ctx));
     }
 
     /// Advances capture time: hole expiry and the D3 deadlines. Never reads
     /// the wall clock.
     pub fn tick(&mut self, now_ms: u64) {
-        for entry in self.entries.values_mut() {
-            let mut ctx = Ctx {
-                reserved: &mut self.reserved,
-                others: None,
-                last_cut_ms: self.last_cut_ms,
-                turn_limit: false,
-                truncated: false,
-            };
-            entry.settle(now_ms, &mut ctx);
+        let keys: Vec<FlowKey> = self.entries.keys().cloned().collect();
+        for key in &keys {
+            // An entry evicted earlier in this tick is simply skipped.
+            self.with_ctx(key, |entry, ctx| entry.settle(now_ms, ctx));
         }
     }
 
@@ -1561,21 +1590,25 @@ impl FollowStore {
     /// Interface switch: every entry goes; the epoch and counter stay, so
     /// generations remain monotonic.
     pub fn reset(&mut self) {
-        let freed: usize = self.entries.values().map(FollowEntry::heap_bytes).sum();
+        let freed: usize = self.entries.values().map(|e| e.heap_bytes()).sum();
         self.entries.clear();
         self.reserved -= freed;
         self.last_cut_ms = None;
     }
 
     pub fn with_entry<R>(&self, connection_id: &str, f: impl FnOnce(Option<&FollowEntry>) -> R) -> R {
-        f(self.entries.values().find(|e| e.id == connection_id))
+        let key = FlowKey::from_connection_id(connection_id);
+        f(key.and_then(|k| self.entries.get(&k)).map(|e| &**e))
     }
 
     /// Structural invariants, for tests and the fuzz target. Reports counts
     /// and fixed messages only, never payload.
     #[cfg(any(test, fuzzing))]
     pub fn audit(&self) -> Result<(), &'static str> {
-        let recomputed = self.map_bytes + self.entries.values().map(FollowEntry::heap_bytes).sum::<usize>();
+        if self.map_bytes != map_estimate(self.entries.capacity()) {
+            return Err("flow index charged below its capacity");
+        }
+        let recomputed = self.map_bytes + self.entries.values().map(|e| e.heap_bytes()).sum::<usize>();
         if recomputed != self.reserved {
             return Err("reserved byte counter drifted from reserved capacity");
         }
@@ -2591,5 +2624,63 @@ mod tests {
             let mut out = [0u8; 64];
             assert_eq!(e.unwrap().copy_masked(Direction::C2s, 0, 13, &mut out), 0);
         });
+    }
+
+    // ---------- review fixes (PR #327) ----------
+
+    #[test]
+    fn a_fin_before_held_bytes_ends_the_stream_at_the_fin() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        open(&mut store, &k);
+        store.ingest(&k, true, seg(C0 + 100, &[b'x'; 100], T0));
+        store.ingest(&k, true, fin(C0 + 50, b"", T0));
+        store.tick(T0 + REORDER_MS);
+        let s = snap(&store, &k, Direction::C2s);
+        assert!(s.closed);
+        assert_eq!(s.gaps, vec![Gap { at: 0, missing: 50, reason: GapReason::Missing }], "no gap past the FIN");
+        assert_eq!(s.stored, 0, "bytes after the FIN are not part of the stream");
+    }
+
+    #[test]
+    fn a_tick_that_drains_held_bytes_may_evict_other_flows() {
+        let mut store = FollowStore::new(1);
+        let target = key_n(1_000);
+        open(&mut store, &target);
+        store.ingest(&target, true, seg(C0, b"a", T0));
+        store.ingest(&target, true, seg(C0 + 11, &[b'b'; 60_000], T0)); // a 10-byte hole
+        // Closed fillers take the store to within one small flow of its cap.
+        let block = vec![b'x'; 16 * 1024];
+        for n in 0..60u16 {
+            let k = key_n(n);
+            for i in 0..16u32 {
+                store.ingest(&k, true, seg(10 + i * block.len() as u32, &block, T0));
+            }
+            store.ingest(&k, true, rst(10 + 16 * block.len() as u32, T0));
+        }
+        let mut n = 60u16;
+        while MAX_TOTAL_BYTES - store.reserved_bytes() >= 20_000 {
+            store.ingest(&key_n(n), true, seg(10, b"x", T0));
+            store.ingest(&key_n(n), true, rst(11, T0));
+            n += 1;
+        }
+        let fillers = store.flow_count();
+        // Draining 60 000 bytes needs more chunks than the headroom holds.
+        store.tick(T0 + REORDER_MS);
+        let s = snap(&store, &target, Direction::C2s);
+        assert_eq!((s.stopped, s.stored), (None, 60_001));
+        assert!(store.flow_count() < fillers, "a closed flow was evicted to make room");
+    }
+
+    #[test]
+    fn a_header_pending_for_2000_ms_is_not_withheld_again_as_a_suspect() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        open(&mut store, &k);
+        // A valid header whose chained record never arrives.
+        store.ingest(&k, true, seg(C0, b"\x17\x03\x03\x00\x40abc", T0));
+        store.tick(T0 + CLASSIFY_MS);
+        let s = snap(&store, &k, Direction::C2s);
+        assert_eq!((s.class, s.emittable), (Classification::Cleartext, 8));
     }
 }
