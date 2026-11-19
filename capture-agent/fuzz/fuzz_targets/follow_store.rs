@@ -143,8 +143,12 @@ fuzz_target!(|data: &[u8]| {
                 };
                 let base = *cursor.entry((n, outbound)).or_insert(u32::from(delta) << 16);
                 let seq = base.wrapping_add(i32::from(delta as i16) as u32 >> (flags >> 6));
+                // Acknowledge near the other side's cursor, so an RST from a
+                // side that sent nothing is reachable (KAN-292).
+                let peer = cursor.get(&(n, !outbound)).copied().unwrap_or(0);
                 let segment = FollowSegment {
                     seq,
+                    ack_number: peer.wrapping_add(u32::from(len) >> (flags >> 6)),
                     syn: flags & 2 != 0,
                     ack: flags & 4 != 0,
                     fin: flags & 8 != 0,
