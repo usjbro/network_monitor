@@ -1,6 +1,8 @@
 # KAN-292 review fixes (2026-11-19)
 
 - Change: `capture-agent/src/follow.rs` `rst_acceptable` rewritten as three named clauses; the ACK clause is gated on `!sender.confirmed`; `FollowStore::ingest` never creates an entry from an RST; `RST_WINDOW_BYTES` doc states the corrected bound. `tcp_samples::seq_after` is `pub(crate)` and shared.
+- `FollowStore::ingest` clears SYN on a SYN|RST before anything branches on it, so it never creates, replaces or erases an entry.
+- Accepted trade-offs: a confirmed sender no longer gets the ACK-only fallback, so after >1 MiB loss its RST|ACK matching the peer is dropped (folded into KAN-293); the side that creates an entry is trusted by `first` (doc says so).
 - Open: KAN-293 (confirmed anchor never resyncs). Still not addressed: an accepted RST over an open hole records no gap.
 
 ---

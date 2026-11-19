@@ -49,7 +49,9 @@ pub const REORDER_BYTES: u32 = 64 * 1024;
 /// receiver's last ACK) an RST may sit and still be accepted. RFC 5961 §3
 /// uses the receive window, which a passive monitor cannot see, so this is
 /// a fixed bound. Anchors count only once their side is confirmed, so a
-/// forged first segment cannot plant one. At most two windows apply to any
+/// forged first segment on a side not yet seen cannot plant one; the side
+/// that creates the entry is trusted, as there is nothing to check it
+/// against. At most two windows apply to any
 /// RST (`FollowEntry::rst_acceptable`), so a blind forger needs at least
 /// 2^32 / 2^21 = 2,048 guesses per flow, about 4,096 when they overlap.
 /// Larger than the reorder window because a legitimate RST may follow sent
@@ -1666,12 +1668,14 @@ impl FollowStore {
     }
 
     pub fn ingest(&mut self, key: &FlowKey, outbound: bool, segment: FollowSegment<'_>) {
+        // A SYN|RST is only an RST: it never starts, replaces or opens a flow.
+        let segment = FollowSegment { syn: segment.syn && !segment.rst, ..segment };
         // Only replacement of a terminal tuple starts a new generation.
         if segment.syn && self.entries.get(key).is_some_and(|e| e.closed()) {
             self.remove(key);
         }
         if !self.entries.contains_key(key) {
-            let starts = !segment.rst && (segment.syn || !segment.payload.is_empty());
+            let starts = segment.syn || (!segment.payload.is_empty() && !segment.rst);
             if !starts || !self.create(key, outbound, &segment) {
                 return;
             }
@@ -3031,5 +3035,17 @@ mod tests {
         store.ingest(&k, true, FollowSegment { rst: true, ..syn(C_ISN, false, T0) });
         assert_eq!(store.flow_count(), 0);
         store.audit().expect("store invariants");
+    }
+
+    #[test]
+    fn a_syn_with_rst_does_not_replace_a_closed_flow() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, _) = open_cleartext(&mut store, &k);
+        store.ingest(&k, true, rst(c_next, T0 + 3_000));
+        let generation = store.with_entry(&id(&k), |e| e.unwrap().generation());
+        store.ingest(&k, true, FollowSegment { rst: true, ..syn(0x1234, false, T0 + 3_000) });
+        assert_eq!(store.with_entry(&id(&k), |e| e.map(|e| e.generation())), Some(generation));
+        assert_eq!(emitted(&store, &k, Direction::C2s), b"GET / HTTP/1.1\r\n");
     }
 }
