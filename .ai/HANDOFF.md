@@ -1,3 +1,10 @@
+# KAN-292 review fixes (2026-11-19)
+
+- Change: `capture-agent/src/follow.rs` `rst_acceptable` rewritten as three named clauses; the ACK clause is gated on `!sender.confirmed`; `FollowStore::ingest` never creates an entry from an RST; `RST_WINDOW_BYTES` doc states the corrected bound. `tcp_samples::seq_after` is `pub(crate)` and shared.
+- Open: KAN-293 (confirmed anchor never resyncs). Still not addressed: an accepted RST over an open hole records no gap.
+
+---
+
 # KAN-292 Follow Stream RST sequence validation (2026-11-19)
 
 - Change: `capture-agent/src/follow.rs` (`rst_acceptable`, `DirState::track` with `seq_hi`/`last_ack`, `RST_WINDOW_BYTES`, `FollowSegment::ack_number`); fuzz target derives `ack_number` from the peer cursor. Anchors judge an RST only once their direction is confirmed (created the entry, or mutually acknowledged with a confirmed peer), so a forged first segment on a silent side plants nothing usable. A segment more than 1 MiB from the tracked position is untrusted (doesn't move it or record its ACK); a capture loss over 1 MiB in one direction therefore leaves that side's RST unbelieved until idle eviction.
