@@ -1,3 +1,9 @@
+# KAN-130 Task 3 — ladder model `lib/flow-ladder.ts` (2026-11-20)
+
+James approved gate `kan-130__flow-ladder-model` in chat. Worktree `.worktrees/flow-ladder-model`. Pure `buildLadder` (spec D3 gap/interesting/run/row-cap), `arrowText`, `sampleKey`/`packetKey`/`linkSamples` (spec D4; ambiguity fails closed; endpoints split at the last colon, brackets/case normalised). 22 tests in `lib/__tests__/flow-ladder.test.ts`, written first (16 failed against a stub). tsc, lint, 1,149 Vitest pass. No UI yet. Next: PR, CI; James merges; Task 4 needs its own gate.
+
+---
+
 # KAN-130 Task 2 — tcp_samples head and labels on the wire (2026-11-20)
 
 James approved gate `kan-130__flow-ladder-wire` in chat. Worktree `.worktrees/flow-ladder-wire`. `wire.rs` page gains `head` (P2 rule) and `labels` `[index, kind, text]`; measured worst-case line 226,620 B (cap 3,072 stands). TS: `TcpSamplesPage.head/labels`, mapper validates labels (bad ones dropped), `accumulate` keeps head + labels and pins trimmed indices < 16 client-side. Replay tests cover a 4,206-sample TLS flow and an HTTP flow. cargo test/clippy, tsc, lint, 1,127 Vitest pass. Next: PR, CI; James merges; Task 3 needs its own gate.
