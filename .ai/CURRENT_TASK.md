@@ -1,3 +1,9 @@
+# KAN-294 Follow Stream front-door exclusion (2026-11-19)
+
+James chose option (a). Worktree `.worktrees/follow-stream-front-door`, branch `KAN-294-follow-stream-front-door`. With `FOLLOW_STREAM=1` the agent also reads `FRONT_DOOR_PORT` (default 8443) and excludes that port with the relay port: on loopback pairs, and between this host's own address and itself; another host's front-door session is kept. PR open. Next: reviews, CI; James merges.
+
+---
+
 # KAN-130 Task 4 — flow ladder UI (2026-11-20)
 
 James approved gate `kan-130__flow-ladder-ui` in chat. Worktree `.worktrees/flow-ladder-ui`. `components/FlowLadderView.tsx`; `TcpGraphsView` Graphs | Ladder tabs (`tab`/`onTab`/`ladder`, one poller); Ladder button in `ConnectionsView`; `PacketStreamView` `focusPacketId`/`onFocusHandled` (P7); `app/page.tsx` wiring and `openLadderFrame` (missing / hidden-by-display-filter notices). e2e `flow-ladder.spec.ts`: production live poll median 8.8 ms; no sideways scroll at 320/1280 px. docs/usage.md Flow ladder section; 'never payload' corrected. Vitest 1,167, tsc, lint pass. Next: PR, CI; James merges; then KAN-130 Done.
