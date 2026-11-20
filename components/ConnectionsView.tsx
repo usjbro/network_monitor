@@ -9,6 +9,7 @@ import {
   Network,
   Route,
   Search,
+  ListTree,
 } from 'lucide-react';
 import { Finding, NetworkConnection, ThemeConfig, TracerouteHop } from '@/lib/types';
 import { formatSpeed, formatBytes } from '@/lib/osi-engine';
@@ -40,6 +41,8 @@ interface ConnectionsViewProps {
   onTraceRoute?: (connectionId: string, remoteAddr: string) => void;
   // KAN-129: opens the TCP graphs panel for a TCP flow (app/page.tsx polls).
   onOpenTcpGraphs?: (connectionId: string) => void;
+  // KAN-130: opens the same panel on its flow ladder tab.
+  onOpenLadder?: (connectionId: string) => void;
   // True when the agent's capture_stats event (issue #61) reports nonzero
   // kernel/driver drops or relay lag — the per-connection loss % below is
   // retransmit-derived and only trustworthy when this is false.
@@ -74,6 +77,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
   traceInFlight,
   onTraceRoute,
   onOpenTcpGraphs,
+  onOpenLadder,
   captureDegraded,
   totalObserved,
   capacityEvictions,
@@ -385,7 +389,7 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
           </div>
 
           {/* Trace Route: on-demand only, never triggered automatically */}
-          {(onTraceRoute || (onOpenTcpGraphs && selectedConn.transportProtocol === 'TCP')) && (
+          {(onTraceRoute || ((onOpenTcpGraphs || onOpenLadder) && selectedConn.transportProtocol === 'TCP')) && (
             <div className="pt-2 border-t border-slate-800">
               <div className="flex items-center space-x-2">
                 {onTraceRoute && (
@@ -405,6 +409,15 @@ export const ConnectionsView: React.FC<ConnectionsViewProps> = ({
                   >
                     <Activity className="h-3 w-3" />
                     <span>TCP graphs</span>
+                  </button>
+                )}
+                {onOpenLadder && selectedConn.transportProtocol === 'TCP' && (
+                  <button
+                    onClick={() => onOpenLadder(selectedConn.id)}
+                    className="flex items-center space-x-1 px-2.5 py-1 rounded border text-[11px] transition bg-slate-800/80 border-slate-700 hover:border-slate-500 text-slate-300"
+                  >
+                    <ListTree className="h-3 w-3" />
+                    <span>Ladder</span>
                   </button>
                 )}
               </div>

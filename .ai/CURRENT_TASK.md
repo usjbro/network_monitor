@@ -1,3 +1,9 @@
+# KAN-130 Task 4 — flow ladder UI (2026-11-20)
+
+James approved gate `kan-130__flow-ladder-ui` in chat. Worktree `.worktrees/flow-ladder-ui`. `components/FlowLadderView.tsx`; `TcpGraphsView` Graphs | Ladder tabs (`tab`/`onTab`/`ladder`, one poller); Ladder button in `ConnectionsView`; `PacketStreamView` `focusPacketId`/`onFocusHandled` (P7); `app/page.tsx` wiring and `openLadderFrame` (missing / hidden-by-display-filter notices). e2e `flow-ladder.spec.ts`: production live poll median 8.8 ms; no sideways scroll at 320/1280 px. docs/usage.md Flow ladder section; 'never payload' corrected. Vitest 1,167, tsc, lint pass. Next: PR, CI; James merges; then KAN-130 Done.
+
+---
+
 # KAN-130 Task 3 — ladder model `lib/flow-ladder.ts` (2026-11-20)
 
 James approved gate `kan-130__flow-ladder-model` in chat. Worktree `.worktrees/flow-ladder-model`. Pure `buildLadder` (spec D3 gap/interesting/run/row-cap), `arrowText`, `sampleKey`/`packetKey`/`linkSamples` (spec D4; ambiguity fails closed; endpoints split at the last colon, brackets/case normalised). 22 tests in `lib/__tests__/flow-ladder.test.ts`, written first (16 failed against a stub). tsc, lint, 1,149 Vitest pass. No UI yet. Next: PR, CI; James merges; Task 4 needs its own gate.

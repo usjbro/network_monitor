@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Activity,
   BarChart2,
@@ -80,7 +80,8 @@ import { CommandLineBar } from '@/components/CommandLineBar';
 import { compileDisplayFilter, type CompiledDisplayFilter } from '@/lib/display-filter';
 import { IoGraphView, timed, type SetIoSeriesMessage } from '@/components/IoGraphView';
 import { createHistory, drillDown, ingestBuckets, ingestStatus, type IoInterval } from '@/lib/io-graph';
-import { TcpGraphsView } from '@/components/TcpGraphsView';
+import { TcpGraphsView, type PanelTab } from '@/components/TcpGraphsView';
+import { FlowLadderView } from '@/components/FlowLadderView';
 import { emptyState as emptyTcpGraphState, type TcpGraphState } from '@/lib/tcp-graphs';
 import { TcpSamplesPoller, fetchTcpSamples } from '@/lib/tcp-samples-poll';
 
@@ -251,12 +252,31 @@ export default function TerminalApp() {
   const tcpPoller = useRef<TcpSamplesPoller | null>(null);
   // Polled only while it is on screen: the panel lives in the Sockets tab.
   const tcpGraphsLive = agentConnected && !isPaused && activeTab === 'connections';
-  const openTcpGraphs = (connectionId: string) => {
+  // KAN-130 plan P8: the panel's tab; both tabs read the one poller's state.
+  const [tcpPanelTab, setTcpPanelTab] = useState<PanelTab>('graphs');
+  // KAN-130 plan P7: a frame the Packets view is asked to select.
+  const [focusPacketId, setFocusPacketId] = useState<string | undefined>(undefined);
+  const clearFocusPacket = useCallback(() => setFocusPacketId(undefined), []);
+  const openTcpGraphs = (connectionId: string, tab: PanelTab = 'graphs') => {
+    setTcpPanelTab(tab);
     // Already open: its poller holds the samples, so keep what is shown.
     if (connectionId === tcpGraphsFor) return;
     setTcpGraphsFor(connectionId);
     setTcpGraphState(emptyTcpGraphState(connectionId));
     setTcpGraphError(null);
+  };
+  // KAN-130 spec D4 / plan P7: a linked ladder arrow opens its frame in the
+  // Packets view. The lookup is repeated here, at click time.
+  const openLadderFrame = (packetId: string): string | null => {
+    const target = packets.find((p) => p.id === packetId);
+    if (!target) return 'This frame has left the packet view.';
+    if (displayFilter?.predicate && !displayFilter.predicate({ kind: 'packet', packet: target })) {
+      return 'That frame is hidden by the display filter.';
+    }
+    setIoDrill(null);
+    setFocusPacketId(packetId);
+    setActiveTab('packets');
+    return null;
   };
   useEffect(() => {
     if (tcpGraphsFor === null) return;
@@ -1188,7 +1208,8 @@ export default function TerminalApp() {
               traceroute={traceroute}
               traceInFlight={traceInFlight}
               onTraceRoute={handleTraceRoute}
-              onOpenTcpGraphs={openTcpGraphs}
+              onOpenTcpGraphs={(id) => openTcpGraphs(id, 'graphs')}
+              onOpenLadder={(id) => openTcpGraphs(id, 'ladder')}
               captureDegraded={captureDegraded}
               totalObserved={captureStats?.totalConnectionsObserved}
               capacityEvictions={captureStats?.capacityEvictions}
@@ -1208,6 +1229,18 @@ export default function TerminalApp() {
               theme={themeConfig}
               latencyMs={connections.find((c) => c.id === tcpGraphsFor)?.latencyMs}
               onClose={() => setTcpGraphsFor(null)}
+              tab={tcpPanelTab}
+              onTab={setTcpPanelTab}
+              ladder={
+                <FlowLadderView
+                  state={tcpGraphState}
+                  connection={connections.find((c) => c.id === tcpGraphsFor)}
+                  packets={packets}
+                  bufferLimit={packetBufferLimit}
+                  theme={themeConfig}
+                  onOpenFrame={openLadderFrame}
+                />
+              }
             />
           )}
 
@@ -1237,6 +1270,8 @@ export default function TerminalApp() {
               timeRange={ioDrill?.timeRange}
               drillHeader={ioDrill?.header}
               onClearDrill={() => setIoDrill(null)}
+              focusPacketId={focusPacketId}
+              onFocusHandled={clearFocusPacket}
             />
           )}
 
