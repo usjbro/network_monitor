@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 
@@ -4119,13 +4119,21 @@ where
     if write_half.write_all(bootstrap.as_bytes()).await.is_err() {
         return;
     }
-    let mut reader = reader.lines();
+    // KAN-110 Task 3a: lines are capped before the buffer grows.
+    let mut reader = capture_agent::control_line::ControlLines::new(reader);
 
     loop {
         tokio::select! {
             line = reader.next_line() => {
                 match line {
-                    Ok(Some(text)) => {
+                    Ok(capture_agent::control_line::ControlRead::TooLong) => {
+                        eprintln!(
+                            "capture-agent: closing control connection: line over {} bytes",
+                            capture_agent::control_line::MAX_CONTROL_LINE_BYTES
+                        );
+                        break;
+                    }
+                    Ok(capture_agent::control_line::ControlRead::Line(text)) => {
                         let message = match wire::classify_control_line(&text) {
                             wire::ControlLine::Message(message) => Some(message),
                             wire::ControlLine::Ignored => None,
@@ -6179,6 +6187,48 @@ mod tcp_samples_reply_path_tests {
     async fn next_line<R: tokio::io::AsyncBufRead + Unpin>(lines: &mut tokio::io::Lines<R>) -> serde_json::Value {
         let line = timeout(Duration::from_secs(5), lines.next_line()).await.expect("a line in time").unwrap().expect("open");
         serde_json::from_str(&line).unwrap()
+    }
+
+    /// A control line padded with an unknown field to exactly `len` bytes,
+    /// LF included.
+    fn padded_pause(len: usize) -> Vec<u8> {
+        let head = b"{\"type\":\"pause\",\"pad\":\"";
+        let tail = b"\"}\n";
+        let mut line = head.to_vec();
+        line.resize(len - tail.len(), b'p');
+        line.extend_from_slice(tail);
+        line
+    }
+
+    #[tokio::test]
+    async fn a_control_line_over_the_cap_closes_the_connection_unparsed() {
+        let (trace_tx, _keep) = broadcast::channel::<String>(4);
+        let flow_table = flow_table_with_samples(4);
+        let (peer, shared) = connect(&trace_tx, &flow_table, 256 * 1024);
+        let (read, mut write) = tokio::io::split(peer);
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(next_line(&mut lines).await["type"], "io_series_status");
+        let max = capture_agent::control_line::MAX_CONTROL_LINE_BYTES;
+        write.write_all(&padded_pause(max + 1)).await.unwrap();
+        // Were it parsed, this would be answered.
+        write.write_all(request_line(1).as_bytes()).await.unwrap();
+        let end = timeout(Duration::from_secs(5), lines.next_line()).await.expect("closed in time");
+        assert!(matches!(end, Ok(None)), "connection stayed open: {end:?}");
+        assert!(!shared.paused.load(Ordering::Relaxed), "the oversized line was acted on");
+    }
+
+    #[tokio::test]
+    async fn a_control_line_at_the_cap_is_acted_on_and_the_next_one_too() {
+        let (trace_tx, _keep) = broadcast::channel::<String>(4);
+        let flow_table = flow_table_with_samples(4);
+        let (peer, shared) = connect(&trace_tx, &flow_table, 256 * 1024);
+        let (read, mut write) = tokio::io::split(peer);
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(next_line(&mut lines).await["type"], "io_series_status");
+        write.write_all(&padded_pause(capture_agent::control_line::MAX_CONTROL_LINE_BYTES)).await.unwrap();
+        write.write_all(request_line(2).as_bytes()).await.unwrap();
+        assert_eq!(next_line(&mut lines).await["type"], "tcp_samples");
+        assert!(shared.paused.load(Ordering::Relaxed), "the line at the cap was not acted on");
     }
 
     #[tokio::test]

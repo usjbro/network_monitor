@@ -1,3 +1,9 @@
+# KAN-110 Follow Stream Task 3a — bounded control-line reader (2026-11-20)
+
+James split plan Task 3 into 3a/3b/3c and chose Claude for 3a (gate `kan-110__follow-stream-control-reader`, approved in chat). Worktree `.worktrees/follow-stream-control-reader`, branch from `new-task.sh`. Scope: `capture-agent/src/control_line.rs` and its use in `serve_connection`; docs. Implemented and verified, uncommitted. Next: James asks for commit/PR; reviews; James merges. 3b (response builder, wire types, P2) and 3c (main.rs integration, replay test, fuzz) are unassigned; KAN-294 option (a) chosen, unassigned.
+
+---
+
 # KAN-293 review fixes (2026-11-20)
 
 /code-review on #331 (merged as 22b51a1) found two regressions it introduced and a missed tail gap; James: "go ahead". Worktree `.worktrees/rst-anchor-resync`, branch `KAN-293-rst-review-fixes`. The ACK-push resync is replaced by a vouched resync: a side's own segment landing where the confirmed peer last acknowledged confirms it or moves it forward. An accepted RST also records the sender's missed tail as a gap. Next: PR, review; James merges.
