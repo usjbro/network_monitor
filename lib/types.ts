@@ -240,7 +240,26 @@ export type TcpSamplesPage =
       // Samples before `firstIndex` the request asked for but the ring overwrote.
       droppedOlder: number;
       samples: TcpSample[];
+      // KAN-130: the ring's pinned first samples that `samples` no longer
+      // covers (sent only when the request asked for them); null otherwise.
+      head: { firstIndex: number; samples: TcpSample[] } | null;
+      // Labels on samples in `head` or `samples`, in index order. [] from an
+      // agent that predates KAN-130.
+      labels: TcpSampleLabel[];
     };
+
+// KAN-130: a short, display-safe description of one sampled segment.
+// `kind` is one of TCP_SAMPLE_LABEL_KINDS, or a newer kind shown as unknown.
+export interface TcpSampleLabel {
+  index: number;
+  kind: string;
+  text: string;
+}
+
+export const TCP_SAMPLE_LABEL_KINDS = ['tls_client_hello', 'tls_server_hello', 'http_request', 'http_response'] as const;
+// The agent pins a ring's first samples (capture-agent/src/tcp_samples.rs HEAD_SAMPLES).
+export const TCP_HEAD_SAMPLES = 16;
+export const TCP_LABEL_TEXT_MAX = 64;
 
 // IO graph (JAM-18, docs/wire-protocol.md "io_series_status"/"io_buckets").
 // One shared series set per agent; edits are compare-and-swap on

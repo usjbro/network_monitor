@@ -2,7 +2,7 @@
 // `accumulate` merges `tcp_samples` pages by sample index; `series` and
 // `throughput` turn the held samples into what TcpGraphsView draws. Header
 // metadata only; times are frame timestamps in µs.
-import { TCP_SAMPLE_FLAG, TCP_SAMPLE_MARK, type TcpSample, type TcpSamplesPage } from './types';
+import { TCP_HEAD_SAMPLES, TCP_SAMPLE_FLAG, TCP_SAMPLE_MARK, type TcpSample, type TcpSampleLabel, type TcpSamplesPage } from './types';
 
 /** One agent ring; the client never holds more for a flow (spec D6 point budget). */
 export const MAX_SAMPLES = 4096;
@@ -23,10 +23,18 @@ export interface TcpGraphState {
   meta: TcpPageMeta | null;
   /** null until the first reply; false once the agent no longer has the flow. */
   found: boolean | null;
+  /**
+   * KAN-130: the ring's first `TCP_HEAD_SAMPLES` samples once `samples` no
+   * longer covers them, from the agent's head block or pinned here when
+   * trimming. Ascending indices, all below `samples[0].index`. Not plotted.
+   */
+  head: IndexedSample[];
+  /** KAN-130: labels by sample index, for samples in `head` or `samples`. */
+  labels: Map<number, TcpSampleLabel>;
 }
 
 export function emptyState(connectionId: string): TcpGraphState {
-  return { connectionId, generation: null, samples: [], nextIndex: 0, meta: null, found: null };
+  return { connectionId, generation: null, samples: [], nextIndex: 0, meta: null, found: null, head: [], labels: new Map() };
 }
 
 export function accumulate(state: TcpGraphState, page: TcpSamplesPage): TcpGraphState {
@@ -36,13 +44,37 @@ export function accumulate(state: TcpGraphState, page: TcpSamplesPage): TcpGraph
   const start = page.nextIndex - page.samples.length;
   const kept = fresh ? [] : state.samples.filter((x) => x.index < start);
   const merged = kept.concat(page.samples.map((x, i) => ({ ...x, index: start + i })));
+  const trimmed = merged.length > MAX_SAMPLES ? merged.slice(0, merged.length - MAX_SAMPLES) : [];
+  const samples = merged.length > MAX_SAMPLES ? merged.slice(merged.length - MAX_SAMPLES) : merged;
+
+  // The head: what was held, what the page sent, and what trimming just
+  // dropped from the first TCP_HEAD_SAMPLES indices (the agent will not
+  // resend those to a reader already past them).
+  const byIndex = new Map<number, IndexedSample>();
+  const offer = (x: IndexedSample) => {
+    if (x.index < TCP_HEAD_SAMPLES) byIndex.set(x.index, x);
+  };
+  if (!fresh) state.head.forEach(offer);
+  page.head?.samples.forEach((x, i) => offer({ ...x, index: page.head!.firstIndex + i }));
+  trimmed.forEach(offer);
+  const firstHeld = samples.length > 0 ? samples[0].index : Number.POSITIVE_INFINITY;
+  const head = [...byIndex.values()].filter((x) => x.index < firstHeld).sort((a, b) => a.index - b.index);
+
+  const labels = new Map(fresh ? [] : state.labels);
+  for (const label of page.labels) labels.set(label.index, label);
+  const headIndices = new Set(head.map((x) => x.index));
+  for (const index of labels.keys()) {
+    if (index < firstHeld && !headIndices.has(index)) labels.delete(index);
+  }
   return {
     connectionId: state.connectionId,
     generation: page.generation,
-    samples: merged.length > MAX_SAMPLES ? merged.slice(merged.length - MAX_SAMPLES) : merged,
+    samples,
     nextIndex: page.nextIndex,
     meta: { handshakeSeen: page.handshakeSeen, windowScale: page.windowScale, seqBase: page.seqBase, relativeTo: page.relativeTo },
     found: true,
+    head,
+    labels,
   };
 }
 

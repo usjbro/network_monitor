@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TCP_SAMPLE_MARK, TcpSample, TcpSamplesPage, TcpSamplesRelativeTo, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TCP_LABEL_TEXT_MAX, TCP_SAMPLE_MARK, TcpSample, TcpSampleLabel, TcpSamplesPage, TcpSamplesRelativeTo, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -224,25 +224,14 @@ export function mapTcpSamplesReply(json: unknown): TcpSamplesPage {
   const index = (key: string) => tcpSamplesInt(w[key], key, 0, Number.MAX_SAFE_INTEGER);
   const seqBase = tcpSamplesObject(w.seqBase, 'seqBase');
   const windowScale = w.windowScale === null ? null : tcpSamplesObject(w.windowScale, 'windowScale');
-  const columns = tcpSamplesObject(w.samples, 'samples');
-  const cols = TCP_SAMPLE_COLUMNS.map((name) => {
-    const col = columns[name];
-    if (!Array.isArray(col)) throw new Error(`malformed tcp_samples: samples.${name}`);
-    return col;
-  });
-  const count = cols[0].length;
-  if (cols.some((col) => col.length !== count)) throw new Error('malformed tcp_samples: column lengths differ');
-
-  const samples: TcpSample[] = [];
-  let tUs = 0;
-  for (let i = 0; i < count; i++) {
-    const [t, seq, ack, win, len, flags, mark, rttUs] = TCP_SAMPLE_COLUMNS.map((name, c) => {
-      const max = TCP_SAMPLE_COLUMN_MAX[name];
-      // Every timestamp after the first is a signed delta.
-      return tcpSamplesInt(cols[c][i], `samples.${name}[${i}]`, name === 'tUs' && i > 0 ? -max : 0, max);
-    });
-    tUs = tcpSamplesInt(i === 0 ? t : tUs + t, `reconstructed tUs[${i}]`, 0, Number.MAX_SAFE_INTEGER);
-    samples.push({ tUs, seq, ack, win, len, flags, mark, rttUs, outbound: (mark & TCP_SAMPLE_MARK.OUTBOUND) !== 0 });
+  const samples = decodeTcpSampleColumns(tcpSamplesObject(w.samples, 'samples'), 'samples');
+  const count = samples.length;
+  // KAN-130: absent from an agent that predates it, and whenever the
+  // request did not reach back into the pinned head.
+  let head: { firstIndex: number; samples: TcpSample[] } | null = null;
+  if (w.head !== undefined) {
+    const h = tcpSamplesObject(w.head, 'head');
+    head = { firstIndex: tcpSamplesInt(h.firstIndex, 'head.firstIndex', 0, Number.MAX_SAFE_INTEGER), samples: decodeTcpSampleColumns(h, 'head') };
   }
 
   // The page runs from nextIndex − count to nextIndex and starts at or
@@ -273,7 +262,46 @@ export function mapTcpSamplesReply(json: unknown): TcpSamplesPage {
     more: tcpSamplesBool(w, 'more'),
     droppedOlder: index('droppedOlder'),
     samples,
+    head,
+    labels: Array.isArray(w.labels) ? w.labels.flatMap(mapTcpSampleLabel) : [],
   };
+}
+
+// Columnar, delta-encoded samples (`samples` and KAN-130's `head`).
+function decodeTcpSampleColumns(columns: Record<string, unknown>, where: string): TcpSample[] {
+  const cols = TCP_SAMPLE_COLUMNS.map((name) => {
+    const col = columns[name];
+    if (!Array.isArray(col)) throw new Error(`malformed tcp_samples: ${where}.${name}`);
+    return col;
+  });
+  const count = cols[0].length;
+  if (cols.some((col) => col.length !== count)) throw new Error(`malformed tcp_samples: ${where} column lengths differ`);
+
+  const samples: TcpSample[] = [];
+  let tUs = 0;
+  for (let i = 0; i < count; i++) {
+    const [t, seq, ack, win, len, flags, mark, rttUs] = TCP_SAMPLE_COLUMNS.map((name, c) => {
+      const max = TCP_SAMPLE_COLUMN_MAX[name];
+      // Every timestamp after the first is a signed delta.
+      return tcpSamplesInt(cols[c][i], `${where}.${name}[${i}]`, name === 'tUs' && i > 0 ? -max : 0, max);
+    });
+    tUs = tcpSamplesInt(i === 0 ? t : tUs + t, `reconstructed ${where}.tUs[${i}]`, 0, Number.MAX_SAFE_INTEGER);
+    samples.push({ tUs, seq, ack, win, len, flags, mark, rttUs, outbound: (mark & TCP_SAMPLE_MARK.OUTBOUND) !== 0 });
+  }
+  return samples;
+}
+
+// KAN-130: `[index, kind, text]`. The agent sends printable ASCII of at
+// most 64 bytes; anything else is dropped here (one bad label never rejects
+// the reply), so a label is always safe to render as text.
+const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
+function mapTcpSampleLabel(raw: unknown): TcpSampleLabel[] {
+  if (!Array.isArray(raw) || raw.length !== 3) return [];
+  const [index, kind, text] = raw;
+  if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0) return [];
+  if (typeof kind !== 'string' || typeof text !== 'string') return [];
+  if (text.length > TCP_LABEL_TEXT_MAX || !PRINTABLE_ASCII.test(text) || !PRINTABLE_ASCII.test(kind) || kind.length > 64) return [];
+  return [{ index, kind, text }];
 }
 
 // Same nested-envelope shape as mapCaptureStatsEvent/mapSystemStatsEvent/

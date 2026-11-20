@@ -1,5 +1,5 @@
 use crate::flow::{FlowKey, FlowTable};
-use crate::tcp_samples::{flag, mark, relative_seq, RingView, TcpSampleStore};
+use crate::tcp_samples::{flag, mark, relative_seq, LabelKind, RingView, TcpSample, TcpSampleStore};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -944,6 +944,22 @@ pub struct TcpSamplesPageJson {
     pub more: bool,
     pub dropped_older: u64,
     pub samples: TcpSampleColumnsJson,
+    /// KAN-130 plan P2: pinned head samples the ring no longer holds in its
+    /// rolling buffer. Absent when there are none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<TcpHeadJson>,
+    /// `[index, kind, text]` for every labelled sample in `head` or
+    /// `samples`, in index order. Always present on a page.
+    pub labels: Vec<(u64, &'static str, String)>,
+}
+
+/// The head block: the same columnar layout as `samples`, from `firstIndex`.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpHeadJson {
+    pub first_index: u64,
+    #[serde(flatten)]
+    pub columns: TcpSampleColumnsJson,
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq)]
@@ -995,9 +1011,44 @@ pub fn tcp_samples_reply(request: &TcpSamplesRequest, view: Option<RingView>) ->
     }
 
     let (out_base, in_base) = view.seq_base;
+    let columns = sample_columns(&view.samples, view.seq_base);
+    let head = (!view.head.is_empty()).then(|| TcpHeadJson {
+        first_index: view.head_start_index,
+        columns: sample_columns(&view.head, view.seq_base),
+    });
+    let labels = view.labels.iter().map(|l| (l.index, label_kind_name(l.kind), l.text().to_string())).collect();
+    let next_index = view.start_index + view.samples.len() as u64;
+    reply.page = Some(TcpSamplesPageJson {
+        handshake_seen: view.handshake_seen,
+        window_scale: view.window_scale.map(|(local, remote)| WindowScaleJson { local, remote }),
+        seq_base: SeqBaseJson { outbound: out_base, inbound: in_base },
+        relative_to: if view.relative_to_isn { "isn" } else { "firstSeen" },
+        first_index: view.first_index,
+        next_index,
+        more: next_index < view.next_index,
+        dropped_older: view.first_index.saturating_sub(request.from_index),
+        samples: columns,
+        head,
+        labels,
+    });
+    reply
+}
+
+/// The wire name of a label kind (KAN-130).
+pub fn label_kind_name(kind: LabelKind) -> &'static str {
+    match kind {
+        LabelKind::TlsClientHello => "tls_client_hello",
+        LabelKind::TlsServerHello => "tls_server_hello",
+        LabelKind::HttpRequest => "http_request",
+        LabelKind::HttpResponse => "http_response",
+    }
+}
+
+/// Columnar, delta-encoded samples (see `TcpSampleColumnsJson`).
+fn sample_columns(samples: &[TcpSample], (out_base, in_base): (u32, u32)) -> TcpSampleColumnsJson {
     let mut columns = TcpSampleColumnsJson::default();
     let mut previous: Option<i64> = None;
-    for s in &view.samples {
+    for s in samples {
         // Capped at 2^53 − 1, so every delta of two capped values fits i64.
         let t = s.t_us.min(MAX_EXACT_JSON_UINT as u64) as i64;
         columns.t_us.push(previous.map_or(t, |p| t - p));
@@ -1011,19 +1062,7 @@ pub fn tcp_samples_reply(request: &TcpSamplesRequest, view: Option<RingView>) ->
         columns.mark.push(s.mark);
         columns.rtt_us.push(s.rtt_us);
     }
-    let next_index = view.start_index + view.samples.len() as u64;
-    reply.page = Some(TcpSamplesPageJson {
-        handshake_seen: view.handshake_seen,
-        window_scale: view.window_scale.map(|(local, remote)| WindowScaleJson { local, remote }),
-        seq_base: SeqBaseJson { outbound: out_base, inbound: in_base },
-        relative_to: if view.relative_to_isn { "isn" } else { "firstSeen" },
-        first_index: view.first_index,
-        next_index,
-        more: next_index < view.next_index,
-        dropped_older: view.first_index.saturating_sub(request.from_index),
-        samples: columns,
-    });
-    reply
+    columns
 }
 
 /// The encoded line, or `None` when it would exceed `max_line_bytes` (a
@@ -2012,7 +2051,7 @@ pub enum AuthenticatedMessage {
 #[cfg(test)]
 mod tcp_samples_tests {
     use super::*;
-    use crate::tcp_samples::TcpSample;
+    use crate::tcp_samples::{SampleLabel, HEAD_SAMPLES, LABEL_TEXT_BYTES, MAX_LABELS_PER_RING};
     use serde_json::{json, Value};
 
     const RID: &str = "0123456789abcdef0123456789abcdef";
@@ -2123,7 +2162,10 @@ mod tcp_samples_tests {
     /// Inverse of the encoding, for round-trip checks: absolute
     /// timestamps and raw sequence numbers back from the JSON.
     fn decode_samples(reply: &Value) -> Vec<TcpSample> {
-        let s = &reply["samples"];
+        decode_columns(reply, &reply["samples"])
+    }
+
+    fn decode_columns(reply: &Value, s: &Value) -> Vec<TcpSample> {
         let col = |name: &str| -> Vec<i128> {
             s[name].as_array().unwrap().iter().map(|v| v.as_i64().map(i128::from).or(v.as_u64().map(i128::from)).unwrap()).collect()
         };
@@ -2283,5 +2325,100 @@ mod tcp_samples_tests {
         let line = encode(tcp_samples_reply(&req(None, 0), Some(view.clone())));
         assert_eq!(encode_tcp_samples_reply(tcp_samples_reply(&req(None, 0), Some(view.clone())), line.len()), Some(line.clone()));
         assert_eq!(encode_tcp_samples_reply(tcp_samples_reply(&req(None, 0), Some(view)), line.len() - 1), None);
+    }
+
+    // ---- KAN-130 Task 2: head and labels ----
+
+    fn label(index: u64, kind: LabelKind, text: &str) -> SampleLabel {
+        SampleLabel::new(index, kind, text)
+    }
+
+    #[test]
+    fn a_page_without_a_head_has_no_head_key_and_an_empty_label_list() {
+        let view = ring_view(0, 2, vec![sample(1, true, 1000, 0); 2]);
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 0), Some(view)))).unwrap();
+        assert!(reply.get("head").is_none(), "{reply}");
+        assert_eq!(reply["labels"], json!([]));
+    }
+
+    #[test]
+    fn the_head_is_encoded_like_samples_from_its_first_index() {
+        let mut view = ring_view(5000, 9000, vec![sample(900, true, 1500, 5100)]);
+        view.start_index = 5000;
+        view.head_start_index = 2;
+        view.head = vec![sample(100, true, 1001, 5001), sample(130, false, 5001, 1002)];
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 2), Some(view.clone())))).unwrap();
+        assert_eq!(reply["head"]["firstIndex"], json!(2));
+        assert_eq!(reply["head"]["tUs"], json!([100, 30]));
+        assert_eq!(reply["head"]["seq"], json!([1, 1]), "relative to each sender's base");
+        assert_eq!(decode_columns(&reply, &reply["head"]), view.head);
+        assert_eq!(decode_samples(&reply), view.samples, "samples unchanged");
+    }
+
+    #[test]
+    fn labels_are_index_kind_text_triples_in_order() {
+        let mut view = ring_view(0, 6, vec![sample(1, true, 1000, 0); 6]);
+        view.labels = vec![
+            label(1, LabelKind::TlsClientHello, "ClientHello (SNI: example.com)"),
+            label(2, LabelKind::TlsServerHello, "ServerHello"),
+            label(4, LabelKind::HttpRequest, "HTTP GET /x"),
+            label(5, LabelKind::HttpResponse, "HTTP 200 OK"),
+        ];
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 0), Some(view)))).unwrap();
+        assert_eq!(
+            reply["labels"],
+            json!([
+                [1, "tls_client_hello", "ClientHello (SNI: example.com)"],
+                [2, "tls_server_hello", "ServerHello"],
+                [4, "http_request", "HTTP GET /x"],
+                [5, "http_response", "HTTP 200 OK"],
+            ])
+        );
+    }
+
+    #[test]
+    fn a_stale_or_missing_ring_carries_no_head_or_labels() {
+        let reply: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(None, 0), None))).unwrap();
+        assert!(reply.get("labels").is_none() && reply.get("head").is_none());
+        let view = ring_view(0, 1, vec![sample(1, true, 1000, 0)]);
+        let stale: Value = serde_json::from_str(&encode(tcp_samples_reply(&req(Some("0:0"), 0), Some(view)))).unwrap();
+        assert!(stale.get("labels").is_none() && stale.get("head").is_none());
+    }
+
+    /// KAN-130 plan Task 2's bound: plan A1's maximal page, plus a maximal
+    /// head and 32 labels at 20-digit indices whose text needs escaping in
+    /// every byte, still fits the line ceiling.
+    #[test]
+    fn a_full_page_with_a_maximal_head_and_labels_fits() {
+        let cap = (1u64 << 53) - 1;
+        let maxed = |i: usize| {
+            let mut s = TcpSample::default();
+            s.t_us = match i % 3 { 0 => 0, 1 => u64::MAX, _ => cap - 1 };
+            s.mark = 255;
+            s.flags = 255;
+            s.seq = 999;
+            s.ack = 4999;
+            s.win = u32::MAX;
+            s.len = u16::MAX;
+            s.rtt_us = u32::MAX;
+            s
+        };
+        let mut view = ring_view(u64::MAX - 10_000, u64::MAX - 1, (0..TCP_SAMPLES_MAX_PER_REPLY).map(maxed).collect());
+        view.generation = (u64::MAX, u64::MAX);
+        view.head_start_index = u64::MAX;
+        view.head = (0..HEAD_SAMPLES).map(maxed).collect();
+        let text = "\\".repeat(LABEL_TEXT_BYTES);
+        view.labels = (0..MAX_LABELS_PER_RING as u64)
+            .map(|i| label(u64::MAX - i, LabelKind::TlsClientHello, &text))
+            .collect();
+        assert!(view.labels.iter().all(|l| l.text().len() == LABEL_TEXT_BYTES));
+        let mut request = req(Some(&render_generation((u64::MAX, u64::MAX))), u64::MAX - 10_000);
+        request.connection_id = "\u{0}".repeat(TCP_SAMPLES_MAX_CONNECTION_ID_BYTES);
+        let line = encode_tcp_samples_reply(tcp_samples_reply(&request, Some(view)), TCP_SAMPLES_MAX_LINE_BYTES)
+            .expect("a maximal page, head and label set fits the ceiling");
+        assert!(line.len() <= TCP_SAMPLES_MAX_LINE_BYTES);
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["labels"].as_array().unwrap().len(), MAX_LABELS_PER_RING);
+        assert_eq!(reply["head"]["tUs"].as_array().unwrap().len(), HEAD_SAMPLES);
     }
 }

@@ -105,7 +105,7 @@ impl SampleLabel {
     /// `text` comes from `label_for` and is already display-safe; anything
     /// that is not printable ASCII, and anything past `LABEL_TEXT_BYTES`, is
     /// still refused here, so `text()` can never return anything else.
-    fn new(index: u64, kind: LabelKind, text: &str) -> Self {
+    pub(crate) fn new(index: u64, kind: LabelKind, text: &str) -> Self {
         let mut bytes = [0u8; LABEL_TEXT_BYTES];
         let mut len = 0;
         for b in text

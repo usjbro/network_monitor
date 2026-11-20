@@ -380,3 +380,162 @@ fn a_ring_past_one_page_is_read_in_two() {
     assert_eq!((two["nextIndex"].as_u64(), two["droppedOlder"].as_u64(), two["more"].as_bool()), (Some(4205), Some(0), Some(false)));
     assert_eq!(one["nextIndex"].as_u64(), Some(109 + 3072));
 }
+
+// ---- KAN-130 Task 2: labels and the pinned head, end to end ----
+
+const TLS_ID: &str = "Tcp-192.0.2.1:51001-198.51.100.80:443";
+const HTTP_ID: &str = "Tcp-192.0.2.1:51002-198.51.100.80:80";
+
+/// A minimal TLS 1.2 ClientHello record with an SNI extension.
+fn client_hello(sni: &str) -> Vec<u8> {
+    let mut hs = vec![0x01, 0, 0, 0, 0x03, 0x03];
+    hs.extend([0u8; 32]); // random
+    hs.push(0); // session id
+    hs.extend([0x00, 0x02, 0x13, 0x01]); // one cipher suite
+    hs.extend([0x01, 0x00]); // null compression
+    let name = sni.as_bytes();
+    let mut ext = vec![0x00, 0x00];
+    ext.extend((name.len() as u16 + 5).to_be_bytes());
+    ext.extend((name.len() as u16 + 3).to_be_bytes());
+    ext.push(0);
+    ext.extend((name.len() as u16).to_be_bytes());
+    ext.extend(name);
+    hs.extend((ext.len() as u16).to_be_bytes());
+    hs.extend(ext);
+    let body = (hs.len() - 4) as u32;
+    hs[1..4].copy_from_slice(&body.to_be_bytes()[1..]);
+    let mut record = vec![0x16, 0x03, 0x01];
+    record.extend((hs.len() as u16).to_be_bytes());
+    record.extend(hs);
+    record
+}
+
+struct Conv {
+    client_port: u16,
+    server_port: u16,
+    client_next: u32,
+    server_next: u32,
+    t: u64,
+    frames: Vec<(u64, Vec<u8>)>,
+}
+
+impl Conv {
+    fn new(client_port: u16, server_port: u16, t: u64) -> Self {
+        Conv { client_port, server_port, client_next: 1000, server_next: 9000, t, frames: Vec::new() }
+    }
+
+    fn send(&mut self, outbound: bool, syn: bool, fin: bool, payload: &[u8]) {
+        let (src, dst, sport, dport) = if outbound {
+            (LOCAL, SERVER, self.client_port, self.server_port)
+        } else {
+            (SERVER, LOCAL, self.server_port, self.client_port)
+        };
+        let (seq, ack) = if outbound { (self.client_next, self.server_next) } else { (self.server_next, self.client_next) };
+        let mut builder =
+            PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11]).ipv4(src, dst, 64).tcp(sport, dport, seq, 65535);
+        if syn {
+            builder = builder.syn();
+        }
+        if fin {
+            builder = builder.fin();
+        }
+        // Every segment but the client's SYN carries an ACK.
+        if !(syn && outbound) {
+            builder = builder.ack(ack);
+        }
+        let mut out = Vec::new();
+        builder.write(&mut out, payload).unwrap();
+        self.frames.push((self.t, out));
+        self.t += 1_000;
+        let used = payload.len() as u32 + u32::from(syn) + u32::from(fin);
+        if outbound {
+            self.client_next = self.client_next.wrapping_add(used);
+        } else {
+            self.server_next = self.server_next.wrapping_add(used);
+        }
+    }
+
+    fn handshake(&mut self) {
+        self.send(true, true, false, &[]);
+        self.send(false, true, false, &[]);
+        self.send(true, false, false, &[]);
+    }
+}
+
+/// A TLS flow (handshake, ClientHello with SNI, ServerHello record header,
+/// then `bulk` data/ACK pairs and a FIN) and a short HTTP flow.
+fn tls_and_http(bulk: u32) -> Vec<(u64, Vec<u8>)> {
+    let mut tls = Conv::new(51001, 443, T0_US);
+    tls.handshake();
+    tls.send(true, false, false, &client_hello("example.com"));
+    let mut server_hello = vec![22, 3, 3, 0, 0x2a, 2];
+    server_hello.resize(47, 0);
+    tls.send(false, false, false, &server_hello);
+    for _ in 0..bulk {
+        tls.send(false, false, false, &[23, 3, 3, 0, 4, 1, 2, 3, 4]);
+        tls.send(true, false, false, &[]);
+    }
+    tls.send(true, false, true, &[]);
+
+    let mut http = Conv::new(51002, 80, T0_US + 500);
+    http.handshake();
+    http.send(true, false, false, b"GET /index.html?token=secret HTTP/1.1\r\nHost: example.com\r\n\r\n");
+    http.send(false, false, false, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+
+    let mut frames = tls.frames;
+    frames.extend(http.frames);
+    frames.sort_by_key(|(t, _)| *t);
+    frames
+}
+
+fn labels(answer: &Answer) -> Vec<(u64, String, String)> {
+    answer
+        .pages
+        .iter()
+        .flat_map(|p| p["labels"].as_array().unwrap().clone())
+        .map(|l| (l[0].as_u64().unwrap(), l[1].as_str().unwrap().to_string(), l[2].as_str().unwrap().to_string()))
+        .collect()
+}
+
+#[test]
+fn a_long_tls_flow_keeps_its_handshake_head_and_labels() {
+    // 3 + 2 + 2 × 2 100 + 1 = 4 206 samples: past one ring.
+    let answer = replay_and_ask("labels-tls", &tls_and_http(2_100), "fast", TLS_ID);
+    let first = &answer.pages[0];
+    assert_eq!(first["firstIndex"].as_u64(), Some(4_206 - 4_096));
+    let head = &first["head"];
+    assert_eq!(head["firstIndex"], 0);
+    assert_eq!(head["tUs"].as_array().unwrap().len(), 16, "the whole pinned head");
+    assert_eq!(head["flags"][0].as_u64(), Some(u64::from(flag::SYN)));
+    assert!(answer.pages[1..].iter().all(|p| p.get("head").is_none()), "the head is sent once");
+    assert_eq!(
+        labels(&answer),
+        vec![
+            (3, "tls_client_hello".to_string(), "ClientHello (SNI: example.com)".to_string()),
+            (4, "tls_server_hello".to_string(), "ServerHello".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn an_http_flow_is_labelled_without_its_query() {
+    let answer = replay_and_ask("labels-http", &tls_and_http(4), "fast", HTTP_ID);
+    let page = &answer.pages[0];
+    assert!(page.get("head").is_none(), "a short flow's head is in its samples");
+    assert_eq!(
+        labels(&answer),
+        vec![
+            (3, "http_request".to_string(), "HTTP GET /index.html".to_string()),
+            (4, "http_response".to_string(), "HTTP 200 OK".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn labels_are_identical_at_realtime_and_fast_replay() {
+    let frames = tls_and_http(4);
+    let fast = labels(&replay_and_ask("labels-fast", &frames, "fast", TLS_ID));
+    let realtime = labels(&replay_and_ask("labels-realtime", &frames, "realtime", TLS_ID));
+    assert_eq!(fast.len(), 2);
+    assert_eq!(fast, realtime);
+}

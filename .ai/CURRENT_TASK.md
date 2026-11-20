@@ -1,3 +1,9 @@
+# KAN-130 Task 2 — tcp_samples head and labels on the wire (2026-11-20)
+
+James approved gate `kan-130__flow-ladder-wire` in chat. Worktree `.worktrees/flow-ladder-wire`. `wire.rs` page gains `head` (P2 rule) and `labels` `[index, kind, text]`; measured worst-case line 226,620 B (cap 3,072 stands). TS: `TcpSamplesPage.head/labels`, mapper validates labels (bad ones dropped), `accumulate` keeps head + labels and pins trimmed indices < 16 client-side. Replay tests cover a 4,206-sample TLS flow and an HTTP flow. cargo test/clippy, tsc, lint, 1,127 Vitest pass. Next: PR, CI; James merges; Task 3 needs its own gate.
+
+---
+
 # KAN-130 Task 1 — agent labels, ServerHello check, pinned head (2026-11-20)
 
 James approved gate `kan-130__flow-ladder-agent-labels` in chat. Worktree `.worktrees/flow-ladder-agent-labels`. Plan `docs/superpowers/plans/2026-11-20-flow-sequence-diagram.md` Task 1: `tcp_samples.rs` label table (32/ring, head labels pinned), `label_for`, `is_tls_server_hello_start`, 16-sample head, `RingView.head/head_start_index/labels`; `display_text.rs` (moved from `transaction.rs`); `FlowTable::observe_inner` records labels. No wire change. Worst case now 17,978,368 B (140,456/ring). `cargo test --locked` and clippy pass locally (needed `libpcap-dev` in this container). Next: PR, CI; James merges; Task 2 needs its own gate.

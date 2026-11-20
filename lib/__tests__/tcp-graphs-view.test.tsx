@@ -39,7 +39,7 @@ function stateOf(samples: TcpSample[], over: Partial<Extract<TcpSamplesPage, { s
   return accumulate(emptyState(ID), {
     found: true, stale: false, connectionId: ID, generation: '00000000feedbeef:1', handshakeSeen: true,
     windowScale: { local: 7, remote: 7 }, seqBase: { outbound: 0, inbound: 0 }, relativeTo: 'isn',
-    firstIndex: 0, nextIndex: samples.length, more: false, droppedOlder: 0, samples, ...over,
+    firstIndex: 0, nextIndex: samples.length, more: false, droppedOlder: 0, samples, head: null, labels: [], ...over,
   });
 }
 
