@@ -1,3 +1,10 @@
+# KAN-293 review fixes (2026-11-20)
+
+- Change: `FollowEntry::track` drops the ACK push; `vouched` (peer confirmed, segment at or within one window past the peer's `last_ack`) replaces an unconfirmed side's anchors, or moves a confirmed side forward when the segment is more than a window ahead of it, never back. `DirState::gap_to` declares the RST sender's missed tail (≤ one window, never past a FIN). `expire_holes`'s flag is `flush`; the RST branch's duplicate turn-limit check is gone (`settle` does it).
+- Residual, accepted: a blind forger with ~2,048 guesses (a client segment in window carrying a far ACK, then a free server segment there) can still move the server's anchor and stall its close; the same cost already forges an RST. Any resync past a window of loss has this exposure.
+
+---
+
 # KAN-110 Follow Stream Task 2 (2026-11-19)
 
 - Change: `follow_config.rs`; `main.rs` reads `FOLLOW_STREAM`/`RELAY_PORT` once after the packet source (panics on a bad port only when opted in) and passes `follow_relay_port` to `exclude_live_control_capture`. With it on: relay-port TCP on any loopback pair (IPv4/IPv6) is excluded both ways; every loopback IPv4 TCP fragment; every loopback packet (IPv4 or IPv6) with an undecoded transport, which covers IPv6 fragments and AH-carrying IPv4 fragments (review fix on #332). With it off: byte-for-byte the old rule. Exclusion still runs before reassembly, flow events and the only `WriterCommand::Packet` producer.

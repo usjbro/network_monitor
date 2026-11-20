@@ -1,3 +1,9 @@
+# KAN-293 review fixes (2026-11-20)
+
+`cargo test --locked`: 851 passed, 0 failed. Clippy `-D warnings` clean; `follow_store` fuzz 8,260 runs clean in 41 s. Five new tests; the forged-far-ACK, long-fat-link and tail-gap tests failed on #331's code (the first two pass with its resync disabled, so #331 introduced them). Planted breaks (no resync; resync moving back; no tail gap; an unconfirmed peer vouching) are each caught.
+
+---
+
 # KAN-110 Follow Stream Task 2 (2026-11-19)
 
 `cargo test --locked`: 853 passed, 0 failed; clippy `-D warnings` clean; release build OK. 7 new config tests (failed against stubs first) and 4 new exclusion tests (the two feature-on tests failed on the unchanged rule; the two keep-tests guard). Planted breaks caught: no relay-port match, unchanged fragment rule, no IPv6 untyped rule, excluding 3000 when off. Release binary in replay: `FOLLOW_STREAM=1` with `RELAY_PORT=+3000` or blank fails startup with the error; `RELAY_PORT=+3000` alone and `RELAY_PORT=3100` with the feature on start normally.

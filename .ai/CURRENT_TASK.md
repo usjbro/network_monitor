@@ -1,3 +1,9 @@
+# KAN-293 review fixes (2026-11-20)
+
+/code-review on #331 (merged as 22b51a1) found two regressions it introduced and a missed tail gap; James: "go ahead". Worktree `.worktrees/rst-anchor-resync`, branch `KAN-293-rst-review-fixes`. The ACK-push resync is replaced by a vouched resync: a side's own segment landing where the confirmed peer last acknowledged confirms it or moves it forward. An accepted RST also records the sender's missed tail as a gap. Next: PR, review; James merges.
+
+---
+
 # KAN-110 Follow Stream Task 2 — startup ports and pre-pipeline exclusion (2026-11-19)
 
 James approved P2 and chose Claude in chat (gate `kan-110__follow-stream-startup-ports`, delegated in-session). Worktree `.worktrees/follow-stream-startup-ports`, branch `KAN-110-follow-stream-startup-ports`. New `capture-agent/src/follow_config.rs` (`follow_enabled`, `parse_relay_port`, `resolve_relay_port`); `exclude_live_control_capture` takes `relay_port: Option<u16>`, read once in `main`. P2's `relayPort` request field and `ack_number` feeding are Task 3. Next: PR, reviews; James merges.
