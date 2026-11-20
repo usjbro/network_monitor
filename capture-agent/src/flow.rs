@@ -123,7 +123,7 @@ fn tcp_flags_byte(flags: &crate::parse::TcpFlags) -> u8 {
 
 /// A fresh random epoch per table: a new agent process is a new history, so
 /// a generation from a previous run can never match (spec D1).
-fn random_epoch() -> u64 {
+pub fn random_epoch() -> u64 {
     use ring::rand::{SecureRandom, SystemRandom};
     let mut bytes = [0u8; 8];
     SystemRandom::new().fill(&mut bytes).expect("system random source");

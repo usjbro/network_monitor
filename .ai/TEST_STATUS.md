@@ -1,3 +1,9 @@
+# KAN-110 Task 3c-1 review fixes (2026-11-20)
+
+`cargo test --locked` 955 passed, 0 failed; clippy clean; release and `cargo +nightly fuzz build` OK. New: snaplen-stamp test (TCP, TCP fragment, unparsed stamp; UDP, UDP fragment, ICMP do not); planted breaks of each rule and of the eviction drop caught.
+
+---
+
 # KAN-110 Task 3c-1 (2026-11-20)
 
 `cargo test --locked` 954 passed, 0 failed; clippy `-D warnings` clean; release build OK; `cargo +nightly fuzz build` OK. New: 6 `follow_feed_tests`, 2 flow tests (the fragment-closure one failed first). Planted breaks of each helper rule and the fragment merge are each caught. The `main.rs` wiring (snaplen notify, emitter call, reset on switch) has no unit test; 3c-2's real-binary replay test covers feed and tick; the live interface switch needs a real device.

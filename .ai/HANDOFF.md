@@ -1,3 +1,9 @@
+# KAN-110 Task 3c-1 review fixes (2026-11-20)
+
+- /code-review on merged #344: the store is fed inside the `FlowTable` observation lock (one lock order everywhere, no orphan after a capacity sweep) and locked only when there is work; the emitter drops evictions and ticks under the `FlowTable` lock (ticking after release, tried first, used a stale replay clock); snaplen stamps only from TCP, TCP-fragment or unparsed cut frames, never excluded relay/front-door traffic; `apply_interface_switch_request` resets the store inside the `FlowTable::reset` lock; `flow::random_epoch` reused; helpers moved out of `exclude_live_control_capture`'s doc comment; the no-key fragment guard was added then removed (unreachable). Left: ingest runs under the FlowTable lock (the cost of no orphans); unparsed cut frames still stamp (may be TCP).
+
+---
+
 # KAN-110 Task 3c-1 (2026-11-20)
 
 - Change: `main.rs` `follow_segment`, `feed_follow_store`, `tick_follow_store`, `follow_epoch`; store is `Option<Arc<Mutex<FollowStore>>>` (no lock at all when off; the plan sketched `Arc<Mutex<Option<_>>>`). Lock order FlowTable then FollowStore (emitter); the capture thread never holds both. `flow.rs` `ObserveResult.closed_key`, and `observe_reassembled_inner` keeps a first fragment's tuple closure (it was discarded, so that reused flow got no `connection_closed` either).
