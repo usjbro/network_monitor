@@ -1,12 +1,12 @@
-# KAN-110 Task 3a (2026-11-20)
+# KAN-110 Task 3a (2026-11-19)
 
 - Change: `control_line::ControlLines` replaces `BufReader::lines()` in `serve_connection`; the cap is checked before the buffer grows; `TooLong` closes the connection with a fixed log line and no body; EOF-without-LF and non-UTF-8 behave as `Lines` did. The 256-byte auth first line (`control_auth::verify_peer`) is unchanged.
-- /code-review on #334: buffer grows by doubling (`grown_capacity`), not per read; trailing CR stripped as `Lines` did; an unterminated EOF line counts its missing LF; `NotUtf8` logs a fixed reason. Not done: no per-line or idle timeout on authenticated connections (pre-existing with `Lines`; a peer can hold a permit and 128 KiB indefinitely); the cap does not bound `serde_json::Value` parse cost.
+- /code-review on #334: buffer grows by `Vec`'s own doubling (the per-read `reserve_exact` is gone); trailing CR stripped as `Lines` did; an unterminated EOF line counts its missing LF; `NotUtf8` logs a fixed reason. Not done: no per-line or idle timeout on authenticated connections (pre-existing with `Lines`; a peer can hold a permit and 128 KiB indefinitely); the cap does not bound `serde_json::Value` parse cost.
 - Deliberate deviation (also in DECISIONS.md): cap is 128 KiB, not the plan's 32 KiB. `set_io_series` at the relay's own bounds (8 × 2,048-unit filters, six-byte escapes) is 99,692 bytes; 32 KiB would refuse legitimate non-ASCII filter sets.
 
 ---
 
-# KAN-293 review fixes (2026-11-20)
+# KAN-293 review fixes (2026-11-19)
 
 - Change: `FollowEntry::track` drops the ACK push; `vouched` (peer confirmed, segment at or within one window past the peer's `last_ack`) replaces an unconfirmed side's anchors, or moves a confirmed side forward when the segment is more than a window ahead of it, never back. `DirState::gap_to` declares each direction's missed tail at an RST (see the #333 line below). `expire_holes`'s flag is `flush`; the RST branch's duplicate turn-limit check is gone (`settle` does it).
 - /code-review on #333: a vouched segment now takes the in-window path for a confirmed side (both anchors forward-only, so `last_ack` is never cleared or moved back); `gap_to` takes the confirmed peer's `last_ack` as evidence instead of the RST's own seq, for both directions, with no window bound (a gap is only a record), via `hole_end`.

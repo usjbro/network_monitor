@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 /// the relay's `JSON.stringify` can write as six-byte escapes (about 99 KB
 /// in all). The plan's 32 KiB would refuse a legitimate set of non-ASCII
 /// filters, so the cap is 128 KiB: at 64 authenticated connections that
-/// is at most 8 MiB of line buffers. It bounds the bytes held, not what
+/// is at most 8 MiB of line buffers (plus each connection's 8 KiB read buffer). It bounds the bytes held, not what
 /// parsing an accepted line into JSON costs.
 pub const MAX_CONTROL_LINE_BYTES: usize = 128 * 1024;
 
@@ -51,7 +51,8 @@ impl<R: AsyncBufRead + Unpin> ControlLines<R> {
                 if self.buf.is_empty() {
                     return Ok(ControlRead::Eof);
                 }
-                if self.buf.len() + 1 > MAX_CONTROL_LINE_BYTES {
+                // The missing LF counts, so the limit matches a terminated line.
+                if !fits(self.buf.len(), 1) {
                     self.buf = Vec::new();
                     return Ok(ControlRead::TooLong);
                 }
@@ -61,12 +62,12 @@ impl<R: AsyncBufRead + Unpin> ControlLines<R> {
             let take = newline.map_or(available.len(), |n| n + 1);
             // Checked before the buffer grows: a line over the cap is
             // never held, only refused.
-            if self.buf.len() + take > MAX_CONTROL_LINE_BYTES {
+            if !fits(self.buf.len(), take) {
                 self.buf = Vec::new();
                 return Ok(ControlRead::TooLong);
             }
-            let want = grown_capacity(self.buf.capacity(), self.buf.len() + take);
-            self.buf.reserve_exact(want - self.buf.len());
+            // `Vec` grows by doubling in powers of two, so with the line
+            // never past the (power-of-two) cap neither is its capacity.
             self.buf.extend_from_slice(&available[..take]);
             self.reader.consume(take);
             if newline.is_some() {
@@ -90,14 +91,9 @@ impl<R: AsyncBufRead + Unpin> ControlLines<R> {
     }
 }
 
-/// The capacity to hold `needed` bytes: doubling from `cap`, never past
-/// the cap, so a line trickled a byte at a time is regrown only a few
-/// times rather than once per read.
-fn grown_capacity(cap: usize, needed: usize) -> usize {
-    if needed <= cap {
-        return cap;
-    }
-    needed.max(cap.saturating_mul(2)).clamp(256, MAX_CONTROL_LINE_BYTES)
+/// Whether a line of `len` bytes can take `more`, LF included.
+fn fits(len: usize, more: usize) -> bool {
+    len + more <= MAX_CONTROL_LINE_BYTES
 }
 
 #[cfg(test)]
@@ -115,6 +111,45 @@ mod tests {
             if stop {
                 return out;
             }
+        }
+    }
+
+    /// Hands out one byte per poll, pending in between.
+    struct Trickle<'a> {
+        data: &'a [u8],
+        pos: usize,
+        ready: bool,
+    }
+
+    impl tokio::io::AsyncRead for Trickle<'_> {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            unreachable!("read through AsyncBufRead only")
+        }
+    }
+
+    impl tokio::io::AsyncBufRead for Trickle<'_> {
+        fn poll_fill_buf(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if !this.ready {
+                this.ready = true;
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            let end = (this.pos + 1).min(this.data.len());
+            std::task::Poll::Ready(Ok(&this.data[this.pos..end]))
+        }
+
+        fn consume(self: std::pin::Pin<&mut Self>, amt: usize) {
+            let this = self.get_mut();
+            this.pos += amt;
+            this.ready = false;
         }
     }
 
@@ -191,19 +226,24 @@ mod tests {
         assert_eq!(read_all(&over).await, vec![ControlRead::TooLong]);
     }
 
-    #[test]
-    fn a_trickled_line_grows_its_buffer_geometrically_and_never_past_the_cap() {
-        // One byte per read must not regrow (and copy) the buffer per byte.
-        let (mut cap, mut grows) = (0, 0);
-        for len in 1..=MAX_CONTROL_LINE_BYTES {
-            let next = grown_capacity(cap, len);
-            assert!(next >= len && next <= MAX_CONTROL_LINE_BYTES);
-            if next != cap {
+    #[tokio::test]
+    async fn a_trickled_line_never_grows_the_buffer_past_the_cap() {
+        let input = line_of(MAX_CONTROL_LINE_BYTES);
+        let mut lines = ControlLines::new(Trickle { data: &input, pos: 0, ready: false });
+        let (mut seen, mut grows) = (0, 0);
+        // Each read yields once per byte; a zero timeout cancels it there.
+        loop {
+            let read = tokio::time::timeout(std::time::Duration::ZERO, lines.next_line()).await;
+            if lines.buf.capacity() != seen {
+                seen = lines.buf.capacity();
                 grows += 1;
-                cap = next;
+            }
+            assert!(seen <= MAX_CONTROL_LINE_BYTES, "capacity {seen}");
+            if read.is_ok() {
+                break;
             }
         }
-        assert!(grows <= 16, "{grows} reallocations for one trickled line");
+        assert!(grows <= 20, "{grows} reallocations for one trickled line");
     }
 
     #[tokio::test]
