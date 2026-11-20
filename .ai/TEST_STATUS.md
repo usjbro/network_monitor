@@ -2,6 +2,8 @@
 
 `cargo test --locked`: 851 passed, 0 failed. Clippy `-D warnings` clean; `follow_store` fuzz 8,260 runs clean in 41 s. Five new tests; the forged-far-ACK, long-fat-link and tail-gap tests failed on #331's code (the first two pass with its resync disabled, so #331 introduced them). Planted breaks (no resync; resync moving back; no tail gap; an unconfirmed peer vouching) are each caught.
 
+
+/code-review on #333: 854 passed, 0 failed; clippy clean; fuzz 5,835 runs clean (41 s). Three new tests; planted breaks (no confirmed resync, RST seq as gap evidence, window-bounded gap, vouched replace of a confirmed side) are each caught.
 ---
 
 # KAN-110 Follow Stream Task 2 (2026-11-19)

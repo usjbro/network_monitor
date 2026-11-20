@@ -1,6 +1,8 @@
 # KAN-293 review fixes (2026-11-20)
 
-- Change: `FollowEntry::track` drops the ACK push; `vouched` (peer confirmed, segment at or within one window past the peer's `last_ack`) replaces an unconfirmed side's anchors, or moves a confirmed side forward when the segment is more than a window ahead of it, never back. `DirState::gap_to` declares the RST sender's missed tail (≤ one window, never past a FIN). `expire_holes`'s flag is `flush`; the RST branch's duplicate turn-limit check is gone (`settle` does it).
+- Change: `FollowEntry::track` drops the ACK push; `vouched` (peer confirmed, segment at or within one window past the peer's `last_ack`) replaces an unconfirmed side's anchors, or moves a confirmed side forward when the segment is more than a window ahead of it, never back. `DirState::gap_to` declares each direction's missed tail at an RST (see the #333 line below). `expire_holes`'s flag is `flush`; the RST branch's duplicate turn-limit check is gone (`settle` does it).
+- /code-review on #333: a vouched segment now takes the in-window path for a confirmed side (both anchors forward-only, so `last_ack` is never cleared or moved back); `gap_to` takes the confirmed peer's `last_ack` as evidence instead of the RST's own seq, for both directions, with no window bound (a gap is only a record), via `hole_end`.
+- Residual, open for James: an unconfirmed side whose segment is vouched has its anchors replaced even if the segment is a retransmit behind its own position (on a link with more than a window in flight it then stays untracked until the peer's ACKs catch up); needed so a real segment can displace an anchor a forger planted first.
 - Residual, accepted: a blind forger with ~2,048 guesses (a client segment in window carrying a far ACK, then a free server segment there) can still move the server's anchor and stall its close; the same cost already forges an RST. Any resync past a window of loss has this exposure.
 
 ---

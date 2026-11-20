@@ -596,16 +596,17 @@ impl DirState {
         }
     }
 
-    /// An accepted RST at `seq` shows its sender had sent up to there:
-    /// bytes between the edge and it that the capture missed are a gap.
-    /// Within one window of the edge only, and never past a FIN.
-    fn gap_to(&mut self, seq: u32, now_ms: u64, ctx: &mut Ctx) {
+    /// At an RST, the peer's last ACK shows this side had sent up to
+    /// there: bytes between the edge and it that the capture missed are a
+    /// gap (never past a FIN). A gap costs only its record, so its size
+    /// needs no bound.
+    fn gap_to(&mut self, acked: u32, now_ms: u64, ctx: &mut Ctx) {
         let Some(base) = self.base.filter(|_| self.accepting()) else { return };
-        let ahead = seq.wrapping_sub(base.wrapping_add(self.edge as u32));
-        if ahead == 0 || ahead > RST_WINDOW_BYTES {
+        let ahead = acked.wrapping_sub(base.wrapping_add(self.edge as u32)) as i32;
+        if ahead <= 0 {
             return;
         }
-        let end = self.fin_at.map_or(self.edge + u64::from(ahead), |f| f.min(self.edge + u64::from(ahead)));
+        let end = self.hole_end(self.edge + ahead as u64);
         if end > self.edge {
             self.declare_gap(end - self.edge, now_ms, ctx);
         }
@@ -1491,16 +1492,15 @@ impl FollowEntry {
             .wrapping_add(seg.payload.len() as u32)
             .wrapping_add(u32::from(seg.syn) + u32::from(seg.fin));
         let d = &mut self.dirs[i];
-        let resync = vouched
-            && (!d.confirmed
-                || d.seq_hi.is_some_and(|hi| seq_after(end, hi) && seq_distance(seg.seq, hi) > RST_WINDOW_BYTES));
-        let replace = d.seq_hi.is_none() || (proves && !d.confirmed) || resync;
+        let replace = d.seq_hi.is_none() || (!d.confirmed && (proves || vouched));
         match d.seq_hi {
             _ if replace => {
                 d.seq_hi = Some(end);
                 d.last_ack = seg.ack.then_some(seg.ack_number);
             }
-            Some(hi) if seq_distance(seg.seq, hi) <= RST_WINDOW_BYTES => {
+            // A vouched segment may also carry a confirmed side forward
+            // past bytes the capture missed; both anchors only move forward.
+            Some(hi) if vouched || seq_distance(seg.seq, hi) <= RST_WINDOW_BYTES => {
                 if seq_after(end, hi) {
                     d.seq_hi = Some(end);
                 }
@@ -1529,12 +1529,13 @@ impl FollowEntry {
         }
         if seg.rst {
             self.rst = true;
+            let acked = self.dirs.each_ref().map(|d| d.last_ack.filter(|_| d.confirmed));
             for j in 0..2 {
                 // Holes before held bytes can never fill now: they are gaps,
-                // as are the sender's bytes up to the RST.
+                // as are bytes the confirmed peer acknowledged past them.
                 self.dirs[j].expire_holes(seg.now_ms, true, Direction::from_index(j), &mut self.turns, ctx);
-                if j == i {
-                    self.dirs[j].gap_to(seg.seq, seg.now_ms, ctx);
+                if let Some(a) = acked[1 - j] {
+                    self.dirs[j].gap_to(a, seg.now_ms, ctx);
                 }
                 self.dirs[j].close(ctx);
             }
@@ -3097,7 +3098,7 @@ mod tests {
     }
 
     #[test]
-    fn a_peers_ack_resyncs_a_direction_after_more_than_a_window_of_capture_loss() {
+    fn a_segment_at_the_peers_ack_resyncs_a_direction_after_more_than_a_window_of_capture_loss() {
         let mut store = FollowStore::new(1);
         let k = key();
         let (c_next, s_next) = open_cleartext(&mut store, &k);
@@ -3113,7 +3114,7 @@ mod tests {
     }
 
     #[test]
-    fn a_confirmed_ack_replaces_an_anchor_the_peers_lagging_acks_could_not() {
+    fn a_segment_at_a_confirmed_ack_replaces_an_anchor_the_sides_lagging_acks_could_not() {
         let mut store = FollowStore::new(1);
         let k = key();
         store.ingest(&k, true, seg(500, b"GET / HTTP/1.1\r\n", T0));
@@ -3211,11 +3212,52 @@ mod tests {
     fn an_rst_past_the_last_captured_byte_records_the_missed_tail_as_a_gap() {
         let mut store = FollowStore::new(1);
         let k = key();
-        let (c_next, _) = open_cleartext(&mut store, &k);
+        let (c_next, s_next) = open_cleartext(&mut store, &k);
         store.ingest(&k, true, seg(c_next, &[b'a'; 50], T0 + 3_000));
+        // The server acknowledges 50 bytes the capture never saw.
+        store.ingest(&k, false, seg_ack(s_next, b"", c_next + 100, T0 + 3_000));
         store.ingest(&k, true, rst(c_next + 100, T0 + 3_000));
         let s = snap(&store, &k, Direction::C2s);
         assert!(s.closed);
         assert_eq!(s.gaps, vec![Gap { at: 16 + 50, missing: 50, reason: GapReason::Missing }]);
+    }
+
+    #[test]
+    fn an_rst_records_more_than_a_window_of_acknowledged_loss_as_a_gap() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, s_next) = open_cleartext(&mut store, &k);
+        let resumed = s_next.wrapping_add(2 * RST_WINDOW_BYTES);
+        store.ingest(&k, true, seg_ack(c_next, b"", resumed, T0 + 3_000));
+        store.ingest(&k, false, rst(resumed, T0 + 3_000));
+        let s = snap(&store, &k, Direction::S2c);
+        assert!(s.closed);
+        assert_eq!(s.gaps.iter().map(|g| u64::from(g.missing)).sum::<u64>(), u64::from(2 * RST_WINDOW_BYTES));
+    }
+
+    #[test]
+    fn an_rst_alone_invents_no_gap() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, _) = open_cleartext(&mut store, &k);
+        // In the sender's window, but nothing shows bytes were sent.
+        store.ingest(&k, true, rst(c_next + 900_000, T0 + 3_000));
+        let s = snap(&store, &k, Direction::C2s);
+        assert!(s.closed);
+        assert!(s.gaps.is_empty());
+    }
+
+    #[test]
+    fn a_vouched_segment_without_ack_keeps_a_confirmed_sides_last_ack() {
+        let mut store = FollowStore::new(1);
+        let k = key();
+        let (c_next, s_next) = open_cleartext(&mut store, &k);
+        let resumed = s_next.wrapping_add(2 * RST_WINDOW_BYTES);
+        store.ingest(&k, true, seg_ack(c_next, b"y", resumed, T0 + 3_000));
+        // The server resyncs on a segment with no ACK flag.
+        store.ingest(&k, false, seg(resumed, b"z", T0 + 3_000));
+        // The client's RST at the server's last real ACK is still believed.
+        store.ingest(&k, true, rst(c_next, T0 + 3_000));
+        assert!(is_closed(&store, &k));
     }
 }
