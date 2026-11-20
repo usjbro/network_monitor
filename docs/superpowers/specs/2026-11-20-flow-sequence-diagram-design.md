@@ -3,7 +3,7 @@
 **Issue:** KAN-130 (legacy JAM-20, GitHub #87) — "Flow sequence diagram: a ladder view of packet exchanges"
 **Epic:** KAN-18 (Analysis surfaces, legacy JAM-127)
 **Depends on:** KAN-129 TCP stream graphs (built: `capture-agent/src/tcp_samples.rs`, `pages/api/tcp-samples.ts`, `lib/tcp-samples-poll.ts`, `components/TcpGraphsView.tsx`). Nothing else.
-**Status:** DRAFT. Gate `kan-130__flow-sequence-diagram-spec` was approved by James in chat on 2026-11-20, for this spec only. The decisions marked **open** below are James's to make. No implementation starts before the spec is approved and a plan is written.
+**Status:** APPROVED (merged in PR #336). On 2026-11-20 James chose the recommendations for D2 (label table and pinned head) and D5 (per-flow only) in chat. Next: the implementation plan, `docs/superpowers/plans/2026-11-20-flow-sequence-diagram.md`.
 
 ## Problem
 
@@ -40,7 +40,7 @@ The ladder reads the same `POST /api/tcp-samples` route, poller and `TcpGraphSta
   - `stale`: the flow was replaced; the ladder starts over, as the graphs do.
   - Retained window starts after the first segment: a gap row (D3).
 
-### D2. Labels and the pinned handshake head — **open: wire change, ask-first**
+### D2. Labels and the pinned handshake head — **decided: (a) and (b) (James, 2026-11-20)**
 
 The ring holds header fields only, so it can label `SYN`, `SYN,ACK`, `FIN,ACK`, `RST` and `PSH,ACK len=1448` but not `ClientHello (SNI: example.com)`. Two additions to the ring would close that gap. Both change the `tcp_samples` reply, so per the repo's wire rule `capture-agent/src/wire.rs`, `lib/types.ts`, `lib/agent-mapping.ts`, `docs/wire-protocol.md` and the tests on both sides change together.
 
@@ -54,7 +54,7 @@ The ring holds header fields only, so it can label `SYN`, `SYN,ACK`, `FIN,ACK`, 
 | `http_response` | `http.response.code` and `http.response.phrase` | `HTTP <code> <phrase>` |
 
 - **Text:** printable ASCII only; anything else is escaped as `\u{..}`, as `unanswered-request` summaries already are. Cut at 64 bytes after escaping, on a whole escape. The query string is dropped because it often carries tokens; the path is kept, as `http.request.uri` already appears in full in `packet` events. The phrase goes through the existing HTTP redaction.
-- **Bound:** at most 32 labels per ring. A label is dropped when its sample is overwritten, or, when the table is full, the oldest label goes first. A label is one byte of kind, a `u64` index and at most 64 bytes of text: about 2.4 KiB per ring, about 300 KiB across 128 rings. It is counted in the existing `tcpSampleRingBytes`, allocated with the ring, released with it and cleared on interface switch.
+- **Bound:** at most 32 labels per ring. A label is dropped when its sample is overwritten, or, when the table is full, the oldest label goes first. Labels on the pinned head (b) are never dropped this way; there are at most 16 of them, so at least 16 slots always remain for the rolling part. A label is one byte of kind, a `u64` index and at most 64 bytes of text: about 2.4 KiB per ring, about 300 KiB across 128 rings. It is counted in the existing `tcpSampleRingBytes`, allocated with the ring, released with it and cleared on interface switch.
 - **A ClientHello without SNI** produces no `L7Info` today, so it gets no label. Extending `l7.rs` for it is out of scope.
 
 **(b) A pinned head of the first 16 samples.** The ring rolls, so on a long flow the handshake, the very part a teaching view exists to show, is overwritten first. The ring keeps its first 16 samples (indices 0–15) and their labels separately and never overwrites them: 16 × 32 B = 512 B per ring, 64 KiB across 128 rings, also counted in `tcpSampleRingBytes`. When `fromIndex` is below 16 the reply carries a `head` block with the same columnar layout. A reader that has the head does not ask for it again.
@@ -90,9 +90,9 @@ The packet view holds only sampled frames, at most `buffer packets <n>`. Linking
 - `run`, `gap` and `elided` rows are not links.
 - **Alternative considered:** the agent could record which segments became `packet` events and give the event id in the reply, for an exact link. That needs the limiter's decision fed back into the ring and widens the sample. Rejected for the first cut, because the client-side key is exact except in the ambiguous case, which fails closed.
 
-### D5. Per-host-pair mode — **open; recommendation: out of the first cut**
+### D5. Per-host-pair mode — **decided: out of the first cut (James, 2026-11-20)**
 
-A host-pair ladder would merge several flows' rings (each separately bounded, with separate horizons and gaps) into one time order, with one column per endpoint and port. That multiplies the gap and horizon wording and the admission requests (one per flow). Recommendation: per flow only now; host-pair as a follow-up issue if it is wanted.
+A host-pair ladder would merge several flows' rings (each separately bounded, with separate horizons and gaps) into one time order, with one column per endpoint and port. That multiplies the gap and horizon wording and the admission requests (one per flow). Per flow only now; host-pair is a follow-up issue if it is wanted.
 
 ### D6. Rendering and width
 
@@ -125,12 +125,12 @@ TCP only, IPv4 and IPv6, one flow at a time. Not in scope: UDP and QUIC, DNS lad
 - **§4 Sensitive data:** labels hold SNI (already in `packet` events as `tls.handshake.sni`), the HTTP method and path (query dropped, already in `packet` events), and the status code and redacted phrase. Labels are display-escaped in the agent and rendered as text, never as HTML. Replies go only to the requesting client (KAN-129 D5).
 - **§5 Time:** frame timestamps only; a replay-speed equality test covers labels and the head as KAN-129's covers samples.
 - **§6 Interfaces:** the four wire files change together. Unknown label kinds are shown as `unknown label`, not dropped silently.
-- **§7 Tooling:** tests first per task. The ServerHello check gets `parse_packet` fuzz seeds; the label code runs under the existing parse fuzz target.
+- **§7 Tooling:** tests first per task. The ServerHello check is covered by exhaustive short-input unit tests. *(Amended 2026-11-20, plan decision P5: first written as `parse_packet` fuzz seeds, which would not reach the check, because it runs in `flow.rs`.)* The strings labels are built from come from `l7.rs`, which the existing `parse_packet` and `l7_transactions` fuzz targets cover.
 
 ## Non-goals
 
-Host-pair ladders (unless D5 is decided otherwise), UDP/QUIC/DNS, recorded-file queries (KAN-125's query service), expanding runs, export.
+Host-pair ladders (D5), UDP/QUIC/DNS, recorded-file queries (KAN-125's query service), expanding runs, export.
 
 ## Next
 
-On approval and with D2 and D5 decided: an implementation plan under `docs/superpowers/plans/` in its own PR, split at least into: (1) the label table, ServerHello check and pinned head in `tcp_samples.rs`, with the reply budget; (2) the wire contract on both sides; (3) `lib/flow-ladder.ts` (`buildLadder`, the match key); (4) the Ladder tab, row component, `focusPacketId` and the entry button.
+An implementation plan under `docs/superpowers/plans/` in its own PR, split at least into: (1) the label table, ServerHello check and pinned head in `tcp_samples.rs`, with the reply budget; (2) the wire contract on both sides; (3) `lib/flow-ladder.ts` (`buildLadder`, the match key); (4) the Ladder tab, row component, `focusPacketId` and the entry button.

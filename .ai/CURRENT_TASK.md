@@ -1,3 +1,9 @@
+# KAN-130 Flow sequence diagram — implementation plan (2026-11-20)
+
+Spec merged (PR #336). James chose D2 (a)+(b) and D5 (out) and approved gate `kan-130__flow-sequence-diagram-plan` in chat. Worktree `.worktrees/flow-sequence-diagram-plan`. Plan `docs/superpowers/plans/2026-11-20-flow-sequence-diagram.md` in four tasks (agent labels/head; wire; `lib/flow-ladder.ts`; UI), decisions P1–P8; spec status, D2/D5 and §7 (P5) updated. James said skip Codex review for KAN-130. Next: plan PR; James merges; each task needs its own gate.
+
+---
+
 # KAN-130 Flow sequence diagram — design spec (2026-11-20)
 
 James approved gate `kan-130__flow-sequence-diagram-spec` in chat (spec only). Worktree `.worktrees/flow-sequence-diagram-spec`, branch `KAN-130-flow-sequence-diagram-spec`. Draft `docs/superpowers/specs/2026-11-20-flow-sequence-diagram-design.md`: the ladder reads KAN-129's sample ring via the existing `/api/tcp-samples` poller (shared panel tab); exact collapse/row-cap rules; best-effort client-side link to the packet view. Open for James: D2 (label table + pinned 16-sample head, a wire change) and D5 (host-pair mode; recommended out). No code. Next: James's decisions, commit/PR on request, then the plan.
