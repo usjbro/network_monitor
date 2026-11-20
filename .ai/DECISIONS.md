@@ -209,3 +209,26 @@ Consequences:
 - Linear stays as a read-only archive.
 - Historical records keep `JAM-n`. `coordination/migration/jam-to-kan.tsv` maps each one to its `KAN-m`.
 - Scripts take `<issue-key>` and write `issue_key`. They still read `linear_id` from existing gate and task files.
+
+## ADR-008 — Authenticated control lines are capped at 128 KiB, not the plan's 32 KiB
+
+Date:
+2026-11-19
+
+Status:
+Accepted
+
+Context:
+The Follow Stream plan (Task 3, split out as 3a) asks for `MAX_CONTROL_LINE_BYTES = 32*1024` and asks to verify every current control against it without silently truncating any.
+
+Decision:
+The cap is 128 KiB (131,072 bytes), LF included.
+
+Reasoning:
+`set_io_series` at the relay's own bounds (`app/api/control/route.ts`: 8 series, 2,048-unit filters) can be written by `JSON.stringify` as six-byte escapes, which comes to 99,692 bytes. Ordinary non-ASCII filters, at 3 bytes per unit, also pass 32 KiB. A 32 KiB cap would close the connection on legitimate input.
+
+Consequences:
+At 64 authenticated connections the line buffers are at most 8 MiB in total, plus each connection's 8 KiB `BufReader`. The cap does not bound the cost of parsing an accepted line into `serde_json::Value`, and there is still no per-line or idle timeout. Do not lower the cap without lowering the relay's `set_io_series` bounds first.
+
+Evidence / References:
+`capture-agent/src/control_line.rs` (`the_largest_io_series_set_fits_with_every_filter_unit_escaped`), PR #334, KAN-110.

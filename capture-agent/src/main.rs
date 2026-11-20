@@ -4133,6 +4133,10 @@ where
                         );
                         break;
                     }
+                    Ok(capture_agent::control_line::ControlRead::NotUtf8) => {
+                        eprintln!("capture-agent: closing control connection: line is not UTF-8");
+                        break;
+                    }
                     Ok(capture_agent::control_line::ControlRead::Line(text)) => {
                         let message = match wire::classify_control_line(&text) {
                             wire::ControlLine::Message(message) => Some(message),
@@ -6215,6 +6219,21 @@ mod tcp_samples_reply_path_tests {
         let end = timeout(Duration::from_secs(5), lines.next_line()).await.expect("closed in time");
         assert!(matches!(end, Ok(None)), "connection stayed open: {end:?}");
         assert!(!shared.paused.load(Ordering::Relaxed), "the oversized line was acted on");
+    }
+
+    #[tokio::test]
+    async fn a_non_utf8_control_line_closes_the_connection_unparsed() {
+        let (trace_tx, _keep) = broadcast::channel::<String>(4);
+        let flow_table = flow_table_with_samples(4);
+        let (peer, shared) = connect(&trace_tx, &flow_table, 64 * 1024);
+        let (read, mut write) = tokio::io::split(peer);
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(next_line(&mut lines).await["type"], "io_series_status");
+        write.write_all(b"{\"type\":\"pause\",\"x\":\"\xff\"}\n").await.unwrap();
+        write.write_all(request_line(3).as_bytes()).await.unwrap();
+        let end = timeout(Duration::from_secs(5), lines.next_line()).await.expect("closed in time");
+        assert!(matches!(end, Ok(None)), "connection stayed open: {end:?}");
+        assert!(!shared.paused.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

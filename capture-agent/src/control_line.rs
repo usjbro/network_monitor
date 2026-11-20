@@ -11,13 +11,15 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 /// the relay's `JSON.stringify` can write as six-byte escapes (about 99 KB
 /// in all). The plan's 32 KiB would refuse a legitimate set of non-ASCII
 /// filters, so the cap is 128 KiB: at 64 authenticated connections that
-/// is at most 8 MiB held.
+/// is at most 8 MiB of line buffers (plus each connection's 8 KiB read buffer). It bounds the bytes held, not what
+/// parsing an accepted line into JSON costs.
 pub const MAX_CONTROL_LINE_BYTES: usize = 128 * 1024;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ControlRead {
-    /// One line, without its LF (a CR before it is left for the parser,
-    /// as `Lines` did). A final line at EOF without an LF still counts.
+    /// One line, without its LF or a CR before it, as `Lines` gave. A
+    /// final line at EOF without an LF still counts, its missing LF
+    /// counted against the cap so the limit is the same either way.
     Line(String),
     /// The peer closed with nothing pending.
     Eof,
@@ -49,17 +51,23 @@ impl<R: AsyncBufRead + Unpin> ControlLines<R> {
                 if self.buf.is_empty() {
                     return Ok(ControlRead::Eof);
                 }
+                // The missing LF counts, so the limit matches a terminated line.
+                if !fits(self.buf.len(), 1) {
+                    self.buf = Vec::new();
+                    return Ok(ControlRead::TooLong);
+                }
                 return Ok(self.finish(0));
             }
             let newline = available.iter().position(|b| *b == b'\n');
             let take = newline.map_or(available.len(), |n| n + 1);
             // Checked before the buffer grows: a line over the cap is
             // never held, only refused.
-            if self.buf.len() + take > MAX_CONTROL_LINE_BYTES {
+            if !fits(self.buf.len(), take) {
                 self.buf = Vec::new();
                 return Ok(ControlRead::TooLong);
             }
-            self.buf.reserve_exact(take);
+            // `Vec` grows by doubling in powers of two, so with the line
+            // never past the (power-of-two) cap neither is its capacity.
             self.buf.extend_from_slice(&available[..take]);
             self.reader.consume(take);
             if newline.is_some() {
@@ -68,15 +76,24 @@ impl<R: AsyncBufRead + Unpin> ControlLines<R> {
         }
     }
 
-    /// Hands over the buffered line minus its `lf` trailing bytes.
+    /// Hands over the buffered line minus its LF (`lf` is 1 when one was
+    /// read) and a CR before it.
     fn finish(&mut self, lf: usize) -> ControlRead {
         let mut bytes = std::mem::take(&mut self.buf);
         bytes.truncate(bytes.len() - lf);
+        if lf == 1 && bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
         match String::from_utf8(bytes) {
             Ok(text) => ControlRead::Line(text),
             Err(_) => ControlRead::NotUtf8,
         }
     }
+}
+
+/// Whether a line of `len` bytes can take `more`, LF included.
+fn fits(len: usize, more: usize) -> bool {
+    len + more <= MAX_CONTROL_LINE_BYTES
 }
 
 #[cfg(test)]
@@ -94,6 +111,45 @@ mod tests {
             if stop {
                 return out;
             }
+        }
+    }
+
+    /// Hands out one byte per poll, pending in between.
+    struct Trickle<'a> {
+        data: &'a [u8],
+        pos: usize,
+        ready: bool,
+    }
+
+    impl tokio::io::AsyncRead for Trickle<'_> {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            unreachable!("read through AsyncBufRead only")
+        }
+    }
+
+    impl tokio::io::AsyncBufRead for Trickle<'_> {
+        fn poll_fill_buf(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if !this.ready {
+                this.ready = true;
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            let end = (this.pos + 1).min(this.data.len());
+            std::task::Poll::Ready(Ok(&this.data[this.pos..end]))
+        }
+
+        fn consume(self: std::pin::Pin<&mut Self>, amt: usize) {
+            let this = self.get_mut();
+            this.pos += amt;
+            this.ready = false;
         }
     }
 
@@ -146,7 +202,7 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                ControlRead::Line("{\"type\":\"pause\"}\r".into()),
+                ControlRead::Line("{\"type\":\"pause\"}".into()),
                 ControlRead::Line("{\"type\":\"resume\"}".into()),
                 ControlRead::Eof,
             ]
@@ -160,6 +216,34 @@ mod tests {
             vec![ControlRead::Line("{\"type\":\"pause\"}".into()), ControlRead::Eof]
         );
         assert_eq!(read_all(b"").await, vec![ControlRead::Eof]);
+    }
+
+    #[tokio::test]
+    async fn a_final_line_without_lf_counts_its_missing_lf_against_the_cap() {
+        let fits = vec![b'a'; MAX_CONTROL_LINE_BYTES - 1];
+        assert_eq!(read_all(&fits).await, vec![ControlRead::Line("a".repeat(MAX_CONTROL_LINE_BYTES - 1)), ControlRead::Eof]);
+        let over = vec![b'a'; MAX_CONTROL_LINE_BYTES];
+        assert_eq!(read_all(&over).await, vec![ControlRead::TooLong]);
+    }
+
+    #[tokio::test]
+    async fn a_trickled_line_never_grows_the_buffer_past_the_cap() {
+        let input = line_of(MAX_CONTROL_LINE_BYTES);
+        let mut lines = ControlLines::new(Trickle { data: &input, pos: 0, ready: false });
+        let (mut seen, mut grows) = (0, 0);
+        // Each read yields once per byte; a zero timeout cancels it there.
+        loop {
+            let read = tokio::time::timeout(std::time::Duration::ZERO, lines.next_line()).await;
+            if lines.buf.capacity() != seen {
+                seen = lines.buf.capacity();
+                grows += 1;
+            }
+            assert!(seen <= MAX_CONTROL_LINE_BYTES, "capacity {seen}");
+            if read.is_ok() {
+                break;
+            }
+        }
+        assert!(grows <= 20, "{grows} reallocations for one trickled line");
     }
 
     #[tokio::test]
