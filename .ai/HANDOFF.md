@@ -1,3 +1,10 @@
+# KAN-110 Task 3c-2 (2026-11-20)
+
+- Change: `ConnectionShared` gains `follow_store` and `relay_port`; `serve_connection` encodes under the store lock into a lazily allocated 192 KiB zeroizing buffer and writes inline, then `follow_response::release_output`. Deviation from the plan's writer-owner design: inline writing (as `tcp_samples`) means at most one unflushed reply per connection, so the 512 KiB/four budget holds by construction and `busy` is never sent; a blocked relay stalls only its own connection.
+- Tests: duplex tests in `tcp_samples_reply_path_tests`; `tests/follow_replay.rs` (fast and realtime, fragments, gap, TLS, tuple reuse, stale, disabled, empty working dir); fuzz `check_pages` (op 8).
+
+---
+
 # KAN-110 Task 3c-1 review fixes (2026-11-20)
 
 - /code-review on merged #344: the store is fed inside the `FlowTable` observation lock (one lock order everywhere, no orphan after a capacity sweep) and locked only when there is work; the emitter drops evictions and ticks under the `FlowTable` lock (ticking after release, tried first, used a stale replay clock); snaplen stamps only from TCP, TCP-fragment or unparsed cut frames, never excluded relay/front-door traffic; `apply_interface_switch_request` resets the store inside the `FlowTable::reset` lock; `flow::random_epoch` reused; helpers moved out of `exclude_live_control_capture`'s doc comment; the no-key fragment guard was added then removed (unreachable). Left: ingest runs under the FlowTable lock (the cost of no orphans); unparsed cut frames still stamp (may be TCP).

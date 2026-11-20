@@ -75,8 +75,9 @@ exactly `FOLLOW_STREAM=1`; unset, empty or any other value leaves it off.
 With it on, the agent keeps the start of each TCP conversation in a bounded
 in-memory store (at most 256 flows and 16 MiB, credentials masked on every
 copy out), dropping a flow's bytes when the flow table drops the flow and
-emptying the store on an interface switch. Nothing reads the store yet: the
-agent does not answer stream requests until a later task.
+emptying the store on an interface switch. The agent answers `get_stream`
+on its authenticated control connection only (`docs/wire-protocol.md`); no
+relay route asks yet, so the UI cannot show a stream until a later task.
 
 With it on, the relay's own HTTP traffic would carry retained content back
 over loopback, so live capture drops it before reassembly, flow events and

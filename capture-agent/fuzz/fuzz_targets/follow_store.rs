@@ -6,7 +6,11 @@ use capture_agent::follow::{
     Classification, Direction, FollowSegment, FollowStore, Generation, MAX_DIRECTION_BYTES, MAX_FLOWS,
     MAX_TOTAL_BYTES,
 };
+use capture_agent::follow_response::{
+    encode_stream_data, new_output, MAX_STREAM_DATA_LINE_BYTES, PAGE_DATA_BYTES, PAGE_GAPS, PAGE_RANGES, PAGE_TURNS,
+};
 use capture_agent::parse::TransportProtocol;
+use capture_agent::wire::StreamRequest;
 use libfuzzer_sys::fuzz_target;
 
 /// More keys than the store retains, so flow-cap eviction is reachable.
@@ -107,6 +111,65 @@ fn check_flow(store: &FollowStore, n: u16, seen: &mut HashMap<(u16, usize), (Gen
     });
 }
 
+/// KAN-110 Task 3c-2: pages flow `n` through the response builder from
+/// `start` (one direction's offset; the other starts at 0) to the end. Every
+/// line fits the ceiling; every page progresses and keeps its metadata
+/// limits; and the pages' bytes, joined, are exactly what `copy_masked`
+/// emits, so no pending, TLS or masked byte can be paged out.
+fn check_pages(store: &FollowStore, n: u16, start: u32, turns_from: u32, buf: &mut [u8]) {
+    let id = key(n).connection_id();
+    let Some(emitted) = store.with_entry(&id, |entry| {
+        entry.map(|entry| {
+            [Direction::C2s, Direction::S2c].map(|d| {
+                let len = entry.copy_masked(d, 0, u32::MAX, buf);
+                buf[..len].to_vec()
+            })
+        })
+    }) else {
+        return;
+    };
+    let mut out = new_output();
+    let mut offsets = [start.min(emitted[0].len() as u32), 0];
+    let mut joined = [emitted[0][..offsets[0] as usize].to_vec(), Vec::new()];
+    for _ in 0..=(2 * capture_agent::follow::MAX_DIRECTION_BYTES / 1024 + 4) {
+        let request = StreamRequest {
+            request_id: "0".repeat(32),
+            connection_id: id.clone(),
+            generation: None,
+            c2s_offset: offsets[0],
+            s2c_offset: offsets[1],
+            turns_from,
+            relay_port: Some(3000),
+        };
+        encode_stream_data(Some(store), &request, Some(3000), &mut out).expect("a reply always fits");
+        assert!(out.len() <= MAX_STREAM_DATA_LINE_BYTES && out.last() == Some(&b'\n'), "line ceiling");
+        let reply: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+        assert!(reply["turns"].as_array().unwrap().len() <= PAGE_TURNS);
+        let mut moved = false;
+        for (i, name) in ["clientToServer", "serverToClient"].into_iter().enumerate() {
+            let page = &reply["directions"][name];
+            let (offset, next) = (page["offset"].as_u64().unwrap() as u32, page["nextOffset"].as_u64().unwrap() as u32);
+            assert_eq!(offset, offsets[i]);
+            let data = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, page["dataBase64"].as_str().unwrap())
+                .unwrap();
+            assert_eq!(data.len() as u32, next - offset);
+            assert!(data.len() <= PAGE_DATA_BYTES as usize);
+            assert!(page["gaps"].as_array().unwrap().len() <= PAGE_GAPS);
+            assert!(page["redactedRanges"].as_array().unwrap().len() <= PAGE_RANGES);
+            if (offset as usize) < emitted[i].len() {
+                assert!(next > offset, "a page with bytes left made no progress");
+            }
+            joined[i].extend_from_slice(&data);
+            moved |= next > offset;
+            offsets[i] = next;
+        }
+        if !moved {
+            break;
+        }
+    }
+    assert_eq!(joined, emitted, "paged bytes differ from the masked emission");
+}
+
 fuzz_target!(|data: &[u8]| {
     // JAM-17 / KAN-110 Task 1. Arbitrary segments, timing and lifecycle
     // operations must never panic, never exceed the reserved-capacity and
@@ -124,7 +187,7 @@ fuzz_target!(|data: &[u8]| {
         if ops > 512 {
             break;
         }
-        match op % 8 {
+        match op % 9 {
             0..=2 => {
                 // A segment: flow, side, flags, a sequence delta from the
                 // side's cursor (so data is mostly near the edge, sometimes
@@ -175,10 +238,16 @@ fuzz_target!(|data: &[u8]| {
                 store.reset();
                 seen.clear();
             }
-            _ => {
+            7 => {
                 for n in 0..KEYS {
                     check_flow(&store, n, &mut seen, &mut buf);
                 }
+            }
+            _ => {
+                let Some(n) = input.u16() else { break };
+                let Some(start) = input.u16() else { break };
+                let Some(turns_from) = input.u16() else { break };
+                check_pages(&store, n % KEYS, u32::from(start) * 4, u32::from(turns_from), &mut buf);
             }
         }
         store.audit().expect("store invariants");

@@ -1,3 +1,9 @@
+# KAN-110 Task 3c-2 (2026-11-20)
+
+`cargo test --locked`: 963 passed, 0 failed. Clippy `-D warnings` clean; release and fuzz builds OK; `follow_store` fuzz 44,760 runs clean in 121 s (a planted past-horizon page bug is caught in under 90 s). Five duplex tests failed before the handler; planted broadcast, missing relay port and ignored store are each caught. `tests/follow_replay.rs` (3 tests) passed 5 runs in a row after making temp names unique; planted not-fed and raw-fragment-fed breaks fail both enabled tests.
+
+---
+
 # KAN-110 Task 3c-1 review fixes (2026-11-20)
 
 `cargo test --locked` 955 passed, 0 failed; clippy clean; release and `cargo +nightly fuzz build` OK. New: snaplen-stamp test (TCP, TCP fragment, unparsed stamp; UDP, UDP fragment, ICMP do not); planted breaks of each rule and of the eviction drop caught.

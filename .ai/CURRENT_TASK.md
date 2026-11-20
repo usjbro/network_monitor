@@ -1,3 +1,9 @@
+# KAN-110 Follow Stream Task 3c-2: answer get_stream (2026-11-20)
+
+James's standing instruction (2026-11-20): work through every KAN issue in order. Worktree `.worktrees/follow-stream-reply`, branch `KAN-110-follow-stream-reply`. `serve_connection` answers `get_stream` inline from the store; `tests/follow_replay.rs` through the real binary; `follow_store` fuzz pages the response builder. Next: PR, reviews; then KAN-110 Task 4 (relay route).
+
+---
+
 # KAN-110 Follow Stream Task 3c-1: feed the store (2026-11-20)
 
 James's standing instruction (2026-11-20): work through every KAN issue in order. Worktree `.worktrees/follow-stream-feed`, branch `KAN-110-follow-stream-feed`. `main.rs` allocates `FollowStore` only with `FOLLOW_STREAM=1`, feeds it after flow observation, notifies snaplen cuts, ticks it from the emitter with `FlowTable`'s removals, resets it on a successful interface switch. Next: PR, reviews; then 3c-2 (reply writer, budget, `follow_replay.rs`, fuzz).
