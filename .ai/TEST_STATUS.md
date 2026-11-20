@@ -1,5 +1,7 @@
 # KAN-294 (2026-11-19)
 
+/code-review fixes on #342: 923 passed, 0 failed; clippy clean; release build OK. 2 new tests (front-door QUIC; same-address fragments), both red first; planted breaks (no QUIC, QUIC on the relay port too, the earlier TCP-only same-address rule) each caught. Binary logs `excludes relay port 3000 and front door port 443`.
+
 `cargo test --locked`: 921 passed after rebasing on #341 (887 before), 0 failed; clippy `-D warnings` clean; release build OK. New: 3 config tests (both ports, the error naming its variable, `FollowPorts::contains`) and 4 exclusion tests (front door both ways on IPv4/IPv6 loopback, this host's own LAN address on a follow port, another host's front-door traffic kept, front door kept with the feature off); the existing exclusion tests now go through `FollowPorts`. Planted breaks caught: relay port only, no same-host rule, same-host on any port, any host on a follow port. Release binary in replay: `FOLLOW_STREAM=1` with `FRONT_DOOR_PORT=+8443` or blank fails startup naming the variable; `FRONT_DOOR_PORT=+8443` alone and `FOLLOW_STREAM=1 FRONT_DOOR_PORT=9443` start normally.
 
 ---

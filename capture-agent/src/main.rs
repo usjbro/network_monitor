@@ -2587,6 +2587,12 @@ async fn main() -> std::io::Result<()> {
         std::env::var("FRONT_DOOR_PORT").ok().as_deref(),
     )
     .unwrap_or_else(|e| panic!("{e}"));
+    if let Some(ports) = follow_ports {
+        println!(
+            "capture-agent: Follow Stream on; live capture excludes relay port {} and front door port {}",
+            ports.relay, ports.front_door
+        );
+    }
     println!(
         "capture-agent: mode={mode} interface={interface_name}{}",
         replay_source
@@ -5682,8 +5688,8 @@ mod control_capture_privacy_tests {
             assert!(!exclude_live_control_capture(&v6, true, None), "feature off is unchanged for IPv6");
             assert!(exclude_live_control_capture(&v6, true, on(3000)));
             assert!(!exclude_live_control_capture(&v6, false, on(3000)));
-            let doc = "2001:db8::1".parse().unwrap();
-            assert!(!exclude_live_control_capture(&fragment6(doc, doc, offset, more), true, on(3000)));
+            let (doc1, doc2) = ("2001:db8::1".parse().unwrap(), "2001:db8::2".parse().unwrap());
+            assert!(!exclude_live_control_capture(&fragment6(doc1, doc2, offset, more), true, on(3000)));
         }
     }
 
@@ -5750,6 +5756,39 @@ mod control_capture_privacy_tests {
         }
         // The same host to itself on another port stays visible.
         assert!(!exclude_live_control_capture(&frame([192, 0, 2, 5], [192, 0, 2, 5], 52000, 8080, b"x"), true, on(3000)));
+    }
+
+    #[test]
+    fn with_follow_stream_on_this_hosts_own_lan_address_fragments_are_excluded() {
+        // Its later fragments carry no ports, as on loopback.
+        let own6: std::net::Ipv6Addr = "2001:db8::5".parse().unwrap();
+        for (offset, more) in [(0, true), (8, false)] {
+            let mut ip = etherparse::Ipv4Header::new(64, 64, etherparse::IpNumber::TCP, [192, 0, 2, 5], [192, 0, 2, 5]).unwrap();
+            ip.more_fragments = more;
+            ip.fragment_offset = etherparse::IpFragOffset::try_new(offset).unwrap();
+            let mut data = ip.to_bytes().to_vec();
+            data.extend([b'a'; 64]);
+            let v4 = parse::parse_packet(&data, parse::LinkType::Raw).unwrap();
+            let v6 = fragment6(own6, own6, offset, more);
+            for p in [&v4, &v6] {
+                assert!(exclude_live_control_capture(p, true, on(3000)));
+                assert!(!exclude_live_control_capture(p, true, None), "feature off keeps it");
+            }
+        }
+    }
+
+    #[test]
+    fn with_follow_stream_on_front_door_quic_is_excluded() {
+        // Caddy serves HTTP/3 on the same port over UDP.
+        for p in [
+            udp([127, 0, 0, 1], [127, 0, 0, 1], 8443),
+            udp([192, 0, 2, 5], [192, 0, 2, 5], 8443),
+        ] {
+            assert!(exclude_live_control_capture(&p, true, on(3000)), "front-door QUIC kept");
+            assert!(!exclude_live_control_capture(&p, true, None));
+        }
+        assert!(!exclude_live_control_capture(&udp([192, 0, 2, 9], [192, 0, 2, 5], 8443), true, on(3000)));
+        assert!(!exclude_live_control_capture(&udp([127, 0, 0, 1], [127, 0, 0, 1], 3000), true, on(3000)), "the relay serves no UDP");
     }
 
     #[test]
@@ -6126,11 +6165,11 @@ mod tls_decrypt_state_tests {
 ///
 /// KAN-110 Task 2: with Follow Stream on (`follow` is `Some`), the relay's
 /// HTTP traffic carries retained stream content, and so does the mTLS front
-/// door's in front of it (KAN-294), so both ports are omitted on any
-/// loopback address pair, IPv4 or IPv6, and between this host's own LAN
-/// address and itself (a browser here using the front door by that
-/// address). Their fragments cannot be matched by port, so every loopback
-/// TCP fragment is omitted, and every loopback packet whose transport the
+/// door's in front of it (KAN-294), including its HTTP/3 over UDP. Both are
+/// omitted on any loopback address pair, IPv4 or IPv6, and between one
+/// address and itself (a browser here using the front door by this host's
+/// LAN address). Fragments cannot be matched by port, so on those pairs
+/// every TCP fragment is omitted, and every packet whose transport the
 /// parser could not decode (an IPv6 fragment, or an IPv4 fragment carrying
 /// AH, arrives that way). Another host's front-door session is kept: it is
 /// not this host's content and its keys never reach the agent. With it
@@ -6143,17 +6182,17 @@ fn exclude_live_control_capture(
     if !live {
         return false;
     }
-    let on_follow_port = |p: &parse::ParsedPacket| {
-        matches!(p.protocol, parse::TransportProtocol::Tcp)
-            && follow.is_some_and(|f| p.src_port.is_some_and(|n| f.contains(n)) || p.dst_port.is_some_and(|n| f.contains(n)))
+    let either_port = |hit: &dyn Fn(u16) -> bool| {
+        packet.src_port.is_some_and(hit) || packet.dst_port.is_some_and(hit)
     };
     let loopback = |ip: &str| {
         ip.parse::<std::net::IpAddr>()
             .is_ok_and(|addr| addr.is_loopback())
     };
-    if !loopback(&packet.src_ip) || !loopback(&packet.dst_ip) {
-        // Only this host talks to itself with one address at both ends.
-        return packet.src_ip == packet.dst_ip && on_follow_port(packet);
+    // Only this host talks to itself with one address at both ends.
+    let own_pair = follow.is_some() && packet.src_ip == packet.dst_ip;
+    if !(loopback(&packet.src_ip) && loopback(&packet.dst_ip)) && !own_pair {
+        return false;
     }
     if packet
         .ip_fragment
@@ -6162,15 +6201,16 @@ fn exclude_live_control_capture(
     {
         return follow.is_some() || packet.src_ip == "127.0.0.1" || packet.dst_ip == "127.0.0.1";
     }
-    if follow.is_some() && matches!(packet.protocol, parse::TransportProtocol::Other) {
-        return true;
+    match (packet.protocol, follow) {
+        (parse::TransportProtocol::Other, Some(_)) => true,
+        (parse::TransportProtocol::Udp, Some(f)) => either_port(&|n| n == f.front_door),
+        (parse::TransportProtocol::Tcp, _) => {
+            follow.is_some_and(|f| either_port(&|n| f.contains(n)))
+                || (packet.src_ip == "127.0.0.1" && packet.src_port == Some(9990))
+                || (packet.dst_ip == "127.0.0.1" && packet.dst_port == Some(9990))
+        }
+        _ => false,
     }
-    if !matches!(packet.protocol, parse::TransportProtocol::Tcp) {
-        return false;
-    }
-    on_follow_port(packet)
-        || (packet.src_ip == "127.0.0.1" && packet.src_port == Some(9990))
-        || (packet.dst_ip == "127.0.0.1" && packet.dst_port == Some(9990))
 }
 
 /// KAN-129 plan A2/A5: `get_tcp_samples` is answered inline on the

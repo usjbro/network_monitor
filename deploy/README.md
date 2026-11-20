@@ -67,6 +67,10 @@ for the full design and threat model.
    is its defence against DNS rebinding (JAM-176, see `docs/security.md`).
    The loopback-only default (`localhost:8443`) needs no setting.
 
+   If the capture agent runs with `FOLLOW_STREAM=1`, also start it with
+   `FRONT_DOOR_PORT=443`, so it keeps the front door's own traffic out of
+   capture (see `capture-agent/README.md`, Follow Stream).
+
 ## Running (each session, once set up)
 
     ./capture-agent/target/release/capture-agent &   # or: cd capture-agent && cargo run --release

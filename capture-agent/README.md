@@ -99,9 +99,20 @@ so live capture also drops `FRONT_DOOR_PORT` (KAN-294; default 8443, the
 port in `deploy/Caddyfile`). That covers a browser on this host reaching the
 front door over loopback or by this host's own LAN address (both ends the
 same address). Another LAN client's session with the front door is kept:
-it is not this host's own content, and its keys never reach the agent. If
-`CADDY_LISTEN_ADDR` moves the front door to another port, start the agent
-with the same `FRONT_DOOR_PORT`.
+it is not this host's own content, and its keys never reach the agent.
+Caddy also serves HTTP/3 on that port over UDP, which is dropped too.
+
+The front door's port is a separate setting from Caddy's, and nothing checks
+they agree; the agent logs the two ports it excludes at startup. After
+`deploy/README.md` step 5 (site address `:443`) start the agent with
+`FRONT_DOOR_PORT=443`, and match any other `CADDY_LISTEN_ADDR` port the same
+way.
+
+Costs: with Follow Stream on and no front door running, a loopback app of
+your own on 8443 is hidden; set `FRONT_DOOR_PORT` to an unused port. The
+same-address rule trusts the packet's addresses, so a forged packet from
+one address to itself on a follow port is hidden too, and so are that
+pair's fragments.
 
 With Follow Stream on, `RELAY_PORT` and `FRONT_DOOR_PORT` must each be a
 plain decimal port from 1 to 65535 (no sign or spaces), or startup fails

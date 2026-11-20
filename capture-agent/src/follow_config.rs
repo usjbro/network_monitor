@@ -61,7 +61,11 @@ impl fmt::Display for PortError {
             PortProblem::NotDecimal => "is not a decimal number",
             PortProblem::OutOfRange => "is outside 1-65535",
         };
-        write!(f, "{} {why}; FOLLOW_STREAM=1 needs a port (default {})", self.var, self.default)
+        let what = match self.var {
+            "FRONT_DOOR_PORT" => "the mTLS front door's listen port",
+            _ => "the relay's port",
+        };
+        write!(f, "{} {why}; FOLLOW_STREAM=1 needs {what} (default {})", self.var, self.default)
     }
 }
 
@@ -135,10 +139,10 @@ mod tests {
         let e = resolve_follow_ports(Some("1"), Some("3100"), Some("x")).unwrap_err();
         assert_eq!((e.var, e.problem), ("FRONT_DOOR_PORT", PortProblem::NotDecimal));
         assert!(e.to_string().starts_with("FRONT_DOOR_PORT is not a decimal number"), "{e}");
-        assert!(e.to_string().contains("default 8443"), "{e}");
+        assert!(e.to_string().contains("front door's listen port (default 8443)"), "{e}");
         let e = resolve_follow_ports(Some("1"), Some("x"), None).unwrap_err();
         assert_eq!(e.var, "RELAY_PORT");
-        assert!(e.to_string().contains("default 3000"), "{e}");
+        assert!(e.to_string().contains("the relay's port (default 3000)"), "{e}");
     }
 
     #[test]

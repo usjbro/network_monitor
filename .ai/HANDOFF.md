@@ -1,6 +1,7 @@
 # KAN-294 (2026-11-19)
 
 - Change: `follow_config.rs` `resolve_relay_port` became `resolve_follow_ports` returning `FollowPorts { relay, front_door }`; errors name their variable. `main.rs` `exclude_live_control_capture` takes `Option<FollowPorts>`; a non-loopback packet is excluded only when both IPs are equal and a follow port matches (TCP).
+- /code-review on #342: front-door UDP (Caddy's HTTP/3) excluded; same-address pairs get the loopback fragment/undecoded rules; startup logs the excluded ports; errors say what the port is for; `deploy/README.md` step 5 says to set `FRONT_DOOR_PORT=443`. Accepted: the same-address rule trusts addresses (a forged src==dst packet on a follow port is hidden); with no front door, a local app on 8443 is hidden.
 - Not covered: a browser on this host using a different own address at each end (e.g. two interfaces) is kept; another LAN client's front-door session is kept by design.
 
 ---
