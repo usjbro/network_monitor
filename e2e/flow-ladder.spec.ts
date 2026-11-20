@@ -72,7 +72,7 @@ function synAckPacket() {
     type: 'packet',
     packet: {
       id: 'pkt-synack', timestamp: String(Math.floor(s.tUs / 1000)), relativeTimeMs: 0, layer: 4, protocol: 'TCP',
-      src: '93.184.216.34:443', dst: '192.168.1.10:51000', length: 60, summary: 'SYN-ACK frame', hexDump: '', headerHexDump: '',
+      src: '198.51.100.34:443', dst: '192.0.2.10:51000', length: 60, summary: 'SYN-ACK frame', hexDump: '', headerHexDump: '',
       fields: [f('tcp.seq', 0), f('tcp.ack_number', 1), f('tcp.flags.syn', true), f('tcp.flags.ack', true), f('tcp.flags.fin', false), f('tcp.flags.rst', false)],
     },
   };

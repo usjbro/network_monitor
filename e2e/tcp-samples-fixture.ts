@@ -4,11 +4,12 @@
 // parsing it (window.__tcpParsed), for the one-frame budget.
 import type { Page } from '@playwright/test';
 
-export const TCP_ID = 'Tcp-192.168.1.10:51000-93.184.216.34:443';
+// Documentation addresses (RFC 5737), never real hosts.
+export const TCP_ID = 'Tcp-192.0.2.10:51000-198.51.100.34:443';
 
 export const TCP_CONNECTION = {
   id: TCP_ID, protocol: 'HTTPS/TLS', appLayerProtocol: 'HTTPS/TLS', transportProtocol: 'TCP', osiStack: 'x',
-  localAddr: '192.168.1.10', localPort: 51000, remoteAddr: '93.184.216.34', remotePort: 443, processName: 'curl', pid: 1,
+  localAddr: '192.0.2.10', localPort: 51000, remoteAddr: '198.51.100.34', remotePort: 443, processName: 'curl', pid: 1,
   rxSpeed: 0, txSpeed: 0, rxBytesTotal: 0, txBytesTotal: 0, latencyMs: 20, packetLoss: 0, status: 'ESTABLISHED',
   encryption: 'TLS', sparkline: [],
 };
