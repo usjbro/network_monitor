@@ -31,6 +31,9 @@ pub enum StreamResponseError {
     /// The line would pass the ceiling. A bug by spec D4's arithmetic; the
     /// output is zeroized and nothing should be sent.
     TooLarge,
+    /// The store copied fewer bytes than the page planned. A bug; rather
+    /// than send metadata for bytes it does not carry, nothing is sent.
+    ShortCopy,
 }
 
 /// A reply buffer with exactly the ceiling's capacity.
@@ -110,8 +113,8 @@ fn encode_entry(entry: &FollowEntry, request: &StreamRequest, output: &mut Zeroi
     let mut raw = Zeroizing::new(vec![0u8; PAGE_DATA_BYTES as usize]);
     let mut c2s_b64 = Zeroizing::new(vec![0u8; PAGE_BASE64_BYTES]);
     let mut s2c_b64 = Zeroizing::new(vec![0u8; PAGE_BASE64_BYTES]);
-    let c2s = page(entry, Direction::C2s, request.c2s_offset, &mut raw, &mut c2s_b64);
-    let s2c = page(entry, Direction::S2c, request.s2c_offset, &mut raw, &mut s2c_b64);
+    let c2s = page(entry, Direction::C2s, request.c2s_offset, &mut raw, &mut c2s_b64)?;
+    let s2c = page(entry, Direction::S2c, request.s2c_offset, &mut raw, &mut s2c_b64)?;
 
     let all = entry.turns();
     let from = (request.turns_from as usize).min(all.len());
@@ -140,16 +143,25 @@ fn encode_entry(entry: &FollowEntry, request: &StreamRequest, output: &mut Zeroi
 }
 
 /// One direction's page, its masked bytes base64-encoded into `b64`.
-fn page<'a>(entry: &FollowEntry, dir: Direction, offset: u32, raw: &mut [u8], b64: &'a mut [u8]) -> StreamPageJson<'a> {
+fn page<'a>(
+    entry: &FollowEntry,
+    dir: Direction,
+    offset: u32,
+    raw: &mut [u8],
+    b64: &'a mut [u8],
+) -> Result<StreamPageJson<'a>, StreamResponseError> {
     let view = entry.direction(dir);
     let plan = plan_page(&view, offset);
     let n = entry.copy_masked(dir, offset, plan.end, raw);
-    debug_assert_eq!(n as u32, plan.end.saturating_sub(offset), "a planned page lies under the horizon");
+    if n as u32 != plan.end.saturating_sub(offset) {
+        raw[..n].zeroize();
+        return Err(StreamResponseError::ShortCopy);
+    }
     let len = base64::engine::general_purpose::STANDARD
         .encode_slice(&raw[..n], b64)
         .expect("a page's base64 fits its scratch");
     raw[..n].zeroize();
-    StreamPageJson {
+    Ok(StreamPageJson {
         classification: match view.classification {
             Classification::Pending => "pending",
             Classification::Cleartext => "cleartext",
@@ -170,7 +182,7 @@ fn page<'a>(entry: &FollowEntry, dir: Direction, offset: u32, raw: &mut [u8], b6
         conflicting_overlap_bytes: view.conflicting_overlap_bytes,
         redacted_ranges: plan.ranges,
         data_base64: std::str::from_utf8(&b64[..len]).expect("base64 is ASCII"),
-    }
+    })
 }
 
 /// Where a page ends and the metadata it carries.
@@ -182,23 +194,26 @@ struct PagePlan {
 }
 
 /// The page `[offset, end)`. Data stops at the emission horizon. A gap
-/// belongs to the page holding its offset; one at the very end belongs to
-/// the final page only once nothing more can follow it, so no gap is sent
-/// on two different pages. Gaps at one offset are merged, so a page always
-/// ends past its offset when it is shortened to fit the metadata limits.
+/// belongs to the page holding its offset. One at the very end belongs to
+/// the empty page that starts there, and only once nothing more can follow
+/// it, so no gap is sent on two pages with different offsets (a page cut
+/// short by the gap limit can end exactly there). Gaps at one offset are
+/// merged, so a page always ends past its offset when it is shortened to
+/// fit the metadata limits.
 fn plan_page(view: &FollowDirection<'_>, offset: u32) -> PagePlan {
     let horizon = view.emittable;
     if offset > horizon {
         return PagePlan { end: offset, gaps: Vec::new(), ranges: Vec::new() };
     }
     let mut end = offset.saturating_add(PAGE_DATA_BYTES).min(horizon);
-    let finished = (view.closed || view.stopped.is_some()) && horizon == view.stored_bytes;
+    // The empty page at the end of a direction that can no longer grow.
+    let at_the_end = offset == horizon && horizon == view.stored_bytes && (view.closed || view.stopped.is_some());
 
     let mut gaps = Vec::new();
     let mut i = view.gaps.partition_point(|g| g.at < offset);
     while let Some(g) = view.gaps.get(i) {
         let at = g.at;
-        if at > end || (at == end && !(finished && end == horizon)) {
+        if at > end || (at == end && !at_the_end) {
             break;
         }
         if gaps.len() == PAGE_GAPS {
@@ -215,7 +230,7 @@ fn plan_page(view: &FollowDirection<'_>, offset: u32) -> PagePlan {
         gaps.push(StreamGapJson { at, missing, reason: if snaplen { "snaplen_likely" } else { "missing" } });
     }
 
-    let mut ranges = Vec::new();
+    let mut ranges: Vec<StreamMaskJson> = Vec::new();
     let first = view.redacted_ranges.partition_point(|r| r.start + r.len <= offset);
     for r in &view.redacted_ranges[first..] {
         if r.start >= end {
@@ -227,23 +242,16 @@ fn plan_page(view: &FollowDirection<'_>, offset: u32) -> PagePlan {
             gaps.retain(|g| g.at < end);
             break;
         }
-        ranges.push(*r);
+        let start = r.start.max(offset);
+        ranges.push(StreamMaskJson {
+            start,
+            len: (r.start + r.len).min(end) - start,
+            reason: match r.reason {
+                MaskReason::Credential => "credential",
+                MaskReason::Uncertain => "uncertain",
+            },
+        });
     }
-    let ranges = ranges
-        .iter()
-        .filter(|r| r.start < end)
-        .map(|r| {
-            let start = r.start.max(offset);
-            StreamMaskJson {
-                start,
-                len: (r.start + r.len).min(end) - start,
-                reason: match r.reason {
-                    MaskReason::Credential => "credential",
-                    MaskReason::Uncertain => "uncertain",
-                },
-            }
-        })
-        .collect();
     PagePlan { end, gaps, ranges }
 }
 
@@ -277,14 +285,18 @@ impl Write for Bounded<'_> {
 }
 
 fn write_line(reply: &StreamDataJson<'_>, output: &mut Zeroizing<Vec<u8>>) -> Result<(), StreamResponseError> {
-    output.zeroize();
+    // Every byte ever written lies below the previous length: every exit
+    // leaves it zeroed or as the line just written.
+    output.as_mut_slice().zeroize();
+    output.clear();
     if output.capacity() < MAX_STREAM_DATA_LINE_BYTES {
         output.reserve_exact(MAX_STREAM_DATA_LINE_BYTES);
     }
     let mut w = Bounded(output);
     let written = serde_json::to_writer(&mut w, reply).is_ok() && w.write_all(b"\n").is_ok();
     if !written {
-        output.zeroize();
+        output.as_mut_slice().zeroize();
+        output.clear();
         return Err(StreamResponseError::TooLarge);
     }
     Ok(())
@@ -528,6 +540,19 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_directions_tail_gap_is_delivered_exactly_once() {
+        let mut store = FollowStore::new(1);
+        let (c, s) = open_cleartext(&mut store);
+        store.ingest(&key(), true, seg(c, &[b'a'; 50], s, T0 + 3_000));
+        // The server acknowledges 50 bytes the capture never saw, then the client resets.
+        store.ingest(&key(), false, seg(s, b"", c + 100, T0 + 3_000));
+        store.ingest(&key(), true, FollowSegment { seq: c + 100, ack_number: 0, syn: false, ack: false, fin: false, rst: true, payload: &[], now_ms: T0 + 3_000 });
+        let (gaps, _, bytes) = page_through(&store, "clientToServer");
+        assert_eq!(gaps, vec![serde_json::json!({ "at": 66, "missing": 50, "reason": "missing" })]);
+        assert_eq!(bytes.len(), 66);
+    }
+
+    #[test]
     fn more_than_a_pages_redacted_ranges_are_all_delivered_with_absolute_offsets() {
         let mut store = FollowStore::new(1);
         let (mut c, s) = open_cleartext(&mut store);
@@ -696,9 +721,10 @@ mod tests {
         let live = plan_page(&view(50, 50, &gaps, &[], false), 0);
         assert_eq!((live.end, live.gaps.len()), (50, 0), "live: held until the horizon passes it");
         assert!(plan_page(&view(50, 50, &gaps, &[], false), 50).gaps.is_empty());
-        let closed = plan_page(&view(50, 50, &gaps, &[], true), 0);
-        assert_eq!(closed.gaps.len(), 1);
-        assert!(plan_page(&view(50, 60, &gaps, &[], true), 0).gaps.is_empty(), "bytes withheld past it");
+        assert!(plan_page(&view(50, 50, &gaps, &[], true), 0).gaps.is_empty(), "not on the page ending there");
+        let closed = plan_page(&view(50, 50, &gaps, &[], true), 50);
+        assert_eq!((closed.end, closed.gaps.len()), (50, 1), "on the empty page starting there");
+        assert!(plan_page(&view(50, 60, &gaps, &[], true), 50).gaps.is_empty(), "bytes withheld past it");
         let mut grown = view(80, 80, &gaps, &[], false);
         assert_eq!(plan_page(&grown, 50).gaps.len(), 1, "then on the page holding it");
         grown.closed = true;

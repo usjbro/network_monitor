@@ -181,6 +181,7 @@ const STREAM_REQUEST_ID = /^[0-9a-f]{32}$/;
 const STREAM_GENERATION = /^[0-9a-f]{16}:(0|[1-9][0-9]{0,19})$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const STREAM_PAGE_BASE64_CHARS = Math.ceil(FOLLOW_LIMITS.pageBytes / 3) * 4;
+const UTF8 = new TextEncoder();
 
 function streamFail(what: string): never {
   throw new Error(`malformed stream_data: ${what}`);
@@ -244,6 +245,7 @@ function mapStreamPage(value: unknown, what: string): FollowDirectionPage {
   if (nextOffset < offset || base64Bytes(dataBase64) !== nextOffset - offset) streamFail(`${what}: data does not span offset..nextOffset`);
   const gaps: FollowGap[] = streamArray(p.gaps, `${what}.gaps`, FOLLOW_LIMITS.pageGaps).map((g, i) => {
     const o = streamObject(g, `${what}.gaps[${i}]`);
+    // A gap belongs to the page holding it; one at nextOffset only when the page is empty at the end.
     return {
       at: streamInt(o.at, `${what}.gaps[${i}].at`, max),
       missing: streamInt(o.missing, `${what}.gaps[${i}].missing`, 2 ** 32 - 1),
@@ -255,8 +257,12 @@ function mapStreamPage(value: unknown, what: string): FollowDirectionPage {
     const start = streamInt(o.start, `${what}.redactedRanges[${i}].start`, max);
     const len = streamInt(o.len, `${what}.redactedRanges[${i}].len`, max - start);
     if (len === 0) streamFail(`${what}.redactedRanges[${i}].len`);
+    if (start < offset || start + len > nextOffset) streamFail(`${what}.redactedRanges[${i}]: outside the page`);
     return { start, len, reason: streamEnum(o.reason, `${what}.redactedRanges[${i}].reason`, ['credential', 'uncertain'] as const) };
   });
+  for (const [i, g] of gaps.entries()) {
+    if (g.at < offset || g.at > nextOffset || (g.at === nextOffset && nextOffset !== offset)) streamFail(`${what}.gaps[${i}]: outside the page`);
+  }
   return {
     classification: streamEnum(p.classification, `${what}.classification`, ['pending', 'cleartext', 'tls'] as const),
     tlsFrom: p.tlsFrom === null ? null : streamInt(p.tlsFrom, `${what}.tlsFrom`, max),
@@ -276,7 +282,7 @@ export function mapStreamData(json: unknown): FollowResponse {
   const w = streamObject(json, 'not an object');
   if (w.type !== 'stream_data') streamFail('type');
   if (typeof w.requestId !== 'string' || !STREAM_REQUEST_ID.test(w.requestId)) streamFail('requestId');
-  if (typeof w.connectionId !== 'string' || w.connectionId.length === 0 || w.connectionId.length > FOLLOW_LIMITS.connectionIdChars) {
+  if (typeof w.connectionId !== 'string' || w.connectionId.length === 0 || UTF8.encode(w.connectionId).length > FOLLOW_LIMITS.connectionIdBytes) {
     streamFail('connectionId');
   }
   const generation = w.generation;

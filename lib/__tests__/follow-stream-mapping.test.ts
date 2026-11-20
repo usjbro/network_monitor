@@ -111,7 +111,10 @@ describe('stream_data strictness', () => {
     ['wrong type', (w) => (w.type = 'tcp_samples')],
     ['uppercase requestId', (w) => (w.requestId = w.requestId.toUpperCase())],
     ['short requestId', (w) => (w.requestId = 'abc')],
-    ['long connectionId', (w) => (w.connectionId = 'x'.repeat(FOLLOW_LIMITS.connectionIdChars + 1))],
+    ['long connectionId', (w) => (w.connectionId = 'x'.repeat(FOLLOW_LIMITS.connectionIdBytes + 1))],
+    ['connectionId over its bytes, not its characters', (w) => (w.connectionId = '€'.repeat(43))],
+    ['gap at the end of a non-empty page', (w) => (w.directions.clientToServer.gaps[0].at = w.directions.clientToServer.nextOffset)],
+    ['range past the page', (w) => (w.directions.clientToServer.redactedRanges[1].len = 5)],
     ['non-canonical generation', (w) => (w.generation = '000000000000feed:01')],
     ['generation as number', (w) => (w.generation = 1)],
     ['string boolean', (w) => (w.found = 'true')],
@@ -137,6 +140,18 @@ describe('stream_data strictness', () => {
   ];
   it.each(cases)('rejects %s', (_, edit) => {
     expect(() => mapStreamData(edited(edit))).toThrow(/malformed stream_data/);
+  });
+
+  it('rejects a gap or range before a page that starts past 0', () => {
+    const page = (continued as any).directions.clientToServer;
+    expect(page.offset).toBe(16);
+    expect(() => mapStreamData(continued)).not.toThrow();
+    const gapBefore = structuredClone(continued) as any;
+    gapBefore.directions.clientToServer.gaps = [{ at: 15, missing: 1, reason: 'missing' }];
+    expect(() => mapStreamData(gapBefore)).toThrow(/gaps\[0\]: outside the page/);
+    const rangeBefore = structuredClone(continued) as any;
+    rangeBefore.directions.clientToServer.redactedRanges = [{ start: 15, len: 2, reason: 'credential' }];
+    expect(() => mapStreamData(rangeBefore)).toThrow(/redactedRanges\[0\]: outside the page/);
   });
 
   it('never echoes captured bytes in its error', () => {
@@ -166,7 +181,7 @@ describe('Rust and TypeScript limits agree', () => {
       pageRanges: rust('follow_response.rs', 'PAGE_RANGES'),
       pageTurns: rust('follow_response.rs', 'PAGE_TURNS'),
       flowTurns: rust('follow.rs', 'MAX_TURNS_PER_FLOW'),
-      connectionIdChars: rust('wire.rs', 'STREAM_MAX_CONNECTION_ID_CHARS'),
+      connectionIdBytes: rust('wire.rs', 'STREAM_MAX_CONNECTION_ID_BYTES'),
     });
   });
 

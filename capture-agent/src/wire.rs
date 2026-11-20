@@ -913,7 +913,7 @@ impl TryFrom<RawTcpSamplesRequest> for TcpSamplesRequest {
 }
 
 /// `get_stream` limits (spec D4): the relay enforces the same ones.
-pub const STREAM_MAX_CONNECTION_ID_CHARS: usize = 128;
+pub const STREAM_MAX_CONNECTION_ID_BYTES: usize = 128;
 /// `"<16 hex>:<u64>"`: 16 + 1 + 20.
 pub const STREAM_MAX_GENERATION_CHARS: usize = 37;
 
@@ -963,9 +963,9 @@ impl TryFrom<RawStreamRequest> for StreamRequest {
         if id.len() != 32 || !id.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
             return Err("requestId must be 32 lowercase hex characters");
         }
-        let chars = raw.connection_id.chars().count();
-        if chars == 0 || chars > STREAM_MAX_CONNECTION_ID_CHARS {
-            return Err("connectionId must be 1 to 128 characters");
+        // Bytes, as the relay counts them, so both sides agree on any input.
+        if raw.connection_id.is_empty() || raw.connection_id.len() > STREAM_MAX_CONNECTION_ID_BYTES {
+            return Err("connectionId must be 1 to 128 bytes");
         }
         let generation = match raw.generation {
             None => None,
@@ -2692,13 +2692,15 @@ mod stream_tests {
 
     #[test]
     fn get_stream_outside_its_limits_is_ignored() {
-        let long = format!("Tcp-{}", "1".repeat(STREAM_MAX_CONNECTION_ID_CHARS - 3));
-        assert!(stream_request(&get_stream(json!({ "connectionId": long[..STREAM_MAX_CONNECTION_ID_CHARS].to_string() }))).is_some());
+        let long = format!("Tcp-{}", "1".repeat(STREAM_MAX_CONNECTION_ID_BYTES - 3));
+        assert!(stream_request(&get_stream(json!({ "connectionId": long[..STREAM_MAX_CONNECTION_ID_BYTES].to_string() }))).is_some());
         for bad in [
             json!({ "requestId": "0123456789ABCDEF0123456789abcdef" }),
             json!({ "requestId": "0123" }),
             json!({ "connectionId": "" }),
             json!({ "connectionId": long }),
+            // 43 three-byte characters: 129 bytes, though 43 characters.
+            json!({ "connectionId": "€".repeat(43) }),
             json!({ "c2s": { "offset": 262_145 } }),
             json!({ "s2c": { "offset": -1 } }),
             json!({ "c2s": {} }),

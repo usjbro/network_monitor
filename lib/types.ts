@@ -272,7 +272,7 @@ export const FOLLOW_LIMITS = {
   pageRanges: 128,
   pageTurns: 256,
   flowTurns: 4_096,
-  connectionIdChars: 128,
+  connectionIdBytes: 128,
 } as const;
 
 export type FollowDirection = 'c2s' | 's2c' | 'unknown';
