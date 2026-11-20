@@ -1,3 +1,9 @@
+# KAN-110 Follow Stream Task 3c-1: feed the store (2026-11-20)
+
+James's standing instruction (2026-11-20): work through every KAN issue in order. Worktree `.worktrees/follow-stream-feed`, branch `KAN-110-follow-stream-feed`. `main.rs` allocates `FollowStore` only with `FOLLOW_STREAM=1`, feeds it after flow observation, notifies snaplen cuts, ticks it from the emitter with `FlowTable`'s removals, resets it on a successful interface switch. Next: PR, reviews; then 3c-2 (reply writer, budget, `follow_replay.rs`, fuzz).
+
+---
+
 # KAN-110 Follow Stream Task 3b: wire contract and bounded response (2026-11-20)
 
 James approved Task 3b in chat ("approved all"). Worktree `.worktrees/follow-stream-response`, branch `KAN-110-follow-stream-response`. `follow_response.rs` builds `stream_data` (192 KiB bounded writer, page/metadata/turn limits, P2 port check); `wire.rs` decodes `get_stream`; `lib/types.ts`/`lib/agent-mapping.ts` map it from an encoder-generated fixture. `main.rs` ignores `get_stream` until Task 3c. PR open. Next: reviews, CI; James merges.

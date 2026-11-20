@@ -72,8 +72,11 @@ event contract this binary produces.
 Follow Stream (KAN-110, in progress) retains a selected TCP flow's bytes so
 the UI can show the conversation. It is off unless the agent starts with
 exactly `FOLLOW_STREAM=1`; unset, empty or any other value leaves it off.
-Today the setting only does the step below; the stream itself arrives in
-later tasks.
+With it on, the agent keeps the start of each TCP conversation in a bounded
+in-memory store (at most 256 flows and 16 MiB, credentials masked on every
+copy out), dropping a flow's bytes when the flow table drops the flow and
+emptying the store on an interface switch. Nothing reads the store yet: the
+agent does not answer stream requests until a later task.
 
 With it on, the relay's own HTTP traffic would carry retained content back
 over loopback, so live capture drops it before reassembly, flow events and
