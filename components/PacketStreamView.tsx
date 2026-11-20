@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Code,
   Download,
@@ -67,6 +67,11 @@ interface PacketStreamViewProps {
   // packets actually buffered (k), computed here on every render.
   drillHeader?: DrillHeader;
   onClearDrill?: () => void;
+  // KAN-130 plan P7: select and inspect this frame, clearing this view's own
+  // search, layer filter and freeze so it is listed. onFocusHandled is
+  // called once per id, whether or not the frame is still buffered.
+  focusPacketId?: string;
+  onFocusHandled?: () => void;
 }
 
 function HexPane({ hexDump, fields, activePath, selectedPath, hoveredByte, onHoverByte, onSelectField, testId }: {
@@ -177,6 +182,8 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   timeRange,
   drillHeader,
   onClearDrill,
+  focusPacketId,
+  onFocusHandled,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isFrozen, setIsFrozen] = useState(false);
@@ -194,6 +201,24 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
   const [hoveredPayloadFieldPath, setHoveredPayloadFieldPath] = useState<string | null>(null);
   const [hoveredHeaderByte, setHoveredHeaderByte] = useState<number | null>(null);
   const [hoveredPayloadByte, setHoveredPayloadByte] = useState<number | null>(null);
+  // KAN-130: the focus request last applied, so each one is applied once.
+  const [appliedFocus, setAppliedFocus] = useState<string | undefined>(undefined);
+  if (focusPacketId !== appliedFocus) {
+    setAppliedFocus(focusPacketId);
+    const target = focusPacketId === undefined ? undefined : packets.find((p) => p.id === focusPacketId);
+    if (target) {
+      setSearchTerm('');
+      setLayerFilter(0);
+      setIsFrozen(false);
+      setSelectedPacket(target);
+    }
+  }
+  useEffect(() => {
+    if (focusPacketId === undefined) return;
+    const row = Array.from(document.querySelectorAll<HTMLElement>('[data-packet-row]')).find((el) => el.dataset.packetId === focusPacketId);
+    row?.scrollIntoView?.({ block: 'nearest' });
+    onFocusHandled?.();
+  }, [focusPacketId, onFocusHandled]);
 
   // First finding wins per frame — a row shows one marker, not a stack;
   // the panel (FindingsPanel) is where every finding for a frame is listed.
@@ -410,6 +435,8 @@ export const PacketStreamView: React.FC<PacketStreamViewProps> = ({
                 <div
                   key={pkt.id}
                   data-packet-row
+                  data-packet-id={pkt.id}
+                  data-selected={isSelected}
                   onClick={() => selectPacket(pkt)}
                   className={`p-2 hover:bg-slate-900/90 transition cursor-pointer flex items-start space-x-2 text-[11px] ${
                     isSelected ? 'bg-slate-900 border-l-2 border-emerald-400 font-semibold' : ''

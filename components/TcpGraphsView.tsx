@@ -22,7 +22,16 @@ interface TcpGraphsViewProps {
   onClose: () => void;
   /** For tests: tick label time zone. */
   timeZone?: string;
+  /**
+   * KAN-130 plan P8: the panel's tab. With `ladder` and `onTab` the header
+   * shows a Graphs | Ladder strip; both tabs read the same polled state.
+   */
+  tab?: PanelTab;
+  onTab?: (tab: PanelTab) => void;
+  ladder?: React.ReactNode;
 }
+
+export type PanelTab = 'graphs' | 'ladder';
 
 const W = 800;
 const H = 130;
@@ -107,7 +116,9 @@ function yTicksOf(min: number, max: number, y: (v: number) => number, fmt: (v: n
   return [min, (min + hi) / 2, hi].map((v) => ({ y: y(v), label: fmt(v) }));
 }
 
-export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, theme, latencyMs, onClose, timeZone }) => {
+export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, theme, latencyMs, onClose, timeZone, tab = 'graphs', onTab, ladder }) => {
+  const tabbed = ladder !== undefined && onTab !== undefined;
+  const onLadder = tabbed && tab === 'ladder';
   const [direction, setDirection] = useState<Direction>('outbound');
   // `fit`: the window spans every sample held and follows new ones.
   const [fit, setFit] = useState(true);
@@ -153,6 +164,7 @@ export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, them
   }, [hasPlots]);
 
   function onKeyDown(e: React.KeyboardEvent) {
+    if (onLadder) return; // the ladder handles its own keys
     if (e.key === '+' || e.key === '=') zoom(0.5, 0.5);
     else if (e.key === '-' || e.key === '_') zoom(2, 0.5);
     else if (e.key === 'ArrowLeft') pan(-0.1);
@@ -218,16 +230,33 @@ export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, them
       tabIndex={0}
       onKeyDown={onKeyDown}
       className={`p-3.5 rounded border ${theme.border} ${theme.cardBg} space-y-2 outline-none`}
-      aria-label="TCP graphs: + and - zoom, arrows pan, 0 fits all samples"
+      aria-label={onLadder ? 'TCP flow ladder' : 'TCP graphs: + and - zoom, arrows pan, 0 fits all samples'}
     >
       <div className="flex items-center justify-between border-b border-slate-800 pb-2">
         <div className="flex items-center space-x-2 font-bold text-slate-200">
           <Activity className={`h-4 w-4 ${theme.accent}`} />
-          <span>TCP GRAPHS</span>
-          <span className="font-mono text-[11px] text-slate-400 font-normal">{state.connectionId}</span>
+          <span>{onLadder ? 'FLOW LADDER' : 'TCP GRAPHS'}</span>
+          {!onLadder && <span className="font-mono text-[11px] text-slate-400 font-normal truncate">{state.connectionId}</span>}
         </div>
         <div className="flex items-center space-x-2 text-[11px]">
-          <label className="text-slate-400">
+          {tabbed && (
+            <div role="tablist" aria-label="TCP panel" className="flex rounded border border-slate-700 overflow-hidden">
+              {(['graphs', 'ladder'] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === t}
+                  data-testid={`tcp-tab-${t}`}
+                  onClick={() => onTab(t)}
+                  className={`px-2 py-0.5 ${tab === t ? theme.highlight : 'bg-slate-900 text-slate-400 hover:text-slate-200'}`}
+                >
+                  {t === 'graphs' ? 'Graphs' : 'Ladder'}
+                </button>
+              ))}
+            </div>
+          )}
+          {!onLadder && <label className="text-slate-400">
             Data{' '}
             <select
               data-testid="tcp-direction"
@@ -238,21 +267,24 @@ export const TcpGraphsView: React.FC<TcpGraphsViewProps> = ({ state, error, them
               <option value="outbound">outbound (this host sends)</option>
               <option value="inbound">inbound (this host receives)</option>
             </select>
-          </label>
-          <button onClick={onClose} aria-label="Close TCP graphs" className="p-1 rounded hover:bg-slate-800 text-slate-400">
+          </label>}
+          <button onClick={onClose} aria-label={onLadder ? 'Close flow ladder' : 'Close TCP graphs'} className="p-1 rounded hover:bg-slate-800 text-slate-400">
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
 
-      <div className="text-[11px] text-slate-400 space-y-0.5">
+      {onLadder && error !== null && <div data-testid="tcp-error" className="text-[11px] text-amber-400">{errorText(error)}</div>}
+      {onLadder && ladder}
+
+      {!onLadder && <div className="text-[11px] text-slate-400 space-y-0.5">
         {horizon && <div data-testid="tcp-horizon">{horizon}</div>}
         {s.note && <div data-testid="tcp-note" className="text-amber-400">{s.note}</div>}
         {status && <div data-testid="tcp-status">{status}</div>}
         {error !== null && <div data-testid="tcp-error" className="text-amber-400">{errorText(error)}</div>}
-      </div>
+      </div>}
 
-      {hasPlots && (
+      {!onLadder && hasPlots && (
         <div data-testid="tcp-plots" className="space-y-1">
           <Plot testId="tcp-plot-seq" title="Time / sequence (relative): data, ACK line, receive window" ticks={xTicks} showLabels={false} yTicks={yTicksOf(seqMin, seqMax, seq.y, (v) => compact.format(v))}>
             {zeroOfAdvertiser.map((z) => (

@@ -1,25 +1,11 @@
 // KAN-130 Task 3: the ladder model (spec D3 rows and collapse, D4 match key).
 import { describe, expect, it } from 'vitest';
 import { MAX_ROWS, RUN_DRAW_MAX, arrowText, buildLadder, linkSamples, packetKey, sampleKey, type LadderRow } from '../flow-ladder';
-import type { IndexedSample, TcpGraphState } from '../tcp-graphs';
-import { TCP_SAMPLE_FLAG as F, TCP_SAMPLE_MARK as M, type NetworkConnection, type PacketFrame, type TcpSample, type TcpSampleLabel, type WireField } from '../types';
+import type { IndexedSample } from '../tcp-graphs';
+import { BASE, LADDER_ID as ID, s, state } from './helpers/ladder-fixtures';
+import { TCP_SAMPLE_FLAG as F, TCP_SAMPLE_MARK as M, type NetworkConnection, type PacketFrame, type TcpSampleLabel, type WireField } from '../types';
 
-const ID = 'Tcp-192.168.1.10:51000-93.184.216.34:443';
 const T0 = 1_794_120_000_000_000;
-const BASE = { outbound: 1000, inbound: 5000 };
-
-function s(index: number, tUs: number, outbound: boolean, over: Partial<TcpSample> = {}): IndexedSample {
-  const mark = (outbound ? M.OUTBOUND : 0) | (over.mark ?? 0);
-  return { index, tUs, seq: 0, ack: 0, win: 1000, len: 0, flags: F.ACK, rttUs: 0, ...over, mark, outbound };
-}
-
-function state(samples: IndexedSample[], over: Partial<TcpGraphState> = {}): TcpGraphState {
-  return {
-    connectionId: ID, generation: 'g:1', samples, nextIndex: (samples.at(-1)?.index ?? -1) + 1,
-    meta: { handshakeSeen: true, windowScale: null, seqBase: BASE, relativeTo: 'isn' },
-    found: true, head: [], labels: new Map(), ...over,
-  };
-}
 
 function labels(...entries: TcpSampleLabel[]): Map<number, TcpSampleLabel> {
   return new Map(entries.map((l) => [l.index, l]));
