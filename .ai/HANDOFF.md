@@ -1,3 +1,10 @@
+# KAN-110 Task 3a (2026-11-20)
+
+- Change: `control_line::ControlLines` replaces `BufReader::lines()` in `serve_connection`; the cap is checked before the buffer grows; `TooLong` closes the connection with a fixed log line and no body; EOF-without-LF and non-UTF-8 behave as `Lines` did. The 256-byte auth first line (`control_auth::verify_peer`) is unchanged.
+- Deliberate deviation: cap is 128 KiB, not the plan's 32 KiB. `set_io_series` at the relay's own bounds (8 × 2,048-unit filters, six-byte escapes) is 99,692 bytes; 32 KiB would refuse legitimate non-ASCII filter sets.
+
+---
+
 # KAN-293 review fixes (2026-11-20)
 
 - Change: `FollowEntry::track` drops the ACK push; `vouched` (peer confirmed, segment at or within one window past the peer's `last_ack`) replaces an unconfirmed side's anchors, or moves a confirmed side forward when the segment is more than a window ahead of it, never back. `DirState::gap_to` declares each direction's missed tail at an RST (see the #333 line below). `expire_holes`'s flag is `flush`; the RST branch's duplicate turn-limit check is gone (`settle` does it).

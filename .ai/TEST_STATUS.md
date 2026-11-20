@@ -1,3 +1,9 @@
+# KAN-110 Task 3a (2026-11-20)
+
+`cargo test --locked`: 881 passed, 0 failed. Clippy `-D warnings` clean; release build OK. 14 reader tests (stub run: 11 red) and 2 connection tests through `serve_connection`. Planted breaks caught: off-by-one cap, no cap, `TooLong` not closing, buffer cleared on re-entry (cancel safety); the worst-case `set_io_series` test fails at 32 KiB.
+
+---
+
 # KAN-293 review fixes (2026-11-20)
 
 `cargo test --locked`: 851 passed, 0 failed. Clippy `-D warnings` clean; `follow_store` fuzz 8,260 runs clean in 41 s. Five new tests; the forged-far-ACK, long-fat-link and tail-gap tests failed on #331's code (the first two pass with its resync disabled, so #331 introduced them). Planted breaks (no resync; resync moving back; no tail gap; an unconfirmed peer vouching) are each caught.
