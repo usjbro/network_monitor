@@ -2,6 +2,8 @@
 
 `cargo test --locked`: 881 passed, 0 failed. Clippy `-D warnings` clean; release build OK. 14 reader tests (stub run: 11 red) and 2 connection tests through `serve_connection`. Planted breaks caught: off-by-one cap, no cap, `TooLong` not closing, buffer cleared on re-entry (cancel safety); the worst-case `set_io_series` test fails at 32 KiB.
 
+
+/code-review fixes on #334: 883 passed, 0 failed; clippy clean. New tests for CR stripping, the EOF-line cap and geometric growth; planted removals of each are caught.
 ---
 
 # KAN-293 review fixes (2026-11-20)

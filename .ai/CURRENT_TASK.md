@@ -1,6 +1,6 @@
 # KAN-110 Follow Stream Task 3a — bounded control-line reader (2026-11-20)
 
-James split plan Task 3 into 3a/3b/3c and chose Claude for 3a (gate `kan-110__follow-stream-control-reader`, approved in chat). Worktree `.worktrees/follow-stream-control-reader`, branch from `new-task.sh`. Scope: `capture-agent/src/control_line.rs` and its use in `serve_connection`; docs. Implemented and verified, uncommitted. Next: James asks for commit/PR; reviews; James merges. 3b (response builder, wire types, P2) and 3c (main.rs integration, replay test, fuzz) are unassigned; KAN-294 option (a) chosen, unassigned.
+James split plan Task 3 into 3a/3b/3c and chose Claude for 3a (gate `kan-110__follow-stream-control-reader`, approved in chat). Worktree `.worktrees/follow-stream-control-reader`, branch from `new-task.sh`. Scope: `capture-agent/src/control_line.rs` and its use in `serve_connection`; docs. PR #334 (security review: no findings; /code-review fixes on the PR). Next: CI; James merges. 3b (response builder, wire types, P2) and 3c (main.rs integration, replay test, fuzz) are unassigned; KAN-294 option (a) chosen, unassigned.
 
 ---
 

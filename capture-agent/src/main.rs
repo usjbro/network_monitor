@@ -4133,6 +4133,10 @@ where
                         );
                         break;
                     }
+                    Ok(capture_agent::control_line::ControlRead::NotUtf8) => {
+                        eprintln!("capture-agent: closing control connection: line is not UTF-8");
+                        break;
+                    }
                     Ok(capture_agent::control_line::ControlRead::Line(text)) => {
                         let message = match wire::classify_control_line(&text) {
                             wire::ControlLine::Message(message) => Some(message),

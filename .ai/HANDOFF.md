@@ -1,7 +1,8 @@
 # KAN-110 Task 3a (2026-11-20)
 
 - Change: `control_line::ControlLines` replaces `BufReader::lines()` in `serve_connection`; the cap is checked before the buffer grows; `TooLong` closes the connection with a fixed log line and no body; EOF-without-LF and non-UTF-8 behave as `Lines` did. The 256-byte auth first line (`control_auth::verify_peer`) is unchanged.
-- Deliberate deviation: cap is 128 KiB, not the plan's 32 KiB. `set_io_series` at the relay's own bounds (8 × 2,048-unit filters, six-byte escapes) is 99,692 bytes; 32 KiB would refuse legitimate non-ASCII filter sets.
+- /code-review on #334: buffer grows by doubling (`grown_capacity`), not per read; trailing CR stripped as `Lines` did; an unterminated EOF line counts its missing LF; `NotUtf8` logs a fixed reason. Not done: no per-line or idle timeout on authenticated connections (pre-existing with `Lines`; a peer can hold a permit and 128 KiB indefinitely); the cap does not bound `serde_json::Value` parse cost.
+- Deliberate deviation (also in DECISIONS.md): cap is 128 KiB, not the plan's 32 KiB. `set_io_series` at the relay's own bounds (8 × 2,048-unit filters, six-byte escapes) is 99,692 bytes; 32 KiB would refuse legitimate non-ASCII filter sets.
 
 ---
 
