@@ -8,6 +8,7 @@ pub mod fields;
 pub mod flow;
 pub mod follow;
 pub mod follow_config;
+pub mod follow_response;
 pub mod host_stats;
 pub mod http2;
 pub mod io_series;

@@ -674,6 +674,10 @@ pub enum ControlMessage {
     /// message outside them fails to decode and is ignored like an unknown
     /// control type.
     GetTcpSamples(TcpSamplesRequest),
+    /// KAN-110 Task 3b: one page of a Follow Stream entry, answered only to
+    /// the requesting connection (`follow_response`). Sent only by the
+    /// relay's own Follow Stream route, never `/api/control`.
+    GetStream(StreamRequest),
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -906,6 +910,208 @@ impl TryFrom<RawTcpSamplesRequest> for TcpSamplesRequest {
             from_index: raw.from_index.unwrap_or(0),
         })
     }
+}
+
+/// `get_stream` limits (spec D4): the relay enforces the same ones.
+pub const STREAM_MAX_CONNECTION_ID_BYTES: usize = 128;
+/// `"<16 hex>:<u64>"`: 16 + 1 + 20.
+pub const STREAM_MAX_GENERATION_CHARS: usize = 37;
+
+/// `get_stream`, validated. A request ID, connection ID, generation,
+/// offset or `turnsFrom` outside its limit fails to decode, so the request
+/// is ignored and gets no reply. `relayPort` alone decodes tolerantly
+/// (plan P2): missing or not a port reads as `None`, which the handler
+/// answers with a correlated, content-free `relay_port_mismatch`.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(try_from = "RawStreamRequest")]
+pub struct StreamRequest {
+    pub request_id: String,
+    pub connection_id: String,
+    /// `(epoch, counter)`; `None` on a first request.
+    pub generation: Option<(u64, u64)>,
+    pub c2s_offset: u32,
+    pub s2c_offset: u32,
+    pub turns_from: u32,
+    pub relay_port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawStreamRequest {
+    request_id: String,
+    connection_id: String,
+    #[serde(default)]
+    generation: Option<String>,
+    c2s: RawStreamOffset,
+    s2c: RawStreamOffset,
+    #[serde(default)]
+    turns_from: Option<u64>,
+    #[serde(default)]
+    relay_port: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct RawStreamOffset {
+    offset: u64,
+}
+
+impl TryFrom<RawStreamRequest> for StreamRequest {
+    type Error = &'static str;
+
+    fn try_from(raw: RawStreamRequest) -> Result<Self, Self::Error> {
+        let id = raw.request_id.as_bytes();
+        if id.len() != 32 || !id.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err("requestId must be 32 lowercase hex characters");
+        }
+        // Bytes, as the relay counts them, so both sides agree on any input.
+        if raw.connection_id.is_empty() || raw.connection_id.len() > STREAM_MAX_CONNECTION_ID_BYTES {
+            return Err("connectionId must be 1 to 128 bytes");
+        }
+        let generation = match raw.generation {
+            None => None,
+            Some(g) => Some(parse_generation(&g).ok_or("generation is not canonical")?),
+        };
+        let offset = |o: RawStreamOffset| {
+            u32::try_from(o.offset)
+                .ok()
+                .filter(|&o| o <= crate::follow::MAX_DIRECTION_BYTES)
+                .ok_or("offset is outside 0..=262144")
+        };
+        let turns_from = u32::try_from(raw.turns_from.unwrap_or(0))
+            .ok()
+            .filter(|&t| t as usize <= crate::follow::MAX_TURNS_PER_FLOW)
+            .ok_or("turnsFrom is outside 0..=4096")?;
+        let relay_port = raw
+            .relay_port
+            .and_then(|v| v.as_u64())
+            .and_then(|p| u16::try_from(p).ok())
+            .filter(|&p| p != 0);
+        Ok(StreamRequest {
+            request_id: raw.request_id,
+            connection_id: raw.connection_id,
+            generation,
+            c2s_offset: offset(raw.c2s)?,
+            s2c_offset: offset(raw.s2c)?,
+            turns_from,
+            relay_port,
+        })
+    }
+}
+
+/// The inverse of `render_generation`, for its exact output only: 16
+/// lowercase hex digits, a colon, a decimal counter without leading zeros.
+pub fn parse_generation(text: &str) -> Option<(u64, u64)> {
+    if text.len() > STREAM_MAX_GENERATION_CHARS {
+        return None;
+    }
+    let (epoch, counter) = text.split_once(':')?;
+    if epoch.len() != 16 || !epoch.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return None;
+    }
+    if counter.is_empty() || !counter.bytes().all(|b| b.is_ascii_digit()) || (counter.len() > 1 && counter.starts_with('0')) {
+        return None;
+    }
+    Some((u64::from_str_radix(epoch, 16).ok()?, counter.parse().ok()?))
+}
+
+/// `stream_data` (spec D4), written only through `follow_response`'s
+/// bounded writer. Deliberately has no `Debug`: it borrows page bytes.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDataJson<'a> {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub request_id: &'a str,
+    pub connection_id: &'a str,
+    pub enabled: bool,
+    pub found: bool,
+    pub stale: bool,
+    pub generation: Option<String>,
+    pub flow_start_captured: bool,
+    pub closed: bool,
+    pub client_is_local: Option<bool>,
+    pub directions: StreamDirectionsJson<'a>,
+    pub turns_from: u32,
+    pub turns_next: Option<u32>,
+    pub last_turn: Option<StreamLastTurnJson>,
+    pub turns: Vec<StreamTurnJson>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub busy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamDirectionsJson<'a> {
+    pub client_to_server: StreamPageJson<'a>,
+    pub server_to_client: StreamPageJson<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamPageJson<'a> {
+    pub classification: &'static str,
+    pub tls_from: Option<u32>,
+    pub offset: u32,
+    pub next_offset: u32,
+    pub stored_bytes: u32,
+    pub seen_bytes: u64,
+    pub stopped_reason: Option<&'static str>,
+    pub gaps: Vec<StreamGapJson>,
+    pub conflicting_overlap_bytes: u64,
+    pub redacted_ranges: Vec<StreamMaskJson>,
+    pub data_base64: &'a str,
+}
+
+impl StreamPageJson<'_> {
+    /// No entry, or one that must not be shown: no bytes, no metadata.
+    pub fn empty() -> Self {
+        StreamPageJson {
+            classification: "pending",
+            tls_from: None,
+            offset: 0,
+            next_offset: 0,
+            stored_bytes: 0,
+            seen_bytes: 0,
+            stopped_reason: None,
+            gaps: Vec::new(),
+            conflicting_overlap_bytes: 0,
+            redacted_ranges: Vec::new(),
+            data_base64: "",
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct StreamGapJson {
+    pub at: u32,
+    pub missing: u32,
+    pub reason: &'static str,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct StreamMaskJson {
+    pub start: u32,
+    pub len: u32,
+    pub reason: &'static str,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamTurnJson {
+    pub dir: &'static str,
+    pub start: u32,
+    pub len: u32,
+    pub first_seen_ms: u64,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamLastTurnJson {
+    pub index: u32,
+    #[serde(flatten)]
+    pub turn: StreamTurnJson,
 }
 
 /// A ring generation as the wire carries it: 16 lowercase hex digits of the
@@ -2421,4 +2627,149 @@ mod tcp_samples_tests {
         assert_eq!(reply["labels"].as_array().unwrap().len(), MAX_LABELS_PER_RING);
         assert_eq!(reply["head"]["tUs"].as_array().unwrap().len(), HEAD_SAMPLES);
     }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use serde_json::json;
+
+    // KAN-110 Task 3b: get_stream / stream_data.
+
+    const SID: &str = "0123456789abcdef0123456789abcdef";
+
+    fn get_stream(extra: serde_json::Value) -> serde_json::Value {
+        let mut m = json!({
+            "type": "get_stream", "requestId": SID, "connectionId": "Tcp-10.0.0.1:40000-93.184.216.34:80",
+            "c2s": { "offset": 0 }, "s2c": { "offset": 0 }, "relayPort": 3000,
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            m[k] = v.clone();
+        }
+        m
+    }
+
+    fn stream_request(m: &serde_json::Value) -> Option<StreamRequest> {
+        match classify_control_line(&m.to_string()) {
+            ControlLine::Message(ControlMessage::GetStream(r)) => Some(r),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn get_stream_decodes_every_field() {
+        let r = stream_request(&get_stream(json!({
+            "generation": "4be1a07c9d22f310:17", "c2s": { "offset": 412 }, "s2c": { "offset": 262144 }, "turnsFrom": 4096,
+        })))
+        .expect("decodes");
+        assert_eq!(
+            r,
+            StreamRequest {
+                request_id: SID.into(),
+                connection_id: "Tcp-10.0.0.1:40000-93.184.216.34:80".into(),
+                generation: Some((0x4be1_a07c_9d22_f310, 17)),
+                c2s_offset: 412,
+                s2c_offset: 262_144,
+                turns_from: 4096,
+                relay_port: Some(3000),
+            }
+        );
+        let first = stream_request(&get_stream(json!({ "generation": null }))).unwrap();
+        assert_eq!((first.generation, first.turns_from), (None, 0));
+    }
+
+    #[test]
+    fn get_stream_reads_a_bad_relay_port_as_none_rather_than_ignoring_the_request() {
+        for port in [json!(null), json!("3000"), json!(-1), json!(0), json!(65536), json!(3000.5), json!([3000])] {
+            let r = stream_request(&get_stream(json!({ "relayPort": port }))).unwrap_or_else(|| panic!("{port} dropped"));
+            assert_eq!(r.relay_port, None, "{port}");
+        }
+        let mut missing = get_stream(json!({}));
+        missing.as_object_mut().unwrap().remove("relayPort");
+        assert_eq!(stream_request(&missing).unwrap().relay_port, None);
+        assert_eq!(stream_request(&get_stream(json!({ "relayPort": 65535 }))).unwrap().relay_port, Some(65535));
+    }
+
+    #[test]
+    fn get_stream_outside_its_limits_is_ignored() {
+        let long = format!("Tcp-{}", "1".repeat(STREAM_MAX_CONNECTION_ID_BYTES - 3));
+        assert!(stream_request(&get_stream(json!({ "connectionId": long[..STREAM_MAX_CONNECTION_ID_BYTES].to_string() }))).is_some());
+        for bad in [
+            json!({ "requestId": "0123456789ABCDEF0123456789abcdef" }),
+            json!({ "requestId": "0123" }),
+            json!({ "connectionId": "" }),
+            json!({ "connectionId": long }),
+            // 43 three-byte characters: 129 bytes, though 43 characters.
+            json!({ "connectionId": "€".repeat(43) }),
+            json!({ "c2s": { "offset": 262_145 } }),
+            json!({ "s2c": { "offset": -1 } }),
+            json!({ "c2s": {} }),
+            json!({ "turnsFrom": 4097 }),
+            json!({ "generation": "4BE1A07C9D22F310:17" }),
+            json!({ "generation": "4be1a07c9d22f31:17" }),
+            json!({ "generation": "4be1a07c9d22f310:017" }),
+            json!({ "generation": "4be1a07c9d22f310:+1" }),
+            json!({ "generation": "4be1a07c9d22f310:18446744073709551616" }),
+            json!({ "generation": "4be1a07c9d22f310" }),
+            json!({ "generation": 17 }),
+        ] {
+            assert!(stream_request(&get_stream(bad.clone())).is_none(), "{bad} decoded");
+        }
+    }
+
+    #[test]
+    fn a_generation_parses_back_from_exactly_what_render_generation_wrote() {
+        for g in [(0, 0), (0x4be1_a07c_9d22_f310, 17), (u64::MAX, u64::MAX)] {
+            let text = render_generation(g);
+            assert!(text.len() <= STREAM_MAX_GENERATION_CHARS);
+            assert_eq!(parse_generation(&text), Some(g));
+        }
+    }
+
+    #[test]
+    fn stream_data_serializes_camel_case_with_its_type_tag() {
+        let data = StreamDataJson {
+            kind: "stream_data",
+            request_id: SID,
+            connection_id: "c",
+            enabled: true,
+            found: true,
+            stale: false,
+            generation: Some(render_generation((1, 2))),
+            flow_start_captured: true,
+            closed: false,
+            client_is_local: Some(true),
+            directions: StreamDirectionsJson {
+                client_to_server: StreamPageJson {
+                    gaps: vec![StreamGapJson { at: 9, missing: 4, reason: "snaplen_likely" }],
+                    redacted_ranges: vec![StreamMaskJson { start: 1, len: 2, reason: "credential" }],
+                    data_base64: "QUI=",
+                    stopped_reason: Some("store_cap"),
+                    ..StreamPageJson::empty()
+                },
+                server_to_client: StreamPageJson::empty(),
+            },
+            turns_from: 0,
+            turns_next: None,
+            last_turn: Some(StreamLastTurnJson { index: 0, turn: StreamTurnJson { dir: "c2s", start: 0, len: 2, first_seen_ms: 5 } }),
+            turns: vec![StreamTurnJson { dir: "c2s", start: 0, len: 2, first_seen_ms: 5 }],
+            busy: None,
+            unavailable: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&data).unwrap();
+        assert_eq!(v["type"], "stream_data");
+        assert_eq!(v["requestId"], SID);
+        assert_eq!(v["clientIsLocal"], true);
+        assert_eq!(v["lastTurn"], json!({ "index": 0, "dir": "c2s", "start": 0, "len": 2, "firstSeenMs": 5 }));
+        let c2s = &v["directions"]["clientToServer"];
+        assert_eq!(c2s["dataBase64"], "QUI=");
+        assert_eq!(c2s["stoppedReason"], "store_cap");
+        assert_eq!(c2s["gaps"], json!([{ "at": 9, "missing": 4, "reason": "snaplen_likely" }]));
+        assert_eq!(c2s["redactedRanges"], json!([{ "start": 1, "len": 2, "reason": "credential" }]));
+        for k in ["nextOffset", "storedBytes", "seenBytes", "conflictingOverlapBytes", "tlsFrom"] {
+            assert!(c2s.get(k).is_some(), "{k}");
+        }
+        assert!(v.get("busy").is_none() && v.get("unavailable").is_none());
+    }
+
 }

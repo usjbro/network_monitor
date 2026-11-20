@@ -261,6 +261,74 @@ export const TCP_SAMPLE_LABEL_KINDS = ['tls_client_hello', 'tls_server_hello', '
 export const TCP_HEAD_SAMPLES = 16;
 export const TCP_LABEL_TEXT_MAX = 64;
 
+// KAN-110 Follow Stream (docs/wire-protocol.md "stream_data"): one page of
+// a retained TCP conversation. Limits mirror capture-agent/src/follow.rs and
+// follow_response.rs; follow-stream-mapping.test.ts checks they agree.
+export const FOLLOW_LIMITS = {
+  lineBytes: 192 * 1024,
+  directionBytes: 256 * 1024,
+  pageBytes: 32 * 1024,
+  pageGaps: 128,
+  pageRanges: 128,
+  pageTurns: 256,
+  flowTurns: 4_096,
+  connectionIdBytes: 128,
+} as const;
+
+export type FollowDirection = 'c2s' | 's2c' | 'unknown';
+export type FollowClassification = 'pending' | 'cleartext' | 'tls' | 'unknown';
+export type FollowStopReason = 'store_cap' | 'gap_limit' | 'turn_limit' | 'redaction_limit' | 'unknown';
+
+export interface FollowRequest {
+  connectionId: string;
+  generation?: string;
+  c2s: { offset: number };
+  s2c: { offset: number };
+  turnsFrom?: number;
+}
+
+export interface FollowGap { at: number; missing: number; reason: 'missing' | 'snaplen_likely' | 'unknown' }
+export interface FollowMask { start: number; len: number; reason: 'credential' | 'uncertain' | 'unknown' }
+export interface FollowTurn { dir: FollowDirection; start: number; len: number; firstSeenMs: number }
+
+export interface FollowDirectionPage {
+  classification: FollowClassification;
+  tlsFrom: number | null;
+  offset: number;
+  nextOffset: number;
+  storedBytes: number;
+  // Observed TCP payload bytes, retransmissions included. Saturates at
+  // Number.MAX_SAFE_INTEGER; show it as "≥" there, not as exact.
+  seenBytes: number;
+  stoppedReason: FollowStopReason | null;
+  gaps: FollowGap[];
+  conflictingOverlapBytes: number;
+  redactedRanges: FollowMask[];
+  // Exactly nextOffset − offset bytes, credentials already masked.
+  dataBase64: string;
+}
+
+export interface FollowResponse {
+  type: 'stream_data';
+  requestId: string;
+  connectionId: string;
+  enabled: boolean;
+  found: boolean;
+  stale: boolean;
+  generation: string | null;
+  flowStartCaptured: boolean;
+  closed: boolean;
+  // null: capture started midstream, so endpoints are local/remote, not client/server.
+  clientIsLocal: boolean | null;
+  directions: { clientToServer: FollowDirectionPage; serverToClient: FollowDirectionPage };
+  turnsFrom: number;
+  turnsNext: number | null;
+  lastTurn: (FollowTurn & { index: number }) | null;
+  turns: FollowTurn[];
+  busy?: boolean;
+  unavailable?: 'relay_port_mismatch' | 'unknown';
+}
+
 // IO graph (JAM-18, docs/wire-protocol.md "io_series_status"/"io_buckets").
 // One shared series set per agent; edits are compare-and-swap on
 // (epoch, revision), both assigned by the agent.

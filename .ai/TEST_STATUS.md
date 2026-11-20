@@ -1,3 +1,11 @@
+# KAN-110 Task 3b (2026-11-20)
+
+/code-review fixes on #343: `cargo test --locked` 946 passed, 0 failed (port 9990 free again, so `io_graph_replay` ran and passed); clippy clean; Vitest 1,205 passed; lint clean. The new closed-flow tail-gap test failed first (gap delivered twice); planted breaks of the new end-gap rule, the mapper's page bounds and byte-counted connection IDs are each caught. The short-copy guard is defensive and has no test (no current path triggers it).
+
+`cargo test --locked`: 911 passed, 5 failed: all five in `tests/io_graph_replay.rs`, which need the fixed port 9990, held by another agent process (PID 13644, started from the main checkout, not this session's); this branch does not touch `tests/`. Clippy `-D warnings` clean; release build OK. Vitest: 1,201 passed (108 files); lint clean. New: 17 `follow_response` tests, 5 `wire::stream_tests`, 34 TS mapper tests. Builder written before its tests, so red evidence is planted breaks: 14 in the builder, 6 in decoding, 6 in the TS mapper/limits, and an encoder output change failing the fixture test; each caught.
+
+---
+
 # KAN-294 (2026-11-19)
 
 /code-review fixes on #342: 923 passed, 0 failed; clippy clean; release build OK. 2 new tests (front-door QUIC; same-address fragments), both red first; planted breaks (no QUIC, QUIC on the relay port too, the earlier TCP-only same-address rule) each caught. Binary logs `excludes relay port 3000 and front door port 443`.

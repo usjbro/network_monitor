@@ -1,3 +1,9 @@
+# KAN-110 Follow Stream Task 3b: wire contract and bounded response (2026-11-20)
+
+James approved Task 3b in chat ("approved all"). Worktree `.worktrees/follow-stream-response`, branch `KAN-110-follow-stream-response`. `follow_response.rs` builds `stream_data` (192 KiB bounded writer, page/metadata/turn limits, P2 port check); `wire.rs` decodes `get_stream`; `lib/types.ts`/`lib/agent-mapping.ts` map it from an encoder-generated fixture. `main.rs` ignores `get_stream` until Task 3c. PR open. Next: reviews, CI; James merges.
+
+---
+
 # KAN-294 Follow Stream front-door exclusion (2026-11-19)
 
 James chose option (a). Worktree `.worktrees/follow-stream-front-door`, branch `KAN-294-follow-stream-front-door`. With `FOLLOW_STREAM=1` the agent also reads `FRONT_DOOR_PORT` (default 8443) and excludes that port with the relay port: on loopback pairs, and between this host's own address and itself; another host's front-door session is kept. PR open. Next: reviews, CI; James merges.
