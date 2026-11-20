@@ -701,6 +701,34 @@ The reply to one `get_tcp_samples` (below): one page of a TCP flow's sample ring
 - **Bounds.** 3 072 samples cost at most 79 bytes each with every column at its maximum. With a 16-sample head at its maximum and 32 labels whose text needs JSON escaping in every byte, the measured worst-case line is 226 620 bytes (`wire.rs` test `a_full_page_with_a_maximal_head_and_labels_fits`), so every reply fits the 256 KiB line ceiling (LF included) whatever the values. The agent still measures the line before writing it; an over-ceiling line is a bug, is not written, and is logged as one stderr line with its size (never its contents), and the request ends as a 504 at the relay.
 - **Mapper.** `mapTcpSamplesReply` (`lib/agent-mapping.ts`) returns one object per sample with absolute timestamps and an `outbound` flag, keeps `seq`/`ack` relative, and ignores unknown fields. It throws on columns of different lengths, non-integers, out-of-range values (including a window shift above 14), a reconstructed timestamp or index that is not a non-negative safe integer, and indices that do not cover the page (`nextIndex − samples < firstIndex`). It decodes `head` with the same rules (throwing on the same faults) into `{ firstIndex, samples }`, or `null` when absent. A label that is not a 3-tuple of a non-negative safe-integer index, a string kind and a printable-ASCII text of at most 64 characters is dropped, never fatal; an unknown kind is kept for the UI to show as unknown. A reply without `labels` (an agent before KAN-130) maps to `labels: []`.
 
+### `stream_data` (KAN-110, Follow Stream)
+
+**Not sent yet.** Task 3b defines the reply and its encoder (`capture-agent/src/follow_response.rs`); Task 3c makes the agent answer `get_stream` with it. Until then a `get_stream` gets no reply. The reply to one `get_stream` (below): one page of a retained TCP conversation, written **only to the agent connection that asked**, never through the broadcast channel. Design: `docs/superpowers/specs/2026-10-31-follow-stream-design.md` D4, with plan P2 (`relay_port_mismatch`) and P3 (`clientIsLocal`).
+
+```json
+{"type":"stream_data","requestId":"0123456789abcdef0123456789abcdef","connectionId":"Tcp-10.0.0.1:40000-93.184.216.34:80",
+ "enabled":true,"found":true,"stale":false,"generation":"000000000000feed:1","flowStartCaptured":true,"closed":false,"clientIsLocal":true,
+ "directions":{
+   "clientToServer":{"classification":"cleartext","tlsFrom":null,"offset":0,"nextOffset":67,"storedBytes":67,"seenBytes":68,"stoppedReason":null,
+     "gaps":[{"at":63,"missing":10,"reason":"missing"}],"conflictingOverlapBytes":0,
+     "redactedRanges":[{"start":31,"len":19,"reason":"credential"},{"start":63,"len":4,"reason":"uncertain"}],"dataBase64":"R0VUIC8g..."},
+   "serverToClient":{"classification":"cleartext","tlsFrom":null,"offset":0,"nextOffset":38,"storedBytes":38,"seenBytes":38,"stoppedReason":null,
+     "gaps":[],"conflictingOverlapBytes":0,"redactedRanges":[],"dataBase64":"SFRUUC8x..."}},
+ "turnsFrom":0,"turnsNext":null,
+ "lastTurn":{"index":3,"dir":"s2c","start":17,"len":21,"firstSeenMs":15000},
+ "turns":[{"dir":"c2s","start":0,"len":16,"firstSeenMs":10000},{"dir":"s2c","start":0,"len":17,"firstSeenMs":10000},
+          {"dir":"c2s","start":16,"len":51,"firstSeenMs":13000},{"dir":"s2c","start":17,"len":21,"firstSeenMs":15000}]}
+```
+
+That line is the first in `lib/__tests__/fixtures/stream-data-samples.jsonl`, which is the encoder's real output (its test fails when the two differ); `dataBase64` is shortened here.
+
+- **Order of checks.** Follow Stream off: `enabled: false`, nothing else. Otherwise the request's `relayPort` must equal the agent's `RELAY_PORT`, or the reply is `unavailable: "relay_port_mismatch"` (plan P2) before any entry is looked up. Then no entry for `connectionId`: `found: false`. A `generation` that is not the entry's current one: `stale: true` with the current `generation` (the client restarts from offset 0 without one). Only then is content sent. Every reply but the last has empty pages (`classification: "pending"`, zero offsets and counts, no gaps, ranges or data), no turns and `lastTurn: null`; `generation` is `null` except on a stale reply. `busy: true` is a content-free reply the agent's writer may send when a connection's reply budget is full (Task 3c).
+- **Pages.** Per direction a page covers stored bytes `[offset, nextOffset)`: at most 32 768 bytes, stopping at the emission horizon (bytes still withheld while TLS classification or a header is uncertain are not sent). `dataBase64` is exactly those bytes, every redacted byte already replaced with `*`; `redactedRanges` are clipped to the page and use absolute offsets. A page carries at most 128 gaps and 128 ranges; when its window holds more, the page ends at the first one left out, so metadata is never dropped and `nextOffset` always moves past `offset` while bytes remain. A gap belongs to the page holding its offset `at`; one at the very end of the stored bytes is sent only once the direction is closed or stopped with nothing withheld, so no gap appears on two different pages. Gaps at the same offset are merged: `missing` adds up, and the reason is `snaplen_likely` only if every merged hole was. Offsets and lengths count stored bytes, not TCP sequence space.
+- **Turns** page separately from data: at most 256 from `turnsFrom`, and `turnsNext` is the next index or `null`. `lastTurn` is always the current final turn, even when `turnsFrom` is past it, because a live final turn keeps growing.
+- **Counters.** `seenBytes` (observed payload bytes, retransmissions included) and `conflictingOverlapBytes` are `u64`; `firstSeenMs` is capture-time milliseconds.
+- **Bounds.** The whole line, LF included, is at most 196 608 bytes. The agent writes it through a writer that refuses to pass that, into a buffer preallocated to exactly that size, and zeroizes the buffer and its scratch copies afterwards. An over-ceiling line is a bug and is not sent.
+- **Mapper.** `mapStreamData` (`lib/agent-mapping.ts`) throws on any structural or bounds fault: a request ID that is not 32 lowercase hex characters, a non-canonical `generation`, a non-integer or out-of-range number, `dataBase64` that is not base64, over a page, or not exactly `nextOffset − offset` bytes, more than 128 gaps or ranges, more than 256 turns, or a `turnsNext` that is not `turnsFrom` plus the turns returned. Unknown fields are ignored; unknown `classification`, `dir`, `reason`, `stoppedReason` and `unavailable` values map to `"unknown"`. `u64` counters above `Number.MAX_SAFE_INTEGER` saturate to it. `FOLLOW_LIMITS` (`lib/types.ts`) mirrors the Rust limits, checked by `follow-stream-mapping.test.ts`.
+
 ## Relay → browser (SSE, not the raw agent protocol)
 
 `app/api/stream/route.ts` re-wraps agent events as Server-Sent Events (`data: <json>\n\n`) and adds one synthetic event type the agent itself never sends:
@@ -805,6 +833,18 @@ Sent only by `pages/api/tcp-samples.ts` (`lib/tcp-samples-route.ts`), never by `
 - **Input limits** (agent side). `requestId` must be exactly 32 lowercase hex characters and `connectionId` 1 to 384 bytes; `fromIndex`, when present, a non-negative integer. A message outside these cannot have come from this relay and is ignored, like an unknown control type. Every message inside them gets one `tcp_samples` reply, except in the over-ceiling case under `tcp_samples` Bounds, where nothing is written and the relay's request times out with 504. The relay must therefore keep its timeout.
 - **Lookup.** `connectionId` resolves to a flow only in its exact canonical form: `Tcp-<local addr>:<port>-<remote addr>:<port>`, addresses as Rust's standard formatting writes them (IPv6 compressed, no brackets). Leading zeros, signs, an uncompressed IPv6 address and every other spelling give `found: false`. A `generation` that is present and is not exactly the ring's current one (including one in the wrong format) gives `stale: true`.
 - **Answered inline.** The connection's task reads the request, copies at most one page of the ring under the flow lock, releases the lock, encodes the reply and writes it, and reads its next control line only after that write returns. So a connection never holds more than one unflushed reply (at most 256 KiB), and a slow reader holds back only its own connection: its events wait in the broadcast buffer meanwhile and, past its 1 024 lines, are counted in `relayLaggedEvents` when the connection next reads them. The packet-event limiter does not apply.
+
+### `get_stream` (KAN-110, Follow Stream)
+
+```json
+{"type":"get_stream","requestId":"0123456789abcdef0123456789abcdef","connectionId":"Tcp-10.0.0.1:40000-93.184.216.34:80",
+ "generation":"000000000000feed:1","c2s":{"offset":0},"s2c":{"offset":0},"turnsFrom":0,"relayPort":3000}
+```
+
+Sent only by the relay's own Follow Stream route; `app/api/control/route.ts` never forwards it. Not answered until Task 3c.
+
+- **Input limits** (agent side). `requestId` exactly 32 lowercase hex characters; `connectionId` 1 to 128 characters; `generation`, when present and not `null`, exactly what the agent renders (16 lowercase hex digits, a colon, a decimal counter without leading zeros); `c2s.offset` and `s2c.offset` integers from 0 to 262 144; `turnsFrom`, when present, an integer from 0 to 4 096 (default 0). A message outside these is ignored and gets no reply, so the relay must keep its timeout.
+- **`relayPort`** is the relay's own listening port (`req.socket.localPort`), so the agent can refuse content when it is not the port it excludes from capture (plan P2). It decodes tolerantly: missing, `null`, not an integer, 0 or above 65 535 still gets a correlated `relay_port_mismatch` reply rather than silence.
 
 **`REPLAY_WAIT_FOR_IO_SERIES=1`** (startup, only with `REPLAY_FILE`; unset or empty means off, any other value fails startup): the replay reader waits before reading the first frame until a `set_io_series` with at least one compiling series is accepted. Because that message arrives through a browser's `/api/control` call, a subscriber exists by then and receives every bucket of the file. While waiting, `capture_stats` and `io_series_status` report `replayWaiting: true`. Without it, a replay that finishes before series are set has no IO graph.
 

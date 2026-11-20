@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TCP_LABEL_TEXT_MAX, TCP_SAMPLE_MARK, TcpSample, TcpSampleLabel, TcpSamplesPage, TcpSamplesRelativeTo, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, FOLLOW_LIMITS, FollowDirectionPage, FollowGap, FollowMask, FollowResponse, FollowTurn, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TCP_LABEL_TEXT_MAX, TCP_SAMPLE_MARK, TcpSample, TcpSampleLabel, TcpSamplesPage, TcpSamplesRelativeTo, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -170,6 +170,154 @@ export function mapCaptureStatsEvent(json: unknown): CaptureStats {
     tcpSampleRingBytes: typeof w.tcpSampleRingBytes === 'number' ? w.tcpSampleRingBytes : undefined,
     tcpSampleRingsRecycled: typeof w.tcpSampleRingsRecycled === 'number' ? w.tcpSampleRingsRecycled : undefined,
   };
+}
+
+// KAN-110 `stream_data` (docs/wire-protocol.md). Strict about structure and
+// bounds, so a malformed reply throws (the relay answers 502) rather than
+// reaching a renderer; tolerant of unknown fields, and maps unknown enum
+// values to 'unknown' so a newer agent never makes bytes render under a
+// guessed classification or role.
+const STREAM_REQUEST_ID = /^[0-9a-f]{32}$/;
+const STREAM_GENERATION = /^[0-9a-f]{16}:(0|[1-9][0-9]{0,19})$/;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const STREAM_PAGE_BASE64_CHARS = Math.ceil(FOLLOW_LIMITS.pageBytes / 3) * 4;
+
+function streamFail(what: string): never {
+  throw new Error(`malformed stream_data: ${what}`);
+}
+
+function streamObject(value: unknown, what: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) streamFail(what);
+  return value as Record<string, unknown>;
+}
+
+function streamBool(obj: Record<string, unknown>, key: string): boolean {
+  if (typeof obj[key] !== 'boolean') streamFail(key);
+  return obj[key] as boolean;
+}
+
+function streamInt(value: unknown, what: string, max: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > max) streamFail(what);
+  return value;
+}
+
+// A u64 counter: exact up to MAX_SAFE_INTEGER, saturated above it.
+function streamCounter(value: unknown, what: string): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) streamFail(what);
+  return Math.min(value, Number.MAX_SAFE_INTEGER);
+}
+
+function streamArray(value: unknown, what: string, max: number): unknown[] {
+  if (!Array.isArray(value) || value.length > max) streamFail(what);
+  return value;
+}
+
+function streamEnum<T extends string>(value: unknown, what: string, known: readonly T[]): T | 'unknown' {
+  if (typeof value !== 'string') streamFail(what);
+  return (known as readonly string[]).includes(value) ? (value as T) : 'unknown';
+}
+
+function base64Bytes(text: string): number {
+  return (text.length / 4) * 3 - (text.endsWith('==') ? 2 : text.endsWith('=') ? 1 : 0);
+}
+
+function mapStreamTurn(value: unknown, what: string): FollowTurn {
+  const t = streamObject(value, what);
+  const start = streamInt(t.start, `${what}.start`, FOLLOW_LIMITS.directionBytes);
+  return {
+    dir: streamEnum(t.dir, `${what}.dir`, ['c2s', 's2c'] as const),
+    start,
+    len: streamInt(t.len, `${what}.len`, FOLLOW_LIMITS.directionBytes - start),
+    firstSeenMs: streamCounter(t.firstSeenMs, `${what}.firstSeenMs`),
+  };
+}
+
+function mapStreamPage(value: unknown, what: string): FollowDirectionPage {
+  const p = streamObject(value, what);
+  const max = FOLLOW_LIMITS.directionBytes;
+  const offset = streamInt(p.offset, `${what}.offset`, max);
+  const nextOffset = streamInt(p.nextOffset, `${what}.nextOffset`, max);
+  const dataBase64 = p.dataBase64;
+  if (typeof dataBase64 !== 'string' || dataBase64.length > STREAM_PAGE_BASE64_CHARS || !BASE64.test(dataBase64)) {
+    streamFail(`${what}.dataBase64`);
+  }
+  if (nextOffset < offset || base64Bytes(dataBase64) !== nextOffset - offset) streamFail(`${what}: data does not span offset..nextOffset`);
+  const gaps: FollowGap[] = streamArray(p.gaps, `${what}.gaps`, FOLLOW_LIMITS.pageGaps).map((g, i) => {
+    const o = streamObject(g, `${what}.gaps[${i}]`);
+    return {
+      at: streamInt(o.at, `${what}.gaps[${i}].at`, max),
+      missing: streamInt(o.missing, `${what}.gaps[${i}].missing`, 2 ** 32 - 1),
+      reason: streamEnum(o.reason, `${what}.gaps[${i}].reason`, ['missing', 'snaplen_likely'] as const),
+    };
+  });
+  const redactedRanges: FollowMask[] = streamArray(p.redactedRanges, `${what}.redactedRanges`, FOLLOW_LIMITS.pageRanges).map((r, i) => {
+    const o = streamObject(r, `${what}.redactedRanges[${i}]`);
+    const start = streamInt(o.start, `${what}.redactedRanges[${i}].start`, max);
+    const len = streamInt(o.len, `${what}.redactedRanges[${i}].len`, max - start);
+    if (len === 0) streamFail(`${what}.redactedRanges[${i}].len`);
+    return { start, len, reason: streamEnum(o.reason, `${what}.redactedRanges[${i}].reason`, ['credential', 'uncertain'] as const) };
+  });
+  return {
+    classification: streamEnum(p.classification, `${what}.classification`, ['pending', 'cleartext', 'tls'] as const),
+    tlsFrom: p.tlsFrom === null ? null : streamInt(p.tlsFrom, `${what}.tlsFrom`, max),
+    offset,
+    nextOffset,
+    storedBytes: streamInt(p.storedBytes, `${what}.storedBytes`, max),
+    seenBytes: streamCounter(p.seenBytes, `${what}.seenBytes`),
+    stoppedReason: p.stoppedReason === null ? null : streamEnum(p.stoppedReason, `${what}.stoppedReason`, ['store_cap', 'gap_limit', 'turn_limit', 'redaction_limit'] as const),
+    gaps,
+    conflictingOverlapBytes: streamCounter(p.conflictingOverlapBytes, `${what}.conflictingOverlapBytes`),
+    redactedRanges,
+    dataBase64,
+  };
+}
+
+export function mapStreamData(json: unknown): FollowResponse {
+  const w = streamObject(json, 'not an object');
+  if (w.type !== 'stream_data') streamFail('type');
+  if (typeof w.requestId !== 'string' || !STREAM_REQUEST_ID.test(w.requestId)) streamFail('requestId');
+  if (typeof w.connectionId !== 'string' || w.connectionId.length === 0 || w.connectionId.length > FOLLOW_LIMITS.connectionIdChars) {
+    streamFail('connectionId');
+  }
+  const generation = w.generation;
+  if (generation !== null && (typeof generation !== 'string' || !STREAM_GENERATION.test(generation))) streamFail('generation');
+  if (w.clientIsLocal !== null && typeof w.clientIsLocal !== 'boolean') streamFail('clientIsLocal');
+  const directions = streamObject(w.directions, 'directions');
+  const turnsFrom = streamInt(w.turnsFrom, 'turnsFrom', FOLLOW_LIMITS.flowTurns);
+  const turnsNext = w.turnsNext === null ? null : streamInt(w.turnsNext, 'turnsNext', FOLLOW_LIMITS.flowTurns);
+  const turns = streamArray(w.turns, 'turns', FOLLOW_LIMITS.pageTurns).map((t, i) => mapStreamTurn(t, `turns[${i}]`));
+  if (turnsNext !== null && turnsNext !== turnsFrom + turns.length) streamFail('turnsNext');
+  let lastTurn: FollowResponse['lastTurn'] = null;
+  if (w.lastTurn !== null) {
+    const l = streamObject(w.lastTurn, 'lastTurn');
+    lastTurn = { index: streamInt(l.index, 'lastTurn.index', FOLLOW_LIMITS.flowTurns - 1), ...mapStreamTurn(l, 'lastTurn') };
+  }
+  const reply: FollowResponse = {
+    type: 'stream_data',
+    requestId: w.requestId,
+    connectionId: w.connectionId,
+    enabled: streamBool(w, 'enabled'),
+    found: streamBool(w, 'found'),
+    stale: streamBool(w, 'stale'),
+    generation: generation as string | null,
+    flowStartCaptured: streamBool(w, 'flowStartCaptured'),
+    closed: streamBool(w, 'closed'),
+    clientIsLocal: w.clientIsLocal as boolean | null,
+    directions: {
+      clientToServer: mapStreamPage(directions.clientToServer, 'clientToServer'),
+      serverToClient: mapStreamPage(directions.serverToClient, 'serverToClient'),
+    },
+    turnsFrom,
+    turnsNext,
+    lastTurn,
+    turns,
+  };
+  if (w.busy !== undefined) {
+    if (typeof w.busy !== 'boolean') streamFail('busy');
+    reply.busy = w.busy;
+  }
+  if (w.unavailable !== undefined) reply.unavailable = streamEnum(w.unavailable, 'unavailable', ['relay_port_mismatch'] as const);
+  return reply;
 }
 
 const TCP_SAMPLE_COLUMNS = ['tUs', 'seq', 'ack', 'win', 'len', 'flags', 'mark', 'rttUs'] as const;

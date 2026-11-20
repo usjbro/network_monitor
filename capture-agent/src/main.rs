@@ -4300,6 +4300,10 @@ where
                                     }
                                 }
                             }
+                            // KAN-110: answered from Task 3c, which shares the
+                            // Follow Stream store with this task. Until then
+                            // nothing is sent, so no content can be.
+                            Some(wire::ControlMessage::GetStream(_)) => {}
                             None => {}
                         }
                     }
