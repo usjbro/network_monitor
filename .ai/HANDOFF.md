@@ -1,8 +1,9 @@
 # KAN-110 Follow Stream Task 2 (2026-11-19)
 
-- Change: `follow_config.rs`; `main.rs` reads `FOLLOW_STREAM`/`RELAY_PORT` once after the packet source (panics on a bad port only when opted in) and passes `follow_relay_port` to `exclude_live_control_capture`. With it on: relay-port TCP on any loopback pair (IPv4/IPv6) is excluded both ways; every loopback IPv4 TCP fragment; every loopback IPv6 packet with an undecoded transport. With it off: byte-for-byte the old rule. Exclusion still runs before reassembly, flow events and the only `WriterCommand::Packet` producer.
+- Change: `follow_config.rs`; `main.rs` reads `FOLLOW_STREAM`/`RELAY_PORT` once after the packet source (panics on a bad port only when opted in) and passes `follow_relay_port` to `exclude_live_control_capture`. With it on: relay-port TCP on any loopback pair (IPv4/IPv6) is excluded both ways; every loopback IPv4 TCP fragment; every loopback packet (IPv4 or IPv6) with an undecoded transport, which covers IPv6 fragments and AH-carrying IPv4 fragments (review fix on #332). With it off: byte-for-byte the old rule. Exclusion still runs before reassembly, flow events and the only `WriterCommand::Packet` producer.
 - Deliberate deviation: IPv6 fragments are matched as "loopback IPv6 with transport `Other`", because `parse.rs` records no IPv6 fragment state and adding a `ParsedPacket` field touches 42 constructors. Wider than strictly needed (any undecodable loopback IPv6 packet), never narrower.
 - Not here: the full sentinel recapture test (Task 6), P2's `relayPort` check (Task 3).
+- Open, not this PR: the mTLS front door (Caddy on 8443) proxies the relay over loopback on another port; a browser launched through `osi-inspect` could see relay content decrypted. Filed separately.
 
 ---
 

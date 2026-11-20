@@ -2,6 +2,8 @@
 
 `cargo test --locked`: 853 passed, 0 failed; clippy `-D warnings` clean; release build OK. 7 new config tests (failed against stubs first) and 4 new exclusion tests (the two feature-on tests failed on the unchanged rule; the two keep-tests guard). Planted breaks caught: no relay-port match, unchanged fragment rule, no IPv6 untyped rule, excluding 3000 when off. Release binary in replay: `FOLLOW_STREAM=1` with `RELAY_PORT=+3000` or blank fails startup with the error; `RELAY_PORT=+3000` alone and `RELAY_PORT=3100` with the feature on start normally.
 
+
+Review fixes (#332), rebased on #331: 859 passed, 0 failed, clippy clean; the new undecoded-loopback-IPv4 test failed before the rule was widened.
 ---
 
 # KAN-293 (2026-11-19)

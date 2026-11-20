@@ -88,18 +88,25 @@ start both with the same port:
 If `next dev` moves to 3001 because 3000 is taken, the agent still excludes
 3000; relaunch it with `RELAY_PORT=3001`. A later task makes the agent
 refuse stream requests from a relay on a port it does not exclude, instead
-of trusting that the two settings agree.
+of trusting that the two settings agree. Two other components assume 3000
+and do not read `RELAY_PORT`: the mTLS front door's `reverse_proxy
+127.0.0.1:3000` in `deploy/Caddyfile` (change it by hand, following
+`deploy/README.md`), and `npx osi-inspect`, which posts to
+`OSI_INSPECT_RELAY_URL` (default `http://127.0.0.1:3000`).
 
 With Follow Stream on, `RELAY_PORT` must be a plain decimal port from 1 to
 65535 (no sign or spaces), or startup fails. With it off, `RELAY_PORT` is
 never read, so a bad value cannot stop the agent and a loopback app on port
-3000 stays visible.
+3000 stays visible. The check also runs in replay, which excludes nothing,
+so a replay started with `FOLLOW_STREAM=1` and a bad `RELAY_PORT` fails
+too.
 
 Visibility cost: a fragmented IP packet's later fragments carry no ports,
 so with Follow Stream on, live capture drops every loopback TCP fragment
-(IPv4 and IPv6) and every loopback IPv6 packet whose transport could not be
-decoded. Unfragmented loopback traffic on other ports stays visible. Replay
-is never filtered.
+(IPv4 and IPv6) and every loopback packet whose transport could not be
+decoded (which includes IPv6 fragments and IPv4 fragments carrying AH).
+Loopback TCP, UDP and ICMP on other ports stays visible. Replay is never
+filtered.
 
 ## Replaying a capture file instead of live traffic
 
@@ -160,10 +167,11 @@ with `pid: 0`.
 | `FOLLOW_STREAM` | `1` turns on Follow Stream; anything else leaves it off | Startup |
 | `RELAY_PORT` | The relay's port, excluded from live capture (default 3000); read only with `FOLLOW_STREAM=1` | Startup |
 
-All eight are read once at startup. Invalid `CAPTURE_INTERFACE` and
-nonpositive/non-numeric `MAX_FLOWS` or `MAX_OBSERVED_DNS_NAMES` fail startup;
-blank values are unset. With `FOLLOW_STREAM=1`, an unset `RELAY_PORT` is the
-default, and a blank or invalid one fails startup. `REPLAY_FILE` must name a readable supported file.
+All eight are read at most once, at startup (`RELAY_PORT` only with
+`FOLLOW_STREAM=1`). Invalid `CAPTURE_INTERFACE` and nonpositive/non-numeric
+`MAX_FLOWS` or `MAX_OBSERVED_DNS_NAMES` fail startup; blank values are
+unset, except `RELAY_PORT`: with `FOLLOW_STREAM=1`, unset is the default,
+and blank or invalid fails startup. `REPLAY_FILE` must name a readable supported file.
 `REPLAY_LOCAL_ADDRS` only splits/trims strings, and only exact
 `REPLAY_SPEED=realtime` selects pacing; other speed values select fast mode.
 See [../docs/architecture.md](../docs/architecture.md)'s

@@ -5531,7 +5531,7 @@ mod control_capture_privacy_tests {
         let mut data = Vec::new();
         etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
             .ipv4(src, dst, 64)
-            .udp(42000, port, )
+            .udp(42000, port)
             .write(&mut data, b"dns")
             .unwrap();
         parse::parse_packet(&data, parse::LinkType::Ethernet).unwrap()
@@ -5594,6 +5594,45 @@ mod control_capture_privacy_tests {
         ] {
             assert!(!exclude_live_control_capture(&p, true, Some(3100)));
         }
+    }
+
+    #[test]
+    fn with_follow_stream_on_decoded_loopback_ipv6_on_other_ports_is_kept() {
+        let lo6 = std::net::Ipv6Addr::LOCALHOST;
+        let mut udp6 = Vec::new();
+        etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv6(lo6.octets(), lo6.octets(), 64)
+            .udp(42000, 3100)
+            .write(&mut udp6, b"dns")
+            .unwrap();
+        let mut icmp6 = Vec::new();
+        etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv6(lo6.octets(), lo6.octets(), 64)
+            .icmpv6_echo_request(1, 1)
+            .write(&mut icmp6, b"ping")
+            .unwrap();
+        for p in [
+            frame6(lo6, lo6, 52000, 8080),
+            parse::parse_packet(&udp6, parse::LinkType::Ethernet).unwrap(),
+            parse::parse_packet(&icmp6, parse::LinkType::Ethernet).unwrap(),
+        ] {
+            assert!(!matches!(p.protocol, parse::TransportProtocol::Other));
+            assert!(!exclude_live_control_capture(&p, true, Some(3100)), "{:?} on ::1 dropped", p.protocol);
+        }
+    }
+
+    #[test]
+    fn with_follow_stream_on_undecoded_loopback_ipv4_is_excluded() {
+        // An AH-carrying IPv4 fragment reaches here with no fragment record
+        // and no transport; any undecoded loopback IPv4 does the same.
+        let ip = etherparse::Ipv4Header::new(8, 64, etherparse::IpNumber::SCTP, [127, 0, 0, 1], [127, 0, 0, 1]).unwrap();
+        let mut data = ip.to_bytes().to_vec();
+        data.extend([b'a'; 8]);
+        let p = parse::parse_packet(&data, parse::LinkType::Raw).unwrap();
+        assert!(p.ip_fragment.is_none() && matches!(p.protocol, parse::TransportProtocol::Other));
+        assert!(exclude_live_control_capture(&p, true, Some(3000)));
+        assert!(!exclude_live_control_capture(&p, true, None), "feature off is unchanged");
+        assert!(!exclude_live_control_capture(&p, false, Some(3000)));
     }
 
     #[test]
@@ -6018,8 +6057,8 @@ mod tls_decrypt_state_tests {
 /// relay's loopback HTTP traffic carries retained stream content, so it is
 /// omitted too, on any loopback address pair, IPv4 or IPv6. Its fragments
 /// cannot be matched by port, so every loopback TCP fragment is omitted, and
-/// every loopback IPv6 packet whose transport the parser could not decode
-/// (an IPv6 fragment arrives that way). With it off, behaviour is unchanged.
+/// every loopback packet whose transport the parser could not decode (an
+/// IPv6 fragment, or an IPv4 fragment carrying AH, arrives that way). With it off, behaviour is unchanged.
 fn exclude_live_control_capture(packet: &parse::ParsedPacket, live: bool, relay_port: Option<u16>) -> bool {
     if !live {
         return false;
@@ -6038,7 +6077,7 @@ fn exclude_live_control_capture(packet: &parse::ParsedPacket, live: bool, relay_
     {
         return relay_port.is_some() || packet.src_ip == "127.0.0.1" || packet.dst_ip == "127.0.0.1";
     }
-    if relay_port.is_some() && packet.ip_version == 6 && matches!(packet.protocol, parse::TransportProtocol::Other) {
+    if relay_port.is_some() && matches!(packet.protocol, parse::TransportProtocol::Other) {
         return true;
     }
     if !matches!(packet.protocol, parse::TransportProtocol::Tcp) {
