@@ -3,6 +3,7 @@ use capture_agent::{
     control_auth::{self, Admission, AgentToken, CredentialPath, PublishedCredential},
     fields,
     flow::{self, FlowKey, FlowTable},
+    follow,
     host_stats,
     http2::{FrameOutcome, Http2Reassembler},
     keylog::{KeyLogWatcher, SessionSecret},
@@ -2593,6 +2594,11 @@ async fn main() -> std::io::Result<()> {
             ports.relay, ports.front_door
         );
     }
+    // KAN-110 Task 3c: allocated only when opted in. Capture feeds it, the
+    // emitter ticks it and drops what FlowTable evicts, and a successful
+    // interface switch empties it.
+    let follow_store: Option<Arc<Mutex<follow::FollowStore>>> =
+        follow_ports.map(|_| Arc::new(Mutex::new(follow::FollowStore::new(follow_epoch()))));
     println!(
         "capture-agent: mode={mode} interface={interface_name}{}",
         replay_source
@@ -2912,6 +2918,7 @@ async fn main() -> std::io::Result<()> {
         let io_loss = io_loss.clone();
         let io_kernel_drops_total = io_kernel_drops_total.clone();
         let io_if_drops_total = io_if_drops_total.clone();
+        let follow_store = follow_store.clone();
         std::thread::spawn(move || {
             let mut packet_source = packet_source;
             // Mutable locals, not Arc<Mutex<_>>: only this thread ever
@@ -3018,6 +3025,9 @@ async fn main() -> std::io::Result<()> {
                                     &tx,
                                 );
                                 if replaced {
+                                    if let Some(store) = &follow_store {
+                                        store.lock().unwrap().reset();
+                                    }
                                     io_drops.handle_replaced();
                                     if let Some(acc) = io_acc.as_mut() {
                                         let to_ms = system_time_us(std::time::SystemTime::now()) / 1000;
@@ -3125,6 +3135,9 @@ async fn main() -> std::io::Result<()> {
                             reassembly_now_ms,
                             &mut reassembly,
                         );
+                        if let (true, Some(store)) = (capture_truncated, &follow_store) {
+                            store.lock().unwrap().note_frame_cut_at_snaplen(reassembly_now_ms);
+                        }
                         if capture_truncated && !snaplen_truncation_warned {
                             snaplen_truncation_warned = true;
                             eprintln!(
@@ -3237,6 +3250,15 @@ async fn main() -> std::io::Result<()> {
                                 tx.send(wire::encode_event(&wire::AgentEvent::ConnectionClosed {
                                     id: id.clone(),
                                 }));
+                        }
+                        if let Some(store) = &follow_store {
+                            feed_follow_store(
+                                &mut store.lock().unwrap(),
+                                observe_result.as_ref().and_then(|result| result.closed_key.as_ref()),
+                                txn_flow.as_ref(),
+                                flow_packet,
+                                reassembly_now_ms,
+                            );
                         }
 
                         let txn_event = transactions.observe_frame(
@@ -3529,6 +3551,7 @@ async fn main() -> std::io::Result<()> {
         let io_loss = io_loss.clone();
         let io_kernel_drops_total = io_kernel_drops_total.clone();
         let io_if_drops_total = io_if_drops_total.clone();
+        let follow_store = follow_store.clone();
         tokio::spawn(async move {
             let io_piece_rx = io_piece_rx;
             // JAM-18: pieces left over from a tick that hit the line cap,
@@ -3575,6 +3598,12 @@ async fn main() -> std::io::Result<()> {
                         agent_now_ms,
                     );
                     let evicted = ft.evict_stale(now_ms);
+                    // KAN-110: still ticked while paused, so live idle
+                    // eviction keeps removing retained bytes; a replay's
+                    // clock stops at EOF, and so does expiry.
+                    if let Some(store) = &follow_store {
+                        tick_follow_store(&mut store.lock().unwrap(), &evicted, now_ms);
+                    }
                     let snapshots = ft.snapshot(now_ms);
                     // JAM-14: per-host/per-pair rollups, cumulative since
                     // capture start -- same "gather under the lock, convert
@@ -6167,6 +6196,67 @@ mod tls_decrypt_state_tests {
 /// TCP fragments involving our listening address rather than persist credentials.
 /// Replay remains byte-faithful, and unrelated unfragmented traffic is retained.
 ///
+/// KAN-110 Task 3c: the TCP segment one frame gives Follow Stream, or `None`
+/// for anything but TCP and for an IP fragment still waiting for the rest
+/// of its datagram (the capture loop passes the reassembled datagram once
+/// it is complete).
+fn follow_segment(packet: &parse::ParsedPacket, now_ms: u64) -> Option<follow::FollowSegment<'_>> {
+    if !matches!(packet.protocol, parse::TransportProtocol::Tcp) || packet.ip_fragment.is_some() {
+        return None;
+    }
+    let flags = packet.tcp_flags.as_ref()?;
+    Some(follow::FollowSegment {
+        seq: packet.seq?,
+        ack_number: flags.ack_number,
+        syn: flags.syn,
+        ack: flags.ack,
+        fin: flags.fin,
+        rst: flags.rst,
+        payload: &packet.payload,
+        now_ms,
+    })
+}
+
+/// Once per frame, after `FlowTable` observed it: the flow that observation
+/// closed (a reused tuple) goes first, so the frame starts a new generation
+/// rather than continuing the old bytes, then the frame is ingested under
+/// `FlowTable::key_for`'s key.
+fn feed_follow_store(
+    store: &mut follow::FollowStore,
+    closed: Option<&FlowKey>,
+    flow: Option<&(FlowKey, bool)>,
+    packet: &parse::ParsedPacket,
+    now_ms: u64,
+) {
+    if let Some(key) = closed {
+        store.drop_flow(key);
+    }
+    if let (Some((key, outbound)), Some(segment)) = (flow, follow_segment(packet, now_ms)) {
+        store.ingest(key, *outbound, segment);
+    }
+}
+
+/// The emitter's tick, under the `FlowTable` lock (lock order: `FlowTable`,
+/// then `FollowStore`): every flow `evict_stale` removed, idle or for
+/// capacity, then capture time on the flow-aging clock.
+fn tick_follow_store(store: &mut follow::FollowStore, evicted: &flow::EvictedFlows, now_ms: u64) {
+    for key in evicted.iter() {
+        store.drop_flow(key);
+    }
+    store.tick(now_ms);
+}
+
+/// KAN-110 Task 3c: the generation epoch, drawn once at startup. Without a
+/// working random source the agent does not start with Follow Stream on.
+fn follow_epoch() -> u64 {
+    use ::ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0u8; 8];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .unwrap_or_else(|_| panic!("FOLLOW_STREAM=1 needs the system random source for its generation epoch"));
+    u64::from_be_bytes(bytes)
+}
+
 /// KAN-110 Task 2: with Follow Stream on (`follow` is `Some`), the relay's
 /// HTTP traffic carries retained stream content, and so does the mTLS front
 /// door's in front of it (KAN-294), including its HTTP/3 over UDP. Both are
@@ -6421,5 +6511,119 @@ mod tcp_samples_reply_path_tests {
         // No tcp_samples line ever reached the broadcast channel.
         trace_tx.send("{\"type\":\"test_event\",\"n\":99}\n".into()).unwrap();
         assert_eq!(next_line(&mut bystander).await["n"], 99);
+    }
+}
+
+#[cfg(test)]
+mod follow_feed_tests {
+    use super::*;
+    use capture_agent::follow::{Direction, FollowStore};
+
+    const LOCAL: &str = "192.168.1.10";
+
+    fn tcp(seq: u32, syn: bool, payload: &[u8]) -> parse::ParsedPacket {
+        let mut data = Vec::new();
+        let builder = etherparse::PacketBuilder::ethernet2([0; 6], [1; 6])
+            .ipv4([192, 168, 1, 10], [93, 184, 216, 34], 64)
+            .tcp(51000, 80, seq, 65535);
+        let builder = if syn { builder.syn() } else { builder.ack(7) };
+        builder.write(&mut data, payload).unwrap();
+        parse::parse_packet(&data, parse::LinkType::Ethernet).unwrap()
+    }
+
+    fn flow(packet: &parse::ParsedPacket) -> (FlowKey, bool) {
+        FlowTable::new(vec![LOCAL.to_string()]).key_for(packet).unwrap()
+    }
+
+    fn stored(store: &FollowStore, key: &FlowKey) -> Option<(u64, u32)> {
+        store.with_entry(&key.connection_id(), |e| {
+            e.map(|e| (e.generation().counter, e.direction(Direction::C2s).stored_bytes))
+        })
+    }
+
+    #[test]
+    fn a_tcp_frame_becomes_a_segment_with_its_real_header_fields() {
+        let packet = tcp(1000, false, b"GET /");
+        let segment = follow_segment(&packet, 42).unwrap();
+        assert_eq!((segment.seq, segment.ack_number, segment.payload), (1000, 7, &b"GET /"[..]));
+        assert_eq!((segment.syn, segment.ack, segment.fin, segment.rst, segment.now_ms), (false, true, false, false, 42));
+        assert!(follow_segment(&tcp(1000, true, b""), 0).unwrap().syn);
+    }
+
+    #[test]
+    fn an_incomplete_fragment_or_a_non_tcp_frame_is_not_a_segment() {
+        let mut fragment = tcp(1000, false, b"GET /");
+        fragment.ip_fragment = Some(parse::Ipv4Fragment {
+            identification: 1,
+            offset_bytes: 0,
+            more_fragments: true,
+            protocol: 6,
+            header: vec![],
+            payload: vec![],
+        });
+        assert!(follow_segment(&fragment, 0).is_none());
+        let mut udp = tcp(1000, false, b"dns");
+        udp.protocol = parse::TransportProtocol::Udp;
+        assert!(follow_segment(&udp, 0).is_none());
+    }
+
+    #[test]
+    fn a_frame_is_stored_under_the_flow_tables_key() {
+        let mut store = FollowStore::new(1);
+        let syn = tcp(999, true, b"");
+        let data = tcp(1000, false, b"GET / HTTP/1.1\r\n");
+        let key = flow(&syn);
+        feed_follow_store(&mut store, None, Some(&key), &syn, 0);
+        feed_follow_store(&mut store, None, Some(&key), &data, 1);
+        assert_eq!(stored(&store, &key.0), Some((1, 16)));
+        // Without a flow key (ICMP, an unkeyed fragment) nothing is stored.
+        feed_follow_store(&mut store, None, None, &data, 2);
+        assert_eq!(store.flow_count(), 1);
+    }
+
+    #[test]
+    fn a_tuple_flow_table_closed_is_dropped_before_the_new_frame() {
+        let mut store = FollowStore::new(1);
+        let data = tcp(1000, false, b"first conversation");
+        let key = flow(&data);
+        feed_follow_store(&mut store, None, Some(&key), &data, 0);
+        assert_eq!(stored(&store, &key.0), Some((1, 18)));
+        // FlowTable expired the stale tuple on this frame's arrival: the new
+        // flow starts a new generation instead of continuing the old bytes.
+        let reused = tcp(5000, false, b"second");
+        feed_follow_store(&mut store, Some(&key.0), Some(&key), &reused, 1_900_000);
+        assert_eq!(stored(&store, &key.0), Some((2, 6)));
+    }
+
+    #[test]
+    fn the_emitter_tick_drops_every_evicted_flow() {
+        let mut store = FollowStore::new(1);
+        let a = tcp(1000, false, b"a");
+        let mut b = tcp(1000, false, b"b");
+        b.src_port = Some(51001);
+        let (ka, kb) = (flow(&a), flow(&b));
+        feed_follow_store(&mut store, None, Some(&ka), &a, 0);
+        feed_follow_store(&mut store, None, Some(&kb), &b, 0);
+        let evicted = flow::EvictedFlows { idle: vec![ka.0.clone()], capacity: vec![] };
+        tick_follow_store(&mut store, &evicted, 1);
+        assert_eq!((stored(&store, &ka.0), stored(&store, &kb.0).is_some()), (None, true));
+        let evicted = flow::EvictedFlows { idle: vec![], capacity: vec![kb.0.clone()] };
+        tick_follow_store(&mut store, &evicted, 2);
+        assert_eq!(store.flow_count(), 0);
+    }
+
+    #[test]
+    fn the_emitter_tick_advances_capture_time() {
+        let mut store = FollowStore::new(1);
+        let first = tcp(1000, false, b"abc");
+        let key = flow(&first);
+        feed_follow_store(&mut store, None, Some(&key), &first, 0);
+        // A hole: bytes 1003..1010 are missing, 1010.. is held.
+        feed_follow_store(&mut store, None, Some(&key), &tcp(1010, false, b"xyz"), 0);
+        assert_eq!(stored(&store, &key.0), Some((1, 3)));
+        tick_follow_store(&mut store, &flow::EvictedFlows::default(), 1_999);
+        assert_eq!(stored(&store, &key.0), Some((1, 3)), "still inside the reorder window");
+        tick_follow_store(&mut store, &flow::EvictedFlows::default(), 2_000);
+        assert_eq!(stored(&store, &key.0), Some((1, 6)), "the hole became a gap");
     }
 }

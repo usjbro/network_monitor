@@ -1,3 +1,9 @@
+# KAN-110 Task 3c-1 (2026-11-20)
+
+`cargo test --locked` 954 passed, 0 failed; clippy `-D warnings` clean; release build OK; `cargo +nightly fuzz build` OK. New: 6 `follow_feed_tests`, 2 flow tests (the fragment-closure one failed first). Planted breaks of each helper rule and the fragment merge are each caught. The `main.rs` wiring (snaplen notify, emitter call, reset on switch) has no unit test; 3c-2's real-binary replay test covers feed and tick; the live interface switch needs a real device.
+
+---
+
 # KAN-110 Task 3b (2026-11-20)
 
 /code-review fixes on #343: `cargo test --locked` 946 passed, 0 failed (port 9990 free again, so `io_graph_replay` ran and passed); clippy clean; Vitest 1,205 passed; lint clean. The new closed-flow tail-gap test failed first (gap delivered twice); planted breaks of the new end-gap rule, the mapper's page bounds and byte-counted connection IDs are each caught. The short-copy guard is defensive and has no test (no current path triggers it).

@@ -441,6 +441,9 @@ pub struct ObserveResult {
     /// Connection id for a stale flow with this tuple that was closed before
     /// this packet created a fresh flow.
     pub closed_connection_id: Option<String>,
+    /// That closed flow's key (KAN-110), so a per-flow store keyed by
+    /// `key_for` drops it without parsing the id back.
+    pub closed_key: Option<FlowKey>,
 }
 
 impl FlowTable {
@@ -682,8 +685,15 @@ impl FlowTable {
         if physical_fragment.ip_fragment.is_none() {
             return self.observe_inner(physical_fragment, l7, now_ms, frame_us, true, replay);
         }
-        let _ = self.observe_inner(physical_fragment, &L7Info::None, now_ms, frame_us, true, replay);
-        self.observe_inner(reassembled, l7, now_ms, frame_us, false, replay)
+        let physical = self.observe_inner(physical_fragment, &L7Info::None, now_ms, frame_us, true, replay);
+        let mut result = self.observe_inner(reassembled, l7, now_ms, frame_us, false, replay)?;
+        // A first fragment arriving last carries ports, so it may be the
+        // packet that expired a stale reused tuple: keep that closure.
+        if let Some(physical) = physical.filter(|_| result.closed_key.is_none()) {
+            result.closed_connection_id = physical.closed_connection_id;
+            result.closed_key = physical.closed_key;
+        }
+        Some(result)
     }
 
     /// Expire only the flow addressed by this packet before updating it. The
@@ -746,6 +756,7 @@ impl FlowTable {
         } else {
             None
         };
+        let closed_key = closed_connection_id.as_ref().map(|_| key.clone());
         let remote_port = key.remote_port;
         // Saved before `key` is consumed by `self.flows.entry(key)` below —
         // JAM-14's endpoint/conversation rollups are keyed independently of
@@ -956,6 +967,7 @@ impl FlowTable {
             rst_transitioned,
             connection_id: connection_id_for_reset,
             closed_connection_id,
+            closed_key,
         })
     }
 
@@ -3169,6 +3181,41 @@ mod tcp_sample_tests {
         assert_eq!(second.generation.0, first.0, "same epoch");
         assert_eq!(second.samples.len(), 1, "the new flow's ring starts empty");
         assert_eq!(table.tcp_sample_store().rings(), 1, "the old ring was released, not leaked");
+    }
+
+    #[test]
+    fn a_closed_tuple_reports_its_key_as_well_as_its_id() {
+        let mut table = table();
+        let packet = segment(51000, true, 1, ack_flags(1, 1), b"a");
+        table.observe_replay(&packet, &L7Info::None, 0).unwrap();
+        let result = table.observe_replay(&packet, &L7Info::None, 1_900_000).unwrap();
+        assert_eq!(result.closed_key, Some(key(51000)));
+        assert_eq!(result.closed_connection_id, Some(key(51000).connection_id()));
+        let open = table.observe_replay(&packet, &L7Info::None, 1_900_001).unwrap();
+        assert_eq!((open.closed_key, open.closed_connection_id), (None, None));
+    }
+
+    /// KAN-110: when the first fragment arrives last it completes the
+    /// datagram, and it is the packet that expires a stale reused tuple.
+    #[test]
+    fn a_first_fragment_completing_a_datagram_reports_the_tuple_it_closed() {
+        let mut table = table();
+        let packet = segment(51000, true, 1, ack_flags(1, 1), b"a");
+        table.observe_replay(&packet, &L7Info::None, 0).unwrap();
+        let mut first_fragment = packet.clone();
+        first_fragment.ip_fragment = Some(crate::parse::Ipv4Fragment {
+            identification: 7,
+            offset_bytes: 0,
+            more_fragments: true,
+            protocol: 6,
+            header: vec![],
+            payload: vec![],
+        });
+        let result = table
+            .observe_reassembled_replay(&first_fragment, &packet, &L7Info::None, 1_900_000)
+            .unwrap();
+        assert_eq!(result.closed_key, Some(key(51000)));
+        assert_eq!(result.closed_connection_id, Some(key(51000).connection_id()));
     }
 
     #[test]
