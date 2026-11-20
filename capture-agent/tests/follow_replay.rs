@@ -7,6 +7,8 @@
 //! request says disabled and carries nothing.
 #[path = "fixtures/agent_auth.rs"]
 mod agent_auth;
+#[path = "fixtures/replay_agent.rs"]
+mod replay_agent;
 
 use base64::Engine;
 use etherparse::PacketBuilder;
@@ -14,33 +16,14 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::sync::Mutex;
+use replay_agent::{classic_pcap, run_until_replayed, write_temp, AGENT_LOCK};
+use std::process::Command;
 use std::time::{Duration, Instant};
-
-/// Every test here spawns an agent on the fixed control port.
-static AGENT_LOCK: Mutex<()> = Mutex::new(());
-
-struct Agent(Child);
-impl Drop for Agent {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 struct TempDir(PathBuf);
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-struct TempFile(PathBuf);
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }
 
@@ -102,26 +85,6 @@ fn fragments(whole: &[u8], first: usize) -> [Vec<u8>; 2] {
         [eth, &h, bytes].concat()
     };
     [piece(&payload[..first], 0, true), piece(&payload[first..], first, false)]
-}
-
-/// Classic little-endian pcap, microsecond timestamps, Ethernet.
-fn classic_pcap(frames: &[(u64, Vec<u8>)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend(0xa1b2c3d4u32.to_le_bytes());
-    out.extend(2u16.to_le_bytes());
-    out.extend(4u16.to_le_bytes());
-    out.extend(0i32.to_le_bytes());
-    out.extend(0u32.to_le_bytes());
-    out.extend(65535u32.to_le_bytes());
-    out.extend(1u32.to_le_bytes());
-    for (ts_us, data) in frames {
-        out.extend(((ts_us / 1_000_000) as u32).to_le_bytes());
-        out.extend(((ts_us % 1_000_000) as u32).to_le_bytes());
-        out.extend((data.len() as u32).to_le_bytes());
-        out.extend((data.len() as u32).to_le_bytes());
-        out.extend(data);
-    }
-    out
 }
 
 fn request_text() -> String {
@@ -194,15 +157,6 @@ fn capture() -> Vec<(u64, Vec<u8>)> {
     f
 }
 
-fn write_temp(label: &str, bytes: &[u8]) -> TempFile {
-    // Unique per call: tests run in parallel and each deletes its own file.
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("kan110-{label}-{}-{n}.pcap", std::process::id()));
-    std::fs::write(&path, bytes).unwrap();
-    TempFile(path)
-}
-
 fn get_stream(n: usize, id: &str, generation: Option<&str>) -> String {
     let mut m = json!({
         "type": "get_stream",
@@ -223,7 +177,7 @@ fn get_stream(n: usize, id: &str, generation: Option<&str>) -> String {
 /// Replays the capture to the end, then asks for each flow once capture
 /// time has settled (the emitter ticks the store once a second).
 fn replay_and_ask(speed: &str, follow: bool) -> Vec<Value> {
-    let file = write_temp(&format!("{speed}-{follow}"), &classic_pcap(&capture()));
+    let file = write_temp("kan110", &format!("{speed}-{follow}"), &classic_pcap(&capture()));
     let _guard = AGENT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let auth = agent_auth::AuthFixture::new();
     // The no-disk invariant for retained content: the agent runs in an empty
@@ -240,25 +194,13 @@ fn replay_and_ask(speed: &str, follow: bool) -> Vec<Value> {
         .env_remove("CAPTURE_INTERFACE")
         .env_remove("REPLAY_WAIT_FOR_IO_SERIES")
         .env_remove("RELAY_PORT")
-        .env_remove("FRONT_DOOR_PORT")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .env_remove("FRONT_DOOR_PORT");
     if follow {
         command.env("FOLLOW_STREAM", "1");
     } else {
         command.env_remove("FOLLOW_STREAM");
     }
-    let mut agent = Agent(command.spawn().unwrap());
-    let (finished_tx, finished_rx) = mpsc::channel();
-    let stdout = agent.0.stdout.take().unwrap();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if line.contains("replay finished") {
-                let _ = finished_tx.send(());
-            }
-        }
-    });
-    finished_rx.recv_timeout(Duration::from_secs(60)).expect("replay finished");
+    let _agent = run_until_replayed(&mut command, Duration::from_secs(60));
 
     let stream = TcpStream::connect("127.0.0.1:9990").expect("agent listening");
     let mut reader = auth.authenticate(stream);
