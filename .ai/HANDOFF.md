@@ -1,3 +1,13 @@
+# KAN-110 Task 3c-2 — Codex review continuation (2026-11-20)
+
+- Reviewed published head `9e91028`, the complete task Slack thread, GitHub reviews and CI. No additional production-code blocker found; inline-writer backpressure and store-lock contention remain the documented trade-offs. Cleanup relies on `Zeroizing` on task cancellation; this continuation did not add a release-observer test.
+- CodeQL alert 26 identifies `tests/follow_replay.rs` parsing a socket line before validating length. Local fix caps reads at 256 KiB + 1, rejects oversized/incomplete lines before serde, retains the tighter 192 KiB stream-data assertion, and adds a boundary regression (failed before fix).
+- Sonar PR 346: follow_replay.rs 0 new duplicated lines; fixtures/replay_agent.rs 17 lines / 22.67%, copied from io_graph_replay.rs. Both now use fixtures/classic_pcap.rs; byte-identical writer bodies checked before extraction. New Sonar/CodeQL results require publication.
+- James subsequently instructed: skip further Slack posts and Claude PR review requests; run our own code/security reviewer agents. Final local serial suite: 964 passed, 15 ignored; clippy and diff checks pass. Independent code and security reviewers found no actionable defect/vulnerability. Security checklist remains incomplete for explicit failed-write/disconnect/cancellation zeroization-observer tests; source inspection confirms release_output/Zeroizing paths.
+- James authorized committing and pushing these fixes in live chat. Merge remains unauthorized. Preserve the pre-existing main-checkout next-env.d.ts modification. Existing gate and task are continued, not reclaimed (there is real progress and an open PR).
+
+---
+
 # KAN-110 Task 3c-2 (2026-11-20)
 
 - Change: `ConnectionShared` gains `follow_store` and `relay_port`; `serve_connection` encodes under the store lock into a lazily allocated 192 KiB zeroizing buffer and writes inline, then `follow_response::release_output`. Deviation from the plan's writer-owner design: inline writing (as `tcp_samples`) means at most one unflushed reply per connection, so the 512 KiB/four budget holds by construction and `busy` is never sent; a blocked relay stalls only its own connection.

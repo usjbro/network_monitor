@@ -13,7 +13,7 @@ mod replay_agent;
 use base64::Engine;
 use etherparse::PacketBuilder;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use replay_agent::{classic_pcap, run_until_replayed, write_temp, AGENT_LOCK};
@@ -174,6 +174,33 @@ fn get_stream(n: usize, id: &str, generation: Option<&str>) -> String {
     line
 }
 
+const MAX_AGENT_LINE_BYTES: usize = 256 * 1024;
+
+fn read_agent_line(reader: &mut impl BufRead) -> std::io::Result<(String, Value)> {
+    let mut line = String::new();
+    reader.take((MAX_AGENT_LINE_BYTES + 1) as u64).read_line(&mut line)?;
+    if line.len() > MAX_AGENT_LINE_BYTES || !line.ends_with('\n') {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "oversized or incomplete agent line"));
+    }
+    let value = serde_json::from_str(&line)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid agent JSON"))?;
+    Ok((line, value))
+}
+
+#[test]
+fn agent_line_reader_enforces_the_limit_before_parsing() {
+    let mut oversized = std::io::Cursor::new(vec![b' '; MAX_AGENT_LINE_BYTES * 2]);
+    assert!(read_agent_line(&mut oversized).is_err());
+    assert_eq!(oversized.position(), (MAX_AGENT_LINE_BYTES + 1) as u64);
+
+    let mut exact = vec![b' '; MAX_AGENT_LINE_BYTES];
+    exact[0] = b'0';
+    exact[MAX_AGENT_LINE_BYTES - 1] = b'\n';
+    assert_eq!(read_agent_line(&mut &exact[..]).unwrap().0.len(), MAX_AGENT_LINE_BYTES);
+    assert!(read_agent_line(&mut &b"0"[..]).is_err());
+    assert!(read_agent_line(&mut &b""[..]).is_err());
+}
+
 /// Replays the capture to the end, then asks for each flow once capture
 /// time has settled (the emitter ticks the store once a second).
 fn replay_and_ask(speed: &str, follow: bool) -> Vec<Value> {
@@ -214,9 +241,7 @@ fn replay_and_ask(speed: &str, follow: bool) -> Vec<Value> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             assert!(Instant::now() < deadline, "no stream_data reply");
-            let mut line = String::new();
-            assert!(reader.read_line(&mut line).unwrap() > 0, "agent closed the connection");
-            let value: Value = serde_json::from_str(&line).unwrap();
+            let (line, value) = read_agent_line(reader).expect("bounded, complete agent line");
             if value["type"] == "stream_data" {
                 assert!(line.len() <= 192 * 1024, "reply over the line ceiling");
                 assert!(!line.contains(SECRET), "the secret left the agent");

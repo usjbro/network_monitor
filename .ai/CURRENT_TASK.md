@@ -1,3 +1,9 @@
+# KAN-110 Task 3c-2 — Codex continuation (2026-11-20)
+
+James requested review and continuation in this worktree. PR #346 is the only open PR; #342–#345 are merged. Published head `9e91028` passes Rust/Web/Playwright/fuzz/Sonar/Snyk, but CodeQL blocks on replay-test deserialization before size validation (alert 26). Follow-up fixes bound and validate the replay line before parsing, add a regression, and share the remaining duplicated PCAP writer with `io_graph_replay`. Verification: 964 Rust tests pass serially (15 ignored), clippy clean; independent code/security reviews found no actionable defect. Explicit cancellation/write-failure zeroization-observer coverage remains incomplete. James authorized commit/push in live chat. Next: publish and recheck CodeQL/Sonar. James owns merge. Task 4 remains next after this PR.
+
+---
+
 # KAN-110 Follow Stream Task 3c-2: answer get_stream (2026-11-20)
 
 James's standing instruction (2026-11-20): work through every KAN issue in order. Worktree `.worktrees/follow-stream-reply`, branch `KAN-110-follow-stream-reply`. `serve_connection` answers `get_stream` inline from the store; `tests/follow_replay.rs` through the real binary; `follow_store` fuzz pages the response builder. Next: PR, reviews; then KAN-110 Task 4 (relay route).
