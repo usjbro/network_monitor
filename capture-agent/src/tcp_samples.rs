@@ -3,7 +3,10 @@
 //! bounded per-flow rings of TCP header samples, per-ACK RTT matching under
 //! Karn's rule, and window-scale application.
 //!
-//! Samples are header metadata only. No payload byte enters this module.
+//! Samples are header metadata. The only payload-derived data is a sample's
+//! optional label (KAN-130 spec D2): an SNI, an HTTP method and path without
+//! query or fragment, an HTTP status line, or "ServerHello", made
+//! display-safe and at most 64 bytes.
 //!
 //! A ring belongs to one flow. `FlowTable` keeps each flow's `RingHandle` in
 //! its own state, so recording costs no extra hash lookup or key clone per
@@ -14,6 +17,9 @@
 //! endlessly taking rings from each other).
 
 use std::mem::size_of;
+
+use crate::display_text::display_safe_bytes;
+use crate::l7::L7Info;
 
 pub const SAMPLES_PER_RING: usize = 4096;
 pub const MAX_RINGS: usize = 128;
@@ -69,6 +75,102 @@ pub mod mark {
     pub const RTT: u8 = 16;
 }
 
+/// Ring indices `0..HEAD_SAMPLES` are pinned: a flow's handshake stays
+/// visible after the rolling buffer has overwritten it (KAN-130 spec D2 (b)).
+pub const HEAD_SAMPLES: usize = 16;
+/// Labels per ring, pinned head labels included (KAN-130 spec D2 (a)).
+pub const MAX_LABELS_PER_RING: usize = 32;
+/// Label text bytes, printable ASCII only.
+pub const LABEL_TEXT_BYTES: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LabelKind {
+    TlsClientHello,
+    TlsServerHello,
+    HttpRequest,
+    HttpResponse,
+}
+
+/// A short, display-safe description of what one sampled segment carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SampleLabel {
+    /// The ring index of the labelled sample.
+    pub index: u64,
+    pub kind: LabelKind,
+    len: u8,
+    text: [u8; LABEL_TEXT_BYTES],
+}
+
+impl SampleLabel {
+    /// `text` comes from `label_for` and is already display-safe; anything
+    /// that is not printable ASCII, and anything past `LABEL_TEXT_BYTES`, is
+    /// still refused here, so `text()` can never return anything else.
+    fn new(index: u64, kind: LabelKind, text: &str) -> Self {
+        let mut bytes = [0u8; LABEL_TEXT_BYTES];
+        let mut len = 0;
+        for b in text
+            .bytes()
+            .take_while(|b| b.is_ascii_graphic() || *b == b' ')
+            .take(LABEL_TEXT_BYTES)
+        {
+            bytes[len] = b;
+            len += 1;
+        }
+        SampleLabel {
+            index,
+            kind,
+            len: len as u8,
+            text: bytes,
+        }
+    }
+
+    /// Always printable ASCII, at most `LABEL_TEXT_BYTES`.
+    pub fn text(&self) -> &str {
+        std::str::from_utf8(&self.text[..usize::from(self.len)]).expect("printable ASCII")
+    }
+}
+
+/// The first bytes of a TLS record carrying a ServerHello: content type 22
+/// (handshake), a version major of 3, and handshake type 2. Nothing past the
+/// sixth byte is read.
+pub fn is_tls_server_hello_start(payload: &[u8]) -> bool {
+    payload.len() >= 6 && payload[0] == 22 && payload[1] == 3 && payload[5] == 2
+}
+
+/// The label for one sampled segment (KAN-130 plan Task 1), from the L7
+/// decode the capture loop already did and, for a ServerHello, the segment's
+/// first six payload bytes. `None` for an unlabelled segment.
+///
+/// The query and fragment of an HTTP path are dropped: they often carry
+/// tokens. The reason phrase arrives already redacted (`l7.rs`). For a
+/// message the capture loop reassembled from several segments, the label
+/// goes on the segment that completed it, which is where the decode is
+/// reported.
+pub fn label_for(l7: &L7Info, payload: &[u8]) -> Option<(LabelKind, String)> {
+    let (kind, text) = match l7 {
+        L7Info::TlsClientHello { sni, .. } => (
+            LabelKind::TlsClientHello,
+            format!("ClientHello (SNI: {sni})"),
+        ),
+        _ if is_tls_server_hello_start(payload) => {
+            (LabelKind::TlsServerHello, "ServerHello".to_string())
+        }
+        L7Info::Http { method, path } => {
+            let path = path.split(['?', '#']).next().unwrap_or("");
+            (LabelKind::HttpRequest, format!("HTTP {method} {path}"))
+        }
+        L7Info::HttpResponse { status, reason, .. } => (
+            LabelKind::HttpResponse,
+            match reason {
+                Some(reason) => format!("HTTP {status} {reason}"),
+                None => format!("HTTP {status}"),
+            },
+        ),
+        _ => return None,
+    };
+    Some((kind, display_safe_bytes(&text, LABEL_TEXT_BYTES)))
+}
+
 /// What `FlowTable` hands over for one TCP segment.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SegmentObservation {
@@ -122,6 +224,14 @@ pub struct RingView {
     /// Both bases are ISNs.
     pub relative_to_isn: bool,
     pub samples: Vec<TcpSample>,
+    /// Index of `head[0]` when `head` is non-empty.
+    pub head_start_index: u64,
+    /// Pinned head samples the rolling buffer no longer holds, from
+    /// `max(from_index, 0)` up to the first held index (KAN-130 plan P2), so
+    /// no sample appears in both `head` and `samples`.
+    pub head: Vec<TcpSample>,
+    /// Labels on samples in `head` or `samples`, in index order.
+    pub labels: Vec<SampleLabel>,
 }
 
 /// A sequence number relative to `base`, across the 2^32 wrap.
@@ -137,10 +247,14 @@ pub const RING_RESERVED_BYTES: usize = SAMPLES_PER_RING * size_of::<TcpSample>()
     + 2 * MAX_OUTSTANDING_PER_DIR * (size_of::<u32>() + size_of::<u64>())
     + size_of::<Ring>();
 
-// Spec D1/D3: 4 096 × 32 B of samples and 2 × 256 × 12 B of RTT state, plus a
-// small fixed overhead.
-const _: () = assert!(RING_RESERVED_BYTES >= 4096 * 32 + 2 * 256 * 12);
-const _: () = assert!(RING_RESERVED_BYTES < 4096 * 32 + 2 * 256 * 12 + 1024);
+// Spec D1/D3: 4 096 × 32 B of samples and 2 × 256 × 12 B of RTT state; KAN-130
+// D2: the 16-sample head (inline in `Ring`) and 32 labels of at most 80 B
+// (inline in `Ring`); plus a small fixed overhead.
+const _: () = assert!(size_of::<Option<SampleLabel>>() <= 80);
+const RING_BASE_BYTES: usize =
+    4096 * 32 + 2 * 256 * 12 + 16 * 32 + 32 * size_of::<Option<SampleLabel>>();
+const _: () = assert!(RING_RESERVED_BYTES >= RING_BASE_BYTES);
+const _: () = assert!(RING_RESERVED_BYTES < RING_BASE_BYTES + 1024);
 
 pub struct TcpSampleStore {
     epoch: u64,
@@ -161,6 +275,11 @@ struct Ring {
     last_t_us: u64,
     /// Indexed by `outbound as usize`: `[inbound, outbound]`.
     dirs: [Direction; 2],
+    /// Copies of samples `0..HEAD_SAMPLES`, never overwritten (KAN-130 D2 (b)).
+    head: [TcpSample; HEAD_SAMPLES],
+    /// Unordered; `None` is a free slot. Labels below `HEAD_SAMPLES` are
+    /// pinned with the head (KAN-130 plan P3).
+    labels: [Option<SampleLabel>; MAX_LABELS_PER_RING],
 }
 
 #[derive(Default)]
@@ -262,6 +381,8 @@ impl Ring {
             next_index: 0,
             last_t_us: 0,
             dirs: [Direction::default(), Direction::default()],
+            head: [TcpSample::default(); HEAD_SAMPLES],
+            labels: [None; MAX_LABELS_PER_RING],
         }
     }
 
@@ -276,6 +397,8 @@ impl Ring {
             dir.syn = None;
             dir.outstanding.reset();
         }
+        self.head = [TcpSample::default(); HEAD_SAMPLES];
+        self.labels = [None; MAX_LABELS_PER_RING];
     }
 
     /// A SYN one way and a SYN-ACK the other were both captured.
@@ -298,7 +421,7 @@ impl Ring {
         ))
     }
 
-    fn record(&mut self, obs: SegmentObservation) {
+    fn record(&mut self, obs: SegmentObservation, label: Option<(LabelKind, String)>) {
         let d = usize::from(obs.outbound);
         let syn = obs.flags & flag::SYN != 0;
         let has_ack = obs.flags & flag::ACK != 0;
@@ -351,8 +474,8 @@ impl Ring {
             }
         }
 
-        let i = (self.next_index % SAMPLES_PER_RING as u64) as usize;
-        self.samples[i] = TcpSample {
+        let index = self.next_index;
+        let sample = TcpSample {
             t_us: obs.t_us,
             seq: obs.seq,
             ack: obs.ack,
@@ -363,7 +486,50 @@ impl Ring {
             rtt_us,
             _pad: 0,
         };
+        self.samples[(index % SAMPLES_PER_RING as u64) as usize] = sample;
+        if let Some(slot) = self.head.get_mut(index as usize) {
+            *slot = sample;
+        }
         self.next_index += 1;
+        if let Some((kind, text)) = label {
+            self.add_label(SampleLabel::new(index, kind, &text));
+        }
+    }
+
+    fn is_pinned(index: u64) -> bool {
+        index < HEAD_SAMPLES as u64
+    }
+
+    /// Frees the slots of rolling labels whose sample was overwritten, then
+    /// stores `label`, evicting the lowest-index rolling label if the table
+    /// is still full. At most `HEAD_SAMPLES` labels are pinned, so a full
+    /// table always holds a rolling one.
+    fn add_label(&mut self, label: SampleLabel) {
+        let first_index = self.first_index();
+        for slot in &mut self.labels {
+            if slot.is_some_and(|l| !Self::is_pinned(l.index) && l.index < first_index) {
+                *slot = None;
+            }
+        }
+        let free = self.labels.iter().position(Option::is_none).or_else(|| {
+            self.labels
+                .iter()
+                .enumerate()
+                .filter_map(|(i, l)| {
+                    l.filter(|l| !Self::is_pinned(l.index))
+                        .map(|l| (i, l.index))
+                })
+                .min_by_key(|&(_, index)| index)
+                .map(|(i, _)| i)
+        });
+        if let Some(i) = free {
+            self.labels[i] = Some(label);
+        }
+    }
+
+    /// The number of head samples recorded so far.
+    fn head_len(&self) -> u64 {
+        self.next_index.min(HEAD_SAMPLES as u64)
     }
 
     fn first_index(&self) -> u64 {
@@ -428,13 +594,23 @@ impl TcpSampleStore {
     /// flow's first segment (a ring is allocated), stale once its ring was
     /// taken by a more recent flow (nothing is recorded).
     pub fn record(&mut self, handle: &mut Option<RingHandle>, obs: SegmentObservation) {
+        self.record_labelled(handle, obs, None);
+    }
+
+    /// `record`, with the segment's label, if any (KAN-130).
+    pub fn record_labelled(
+        &mut self,
+        handle: &mut Option<RingHandle>,
+        obs: SegmentObservation,
+        label: Option<(LabelKind, String)>,
+    ) {
         let current = match *handle {
             Some(current) => current,
             None => *handle.insert(self.allocate()),
         };
         if let Some(Some(ring)) = self.slots.get_mut(current.slot) {
             if ring.counter == current.counter {
-                ring.record(obs);
+                ring.record(obs, label);
             }
         }
     }
@@ -464,6 +640,21 @@ impl TcpSampleStore {
         let samples = (start..end)
             .map(|i| ring.samples[(i % SAMPLES_PER_RING as u64) as usize])
             .collect();
+        // KAN-130 plan P2: only the part of the head the ring no longer holds.
+        let head_range = if from_index < ring.head_len() && ring.first_index() > from_index {
+            from_index..ring.head_len().min(ring.first_index())
+        } else {
+            0..0
+        };
+        let head = head_range.clone().map(|i| ring.head[i as usize]).collect();
+        let mut labels: Vec<SampleLabel> = ring
+            .labels
+            .iter()
+            .flatten()
+            .filter(|l| head_range.contains(&l.index) || (start..end).contains(&l.index))
+            .copied()
+            .collect();
+        labels.sort_by_key(|l| l.index);
         let [inbound, outbound] = &ring.dirs;
         Some(RingView {
             generation: (self.epoch, ring.counter),
@@ -475,6 +666,9 @@ impl TcpSampleStore {
             seq_base: (outbound.base.unwrap_or(0), inbound.base.unwrap_or(0)),
             relative_to_isn: outbound.base_is_isn && inbound.base_is_isn,
             samples,
+            head_start_index: head_range.start,
+            head,
+            labels,
         })
     }
 
@@ -699,8 +893,8 @@ mod tests {
         assert_eq!(store.recycled(), 5);
         assert_eq!(store.reserved_bytes(), MAX_RINGS * RING_RESERVED_BYTES);
         assert!(
-            store.reserved_bytes() < 17 * 1024 * 1024,
-            "16 MiB + RTT state + overhead"
+            store.reserved_bytes() < 17 * 1024 * 1024 + 512 * 1024,
+            "16 MiB + RTT state + KAN-130 head and labels (384 KiB) + overhead"
         );
     }
 
@@ -1043,5 +1237,336 @@ mod tests {
             (77, 11, 22, 44, 33, flag::ACK | flag::PSH)
         );
         assert_eq!(s.mark, mark::OUTBOUND | mark::RETRANSMIT);
+    }
+
+    // ---- KAN-130 Task 1: labels, ServerHello check, pinned head ----
+
+    fn hello(sni: &str) -> L7Info {
+        L7Info::TlsClientHello {
+            sni: sni.to_string(),
+            ja3: None,
+            ja3_label: None,
+            client_random: None,
+            sni_offset: 0,
+            sni_len: sni.len(),
+        }
+    }
+
+    const SERVER_HELLO: [u8; 6] = [22, 3, 3, 0, 0x7a, 2];
+
+    #[test]
+    fn server_hello_check_needs_exactly_its_three_bytes() {
+        assert!(is_tls_server_hello_start(&SERVER_HELLO));
+        assert!(is_tls_server_hello_start(&[22, 3, 1, 0, 0x40, 2, 0, 0]));
+        for len in 0..SERVER_HELLO.len() {
+            assert!(
+                !is_tls_server_hello_start(&SERVER_HELLO[..len]),
+                "length {len}"
+            );
+        }
+        for (i, delta) in [(0usize, 1u8), (1, 1), (5, 1), (0, 255), (5, 255)] {
+            let mut p = SERVER_HELLO;
+            p[i] = p[i].wrapping_add(delta);
+            assert!(!is_tls_server_hello_start(&p), "byte {i} changed");
+        }
+        // A ClientHello (type 1) and an application-data record (type 23).
+        assert!(!is_tls_server_hello_start(&[22, 3, 1, 0, 0x40, 1]));
+        assert!(!is_tls_server_hello_start(&[23, 3, 3, 0, 0x40, 2]));
+    }
+
+    #[test]
+    fn label_for_each_kind() {
+        assert_eq!(
+            label_for(&hello("example.com"), &[]),
+            Some((
+                LabelKind::TlsClientHello,
+                "ClientHello (SNI: example.com)".to_string()
+            ))
+        );
+        assert_eq!(
+            label_for(&L7Info::None, &SERVER_HELLO),
+            Some((LabelKind::TlsServerHello, "ServerHello".to_string()))
+        );
+        let get = L7Info::Http {
+            method: "GET".into(),
+            path: "/a/b?token=secret#frag".into(),
+        };
+        assert_eq!(
+            label_for(&get, b"GET /a/b"),
+            Some((LabelKind::HttpRequest, "HTTP GET /a/b".to_string()))
+        );
+        let frag = L7Info::Http {
+            method: "GET".into(),
+            path: "/x#y?z".into(),
+        };
+        assert_eq!(
+            label_for(&frag, &[]),
+            Some((LabelKind::HttpRequest, "HTTP GET /x".to_string()))
+        );
+        let ok = L7Info::HttpResponse {
+            status: "200".into(),
+            reason: Some("OK".into()),
+            content_type: None,
+            content_length: None,
+        };
+        assert_eq!(
+            label_for(&ok, &[]),
+            Some((LabelKind::HttpResponse, "HTTP 200 OK".to_string()))
+        );
+        let bare = L7Info::HttpResponse {
+            status: "204".into(),
+            reason: None,
+            content_type: None,
+            content_length: None,
+        };
+        assert_eq!(
+            label_for(&bare, &[]),
+            Some((LabelKind::HttpResponse, "HTTP 204".to_string()))
+        );
+    }
+
+    #[test]
+    fn label_for_leaves_other_segments_unlabelled() {
+        assert_eq!(label_for(&L7Info::None, &[]), None);
+        assert_eq!(label_for(&L7Info::None, b"hello"), None);
+        let dns = L7Info::Dns {
+            query_name: "example.com".into(),
+            id: 1,
+            qtype: 1,
+        };
+        assert_eq!(label_for(&dns, &[]), None);
+    }
+
+    #[test]
+    fn label_text_is_escaped_and_cut_at_64_bytes() {
+        let evil = L7Info::Http {
+            method: "GET".into(),
+            path: "/a\u{1b}[31m\u{202e}é".into(),
+        };
+        assert_eq!(
+            label_for(&evil, &[]).unwrap().1,
+            "HTTP GET /a\\u{1b}[31m\\u{202e}\\u{e9}"
+        );
+        let long = L7Info::Http {
+            method: "GET".into(),
+            path: format!("/{}", "p".repeat(200)),
+        };
+        let text = label_for(&long, &[]).unwrap().1;
+        assert_eq!(text.len(), LABEL_TEXT_BYTES);
+        assert!(text.ends_with("..."));
+    }
+
+    fn labelled(n: u64) -> Option<(LabelKind, String)> {
+        Some((LabelKind::HttpRequest, format!("HTTP GET /{n}")))
+    }
+
+    fn label_indices(view: &RingView) -> Vec<u64> {
+        view.labels.iter().map(|l| l.index).collect()
+    }
+
+    #[test]
+    fn a_label_is_recorded_against_its_samples_index() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        store.record(&mut h, data(0, true, 0, 10));
+        store.record_labelled(&mut h, data(1, true, 10, 10), labelled(1));
+        store.record(&mut h, data(2, true, 20, 10));
+        let view = all(&store, h);
+        assert_eq!(label_indices(&view), vec![1]);
+        assert_eq!(view.labels[0].kind, LabelKind::HttpRequest);
+        assert_eq!(view.labels[0].text(), "HTTP GET /1");
+        // A page that does not cover index 1 carries no label.
+        let page = store.view(h.unwrap(), 2, SAMPLES_PER_RING).unwrap();
+        assert!(page.labels.is_empty());
+    }
+
+    #[test]
+    fn the_label_table_holds_32_and_evicts_the_oldest_rolling_label() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        // Two head labels, then 31 rolling ones: 33 in all.
+        for i in 0..(HEAD_SAMPLES as u64 + 31) {
+            let label = if i < 2 || i >= HEAD_SAMPLES as u64 {
+                labelled(i)
+            } else {
+                None
+            };
+            store.record_labelled(&mut h, data(i, true, (i * 10) as u32, 10), label);
+        }
+        let view = all(&store, h);
+        assert_eq!(view.labels.len(), MAX_LABELS_PER_RING);
+        let mut expected = vec![0, 1];
+        expected.extend((HEAD_SAMPLES as u64 + 1)..(HEAD_SAMPLES as u64 + 31));
+        assert_eq!(
+            label_indices(&view),
+            expected,
+            "label 16, the oldest rolling one, went first"
+        );
+    }
+
+    #[test]
+    fn head_labels_survive_any_number_of_later_labels() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        for i in 0..10_000u64 {
+            let label = if i == 3 || i >= HEAD_SAMPLES as u64 {
+                labelled(i)
+            } else {
+                None
+            };
+            store.record_labelled(&mut h, data(i, true, (i * 10) as u32, 10), label);
+        }
+        let view = all(&store, h);
+        assert_eq!(view.labels.first().map(|l| l.index), Some(3));
+        assert_eq!(view.labels.len(), MAX_LABELS_PER_RING);
+        assert_eq!(view.labels.last().map(|l| l.index), Some(9_999));
+    }
+
+    #[test]
+    fn a_rolling_label_goes_with_its_overwritten_sample() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        store.record_labelled(&mut h, data(0, true, 0, 10), None);
+        for i in 1..20u64 {
+            store.record(&mut h, data(i, true, (i * 10) as u32, 10));
+        }
+        store.record_labelled(&mut h, data(20, true, 200, 10), labelled(20));
+        for i in 21..(SAMPLES_PER_RING as u64 + 30) {
+            store.record(&mut h, data(i, true, (i * 10) as u32, 10));
+        }
+        // Index 20 was overwritten (first_index is 30).
+        let view = all(&store, h);
+        assert_eq!(view.first_index, 30);
+        assert!(view.labels.is_empty());
+    }
+
+    #[test]
+    fn a_released_or_cleared_ring_keeps_no_labels_or_head() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        store.record_labelled(&mut h, data(0, true, 0, 10), labelled(0));
+        store.release(h.unwrap());
+        let mut h2 = None;
+        store.record(&mut h2, data(1, true, 0, 10));
+        let view = all(&store, h2);
+        assert!(view.labels.is_empty() && view.head.is_empty());
+        store.record_labelled(&mut h2, data(2, true, 10, 10), labelled(1));
+        store.clear();
+        let mut h3 = None;
+        store.record(&mut h3, data(3, true, 0, 10));
+        assert!(all(&store, h3).labels.is_empty());
+    }
+
+    #[test]
+    fn a_recycled_ring_starts_with_no_labels_or_head() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut handles = Vec::new();
+        for f in 0..MAX_RINGS as u64 {
+            let mut h = None;
+            store.record_labelled(&mut h, data(f, true, 0, 10), labelled(f));
+            handles.push(h);
+        }
+        let mut fresh = None;
+        store.record(&mut fresh, data(1_000, true, 0, 10));
+        assert_eq!(store.recycled(), 1);
+        let view = all(&store, fresh);
+        assert!(view.labels.is_empty());
+        assert_eq!(view.next_index, 1);
+    }
+
+    #[test]
+    fn the_head_is_sent_only_once_the_ring_no_longer_holds_it() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        let total = SAMPLES_PER_RING as u64 + 100;
+        for i in 0..total {
+            store.record(&mut h, data(i, true, (i * 10) as u32, 10));
+        }
+        let view = store.view(h.unwrap(), 0, SAMPLES_PER_RING).unwrap();
+        assert_eq!(view.first_index, 100);
+        assert_eq!(view.head_start_index, 0);
+        assert_eq!(view.head.len(), HEAD_SAMPLES);
+        assert_eq!(
+            view.head.iter().map(|s| s.t_us).collect::<Vec<_>>(),
+            (0..16).collect::<Vec<_>>()
+        );
+        assert_eq!(view.start_index, 100);
+        assert_eq!(view.samples.first().map(|s| s.t_us), Some(100));
+
+        let tail = store.view(h.unwrap(), 10, SAMPLES_PER_RING).unwrap();
+        assert_eq!((tail.head_start_index, tail.head.len()), (10, 6));
+
+        let later = store.view(h.unwrap(), 16, SAMPLES_PER_RING).unwrap();
+        assert!(later.head.is_empty());
+    }
+
+    #[test]
+    fn before_the_ring_wraps_the_head_is_ordinary_samples() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        for i in 0..40u64 {
+            store.record(&mut h, data(i, true, (i * 10) as u32, 10));
+        }
+        let view = all(&store, h);
+        assert!(view.head.is_empty());
+        assert_eq!(view.samples.len(), 40);
+    }
+
+    #[test]
+    fn a_partly_overwritten_head_sends_only_the_part_the_ring_lost() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        for i in 0..(SAMPLES_PER_RING as u64 + 5) {
+            store.record(&mut h, data(i, true, (i * 10) as u32, 10));
+        }
+        let view = all(&store, h);
+        assert_eq!(view.first_index, 5);
+        assert_eq!(
+            view.head.iter().map(|s| s.t_us).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        assert_eq!(view.samples.first().map(|s| s.t_us), Some(5));
+    }
+
+    #[test]
+    fn a_short_flow_has_a_short_head() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        for i in 0..3u64 {
+            store.record(&mut h, data(i, true, (i * 10) as u32, 10));
+        }
+        let view = all(&store, h);
+        assert!(view.head.is_empty());
+        assert_eq!(view.samples.len(), 3);
+    }
+
+    #[test]
+    fn head_labels_are_sent_with_the_head() {
+        let mut store = TcpSampleStore::new(EPOCH);
+        let mut h = None;
+        store.record_labelled(&mut h, data(0, true, 0, 10), None);
+        store.record_labelled(
+            &mut h,
+            data(1, true, 10, 10),
+            Some((LabelKind::TlsClientHello, "ClientHello (SNI: a)".into())),
+        );
+        for i in 2..(SAMPLES_PER_RING as u64 + 50) {
+            store.record(&mut h, data(i, true, (i * 10) as u32, 10));
+        }
+        let view = all(&store, h);
+        assert_eq!(label_indices(&view), vec![1]);
+        assert_eq!(view.labels[0].text(), "ClientHello (SNI: a)");
+    }
+
+    #[test]
+    fn reserved_bytes_include_the_head_and_label_table() {
+        assert!(
+            RING_RESERVED_BYTES
+                >= SAMPLES_PER_RING * 32
+                    + 2 * 256 * 12
+                    + HEAD_SAMPLES * 32
+                    + MAX_LABELS_PER_RING * size_of::<SampleLabel>()
+        );
+        assert!(size_of::<SampleLabel>() <= 80);
     }
 }

@@ -1,7 +1,7 @@
 use crate::dns_names::{ObservedDnsNames, DEFAULT_MAX_OBSERVED_DNS_NAMES};
 use crate::l7::{DnsAnswer, L7Info};
 use crate::parse::{ParsedPacket, TransportProtocol};
-use crate::tcp_samples::{flag, RingHandle, RingView, SegmentObservation, TcpSampleStore};
+use crate::tcp_samples::{flag, label_for, RingHandle, RingView, SegmentObservation, TcpSampleStore};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
@@ -930,7 +930,7 @@ impl FlowTable {
             // its reassembled datagram is the segment, and is observed (and
             // sampled) once on its own.
             if let (Some(seq), true) = (packet.seq, packet.ip_fragment.is_none()) {
-                self.tcp_samples.record(
+                self.tcp_samples.record_labelled(
                     &mut state.tcp_ring,
                     SegmentObservation {
                         t_us: frame_us.unwrap_or_else(|| now_ms.saturating_mul(1000)),
@@ -943,6 +943,9 @@ impl FlowTable {
                         retransmit: is_retransmit,
                         wscale_option: flags.window_scale,
                     },
+                    // KAN-130: the segment's label, from the decode the
+                    // capture loop already did.
+                    label_for(l7, &packet.payload),
                 );
             }
         }
@@ -3063,6 +3066,41 @@ mod tcp_sample_tests {
         assert_eq!(view.window_scale, Some((7, 8)));
         assert_eq!(view.seq_base, (999, 4_999));
         assert_eq!(view.samples[2].win, 502 << 7);
+    }
+
+    #[test]
+    fn tls_and_http_segments_are_labelled_at_their_sample_index() {
+        use crate::tcp_samples::LabelKind;
+        let mut table = table();
+        let hello = L7Info::TlsClientHello {
+            sni: "example.com".into(),
+            ja3: None,
+            ja3_label: None,
+            client_random: None,
+            sni_offset: 0,
+            sni_len: 11,
+        };
+        let server_hello: &[u8] = &[22, 3, 3, 0, 0x7a, 2, 0, 0, 0x76, 3, 3];
+        let request = L7Info::Http { method: "GET".into(), path: "/x?secret=1".into() };
+        let segments = [
+            (segment(51000, true, 1000, ack_flags(1, 500), b"\x16\x03\x01hello"), hello),
+            (segment(51000, false, 5000, ack_flags(1, 500), server_hello), L7Info::None),
+            (segment(51000, true, 1100, ack_flags(1, 500), b"plain"), L7Info::None),
+            (segment(51000, true, 1200, ack_flags(1, 500), b"GET /x?secret=1"), request),
+        ];
+        for (i, (p, l7)) in segments.iter().enumerate() {
+            table.observe(p, l7, i as u64).unwrap();
+        }
+        let view = view(&table, 51000).unwrap();
+        let labels: Vec<_> = view.labels.iter().map(|l| (l.index, l.kind, l.text().to_string())).collect();
+        assert_eq!(
+            labels,
+            vec![
+                (0, LabelKind::TlsClientHello, "ClientHello (SNI: example.com)".to_string()),
+                (1, LabelKind::TlsServerHello, "ServerHello".to_string()),
+                (3, LabelKind::HttpRequest, "HTTP GET /x".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -1,3 +1,9 @@
+# KAN-130 Task 1 — agent labels, ServerHello check, pinned head (2026-11-20)
+
+James approved gate `kan-130__flow-ladder-agent-labels` in chat. Worktree `.worktrees/flow-ladder-agent-labels`. Plan `docs/superpowers/plans/2026-11-20-flow-sequence-diagram.md` Task 1: `tcp_samples.rs` label table (32/ring, head labels pinned), `label_for`, `is_tls_server_hello_start`, 16-sample head, `RingView.head/head_start_index/labels`; `display_text.rs` (moved from `transaction.rs`); `FlowTable::observe_inner` records labels. No wire change. Worst case now 17,978,368 B (140,456/ring). `cargo test --locked` and clippy pass locally (needed `libpcap-dev` in this container). Next: PR, CI; James merges; Task 2 needs its own gate.
+
+---
+
 # KAN-130 Flow sequence diagram — implementation plan (2026-11-20)
 
 Spec merged (PR #336). James chose D2 (a)+(b) and D5 (out) and approved gate `kan-130__flow-sequence-diagram-plan` in chat. Worktree `.worktrees/flow-sequence-diagram-plan`. Plan `docs/superpowers/plans/2026-11-20-flow-sequence-diagram.md` in four tasks (agent labels/head; wire; `lib/flow-ladder.ts`; UI), decisions P1–P8; spec status, D2/D5 and §7 (P5) updated. James said skip Codex review for KAN-130. Next: plan PR; James merges; each task needs its own gate.
