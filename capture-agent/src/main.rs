@@ -4363,8 +4363,9 @@ where
                                     let store = follow_store.as_ref().map(|store| store.lock().unwrap());
                                     follow_response::encode_stream_data(store.as_deref(), &request, *relay_port, output)
                                 };
-                                if encoded.is_err() {
-                                    eprintln!("capture-agent: stream_data reply not sent: over its bounds");
+                                // The variant names a bug class only; no content.
+                                if let Err(error) = encoded {
+                                    eprintln!("capture-agent: stream_data reply not sent: {error:?}");
                                     continue;
                                 }
                                 let sent = write_half.write_all(output).await.is_ok();

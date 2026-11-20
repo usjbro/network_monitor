@@ -118,6 +118,25 @@ fn check_flow(store: &FollowStore, n: u16, seen: &mut HashMap<(u16, usize), (Gen
 /// emits, so no pending, TLS or masked byte can be paged out.
 fn check_pages(store: &FollowStore, n: u16, start: u32, turns_from: u32, buf: &mut [u8]) {
     let id = key(n).connection_id();
+    // A wrong relay port or a stale generation is answered without content.
+    let mut out = new_output();
+    for (generation, relay_port) in [(None, Some(3001)), (Some((2, 0)), Some(3000))] {
+        let request = StreamRequest {
+            request_id: "0".repeat(32),
+            connection_id: id.clone(),
+            generation,
+            c2s_offset: 0,
+            s2c_offset: 0,
+            turns_from,
+            relay_port,
+        };
+        encode_stream_data(Some(store), &request, Some(3000), &mut out).expect("a content-free reply fits");
+        let reply: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+        for name in ["clientToServer", "serverToClient"] {
+            assert_eq!(reply["directions"][name]["dataBase64"], "", "content in a refused reply");
+        }
+        assert!(reply["turns"].as_array().is_none_or(|t| t.is_empty()), "turns in a refused reply");
+    }
     let Some(emitted) = store.with_entry(&id, |entry| {
         entry.map(|entry| {
             [Direction::C2s, Direction::S2c].map(|d| {
@@ -128,7 +147,6 @@ fn check_pages(store: &FollowStore, n: u16, start: u32, turns_from: u32, buf: &m
     }) else {
         return;
     };
-    let mut out = new_output();
     let mut offsets = [start.min(emitted[0].len() as u32), 0];
     let mut joined = [emitted[0][..offsets[0] as usize].to_vec(), Vec::new()];
     for _ in 0..=(2 * capture_agent::follow::MAX_DIRECTION_BYTES / 1024 + 4) {

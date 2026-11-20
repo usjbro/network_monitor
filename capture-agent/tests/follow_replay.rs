@@ -301,7 +301,10 @@ fn replay_and_ask(speed: &str, follow: bool) -> Vec<Value> {
     let http = ask(&mut reader, HTTP_ID, None);
     let tls = ask(&mut reader, TLS_ID, None);
     let reused = ask(&mut reader, REUSED_ID, None);
-    let stale = ask(&mut reader, REUSED_ID, Some(&format!("{:016x}:1", 0)));
+    // The first conversation's generation: this run's epoch, counter 1
+    // (any well-formed epoch when Follow Stream is off and none is given).
+    let epoch = reused["generation"].as_str().and_then(|g| g.split(':').next()).unwrap_or("0000000000000000").to_owned();
+    let stale = ask(&mut reader, REUSED_ID, Some(&format!("{epoch}:1")));
     let written: Vec<_> = std::fs::read_dir(&workdir.0).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert!(written.is_empty(), "the agent wrote files: {written:?}");
     vec![http, tls, reused, stale]
