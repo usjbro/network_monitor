@@ -63,8 +63,6 @@ fn frame(s: &Segment) -> Vec<u8> {
     out
 }
 
-/// Classic little-endian pcap, microsecond timestamps, Ethernet.
-
 /// A handshake, `segments` outbound data segments 1 ms apart each ACKed
 /// `ACK_DELAY_US` later, one retransmission of segment 5, then a
 /// zero-window ACK. `client_wscale`/`server_wscale` are the SYN and SYN-ACK
