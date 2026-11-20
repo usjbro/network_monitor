@@ -10,22 +10,16 @@ import { PacketStreamView } from '@/components/PacketStreamView';
 import { ConnectionsView } from '@/components/ConnectionsView';
 import { THEMES } from '@/lib/osi-engine';
 import type { IndexedSample, TcpGraphState } from '@/lib/tcp-graphs';
-import { TCP_SAMPLE_FLAG as F, TCP_SAMPLE_MARK as M, type NetworkConnection, type PacketFrame, type TcpSample, type TcpSampleLabel } from '@/lib/types';
+import { BASE, LADDER_ID as ID, s, state } from './helpers/ladder-fixtures';
+import { TCP_SAMPLE_FLAG as F, TCP_SAMPLE_MARK as M, type NetworkConnection, type PacketFrame, type TcpSampleLabel } from '@/lib/types';
 
 afterEach(cleanup);
 
-const ID = 'Tcp-192.168.1.10:51000-93.184.216.34:443';
 const T0 = Date.UTC(2026, 10, 20, 12, 0, 0) * 1000;
 const theme = Object.values(THEMES)[0];
 const CONN = {
   id: ID, localAddr: '192.168.1.10', localPort: 51000, remoteAddr: '93.184.216.34', remotePort: 443, transportProtocol: 'TCP',
 } as NetworkConnection;
-const BASE = { outbound: 1000, inbound: 5000 };
-
-function s(index: number, tUs: number, outbound: boolean, over: Partial<TcpSample> = {}): IndexedSample {
-  const mark = (outbound ? M.OUTBOUND : 0) | (over.mark ?? 0);
-  return { index, tUs, seq: 0, ack: 0, win: 1000, len: 0, flags: F.ACK, rttUs: 0, ...over, mark, outbound };
-}
 
 function handshake(): IndexedSample[] {
   return [
@@ -35,14 +29,6 @@ function handshake(): IndexedSample[] {
     s(3, T0 + 4_000, true, { flags: F.PSH | F.ACK, seq: 1, ack: 1, len: 517 }),
     s(4, T0 + 9_000, false, { flags: F.PSH | F.ACK, seq: 1, ack: 518, len: 1400 }),
   ];
-}
-
-function state(samples: IndexedSample[], over: Partial<TcpGraphState> = {}): TcpGraphState {
-  return {
-    connectionId: ID, generation: 'g:1', samples, nextIndex: (samples.at(-1)?.index ?? -1) + 1,
-    meta: { handshakeSeen: true, windowScale: null, seqBase: BASE, relativeTo: 'isn' },
-    found: true, head: [], labels: new Map(), ...over,
-  };
 }
 
 const helloLabel: TcpSampleLabel = { index: 3, kind: 'tls_client_hello', text: 'ClientHello (SNI: example.com)' };

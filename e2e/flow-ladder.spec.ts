@@ -7,6 +7,7 @@
 // full ring held commits within a frame (production build).
 import { test, expect, type Page } from '@playwright/test';
 import { FakeAgentDouble } from './fake-agent';
+import { TCP_CONNECTION, TCP_ID as ID, columns, instrumentSamplesFetch, median, type SampleRow as Row } from './tcp-samples-fixture';
 
 let agent: FakeAgentDouble;
 
@@ -19,7 +20,6 @@ test.afterAll(async () => {
   await agent.stop();
 });
 
-const ID = 'Tcp-192.168.1.10:51000-93.184.216.34:443';
 const GEN = '00000000feedbeef:2';
 const RING = 4096;
 const HEAD = 16;
@@ -27,8 +27,6 @@ const PER_REPLY = 3072;
 const T0_US = (Math.floor(Date.now() / 1000) - 60) * 1_000_000;
 // A 64-byte label: the widest the agent sends.
 const HELLO = `ClientHello (SNI: ${'a'.repeat(45)})`;
-
-interface Row { tUs: number; seq: number; ack: number; win: number; len: number; flags: number; mark: number; rttUs: number }
 
 // 0 SYN out, 1 SYN-ACK in, 2 ACK out, 3 ClientHello out, 4 ServerHello in,
 // then outbound 1 000-byte data (even) and its inbound ACK (odd).
@@ -45,14 +43,6 @@ function sample(i: number): Row {
   return k % 2 === 0
     ? { tUs: t, seq: 518 + (k / 2) * 1000, ack: 1401, win: 512, len: 1000, flags: 24, mark: 1, rttUs: 0 }
     : { tUs: t, seq: 1401, ack: 518 + ((k + 1) / 2) * 1000, win: 512, len: 0, flags: 16, mark: 0, rttUs: 0 };
-}
-
-function columns(rows: Row[]) {
-  return {
-    tUs: rows.map((r, i) => (i === 0 ? r.tUs : r.tUs - rows[i - 1].tUs)),
-    seq: rows.map((r) => r.seq), ack: rows.map((r) => r.ack), win: rows.map((r) => r.win), len: rows.map((r) => r.len),
-    flags: rows.map((r) => r.flags), mark: rows.map((r) => r.mark), rttUs: rows.map((r) => r.rttUs),
-  };
 }
 
 function reply(requestId: string, fromIndex: number, total: number) {
@@ -73,13 +63,6 @@ function reply(requestId: string, fromIndex: number, total: number) {
     labels,
   };
 }
-
-const CONNECTION = {
-  id: ID, protocol: 'HTTPS/TLS', appLayerProtocol: 'HTTPS/TLS', transportProtocol: 'TCP', osiStack: 'x',
-  localAddr: '192.168.1.10', localPort: 51000, remoteAddr: '93.184.216.34', remotePort: 443, processName: 'curl', pid: 1,
-  rxSpeed: 0, txSpeed: 0, rxBytesTotal: 0, txBytesTotal: 0, latencyMs: 20, packetLoss: 0, status: 'ESTABLISHED',
-  encryption: 'TLS', sparkline: [],
-};
 
 // The packet event for sample 1 (the SYN-ACK), as the agent would send it.
 function synAckPacket() {
@@ -104,7 +87,7 @@ async function openLadder(page: Page) {
   };
   await page.goto('/');
   await expect(page.getByText(/capture agent not connected/i)).toBeHidden({ timeout: 15_000 });
-  agent.send({ type: 'connection_update', connection: CONNECTION });
+  agent.send({ type: 'connection_update', connection: TCP_CONNECTION });
   agent.send(synAckPacket());
   await page.getByTestId('tab-connections').click();
   await page.getByRole('button', { name: /^ladder$/i }).click();
@@ -151,22 +134,7 @@ for (const width of [320, 1280]) {
 
 test('a live poll with the full ring held commits the ladder within a frame', async ({ page }) => {
   total = 4206;
-  await page.addInitScript(() => {
-    const w = window as unknown as { __tcpParsed: number[] };
-    w.__tcpParsed = [];
-    const original = window.fetch.bind(window);
-    window.fetch = async (input, init) => {
-      const res = await original(input, init);
-      if (String(input) !== '/api/tcp-samples') return res;
-      const json = res.json.bind(res);
-      res.json = async () => {
-        const body = await json();
-        w.__tcpParsed.push(performance.now());
-        return body;
-      };
-      return res;
-    };
-  });
+  await instrumentSamplesFetch(page);
   await openLadder(page);
 
   const production = process.env.E2E_PRODUCTION === '1';
@@ -188,8 +156,8 @@ test('a live poll with the full ring held commits the ladder within a frame', as
       return committed - w.__tcpParsed[w.__tcpParsed.length - 1];
     }));
   }
-  const median = [...live].sort((a, b) => a - b)[Math.floor(live.length / 2)];
-  console.log(`KAN-130 flow ladder (${production ? 'production' : 'next dev'}), full ring + head, live poll median of 9: ${median.toFixed(1)} ms | ${live.map((t) => t.toFixed(1)).join(', ')}`);
+  const mid = median(live);
+  console.log(`KAN-130 flow ladder (${production ? 'production' : 'next dev'}), full ring + head, live poll median of 9: ${mid.toFixed(1)} ms | ${live.map((t) => t.toFixed(1)).join(', ')}`);
   expect(live.every((t) => Number.isFinite(t) && t >= 0)).toBe(true);
-  expect(median).toBeLessThan(budget);
+  expect(mid).toBeLessThan(budget);
 });

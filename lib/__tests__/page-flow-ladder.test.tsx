@@ -4,42 +4,9 @@
 // (plan P8); a linked arrow opens its frame in the Packets view (plan P7).
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import TerminalApp from '@/app/page';
-
-class FakeEventSource {
-  static instances: FakeEventSource[] = [];
-  onmessage: ((event: MessageEvent) => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor(public url: string) { FakeEventSource.instances.push(this); }
-  close(): void {}
-}
-
-function emit(data: unknown): void {
-  act(() => FakeEventSource.instances[0].onmessage!({ data: JSON.stringify(data) } as MessageEvent));
-}
-
-const TCP = {
-  id: 'Tcp-192.168.1.10:51000-93.184.216.34:443', protocol: 'HTTPS/TLS', appLayerProtocol: 'HTTPS/TLS', transportProtocol: 'TCP',
-  osiStack: 'x', localAddr: '192.168.1.10', localPort: 51000, remoteAddr: '93.184.216.34', remotePort: 443,
-  processName: 'Safari', pid: 1234, rxSpeed: 0, txSpeed: 0, rxBytesTotal: 0, txBytesTotal: 0,
-  latencyMs: 12, packetLoss: 0, status: 'ESTABLISHED', encryption: 'TLS', sparkline: [],
-};
-const UDP = { ...TCP, id: 'Udp-192.168.1.10:5353-224.0.0.251:5353', transportProtocol: 'UDP', protocol: 'MDNS', appLayerProtocol: 'MDNS' };
-
-const T0 = 1_794_120_000_000_000;
-function reply(fromIndex: number, count: number) {
-  const n = Array.from({ length: count }, (_, i) => fromIndex + i);
-  return {
-    type: 'tcp_samples', connectionId: TCP.id, found: true, stale: false, generation: '00000000feedbeef:1', handshakeSeen: true,
-    windowScale: null, seqBase: { outbound: 0, inbound: 0 }, relativeTo: 'isn', firstIndex: 0, nextIndex: fromIndex + count, more: false, droppedOlder: 0,
-    samples: {
-      tUs: n.map((i) => (i === fromIndex ? T0 + i * 1000 : 1000)), seq: n.map((i) => i * 10), ack: n.map(() => 0), win: n.map(() => 100),
-      len: n.map(() => 10), flags: n.map(() => 16), mark: n.map(() => 1), rttUs: n.map(() => 0),
-    },
-  };
-}
-
+import { emit, installPageEnv, ok, T0, tcpSamplesReply, TCP, type SamplesRequest } from './helpers/page-harness';
 
 function packet(id: string, index: number) {
   const v = (path: string, value: number | boolean) => ({ path, label: path, type: typeof value === 'boolean' ? 'bool' : 'uint', value, region: 'header', offset: 0, len: 1 });
@@ -54,34 +21,17 @@ function packet(id: string, index: number) {
 }
 
 describe('Flow ladder from the Sockets view', () => {
-  let originalEventSource: typeof EventSource;
-  let originalFetch: typeof fetch;
-  let samplesCalls: { connectionId: string; generation?: string; fromIndex: number }[];
+  let env: ReturnType<typeof installPageEnv>;
+  let samplesCalls: SamplesRequest[];
 
   beforeEach(() => {
-    FakeEventSource.instances = [];
-    samplesCalls = [];
-    originalEventSource = global.EventSource;
-    global.EventSource = FakeEventSource as unknown as typeof EventSource;
-    originalFetch = global.fetch;
-    global.fetch = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url === '/api/tcp-samples') {
-        const body = JSON.parse(String(init?.body));
-        samplesCalls.push(body);
-        return { ok: true, status: 200, json: async () => reply(body.fromIndex, body.fromIndex === 0 ? 3 : 0) };
-      }
-      return { ok: true, status: 200, json: async () => ({ ok: true }) };
-    }) as unknown as typeof fetch;
-    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
-      matches: false, media: query, onchange: null, addListener: vi.fn(), removeListener: vi.fn(),
-      addEventListener: vi.fn(), removeEventListener: vi.fn(), dispatchEvent: vi.fn(),
-    }));
+    env = installPageEnv((body) => ok(tcpSamplesReply(body.fromIndex, body.fromIndex === 0 ? 3 : 0)));
+    samplesCalls = env.calls;
   });
 
   afterEach(() => {
     cleanup();
-    global.EventSource = originalEventSource;
-    global.fetch = originalFetch;
+    env.restore();
   });
 
   function openLadder() {

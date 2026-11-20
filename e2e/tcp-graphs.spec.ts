@@ -6,6 +6,7 @@
 // e2e/io-graph.spec.ts measures the IO graph.
 import { test, expect } from '@playwright/test';
 import { FakeAgentDouble } from './fake-agent';
+import { TCP_CONNECTION, TCP_ID as ID, columns, instrumentSamplesFetch, median } from './tcp-samples-fixture';
 
 let agent: FakeAgentDouble;
 
@@ -18,7 +19,6 @@ test.afterAll(async () => {
   await agent.stop();
 });
 
-const ID = 'Tcp-192.168.1.10:51000-93.184.216.34:443';
 const GEN = '00000000feedbeef:1';
 const RING = 4096;
 const PER_REPLY = 3072;
@@ -44,11 +44,7 @@ function samplesReply(requestId: string, fromIndex: number, total: number) {
     type: 'tcp_samples', requestId, connectionId: ID, found: true, stale: false, generation: GEN,
     handshakeSeen: true, windowScale: { local: 7, remote: 7 }, seqBase: { outbound: 0, inbound: 0 }, relativeTo: 'isn',
     firstIndex: first, nextIndex: start + count, more: start + count < total, droppedOlder: start - fromIndex,
-    samples: {
-      tUs: rows.map((r, i) => (i === 0 ? r.tUs : r.tUs - rows[i - 1].tUs)),
-      seq: rows.map((r) => r.seq), ack: rows.map((r) => r.ack), win: rows.map((r) => r.win), len: rows.map((r) => r.len),
-      flags: rows.map((r) => r.flags), mark: rows.map((r) => r.mark), rttUs: rows.map((r) => r.rttUs),
-    },
+    samples: columns(rows),
   };
 }
 
@@ -63,34 +59,11 @@ test('TCP graphs load a full ring in two pages and stay within a frame per updat
   };
 
   // Timestamp each samples reply as the page finishes parsing it.
-  await page.addInitScript(() => {
-    const w = window as unknown as { __tcpParsed: number[] };
-    w.__tcpParsed = [];
-    const original = window.fetch.bind(window);
-    window.fetch = async (input, init) => {
-      const res = await original(input, init);
-      if (String(input) !== '/api/tcp-samples') return res;
-      const json = res.json.bind(res);
-      res.json = async () => {
-        const body = await json();
-        w.__tcpParsed.push(performance.now());
-        return body;
-      };
-      return res;
-    };
-  });
+  await instrumentSamplesFetch(page);
 
   await page.goto('/');
   await expect(page.getByText(/capture agent not connected/i)).toBeHidden({ timeout: 15_000 });
-  agent.send({
-    type: 'connection_update',
-    connection: {
-      id: ID, protocol: 'HTTPS/TLS', appLayerProtocol: 'HTTPS/TLS', transportProtocol: 'TCP', osiStack: 'x',
-      localAddr: '192.168.1.10', localPort: 51000, remoteAddr: '93.184.216.34', remotePort: 443, processName: 'curl', pid: 1,
-      rxSpeed: 0, txSpeed: 0, rxBytesTotal: 0, txBytesTotal: 0, latencyMs: 20, packetLoss: 0, status: 'ESTABLISHED',
-      encryption: 'TLS', sparkline: [],
-    },
-  });
+  agent.send({ type: 'connection_update', connection: TCP_CONNECTION });
   await page.getByTestId('tab-connections').click();
   await page.getByRole('button', { name: /tcp graphs/i }).click();
 
@@ -106,7 +79,6 @@ test('TCP graphs load a full ring in two pages and stay within a frame per updat
 
   const production = process.env.E2E_PRODUCTION === '1';
   const budget = production ? 16.7 : 100;
-  const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
   const fmt = (xs: number[]) => xs.map((t) => t.toFixed(1)).join(', ');
 
   // 1. Interaction: keyboard pan until React commits the new data path.
