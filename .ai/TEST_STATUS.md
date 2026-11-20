@@ -1,3 +1,9 @@
+# KAN-293 (2026-11-19)
+
+`cargo test --locked`: 846 passed, 0 failed. Clippy `-D warnings` clean; release build OK; `follow_store` fuzz 40,080 runs clean in 121 s. Four new tests; three failed before the change; planted removals of the forward resync, the unconfirmed-peer replace, the confirmed-ACK filter and the immediate hole expiry at RST are each caught by exactly one test (the guard test's first version could not catch its plant and was fixed).
+
+---
+
 # KAN-292 review fixes (2026-11-19)
 
 `cargo test --locked`: 842 passed, 0 failed. Clippy `-D warnings` clean; release build OK; `follow_store` fuzz 47,657 runs clean in 121 s (20,877 more after the SYN|RST normalization). Four new tests; removing the SYN|RST normalization fails both SYN|RST tests; disabling `at_sender` still fails 4 tests with the ACK-bearing fixture; the two rejection tests failed before the fix, and planted reverts of the `!sender.confirmed` gate and of the RST-start exclusion are each caught. `a_planted_segment_does_not_stop_a_refused_connection_from_closing` guards the gate choice (gating on `seq_hi.is_none()` instead would let a forger block a refused-connection RST).

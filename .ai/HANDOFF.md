@@ -1,3 +1,10 @@
+# KAN-293 (2026-11-19)
+
+- Change: `capture-agent/src/follow.rs` `FollowEntry::track` resyncs a peer from a confirmed side's ACK; the RST branch of `FollowEntry::ingest` calls `expire_holes(.., now = true, ..)` before closing each direction. Forgery cost unchanged: moving an anchor needs a trusted segment (two-sided 1 MiB window, ≥ 2,048 guesses), the same as the existing forward-only `last_ack` update.
+- Not fixed, by design: a reused 4-tuple whose old entry stayed open keeps the old entry until eviction (no idle timeout exists in the store yet; spec D2 eviction tied to `FlowTable` is Task 2+).
+
+---
+
 # KAN-292 review fixes (2026-11-19)
 
 - Change: `capture-agent/src/follow.rs` `rst_acceptable` rewritten as three named clauses; the ACK clause is gated on `!sender.confirmed`; `FollowStore::ingest` never creates an entry from an RST; `RST_WINDOW_BYTES` doc states the corrected bound. `tcp_samples::seq_after` is `pub(crate)` and shared.

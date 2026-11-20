@@ -1,3 +1,9 @@
+# KAN-293 Follow Stream RST anchor resync + gap at RST (2026-11-19)
+
+James chose Claude for KAN-293, the RST-over-a-hole gap, and Follow Stream Task 2 (P2 approved). Worktree `.worktrees/rst-anchor-resync`, branch `KAN-293-rst-anchor-resync`. Design (option a): a trusted segment from a confirmed side carries its peer's `seq_hi` forward to its ACK, or replaces an unconfirmed peer's anchors; an accepted RST first turns open holes into gaps. Tuple reuse deliberately not resynced (a forger can produce a self-consistent SYN pair for free). Next: PR, reviews; then Task 2 in its own worktree.
+
+---
+
 # KAN-292 review fixes (2026-11-19)
 
 /code-review on merged PR #329 (James: "go ahead"). Worktree `.worktrees/rst-review-fixes`, branch `KAN-292-rst-review-fixes`. The ACK-only RST clause now applies only to a sender that is not confirmed, so at most two windows apply to any RST (≥ 2,048 blind guesses); a SYN|RST no longer creates an entry; `open_cleartext` sends ACK-bearing data; `ahead` replaced by `tcp_samples::seq_after`. Anchor resync after >1 MiB capture loss, tuple reuse and lagging ACKs is KAN-293 (needs a design choice). Next: PR, review; James merges.
