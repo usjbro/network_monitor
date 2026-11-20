@@ -234,19 +234,7 @@ impl ServiceTimeStats {
 /// ANSI escape sequences and bidirectional overrides therefore arrive as
 /// visible text, never as instructions to a terminal or a renderer.
 fn display_safe(text: &str) -> String {
-    let mut out = String::new();
-    for (count, c) in text.chars().enumerate() {
-        if count == MAX_LABEL_CHARS {
-            out.push('…');
-            break;
-        }
-        if c.is_ascii_graphic() || c == ' ' {
-            out.push(c);
-        } else {
-            out.extend(c.escape_unicode());
-        }
-    }
-    out
+    crate::display_text::display_safe_chars(text, MAX_LABEL_CHARS)
 }
 
 pub struct TransactionTracker {

@@ -2105,6 +2105,9 @@ mod tcp_samples_tests {
             seq_base: (1000, 5000),
             relative_to_isn: true,
             samples,
+            head_start_index: 0,
+            head: Vec::new(),
+            labels: Vec::new(),
         }
     }
 
