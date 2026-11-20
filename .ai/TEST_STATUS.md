@@ -1,6 +1,6 @@
 # KAN-110 Task 3c-1 review fixes (2026-11-20)
 
-`cargo test --locked` 956 passed, 0 failed; clippy clean; release and `cargo +nightly fuzz build` OK. New: snaplen-stamp test, no-key closure test; planted breaks of both and of the eviction drop each caught (the no-key test's first version could not fail and was fixed).
+`cargo test --locked` 955 passed, 0 failed; clippy clean; release and `cargo +nightly fuzz build` OK. New: snaplen-stamp test (TCP, TCP fragment, unparsed stamp; UDP, UDP fragment, ICMP do not); planted breaks of each rule and of the eviction drop caught.
 
 ---
 

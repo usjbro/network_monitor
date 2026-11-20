@@ -686,9 +686,7 @@ impl FlowTable {
             return self.observe_inner(physical_fragment, l7, now_ms, frame_us, true, replay);
         }
         let physical = self.observe_inner(physical_fragment, &L7Info::None, now_ms, frame_us, true, replay);
-        let Some(mut result) = self.observe_inner(reassembled, l7, now_ms, frame_us, false, replay) else {
-            return physical.filter(|p| p.closed_key.is_some());
-        };
+        let mut result = self.observe_inner(reassembled, l7, now_ms, frame_us, false, replay)?;
         // A first fragment arriving last carries ports, so it may be the
         // packet that expired a stale reused tuple: keep that closure.
         if let Some(physical) = physical.filter(|_| result.closed_key.is_none()) {
@@ -3218,30 +3216,6 @@ mod tcp_sample_tests {
             .unwrap();
         assert_eq!(result.closed_key, Some(key(51000)));
         assert_eq!(result.closed_connection_id, Some(key(51000).connection_id()));
-    }
-
-    #[test]
-    fn a_closure_survives_a_reassembled_datagram_with_no_flow_key() {
-        let mut table = table();
-        let packet = segment(51000, true, 1, ack_flags(1, 1), b"a");
-        table.observe_replay(&packet, &L7Info::None, 0).unwrap();
-        let mut first_fragment = packet.clone();
-        first_fragment.ip_fragment = Some(crate::parse::Ipv4Fragment {
-            identification: 7,
-            offset_bytes: 0,
-            more_fragments: true,
-            protocol: 6,
-            header: vec![],
-            payload: vec![],
-        });
-        // Unreachable from a real datagram (it carries its first fragment's
-        // ports); the guard costs nothing.
-        let mut unkeyed = packet.clone();
-        unkeyed.src_port = None;
-        let result = table
-            .observe_reassembled_replay(&first_fragment, &unkeyed, &L7Info::None, 1_900_000)
-            .unwrap();
-        assert_eq!(result.closed_key, Some(key(51000)));
     }
 
     #[test]
