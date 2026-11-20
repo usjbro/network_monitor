@@ -67,7 +67,7 @@ activity.
 See [../docs/wire-protocol.md](../docs/wire-protocol.md) for the full JSON
 event contract this binary produces.
 
-## Follow Stream (`FOLLOW_STREAM`, `RELAY_PORT`)
+## Follow Stream (`FOLLOW_STREAM`, `RELAY_PORT`, `FRONT_DOOR_PORT`)
 
 Follow Stream (KAN-110, in progress) retains a selected TCP flow's bytes so
 the UI can show the conversation. It is off unless the agent starts with
@@ -94,12 +94,21 @@ and do not read `RELAY_PORT`: the mTLS front door's `reverse_proxy
 `deploy/README.md`), and `npx osi-inspect`, which posts to
 `OSI_INSPECT_RELAY_URL` (default `http://127.0.0.1:3000`).
 
-With Follow Stream on, `RELAY_PORT` must be a plain decimal port from 1 to
-65535 (no sign or spaces), or startup fails. With it off, `RELAY_PORT` is
-never read, so a bad value cannot stop the agent and a loopback app on port
-3000 stays visible. The check also runs in replay, which excludes nothing,
-so a replay started with `FOLLOW_STREAM=1` and a bad `RELAY_PORT` fails
-too.
+The mTLS front door re-serves the same content, encrypted, on its own port,
+so live capture also drops `FRONT_DOOR_PORT` (KAN-294; default 8443, the
+port in `deploy/Caddyfile`). That covers a browser on this host reaching the
+front door over loopback or by this host's own LAN address (both ends the
+same address). Another LAN client's session with the front door is kept:
+it is not this host's own content, and its keys never reach the agent. If
+`CADDY_LISTEN_ADDR` moves the front door to another port, start the agent
+with the same `FRONT_DOOR_PORT`.
+
+With Follow Stream on, `RELAY_PORT` and `FRONT_DOOR_PORT` must each be a
+plain decimal port from 1 to 65535 (no sign or spaces), or startup fails
+naming the variable. With it off, neither is read, so a bad value cannot
+stop the agent and a loopback app on port 3000 or 8443 stays visible. The
+check also runs in replay, which excludes nothing, so a replay started with
+`FOLLOW_STREAM=1` and a bad port fails too.
 
 Visibility cost: a fragmented IP packet's later fragments carry no ports,
 so with Follow Stream on, live capture drops every loopback TCP fragment
@@ -166,11 +175,12 @@ with `pid: 0`.
 | `MAX_OBSERVED_DNS_NAMES` | Observed DNS name table capacity (default 16,384) | Startup |
 | `FOLLOW_STREAM` | `1` turns on Follow Stream; anything else leaves it off | Startup |
 | `RELAY_PORT` | The relay's port, excluded from live capture (default 3000); read only with `FOLLOW_STREAM=1` | Startup |
+| `FRONT_DOOR_PORT` | The mTLS front door's port, excluded from live capture (default 8443); read only with `FOLLOW_STREAM=1` | Startup |
 
-All eight are read at most once, at startup (`RELAY_PORT` only with
-`FOLLOW_STREAM=1`). Invalid `CAPTURE_INTERFACE` and nonpositive/non-numeric
+All nine are read at most once, at startup (`RELAY_PORT` and
+`FRONT_DOOR_PORT` only with `FOLLOW_STREAM=1`). Invalid `CAPTURE_INTERFACE` and nonpositive/non-numeric
 `MAX_FLOWS` or `MAX_OBSERVED_DNS_NAMES` fail startup; blank values are
-unset, except `RELAY_PORT`: with `FOLLOW_STREAM=1`, unset is the default,
+unset, except the two ports: with `FOLLOW_STREAM=1`, unset is the default,
 and blank or invalid fails startup. `REPLAY_FILE` must name a readable supported file.
 `REPLAY_LOCAL_ADDRS` only splits/trims strings, and only exact
 `REPLAY_SPEED=realtime` selects pacing; other speed values select fast mode.

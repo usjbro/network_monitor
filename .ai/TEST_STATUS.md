@@ -1,3 +1,9 @@
+# KAN-294 (2026-11-19)
+
+`cargo test --locked`: 921 passed after rebasing on #341 (887 before), 0 failed; clippy `-D warnings` clean; release build OK. New: 3 config tests (both ports, the error naming its variable, `FollowPorts::contains`) and 4 exclusion tests (front door both ways on IPv4/IPv6 loopback, this host's own LAN address on a follow port, another host's front-door traffic kept, front door kept with the feature off); the existing exclusion tests now go through `FollowPorts`. Planted breaks caught: relay port only, no same-host rule, same-host on any port, any host on a follow port. Release binary in replay: `FOLLOW_STREAM=1` with `FRONT_DOOR_PORT=+8443` or blank fails startup naming the variable; `FRONT_DOOR_PORT=+8443` alone and `FOLLOW_STREAM=1 FRONT_DOOR_PORT=9443` start normally.
+
+---
+
 # KAN-110 Task 3a (2026-11-19)
 
 `cargo test --locked`: 881 passed, 0 failed. Clippy `-D warnings` clean; release build OK. 14 reader tests (stub run: 11 red) and 2 connection tests through `serve_connection`. Planted breaks caught: off-by-one cap, no cap, `TooLong` not closing, buffer cleared on re-entry (cancel safety); the worst-case `set_io_series` test fails at 32 KiB.
