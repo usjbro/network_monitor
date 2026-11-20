@@ -1,3 +1,21 @@
+# KAN-110 Task 3c-2 — Codex continuation verification (2026-11-20)
+
+- Final local change: bounded replay-test line reader and shared PCAP writer.
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml -- --test-threads=1`: exit 0, 964 passed, 15 ignored, 0 failed (outside sandbox for loopback tests). Log: `/private/tmp/follow-stream-reply-codex-serial-tests.log`.
+- `cargo clippy --locked --manifest-path capture-agent/Cargo.toml --all-targets -- -D warnings`: exit 0. `git diff --check`: clean.
+- `cargo test --locked --manifest-path capture-agent/Cargo.toml --test follow_replay agent_line_reader_enforces_the_limit_before_parsing`: failed on the original unbounded reader, passed after bounding and validating before serde. Covers bounded consumption, exact limit, unterminated input and EOF.
+- Earlier baseline full suite outside sandbox: 963 passed, 15 ignored. Sandbox run failed three follow_replay subprocess-start tests; unchanged baseline passed outside sandbox. A subsequent parallel run hit pre-existing `control_auth::publication_survives_parent_path_rename` fixture `AlreadyExists` at line 18 (PID + wall-clock nanoseconds are not a unique parallel directory allocator). Final serial run passed; auth fixture unchanged.
+- Published PR #346 head `9e91028`: Rust, Web, Playwright, fuzz, individual CodeQL analyses, SonarCloud and Snyk pass; overall CodeQL gate fails alert 26 in replay-test serde. Local fixes remain uncommitted/unpushed, so no claim of a cleared remote alert.
+- SonarCloud public API for PR346: follow_replay.rs 0 duplicated lines / 0%; fixtures/replay_agent.rs 17 / 22.67%, matching io_graph_replay.rs. Removed that exact duplicate locally; hosted reanalysis pending publication.
+
+---
+
+# KAN-110 Task 3c-2 (2026-11-20)
+
+`cargo test --locked`: 963 passed, 0 failed. Clippy `-D warnings` clean; release and fuzz builds OK; `follow_store` fuzz 44,760 runs clean in 121 s (a planted past-horizon page bug is caught in under 90 s). Five duplex tests failed before the handler; planted broadcast, missing relay port and ignored store are each caught. `tests/follow_replay.rs` (3 tests) passed 5 runs in a row after making temp names unique; planted not-fed and raw-fragment-fed breaks fail both enabled tests.
+
+---
+
 # KAN-110 Task 3c-1 review fixes (2026-11-20)
 
 `cargo test --locked` 955 passed, 0 failed; clippy clean; release and `cargo +nightly fuzz build` OK. New: snaplen-stamp test (TCP, TCP fragment, unparsed stamp; UDP, UDP fragment, ICMP do not); planted breaks of each rule and of the eviction drop caught.

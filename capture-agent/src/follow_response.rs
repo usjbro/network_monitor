@@ -77,6 +77,14 @@ pub fn encode_stream_data(
     })
 }
 
+/// Zeroizes a reply once it has been written, or failed to be. Every byte
+/// ever written lies below the current length (`write_line`), so this
+/// clears all of it.
+pub fn release_output(output: &mut Zeroizing<Vec<u8>>) {
+    output.as_mut_slice().zeroize();
+    output.clear();
+}
+
 /// A content-free reply saying the agent is busy (Task 3c's writer budget).
 pub fn encode_stream_busy(request: &StreamRequest, output: &mut Zeroizing<Vec<u8>>) -> Result<(), StreamResponseError> {
     let mut reply = content_free(request, true);

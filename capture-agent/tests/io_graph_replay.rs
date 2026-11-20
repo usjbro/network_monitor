@@ -5,6 +5,9 @@
 //! grace period, and report a truncated file as `replay_error`.
 #[path = "fixtures/agent_auth.rs"]
 mod agent_auth;
+#[path = "fixtures/classic_pcap.rs"]
+mod pcap;
+use pcap::classic_pcap;
 
 use etherparse::PacketBuilder;
 use serde_json::{json, Value};
@@ -59,26 +62,6 @@ fn udp(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, payload: &[u8]) -> Ve
         .write(&mut frame, payload)
         .unwrap();
     frame
-}
-
-/// Classic little-endian pcap, microsecond timestamps, Ethernet.
-fn classic_pcap(frames: &[(u64, Vec<u8>)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend(0xa1b2c3d4u32.to_le_bytes());
-    out.extend(2u16.to_le_bytes());
-    out.extend(4u16.to_le_bytes());
-    out.extend(0i32.to_le_bytes());
-    out.extend(0u32.to_le_bytes());
-    out.extend(65535u32.to_le_bytes());
-    out.extend(1u32.to_le_bytes());
-    for (ts_us, data) in frames {
-        out.extend(((ts_us / 1_000_000) as u32).to_le_bytes());
-        out.extend(((ts_us % 1_000_000) as u32).to_le_bytes());
-        out.extend((data.len() as u32).to_le_bytes());
-        out.extend((data.len() as u32).to_le_bytes());
-        out.extend(data);
-    }
-    out
 }
 
 struct Fixture {

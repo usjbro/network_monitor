@@ -9,6 +9,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+# KAN-110 Task 3c-2: follow_store decodes the replies it pages through.
+serde_json = "1"
+base64 = "0.23.1"
 
 [dependencies.capture-agent]
 path = ".."

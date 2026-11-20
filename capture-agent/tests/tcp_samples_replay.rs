@@ -7,35 +7,17 @@
 //! fields that match the rings held.
 #[path = "fixtures/agent_auth.rs"]
 mod agent_auth;
+#[path = "fixtures/replay_agent.rs"]
+mod replay_agent;
 
 use capture_agent::tcp_samples::{flag, mark, RING_RESERVED_BYTES};
 use etherparse::{PacketBuilder, TcpOptionElement};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::sync::Mutex;
+use replay_agent::{classic_pcap, run_until_replayed, write_temp, AGENT_LOCK};
+use std::process::Command;
 use std::time::{Duration, Instant};
-
-/// Every test here spawns an agent on the fixed control port.
-static AGENT_LOCK: Mutex<()> = Mutex::new(());
-
-struct Agent(Child);
-impl Drop for Agent {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-struct TempFile(PathBuf);
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
 
 const LOCAL: [u8; 4] = [192, 0, 2, 1];
 const SERVER: [u8; 4] = [198, 51, 100, 80];
@@ -78,26 +60,6 @@ fn frame(s: &Segment) -> Vec<u8> {
     }
     let mut out = Vec::new();
     builder.write(&mut out, &vec![b'd'; s.len]).unwrap();
-    out
-}
-
-/// Classic little-endian pcap, microsecond timestamps, Ethernet.
-fn classic_pcap(frames: &[(u64, Vec<u8>)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend(0xa1b2c3d4u32.to_le_bytes());
-    out.extend(2u16.to_le_bytes());
-    out.extend(4u16.to_le_bytes());
-    out.extend(0i32.to_le_bytes());
-    out.extend(0u32.to_le_bytes());
-    out.extend(65535u32.to_le_bytes());
-    out.extend(1u32.to_le_bytes());
-    for (ts_us, data) in frames {
-        out.extend(((ts_us / 1_000_000) as u32).to_le_bytes());
-        out.extend(((ts_us % 1_000_000) as u32).to_le_bytes());
-        out.extend((data.len() as u32).to_le_bytes());
-        out.extend((data.len() as u32).to_le_bytes());
-        out.extend(data);
-    }
     out
 }
 
@@ -148,12 +110,6 @@ fn bulk_transfer(segments: u32, client_wscale: Option<u8>, server_wscale: Option
     frames
 }
 
-fn write_temp(label: &str, bytes: &[u8]) -> TempFile {
-    let path = std::env::temp_dir().join(format!("kan129-{label}-{}.pcap", std::process::id()));
-    std::fs::write(&path, bytes).unwrap();
-    TempFile(path)
-}
-
 struct Answer {
     /// Every page, in order, until `more` was false.
     pages: Vec<Value>,
@@ -167,32 +123,19 @@ fn request_id(n: usize) -> String {
 /// Replays `frames` to the end, then pages through `connection_id`'s ring
 /// and reads one `capture_stats` sent after the replay finished.
 fn replay_and_ask(label: &str, frames: &[(u64, Vec<u8>)], speed: &str, connection_id: &str) -> Answer {
-    let file = write_temp(label, &classic_pcap(frames));
+    let file = write_temp("kan129", label, &classic_pcap(frames));
     let _guard = AGENT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let auth = agent_auth::AuthFixture::new();
-    let mut agent = Agent(
+    let _agent = run_until_replayed(
         Command::new(env!("CARGO_BIN_EXE_capture-agent"))
             .env("AGENT_TOKEN_FILE", auth.token_path())
             .env("REPLAY_FILE", &file.0)
             .env("REPLAY_SPEED", speed)
             .env("REPLAY_LOCAL_ADDRS", "192.0.2.1")
             .env_remove("CAPTURE_INTERFACE")
-            .env_remove("REPLAY_WAIT_FOR_IO_SERIES")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap(),
+            .env_remove("REPLAY_WAIT_FOR_IO_SERIES"),
+        Duration::from_secs(30),
     );
-    let (finished_tx, finished_rx) = mpsc::channel();
-    let stdout = agent.0.stdout.take().unwrap();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if line.contains("replay finished") {
-                let _ = finished_tx.send(());
-            }
-        }
-    });
-    finished_rx.recv_timeout(Duration::from_secs(30)).expect("replay finished");
 
     let stream = TcpStream::connect("127.0.0.1:9990").expect("agent listening");
     let mut reader = auth.authenticate(stream);

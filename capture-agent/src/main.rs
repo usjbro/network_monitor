@@ -3,7 +3,7 @@ use capture_agent::{
     control_auth::{self, Admission, AgentToken, CredentialPath, PublishedCredential},
     fields,
     flow::{self, FlowKey, FlowTable},
-    follow,
+    follow, follow_response,
     host_stats,
     http2::{FrameOutcome, Http2Reassembler},
     keylog::{KeyLogWatcher, SessionSecret},
@@ -4073,6 +4073,7 @@ async fn main() -> std::io::Result<()> {
         let hostname = hostname.clone();
         let io_shared = io_shared.clone();
         let flow_table = flow_table.clone();
+        let follow_store = follow_store.clone();
         tokio::spawn(async move {
             let (read_half, mut write_half) = socket.into_split();
             let mut reader = BufReader::new(read_half);
@@ -4105,6 +4106,8 @@ async fn main() -> std::io::Result<()> {
                 hostname,
                 io_shared,
                 flow_table,
+                follow_store,
+                relay_port: follow_ports.map(|ports| ports.relay),
             };
             serve_connection(reader, write_half, &shared).await;
         });
@@ -4127,6 +4130,10 @@ struct ConnectionShared {
     hostname: String,
     io_shared: Arc<capture_agent::io_series::IoSeriesShared>,
     flow_table: Arc<Mutex<FlowTable>>,
+    /// KAN-110: `None` unless the agent started with `FOLLOW_STREAM=1`.
+    follow_store: Option<Arc<Mutex<follow::FollowStore>>>,
+    /// The relay port live capture excludes (plan P2's comparison).
+    relay_port: Option<u16>,
 }
 
 /// One authenticated relay connection: the IO-series bootstrap, then
@@ -4153,6 +4160,8 @@ where
         hostname,
         io_shared,
         flow_table,
+        follow_store,
+        relay_port,
     } = shared;
     let mut rx = trace_tx.subscribe();
     // JAM-18: tell this (re)connected relay the current IO-graph
@@ -4165,6 +4174,9 @@ where
     }
     // KAN-110 Task 3a: lines are capped before the buffer grows.
     let mut reader = capture_agent::control_line::ControlLines::new(reader);
+    // KAN-110 Task 3c-2: one zeroizing 192 KiB reply buffer, allocated on
+    // this connection's first get_stream and zeroized when it drops.
+    let mut stream_output: Option<zeroize::Zeroizing<Vec<u8>>> = None;
 
     loop {
         tokio::select! {
@@ -4337,10 +4349,31 @@ where
                                     }
                                 }
                             }
-                            // KAN-110: answered from Task 3c, which shares the
-                            // Follow Stream store with this task. Until then
-                            // nothing is sent, so no content can be.
-                            Some(wire::ControlMessage::GetStream(_)) => {}
+                            Some(wire::ControlMessage::GetStream(request)) => {
+                                // KAN-110 Task 3c-2: answered inline on this task and
+                                // written only to this connection, never broadcast or
+                                // rate-limited. As with tcp_samples, the next control
+                                // line is read only after this write returns, so a
+                                // connection holds at most one unflushed reply, 192 KiB
+                                // at most: inside the plan's 512 KiB / four-reply
+                                // budget, so no reply ever has to be refused as busy.
+                                // The store is locked only while encoding.
+                                let output = stream_output.get_or_insert_with(follow_response::new_output);
+                                let encoded = {
+                                    let store = follow_store.as_ref().map(|store| store.lock().unwrap());
+                                    follow_response::encode_stream_data(store.as_deref(), &request, *relay_port, output)
+                                };
+                                // The variant names a bug class only; no content.
+                                if let Err(error) = encoded {
+                                    eprintln!("capture-agent: stream_data reply not sent: {error:?}");
+                                    continue;
+                                }
+                                let sent = write_half.write_all(output).await.is_ok();
+                                follow_response::release_output(output);
+                                if !sent {
+                                    break;
+                                }
+                            }
                             None => {}
                         }
                     }
@@ -6384,6 +6417,8 @@ mod tcp_samples_reply_path_tests {
             hostname: "test-host".into(),
             io_shared: Arc::new(capture_agent::io_series::IoSeriesShared::with_random_epoch()),
             flow_table: flow_table.clone(),
+            follow_store: None,
+            relay_port: None,
         }
     }
 
@@ -6529,6 +6564,143 @@ mod tcp_samples_reply_path_tests {
         // No tcp_samples line ever reached the broadcast channel.
         trace_tx.send("{\"type\":\"test_event\",\"n\":99}\n".into()).unwrap();
         assert_eq!(next_line(&mut bystander).await["n"], 99);
+    }
+
+    // ---------- KAN-110 Task 3c-2: get_stream ----------
+
+    const FOLLOW_RELAY: u16 = 3000;
+    const FOLLOW_ID: &str = "Tcp-192.168.1.10:51000-93.184.216.34:80";
+    const SECRET: &str = "s3cr3t-bearer-value";
+
+    fn follow_segment_at(seq: u32, ack_number: u32, syn: bool, ack: bool, payload: &[u8], now_ms: u64) -> follow::FollowSegment<'_> {
+        follow::FollowSegment { seq, ack_number, syn, ack, fin: false, rst: false, payload, now_ms }
+    }
+
+    /// A store holding one classified cleartext HTTP exchange whose request
+    /// carries a credential.
+    fn store_with_exchange() -> Arc<Mutex<follow::FollowStore>> {
+        let mut store = follow::FollowStore::new(0xfeed);
+        let key = FlowKey::from_connection_id(FOLLOW_ID).unwrap();
+        let request = format!("GET / HTTP/1.1\r\nAuthorization: Bearer {SECRET}\r\nHost: a\r\n\r\n");
+        store.ingest(&key, true, follow_segment_at(1000, 0, true, false, b"", 0));
+        store.ingest(&key, false, follow_segment_at(5000, 1001, true, true, b"", 0));
+        store.ingest(&key, true, follow_segment_at(1001, 5001, false, true, request.as_bytes(), 0));
+        store.ingest(&key, false, follow_segment_at(5001, 1001 + request.len() as u32, false, true, b"HTTP/1.1 200 OK\r\n\r\n", 0));
+        store.tick(follow::CLASSIFY_MS);
+        Arc::new(Mutex::new(store))
+    }
+
+    fn connect_follow(
+        trace_tx: &broadcast::Sender<String>,
+        follow_store: Option<Arc<Mutex<follow::FollowStore>>>,
+        buffer: usize,
+    ) -> DuplexStream {
+        let (agent_end, peer) = tokio::io::duplex(buffer);
+        let mut shared = shared(trace_tx, &flow_table_with_samples(0));
+        shared.relay_port = follow_store.as_ref().map(|_| FOLLOW_RELAY);
+        shared.follow_store = follow_store;
+        tokio::spawn(async move {
+            let (read_half, write_half) = tokio::io::split(agent_end);
+            serve_connection(BufReader::new(read_half), write_half, &shared).await;
+        });
+        peer
+    }
+
+    fn get_stream(n: u8, relay_port: u16) -> String {
+        format!(
+            "{{\"type\":\"get_stream\",\"requestId\":\"{n:032x}\",\"connectionId\":\"{FOLLOW_ID}\",\"c2s\":{{\"offset\":0}},\"s2c\":{{\"offset\":0}},\"relayPort\":{relay_port}}}\n"
+        )
+    }
+
+    /// Sends `requests`, then reads until `replies` stream_data lines came.
+    async fn ask(peer: DuplexStream, requests: &[String], replies_wanted: usize) -> Vec<String> {
+        let (read, mut write) = tokio::io::split(peer);
+        let mut lines = BufReader::new(read).lines();
+        assert_eq!(next_line(&mut lines).await["type"], "io_series_status");
+        // Sent while replies are read, as the relay does: through a small
+        // pipe, writing everything first would wait on the agent's replies.
+        let requests_text = requests.concat();
+        let sender = tokio::spawn(async move {
+            write.write_all(requests_text.as_bytes()).await.unwrap();
+            write
+        });
+        let mut replies = Vec::new();
+        while replies.len() < replies_wanted {
+            let line = timeout(Duration::from_secs(5), lines.next_line()).await.expect("a reply in time").unwrap().expect("open");
+            if line.contains("\"stream_data\"") {
+                replies.push(line);
+            }
+        }
+        drop(timeout(Duration::from_secs(5), sender).await.expect("requests sent"));
+        replies
+    }
+
+    fn decoded(reply: &serde_json::Value, dir: &str) -> Vec<u8> {
+        let b64 = reply["directions"][dir]["dataBase64"].as_str().unwrap();
+        base64::engine::general_purpose::STANDARD.decode(b64).unwrap()
+    }
+
+    #[tokio::test]
+    async fn get_stream_returns_the_masked_conversation_to_the_requester() {
+        let (trace_tx, mut other_viewer) = broadcast::channel::<String>(16);
+        let peer = connect_follow(&trace_tx, Some(store_with_exchange()), 256 * 1024);
+        let replies = ask(peer, &[get_stream(1, FOLLOW_RELAY)], 1).await;
+        let reply: serde_json::Value = serde_json::from_str(&replies[0]).unwrap();
+        assert_eq!((reply["requestId"].as_str(), reply["found"].as_bool()), (Some(&*format!("{:032x}", 1)), Some(true)));
+        let c2s = decoded(&reply, "clientToServer");
+        assert!(c2s.starts_with(b"GET / HTTP/1.1\r\nAuthorization: "));
+        assert_eq!(decoded(&reply, "serverToClient"), b"HTTP/1.1 200 OK\r\n\r\n");
+        assert!(!replies[0].contains(SECRET), "the line carries the secret");
+        assert!(!String::from_utf8_lossy(&c2s).contains(SECRET), "the bytes carry the secret");
+        assert!(other_viewer.try_recv().is_err(), "the reply reached the broadcast channel");
+    }
+
+    #[tokio::test]
+    async fn get_stream_with_follow_stream_off_says_disabled() {
+        let (trace_tx, _keep) = broadcast::channel::<String>(4);
+        let peer = connect_follow(&trace_tx, None, 64 * 1024);
+        let reply: serde_json::Value = serde_json::from_str(&ask(peer, &[get_stream(2, FOLLOW_RELAY)], 1).await[0]).unwrap();
+        assert_eq!((reply["enabled"].as_bool(), reply["found"].as_bool()), (Some(false), Some(false)));
+    }
+
+    #[tokio::test]
+    async fn get_stream_from_another_relay_port_gets_no_content() {
+        let (trace_tx, _keep) = broadcast::channel::<String>(4);
+        let peer = connect_follow(&trace_tx, Some(store_with_exchange()), 64 * 1024);
+        let reply: serde_json::Value = serde_json::from_str(&ask(peer, &[get_stream(3, 3001)], 1).await[0]).unwrap();
+        assert_eq!(reply["unavailable"], "relay_port_mismatch");
+        assert_eq!(reply["directions"]["clientToServer"]["dataBase64"], "");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_get_stream_is_ignored_and_the_next_is_answered() {
+        let (trace_tx, _keep) = broadcast::channel::<String>(4);
+        let peer = connect_follow(&trace_tx, Some(store_with_exchange()), 64 * 1024);
+        let bad = get_stream(4, FOLLOW_RELAY).replace(&format!("{:032x}", 4), "NOT-HEX");
+        let replies = ask(peer, &[bad, get_stream(5, FOLLOW_RELAY)], 1).await;
+        let reply: serde_json::Value = serde_json::from_str(&replies[0]).unwrap();
+        assert_eq!(reply["requestId"], format!("{:032x}", 5));
+    }
+
+    #[tokio::test]
+    async fn replies_behind_a_slow_reader_arrive_whole_and_in_order() {
+        let (trace_tx, _keep) = broadcast::channel::<String>(64);
+        // A pipe far smaller than one reply: each write waits for the reader.
+        let peer = connect_follow(&trace_tx, Some(store_with_exchange()), 64);
+        let event_tx = trace_tx.clone();
+        let events = tokio::spawn(async move {
+            for _ in 0..20 {
+                let _ = event_tx.send("{\"type\":\"pause_marker\"}\n".to_string());
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        let requests: Vec<String> = (10..14).map(|n| get_stream(n, FOLLOW_RELAY)).collect();
+        let replies = ask(peer, &requests, requests.len()).await;
+        events.await.unwrap();
+        for (n, line) in (10..14).zip(&replies) {
+            let reply: serde_json::Value = serde_json::from_str(line).expect("a whole JSON line, not interleaved");
+            assert_eq!(reply["requestId"], format!("{n:032x}"));
+        }
     }
 }
 
