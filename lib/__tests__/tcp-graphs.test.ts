@@ -29,7 +29,7 @@ function page(firstIndex: number, nextIndex: number, samples: TcpSample[], over:
   return {
     found: true, stale: false, connectionId: ID, generation: GEN, handshakeSeen: true,
     windowScale: { local: 7, remote: 8 }, seqBase: { outbound: 1000, inbound: 5000 }, relativeTo: 'isn',
-    firstIndex, nextIndex, more: false, droppedOlder: 0, samples, ...over,
+    firstIndex, nextIndex, more: false, droppedOlder: 0, samples, head: null, labels: [], ...over,
   };
 }
 
@@ -96,6 +96,55 @@ describe('accumulate', () => {
     expect(MAX_SAMPLES).toBe(4096);
     expect(state.samples).toHaveLength(MAX_SAMPLES);
     expect(state.samples[0].index).toBe(10);
+  });
+});
+
+// KAN-130 Task 2: the head and labels ride along with the samples.
+describe('accumulate head and labels', () => {
+  const label = (index: number, text = `L${index}`) => ({ index, kind: 'http_request', text });
+
+  it('starts with no head and no labels', () => {
+    expect(emptyState(ID)).toMatchObject({ head: [], labels: new Map() });
+  });
+
+  it('keeps the head a page carries, indexed from its first index, and never plots it', () => {
+    const h = bulk(6).slice(0, 16);
+    const state = fed(page(5000, 5004, bulk(1).slice(0, 4), { head: { firstIndex: 0, samples: h } }));
+    expect(state.head.map((x) => x.index)).toEqual(h.map((_, i) => i));
+    expect(state.samples.map((x) => x.index)).toEqual([5000, 5001, 5002, 5003]);
+    // A later page without a head keeps the one already held.
+    const later = accumulate(state, page(5000, 5005, [s(T0 + 9e6, true)]));
+    expect(later.head).toEqual(state.head);
+  });
+
+  it('pins its own first 16 samples when trimming past one ring', () => {
+    const all = Array.from({ length: MAX_SAMPLES + 20 }, (_, i) => s(T0 + i, true));
+    const state = fed(page(0, MAX_SAMPLES + 20, all));
+    expect(state.samples.length).toBe(MAX_SAMPLES);
+    expect(state.samples[0].index).toBe(20);
+    expect(state.head.map((x) => x.index)).toEqual(Array.from({ length: 16 }, (_, i) => i));
+    expect(state.head[0].tUs).toBe(T0);
+  });
+
+  it('keeps labels by index, pruning rolling ones with their samples but never head ones', () => {
+    const all = Array.from({ length: MAX_SAMPLES + 20 }, (_, i) => s(T0 + i, true));
+    const state = fed(page(0, MAX_SAMPLES + 20, all, { labels: [label(3), label(17), label(25)] }));
+    expect([...state.labels.keys()].sort((a, b) => a - b)).toEqual([3, 25]);
+    expect(state.labels.get(3)).toEqual(label(3));
+  });
+
+  it('merges labels from later pages', () => {
+    const one = fed(page(0, 2, bulk(0).slice(0, 2), { labels: [label(1)] }));
+    const two = accumulate(one, page(0, 3, [bulk(0)[2]], { labels: [label(2)] }));
+    expect([...two.labels.keys()]).toEqual([1, 2]);
+  });
+
+  it('clears head and labels on stale and on a new generation', () => {
+    const held = fed(page(5000, 5001, [s(T0, true)], { head: { firstIndex: 0, samples: [s(T0, true)] }, labels: [label(5000)] }));
+    const stale = accumulate(held, { found: true, stale: true, connectionId: ID, generation: GEN });
+    expect(stale).toMatchObject({ head: [], labels: new Map() });
+    const fresh = accumulate(held, page(0, 1, [s(T0, true)], { generation: 'other:1' }));
+    expect(fresh).toMatchObject({ head: [], labels: new Map() });
   });
 });
 

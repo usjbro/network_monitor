@@ -17,7 +17,7 @@ function page(fromIndex: number, count: number, more: boolean, generation = GEN)
   return {
     found: true, stale: false, connectionId: ID, generation, handshakeSeen: true, windowScale: null,
     seqBase: { outbound: 0, inbound: 0 }, relativeTo: 'isn', firstIndex: 0, nextIndex: fromIndex + count, more, droppedOlder: 0,
-    samples: Array.from({ length: count }, (_, i) => sample(fromIndex + i)),
+    samples: Array.from({ length: count }, (_, i) => sample(fromIndex + i)), head: null, labels: [],
   };
 }
 

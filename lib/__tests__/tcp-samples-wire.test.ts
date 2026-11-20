@@ -144,3 +144,84 @@ describe('mapCaptureStatsEvent TCP sample cost', () => {
     expect(stats.tcpSampleRingsRecycled).toBeUndefined();
   });
 });
+
+// KAN-130 Task 2: the pinned head and sample labels.
+describe('mapTcpSamplesReply head and labels', () => {
+  const head = {
+    firstIndex: 0,
+    tUs: [T0 - 5000, 1000],
+    seq: [0, 0],
+    ack: [0, 1],
+    win: [65535, 65535],
+    len: [0, 0],
+    flags: [2, 18],
+    mark: [1, 0],
+    rttUs: [0, 0],
+  };
+
+  it('maps a reply without head or labels (an older agent) to null and []', () => {
+    const page = mapTcpSamplesReply(reply());
+    expect(page).toMatchObject({ head: null, labels: [] });
+  });
+
+  it('decodes the head like samples, from its own first index', () => {
+    const page = mapTcpSamplesReply(reply({ head }));
+    if (!page.found || page.stale) throw new Error('expected a page');
+    expect(page.head).toEqual({
+      firstIndex: 0,
+      samples: [
+        { tUs: T0 - 5000, seq: 0, ack: 0, win: 65535, len: 0, flags: 2, mark: 1, rttUs: 0, outbound: true },
+        { tUs: T0 - 4000, seq: 0, ack: 1, win: 65535, len: 0, flags: 18, mark: 0, rttUs: 0, outbound: false },
+      ],
+    });
+  });
+
+  it('rejects a head whose columns are malformed, like samples', () => {
+    expect(() => mapTcpSamplesReply(reply({ head: { ...head, seq: [0] } }))).toThrow(/head/);
+    expect(() => mapTcpSamplesReply(reply({ head: { ...head, firstIndex: -1 } }))).toThrow(/head/);
+  });
+
+  it('maps labels, keeping unknown kinds', () => {
+    const page = mapTcpSamplesReply(reply({
+      labels: [
+        [18230, 'tls_client_hello', 'ClientHello (SNI: example.com)'],
+        [18231, 'tls_server_hello', 'ServerHello'],
+        [18232, 'future_kind', 'Something'],
+      ],
+    }));
+    if (!page.found || page.stale) throw new Error('expected a page');
+    expect(page.labels).toEqual([
+      { index: 18230, kind: 'tls_client_hello', text: 'ClientHello (SNI: example.com)' },
+      { index: 18231, kind: 'tls_server_hello', text: 'ServerHello' },
+      { index: 18232, kind: 'future_kind', text: 'Something' },
+    ]);
+  });
+
+  it('drops a malformed label without rejecting the reply', () => {
+    const good = [18230, 'http_request', 'HTTP GET /'];
+    const page = mapTcpSamplesReply(reply({
+      labels: [
+        good,
+        [-1, 'http_request', 'x'],
+        [1.5, 'http_request', 'x'],
+        [2 ** 53, 'http_request', 'x'],
+        [1, 7, 'x'],
+        [1, 'http_request', 'x'.repeat(65)],
+        [1, 'http_request', 'caf\u00e9'],
+        [1, 'http_request', 'a\u001bb'],
+        [1, 'http_request'],
+        'not a tuple',
+        null,
+      ],
+    }));
+    if (!page.found || page.stale) throw new Error('expected a page');
+    expect(page.labels).toEqual([{ index: 18230, kind: 'http_request', text: 'HTTP GET /' }]);
+    expect(mapTcpSamplesReply(reply({ labels: 'nope' }))).toMatchObject({ labels: [] });
+  });
+
+  it('accepts a label of exactly 64 printable characters', () => {
+    const text = '~'.repeat(64);
+    const page = mapTcpSamplesReply(reply({ labels: [[1, 'http_request', text]] }));
+    expect(page).toMatchObject({ labels: [{ index: 1, kind: 'http_request', text }] });
+  });
+});
