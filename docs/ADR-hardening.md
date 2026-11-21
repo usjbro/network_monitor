@@ -20,14 +20,15 @@ Inventory taken 2026-11-21. Rules are numbered as in the Standing Rules.
 | 4 | Nothing between agent↔uplink↔ingest | planned | components don't exist |
 | 5 | No secrets in repo | partial | `.gitignore`, 0600 token file (`capture-agent/src/control_auth.rs`); no scanner |
 | 6 | Flags off by default | partial | `docs/feature-flags.md`; no code registry |
-| 7 | Tier budgets, 3-day retention | planned | caps exist (`MAX_FLOWS` etc.); enrichment cache is 14 days |
+| 7 | Tier budgets, 3-day retention | planned | caps exist (`MAX_FLOWS` etc.); enrichment cache is 14 days, GeoIP cache 30 days |
 | 8 | Permissions from policy files | planned | auth checks are hard-coded |
 
 ## TODO
 
 - [ ] **Secret scan in pre-commit and CI.** No scanner (gitleaks, trufflehog, detect-secrets) and no pre-commit framework is installed, so none was added. Pick one, pin it, add a pre-commit hook and a CI job.
 - [ ] **Budget gate.** Define tiers. Add a budgets file (proposed: `config/budgets.toml`) and a check that fails when a cap exceeds its tier.
-- [ ] **Retention.** Make 3 days the default. Decide the fate of the 14-day enrichment cache (`lib/enrichment.ts` `CACHE_TTL_MS`): conform it or record an explicit exception. Behavior is unchanged until decided.
+- [ ] **Retention.** Make 3 days the default. Decide the fate of the 14-day enrichment cache (`lib/enrichment.ts` `CACHE_TTL_MS`) and the 30-day GeoIP cache (`lib/geoip.ts` `CACHE_TTL_MS`): conform each or record an explicit exception. Behavior is unchanged until decided.
+- [ ] **Outbound and probe limits.** GeoIP makes one uncapped provider fetch per uncached hop. Each `trace_route` control spawns an independent traceroute task (up to 45 s), with no cap on concurrent runs (`capture-agent/src/main.rs`). Add a rate limit and a concurrency cap under the budget work.
 - [ ] **Policy files.** Proposed location: `policy/`. Move the hard-coded authorization checks there and add policy tests.
 - [ ] **Exposure check.** Automate the manual bind grep in `CLAUDE.md` §4 as a CI job (fail on non-loopback binds outside `deploy/`).
 - [ ] **Settings manifest and staleness check.** Proposed: `config/settings-manifest.toml`, listing every env var and setting. CI fails when code reads a name the manifest (and `.env.example`) lacks.

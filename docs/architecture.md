@@ -34,7 +34,7 @@ Standing Rules 3 and 4 in `CLAUDE.md` / `AGENTS.md` govern this section.
 | Agent ↔ relay | loopback TCP NDJSON | `127.0.0.1` bind + per-launch HMAC credential (`docs/wire-protocol.md`) |
 | Relay ↔ browser | loopback HTTP/SSE | `127.0.0.1` bind; relay routes lack caller auth (JAM-196) |
 | LAN → front door | HTTPS | Caddy mTLS client certificate (`docs/security.md`) |
-| Host → internet | enrichment, GeoIP, traceroute | opt-in, rate-limited, on demand |
+| Host → internet | enrichment, GeoIP, traceroute | enrichment: opt-in, queued/rate-limited; GeoIP: opt-in, cached, on demand, **not** rate-limited; traceroute: on demand, each run bounded (45 s), concurrent runs **not** capped |
 
 **Fleet mode (planned, not built yet).** Each device runs the capture agent plus a separate **fleet uplink** process. Connections are **outbound only**: the uplink dials the **Rust ingest** service, and ingest feeds the **central backend + dashboard**. Devices open no listener beyond loopback, and nothing dials in to a device. No proxy, broker or interception may sit on the agent↔uplink or uplink↔ingest links.
 
