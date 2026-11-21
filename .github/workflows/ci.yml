@@ -268,6 +268,10 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Agent instructions in sync (CLAUDE.md / AGENTS.md Standing Rules)
+        # No dependencies needed; fails if the shared block differs.
+        run: node .github/scripts/check-agent-docs-sync.mjs
+
       - name: Install dependencies
         run: npm ci --ignore-scripts
 

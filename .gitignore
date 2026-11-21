@@ -5,6 +5,15 @@ coverage/
 *.log
 .env*
 !.env.example
+# Secrets and key material (Standing Rule 5). Keys and certs are generated
+# locally (deploy/setup-ca.sh) and never committed.
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+secrets/
 *.tsbuildinfo
 .worktrees/
 /coordination/gates/

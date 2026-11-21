@@ -232,3 +232,23 @@ At 64 authenticated connections the line buffers are at most 8 MiB in total, plu
 
 Evidence / References:
 `capture-agent/src/control_line.rs` (`the_largest_io_series_set_fits_with_every_filter_unit_escaped`), PR #334, KAN-110.
+
+## ADR-009 — Shared Standing Rules in CLAUDE.md and AGENTS.md, enforced by CI
+
+Date:
+2026-11-21
+
+Status:
+Accepted (James approved the inventory in chat, 2026-11-21)
+
+Decision:
+`CLAUDE.md` and `AGENTS.md` carry the same core sections (project map, standing rules, where things live, before you finish, coordination). The Standing Rules block, between `<!-- BEGIN:standing-rules` and `<!-- END:standing-rules` markers, is byte-identical in both. `.github/scripts/check-agent-docs-sync.mjs` checks it in the CI Web job. The detailed git, Slack, gate, queue and trust rules moved without changing their meaning to `coordination/agent-conventions.md`, so each agent file stays under about 150 lines.
+
+Reasoning:
+James asked for the network manager's hardening rules to bind every Claude and Codex session the same way. Two hand-maintained copies drift, and a mechanical check is cheap.
+
+Consequences:
+Any PR that changes a rule, a file location or a required check updates both files in the same PR. Rules not enforced by code are labelled *(planned, not enforced yet)*. Their TODOs live in `docs/ADR-hardening.md`. Older references to `AGENTS.md "<section>"` for the moved sections resolve to `coordination/agent-conventions.md`.
+
+Evidence / References:
+`CLAUDE.md`, `AGENTS.md`, `coordination/agent-conventions.md`, `docs/ADR-hardening.md`, `.github/workflows/ci.yml`.

@@ -2,14 +2,14 @@
 
 Which skill, loop, goal and agent to use for each kind of work. Every agent reads this when it starts a task, and the coordinator names the route in each assignment ([`templates/assignment.md`](templates/assignment.md)). The assignee copies it into the `## Route` section of its task contract.
 
-This file only picks tools. [`AGENTS.md`](../AGENTS.md) still owns gates, approvals, Slack, merging and trust boundaries, and `CLAUDE.md` "Model Routing" still picks the model. [`router-checklist.md`](router-checklist.md) picks Claude Code or Codex when a task has no owner yet.
+This file only picks tools. [`agent-conventions.md`](agent-conventions.md) (summarized in [`AGENTS.md`](../AGENTS.md)) still owns gates, approvals, Slack, merging and trust boundaries, and `CLAUDE.md` "Model Routing" still picks the model. [`router-checklist.md`](router-checklist.md) picks Claude Code or Codex when a task has no owner yet.
 
 ## Rules that beat any skill
 
 Skills are generic, so a skill step can conflict with this repo. When it does, this repo wins:
 
 - **Worktrees and branches:** use `coordination/scripts/new-task.sh`, not the worktree step in `using-git-worktrees` or the branch step in `epic-task-cycle`.
-- **Merging:** follow `AGENTS.md` "Git & Commits". Stop `finishing-a-development-branch` at the open PR.
+- **Merging:** follow `coordination/agent-conventions.md` "Git & Commits". Stop `finishing-a-development-branch` at the open PR.
 - **Commits and pushes:** only when James asks or the assignment authorizes them, as `AGENTS.md` says. A skill's checklist doesn't authorize them.
 - **Design and plan approval:** a skill's "user approved" step means James typing in chat. A Slack reply never counts.
 - **Slack:** post only through `slack-notify.sh`.
@@ -21,7 +21,7 @@ Skill names are bare here. Claude Code prefixes the Superpowers ones, as in `sup
 | Work | Owner | Skill, in order | Loop or goal | Agent |
 |---|---|---|---|---|
 | Start a Jira issue | Codex | `epic-task-cycle` when it belongs to an epic | Contract `## Goal`; Codex `/goal` only if James asks (see below) | None |
-| Work the queue | Codex, Claude Code for coordination | `epic-task-cycle` per issue | `AGENTS.md` "Continuous Work Queue", only under James's standing instruction | None |
+| Work the queue | Codex, Claude Code for coordination | `epic-task-cycle` per issue | `coordination/agent-conventions.md` "Continuous Work Queue", only under James's standing instruction | None |
 | Write a spec | Claude Code | `brainstorming` | None; James approves | `architect` when subsystems compete; `security-engineer` for security-sensitive work |
 | Write a plan | Codex, or Claude Code | `writing-plans` | None; the other agent reviews and gives the verdict. James approves a plan that lands in a PR | None |
 | Write new code from an approved plan | Codex | `executing-plans`, or `subagent-driven-development` when tasks are independent; `test-driven-development`; `verification-before-completion` | Contract `## Goal`; Codex `/goal` only if James asks | Optional, see "Agents" |
@@ -50,7 +50,7 @@ Codex creates a goal only when explicitly asked, and doesn't infer one from an o
 
 ## Loops
 
-- `/loop` is for watching state that changes on its own, not for doing the work. Use the interval James set; `AGENTS.md` gives the default for Slack monitoring. Playbook section 2 says how to tick.
+- `/loop` is for watching state that changes on its own, not for doing the work. Use the interval James set; `agent-conventions.md` "Multi-Agent Coordination" gives the default for Slack monitoring. Playbook section 2 says how to tick.
 - Monitors and wakeups end with the session that started them. Restart them after a handoff.
 - `ralph-loop` isn't a route here. It repeats a prompt until a completion promise, which skips the gate and review stops, and it's disabled on Codex. Use it only if James asks by name.
 

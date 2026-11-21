@@ -53,6 +53,10 @@ npx osi-inspect <command> [args...]
 
 (Launching a browser this way needs an extra `--yes-decrypt-entire-browser` flag, since that decrypts everything the browser does, not just one request.)
 
+## Connections and Trust Boundaries
+
+Everything listens on `127.0.0.1` only. The relay dials the agent, the browser dials the relay, and LAN access is an opt-in mTLS front door (`deploy/`). A planned fleet mode keeps this rule: devices accept no inbound connections, and a separate uplink process connects **out** to a central ingest service. See [Architecture → Connection flow and trust boundaries](docs/architecture.md#connection-flow-and-trust-boundaries) and [Security](docs/security.md).
+
 ## Documentation
 
 - **[Getting Started](docs/getting-started.md)** — prerequisites, one-time setup, running it, verifying it's really live
@@ -64,6 +68,7 @@ npx osi-inspect <command> [args...]
 - **[GeoIP Protocol](docs/geoip-protocol.md)** — the traceroute/geoIP wire/control contract
 - **[Troubleshooting](docs/troubleshooting.md)** — agent not connecting, wrong interface detected, what "Retransmit Anomaly" actually means
 - **[Security](docs/security.md)** — current posture, capture sensitivity and legal guidance, what's explicitly not done yet, dependency hygiene
+- **[Feature flags](docs/feature-flags.md)** — every opt-in feature, its flag and default
 - **[Contributing](CONTRIBUTING.md)** — project structure, tests, the design-spec-then-plan workflow, roadmap
 
 ## Other Commands

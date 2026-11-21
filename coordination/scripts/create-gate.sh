@@ -2,7 +2,7 @@
 # Create a Slack approval gate for a tracked (Jira KAN) task: writes
 # coordination/gates/<issue-key>__<slug>.md with status: awaiting-approval
 # and posts the plan to the shared Slack channel for visibility/discussion.
-# The plan/design doc predates AGENTS.md "Slack Approval Gate", which
+# The plan/design doc predates coordination/agent-conventions.md "Slack Approval Gate", which
 # supersedes it on how a gate gets approved: only a human typing directly
 # in a live chat session counts, never a Slack reply (a connector-posted
 # message is indistinguishable from one the human typed — see that section
