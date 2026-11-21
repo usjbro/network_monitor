@@ -6,9 +6,9 @@
 #
 # Statuses with their own emoji: started, awaiting-approval, pr-opened,
 # feedback, blocked, review, done, idle (an agent has nothing claimed and
-# is looking for the next Jira (KAN) issue — see AGENTS.md "Continuous Work
+# is looking for the next Jira (KAN) issue — see coordination/agent-conventions.md "Continuous Work
 # Queue"), reclaimed (a stale, delegated-but-stalled gate was
-# automatically reclaimed). When each one is required is in AGENTS.md
+# automatically reclaimed). When each one is required is in coordination/agent-conventions.md
 # "Slack Status Posts".
 #
 # Posting path, in order of preference:

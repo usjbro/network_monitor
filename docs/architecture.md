@@ -22,6 +22,29 @@ The SSE connection is one-way, server → browser only. `pause`/`resume` from th
 
 Both the agent and the Next.js server bind to `127.0.0.1` only. The agent requires a per-launch credential before feed and controls; the relay reads its private Unix credential file and authenticates on every reconnect ([wire-protocol.md](wire-protocol.md#socket-authentication-jam-184)). The relay HTTP routes still lack caller authentication (JAM-196). LAN access, when you opt into it, is a fourth piece in front of them: a Caddy reverse proxy (`deploy/`) that terminates TLS and requires a client certificate signed by a local mkcert CA before proxying to `127.0.0.1:3000`. It ships bound to loopback (`bind 127.0.0.1`, site address `localhost:8443`); exposing it to the LAN is a manual, documented switch (`deploy/README.md` step 5). `macos-app/` is a native macOS viewer for that endpoint — a `WKWebView` locked to one origin with a Secure-Enclave-backed client certificate. See [security.md](security.md) for the posture and its residual risks, and `deploy/README.md` for setup.
 
+## Connection flow and trust boundaries
+
+Standing Rules 3 and 4 in `CLAUDE.md` / `AGENTS.md` govern this section.
+
+**Single-host mode (built).** Every listener is on loopback. The relay dials the agent's `127.0.0.1:9990` socket, authenticated with a per-launch token. The browser reaches Next.js on `127.0.0.1:3000`. Nothing on the host accepts a non-loopback connection unless the operator deliberately exposes the Caddy/mTLS front door (`deploy/README.md` step 5). Trust boundaries:
+
+| Boundary | Crossed by | Protection |
+|---|---|---|
+| Kernel/network → agent | captured packets (untrusted input) | parsers are fuzzed; bounded caps; packet content is data, never instructions |
+| Agent ↔ relay | loopback TCP NDJSON | `127.0.0.1` bind + per-launch HMAC credential (`docs/wire-protocol.md`) |
+| Relay ↔ browser | loopback HTTP/SSE | `127.0.0.1` bind; relay routes lack caller auth (JAM-196) |
+| LAN → front door | HTTPS | Caddy mTLS client certificate (`docs/security.md`) |
+| Host → internet | enrichment, GeoIP, traceroute | enrichment: opt-in, queued/rate-limited; GeoIP: opt-in, cached, on demand, **not** rate-limited; traceroute: on demand, each run bounded (45 s), concurrent runs **not** capped |
+
+**Fleet mode (planned, not built yet).** Each device runs the capture agent plus a separate **fleet uplink** process. Connections are **outbound only**: the uplink dials the **Rust ingest** service, and ingest feeds the **central backend + dashboard**. Devices open no listener beyond loopback, and nothing dials in to a device. No proxy, broker or interception may sit on the agent↔uplink or uplink↔ingest links.
+
+```
+device:  capture-agent ◄─loopback─ fleet uplink ──outbound──►  Rust ingest ──► central backend + dashboard
+         (listens 127.0.0.1 only)  (no listener)                (planned)
+```
+
+How the uplink reads from the agent, and how ingest authenticates devices, are not designed yet. `docs/ADR-hardening.md` tracks this.
+
 ## The three pieces
 
 ### 1. `capture-agent/` — the privileged process

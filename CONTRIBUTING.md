@@ -52,7 +52,7 @@ CI runs the same three steps (`.github/workflows/ci.yml`'s `rust` job) — grant
 
 ## Project roadmap
 
-**Jira is the source of truth for tasks and workflow status.** Use project `KAN` at theantimeridian.atlassian.net. `AGENTS.md` ("Sources of Truth", "Continuous Work Queue") and the `epic-task-cycle` skill describe how work is picked, gated and closed there. GitHub holds the implementation evidence: branches, pull requests, CI runs and review. A Jira status alone doesn't prove anything shipped. Check the merged PR and its CI.
+**Jira is the source of truth for tasks and workflow status.** Use project `KAN` at theantimeridian.atlassian.net. `AGENTS.md` ("Sources of truth"), `coordination/agent-conventions.md` ("Continuous Work Queue") and the `epic-task-cycle` skill describe how work is picked, gated and closed there. GitHub holds the implementation evidence: branches, pull requests, CI runs and review. A Jira status alone doesn't prove anything shipped. Check the merged PR and its CI.
 
 Historical: from September to November 2026 work was tracked in Linear (team `JAM`); every issue moved to Jira on the cutover recorded in ADR-007, labelled `linear-jam-<n>`, and `coordination/migration/jam-to-kan.tsv` maps each `JAM-n` to its `KAN-m`. Before Linear, the roadmap was tracked as GitHub issues in this repo. Those issues were migrated to Linear (each migrated issue's description links its original, e.g. "Migrated from GitHub #75"). The list below is the pre-migration record and isn't kept up to date:
 
@@ -102,3 +102,13 @@ If you change any of these, update this section in the same PR as the decision.
 - Commit messages: imperative mood, explain *why* not just *what* where the reasoning isn't obvious from the diff.
 - If a change fixes a defect found during review (yours or someone else's), say so in the commit message — this repo's history deliberately preserves that trail rather than squashing it away, so future readers can see what was tried and why it changed.
 - PRs should list what was verified (tests run, manual checks performed) — see recent PR descriptions in this repo for the expected format.
+
+### PR checklist
+
+`.github/pull_request_template.md` fills in automatically. Every PR states:
+
+- **Tests:** which tests were added or updated, and the commands run with their results.
+- **Docs:** user-facing and protocol docs updated, or why not needed.
+- **Rollback:** how to undo the change.
+- **Flag status:** new features are behind a flag, off by default, and listed in [`docs/feature-flags.md`](docs/feature-flags.md).
+- **Agent instructions:** if the PR changes a rule, a file location or a required check, `CLAUDE.md` and `AGENTS.md` are updated in the same PR. Their Standing Rules blocks must stay identical; CI runs `node .github/scripts/check-agent-docs-sync.mjs`.
