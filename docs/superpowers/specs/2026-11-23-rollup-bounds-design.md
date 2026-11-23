@@ -2,7 +2,7 @@
 
 **Issue:** KAN-131 (legacy JAM-162) — "Bound per-capture endpoint and conversation rollup growth"
 **Epic:** KAN-18 (Analysis surfaces, legacy JAM-127)
-**Status:** DRAFT. Nothing here is implemented. Open for James: the decisions in "Decisions needed" below. The implementation plan and code each need their own gate.
+**Status:** DRAFT, in review (PR #348). James approved all five recommendations in "Decisions" in chat on 2026-11-23. Nothing here is implemented. The implementation plan and code each need their own gate.
 
 ## Problem
 
@@ -121,6 +121,8 @@ It starts from zero, with `firstSeenMs` at its return and `historyComplete: fals
 
 `FlowTable::reset` clears both tables and all `bounds` counters. Today the rollups survive it (`docs/wire-protocol.md`: cumulative since capture start), so totals from one interface appear under another, with directions judged against different local addresses. This is a behaviour change; `protocol_hierarchy_update` and service times are unchanged.
 
+The snapshot timestamps are not rebaselined. The first rate after a switch is therefore averaged over the whole tick that contains the switch, like the rate of any key first seen partway through a tick. The emitter ticks every second even while paused, so that is normally at most about one second, longer only if a tick is late. Rebaselining at the switch would divide by whatever is left of the tick (a few milliseconds at worst) and show a false spike, which would also distort the rate ranking.
+
 ### D7. UI
 
 - `F7: HOSTS (n)` shows `tracked`, not rows received.
@@ -143,7 +145,7 @@ Anyone able to put packets with many source addresses in front of the capture ca
 | 50,000 | 0 | 5,504 | 5,950 |
 | 100,000 | 0 | 0 | 5,900 |
 
-This is an availability effect on an analysis view, not disclosure, and it is visible: `evictions` climbs and `evicted` accounts for every dropped byte. Memory, wire and tick cost stay bounded throughout. Plain LRU cannot prevent it. A segmented LRU (one-packet keys evicted first) would protect repeat talkers, but it changes the decided policy; see question 5. `observe` work per flood packet rises to about 180 ns at 50,000 for these tables.
+This is an availability effect on an analysis view, not disclosure, and it is visible: `evictions` climbs and `evicted` accounts for every dropped byte. Memory, wire and tick cost stay bounded throughout. Plain LRU cannot prevent it. A segmented LRU (one-packet keys evicted first) would protect repeat talkers, but it changes the decided policy; see decision 5. `observe` work per flood packet rises to about 180 ns at 50,000 for these tables.
 
 ## Failure and locking
 
@@ -162,13 +164,13 @@ TypeScript: mapper accepts and rejects `bounds`; each notice; `≥` marks; Rank 
 
 Merging part 1 alone would bound the tables without saying so on the wire, so the two parts must land together or part 1 must stay unreleased behind part 2: the plan picks one branch with two commits, or a stack merged the same day.
 
-## Decisions needed from James
+## Decisions (James, in chat, 2026-11-23: yes to all)
 
-1. **Defaults:** 50,000 / 50,000 / N=200, ceilings 500,000 and 1,000. (Recommended.)
-2. **Ranking:** union of four top-N lists, no control message. (Recommended.)
-3. **Interface switch clears the rollups.** (Recommended; behaviour change.)
-4. **No feature flag.** Standing Rule 6 asks for new features off by default. This is a bound on an existing feature, and off-by-default would leave it unbounded. (Recommended: exempt, with caps raisable by variable.)
-5. **Plain LRU, flooding accepted and shown.** The alternative is a segmented LRU, which amends the 2026-10-11 decision. (Recommended: plain.)
+1. **Defaults:** 50,000 / 50,000 / N=200, ceilings 500,000 and 1,000.
+2. **Ranking:** union of four top-N lists, no control message.
+3. **Interface switch clears the rollups.** A behaviour change.
+4. **No feature flag.** Standing Rule 6 asks for new features off by default. This is a bound on an existing feature, and off-by-default would leave it unbounded. Exempt, with caps raisable by variable.
+5. **Plain LRU, flooding accepted and shown.** The alternative is a segmented LRU, which amends the 2026-10-11 decision. Not chosen.
 
 ## Not verified
 

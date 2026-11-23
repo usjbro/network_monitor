@@ -1,6 +1,6 @@
 # KAN-131 spec (2026-11-23)
 
-- Draft spec only; nothing implemented. Open: default caps and N, union of four top-N lists, clearing rollups on interface switch, no feature flag, plain LRU under flooding.
+- Draft spec only (PR #348); nothing implemented. Decided by James (yes to all, 2026-11-23): default caps and N, union of four top-N lists, clearing rollups on interface switch, no feature flag, plain LRU under flooding.
 - Found while reading: `flow_count` is incremented only on a flow's first packet, so a host evicted and re-added on a live flow would show 0 flows (spec D5); `FlowTable::reset` does not clear rollups today (D6).
 - Not verified: Linux, live traffic, resident memory, browser render time.
 
