@@ -1,6 +1,6 @@
 # KAN-131 Bounded rollups — design spec (2026-11-23)
 
-James assigned KAN-131 to Claude and approved gate `kan-131__rollup-bounds-spec` (spec only; commit, push and PR authorized) in chat. Worktree `.worktrees/rollup-bounds-spec`, branch `KAN-131-rollup-bounds-spec`. Draft `docs/superpowers/specs/2026-11-23-rollup-bounds-design.md`, with benchmark numbers (throwaway, not committed). No code. PR #348. James approved all five decisions in chat. Next: independent review and merge, then a plan with its own gate. All remaining KAN-110 work is assigned to Codex.
+James assigned KAN-131 to Claude and approved gate `kan-131__rollup-bounds-spec` (spec only; commit, push and PR authorized) in chat. Worktree `.worktrees/rollup-bounds-spec`, branch `KAN-131-rollup-bounds-spec`. Draft `docs/superpowers/specs/2026-11-23-rollup-bounds-design.md`, with benchmark numbers (throwaway, not committed). No code. PR #348. James approved all five decisions in chat, then the fixes for ten review findings (including new event names) and keeping D6 as is. Next: independent review and merge, then a plan with its own gate. All remaining KAN-110 work is assigned to Codex.
 
 ---
 
