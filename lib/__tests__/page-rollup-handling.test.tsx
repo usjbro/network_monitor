@@ -5,8 +5,22 @@
 // and one table's bad event must not touch the other's.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
+import React from 'react';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import TerminalApp from '@/app/page';
+import type { Conversation, Endpoint, RollupState } from '@/lib/types';
+
+// The real view, recording the two tables it was given.
+const seen: { endpoints: RollupState<Endpoint>; conversations: RollupState<Conversation> }[] = [];
+vi.mock('@/components/EndpointsView', async (importOriginal) => {
+  const { EndpointsView } = await importOriginal<typeof import('@/components/EndpointsView')>();
+  return {
+    EndpointsView: (props: React.ComponentProps<typeof EndpointsView>) => {
+      seen.push({ endpoints: props.endpoints, conversations: props.conversations });
+      return <EndpointsView {...props} />;
+    },
+  };
+});
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -317,5 +331,52 @@ describe('the Hosts tab label', () => {
     send(conversationRollup(['10.0.0.1', '10.0.0.2']));
     send({ type: 'conversation_rollup' });
     expect(tabText()).toBe('F7: HOSTS (1)');
+  });
+});
+
+describe('enrichment results and table state', () => {
+  const tables = () => seen[seen.length - 1];
+  const rowsOf = (state: RollupState<Endpoint> | RollupState<Conversation>) => (state.status === 'ready' ? state.rows : []);
+
+  beforeEach(() => {
+    seen.length = 0;
+    openHosts();
+    send(endpointRollup(['10.0.0.1', '10.0.0.2']));
+    send(conversationRollup(['10.0.0.1', '10.0.0.2']));
+  });
+
+  it('an unchanged result keeps both tables as they are', () => {
+    send(enrichmentEvent('10.0.0.1', 'ptr.example.net'));
+    const before = tables();
+    send(enrichmentEvent('10.0.0.1', 'ptr.example.net'));
+    expect(tables().endpoints).toBe(before.endpoints);
+    expect(tables().conversations).toBe(before.conversations);
+  });
+
+  it('a first and a changed result update both tables and only that host\'s rows', () => {
+    for (const name of ['first.example.net', 'second.example.net']) {
+      const before = tables();
+      send(enrichmentEvent('10.0.0.1', name));
+      for (const table of ['endpoints', 'conversations'] as const) {
+        const [row, other] = rowsOf(tables()[table]);
+        expect(row.remoteHostname).toBe(name);
+        expect(other).toBe(rowsOf(before[table])[1]);
+      }
+    }
+    expect(screen.getByText('second.example.net')).toBeInTheDocument();
+  });
+
+  it('a result for a host in neither table keeps both tables as they are', () => {
+    const before = tables();
+    send(enrichmentEvent('10.0.0.9', 'ptr.example.net'));
+    expect(tables().endpoints).toBe(before.endpoints);
+    expect(tables().conversations).toBe(before.conversations);
+  });
+
+  it('a repeated result still shows on rows that replaced the enriched ones', () => {
+    send(enrichmentEvent('10.0.0.1', 'ptr.example.net'));
+    send(endpointRollup(['10.0.0.2', '10.0.0.1']));
+    send(enrichmentEvent('10.0.0.1', 'ptr.example.net'));
+    expect(rowsOf(tables().endpoints).map((row) => row.remoteHostname)).toEqual([undefined, 'ptr.example.net']);
   });
 });

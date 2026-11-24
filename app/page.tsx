@@ -60,7 +60,7 @@ import {
 } from '@/lib/agent-mapping';
 import { mapDecryptedPayloadEvent } from '@/lib/decrypted-mapping';
 import { applyEnrichmentEvent } from '@/lib/enrichment-mapping';
-import { EnrichmentMap, withEnrichment } from '@/lib/rollup-state';
+import { EnrichmentMap, replaceHostRows, withEnrichment } from '@/lib/rollup-state';
 import { isTraceComplete, mergeGeoHopUpdate, mergeTracerouteHop } from '@/lib/traceroute-state';
 import { HeaderBar } from '@/components/HeaderBar';
 import { DashboardView } from '@/components/DashboardView';
@@ -454,18 +454,29 @@ export default function TerminalApp() {
           // JAM-14: on-demand lookups use the host as connectionId, while
           // background lookups use a real connection id. Both carry the
           // shared remoteAddr field, so merge rollup metadata by that host.
-          rollupEnrichment.current.record({
-            remoteAddr: data.remoteAddr,
+          // Cache hits repeat a result on every connection_update, so an
+          // unchanged one leaves both tables alone.
+          const host = data.remoteAddr;
+          const changed = rollupEnrichment.current.record({
+            remoteAddr: host,
             remoteHostname: data.remoteHostname,
             enrichment: data.enrichment,
           });
-          if (endpointRows.current.some((e) => e.host === data.remoteAddr)) {
-            const rows = withEnrichment(endpointRows.current, rollupEnrichment.current);
-            setEndpoints((prev) => (prev.status === 'ready' ? { ...prev, rows } : prev));
+          const received = endpointRows.current;
+          if (changed && received.some((e) => e.host === host)) {
+            setEndpoints((prev) =>
+              prev.status === 'ready'
+                ? { ...prev, rows: replaceHostRows(prev.rows, received, host, rollupEnrichment.current) }
+                : prev,
+            );
           }
-          if (conversationRows.current.some((c) => c.remoteAddr === data.remoteAddr)) {
-            const rows = withEnrichment(conversationRows.current, rollupEnrichment.current);
-            setConversations((prev) => (prev.status === 'ready' ? { ...prev, rows } : prev));
+          const receivedPairs = conversationRows.current;
+          if (changed && receivedPairs.some((c) => c.remoteAddr === host)) {
+            setConversations((prev) =>
+              prev.status === 'ready'
+                ? { ...prev, rows: replaceHostRows(prev.rows, receivedPairs, host, rollupEnrichment.current) }
+                : prev,
+            );
           }
           // A result arrived for this connectionId — it's no longer "in
           // flight," and if it had previously timed out into "unavailable"

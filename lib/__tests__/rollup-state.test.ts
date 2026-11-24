@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EnrichmentMap, MAX_IDLE_ENRICHMENT, RollupEnrichmentEvent, withEnrichment } from '../rollup-state';
+import { EnrichmentMap, MAX_IDLE_ENRICHMENT, RollupEnrichmentEvent, replaceHostRows, withEnrichment } from '../rollup-state';
 import { Conversation, Endpoint } from '../types';
 
 const enrichment = {
@@ -188,5 +188,74 @@ describe('EnrichmentMap', () => {
     const map = new EnrichmentMap();
     map.setCurrentHosts(hosts(100), hosts(100, 'c'));
     expect(map.size).toBe(0);
+  });
+});
+
+describe('EnrichmentMap.record return value', () => {
+  const full = {
+    org: 'Example Org', asn: 'AS1', asnOrg: 'Example AS', country: 'US', registrant: 'Example Registrant',
+    source: 'rdap' as const, fetchedAt: '2026-09-28T00:00:00.000Z',
+  };
+  const event = (overrides: Partial<RollupEnrichmentEvent> = {}): RollupEnrichmentEvent => ({
+    remoteAddr: 'h', remoteHostname: 'ptr.example.net', enrichment: full, ...overrides,
+  });
+
+  it.each([['current', ['h']], ['idle', []]])('says a first result changed something and a repeat did not (%s host)', (_, current) => {
+    const map = new EnrichmentMap();
+    map.setCurrentHosts(current, []);
+    expect(map.record(event())).toBe(true);
+    const before = map.get('h');
+    // A fresh object with the fields in another order, as each event parses to.
+    expect(map.record(event({ enrichment: { ...Object.fromEntries(Object.entries(full).reverse()) } as typeof full }))).toBe(false);
+    expect(map.get('h')).toBe(before);
+    // No PTR name keeps the known one, so nothing changed.
+    expect(map.record(event({ remoteHostname: undefined }))).toBe(false);
+  });
+
+  it.each(['org', 'asn', 'asnOrg', 'country', 'registrant', 'source', 'fetchedAt'])('counts a different %s as a change', (field) => {
+    const map = new EnrichmentMap();
+    map.record(event());
+    const changed = { ...full, [field]: field === 'source' ? 'cache' : 'different' } as typeof full;
+    expect(map.record(event({ enrichment: changed }))).toBe(true);
+    expect(map.get('h')?.enrichment).toEqual(changed);
+  });
+
+  it('counts a new PTR name and a removed or added field as changes', () => {
+    const map = new EnrichmentMap();
+    map.record(event());
+    expect(map.record(event({ remoteHostname: 'other.example.net' }))).toBe(true);
+    expect(map.record(event({ enrichment: { source: full.source, fetchedAt: full.fetchedAt } }))).toBe(true);
+    expect(map.record(event({ enrichment: undefined }))).toBe(true);
+    expect(map.record(event({ enrichment: undefined }))).toBe(false);
+    expect(map.record(event())).toBe(true);
+  });
+
+  it('an unchanged result still refreshes an idle host', () => {
+    const map = new EnrichmentMap();
+    for (const host of hosts(MAX_IDLE_ENRICHMENT)) map.record(result(host));
+    expect(map.record(result('h0'))).toBe(false);
+    map.record(result('one-more'));
+    expect(map.get('h0')).toBeDefined();
+    expect(map.get('h1')).toBeUndefined();
+  });
+});
+
+describe('replaceHostRows', () => {
+  it('rebuilds only the rows for that host, from the received rows', () => {
+    const map = new EnrichmentMap();
+    map.setCurrentHosts([], ['a', 'b']);
+    map.record(result('a', 'old.example.net'));
+    map.record(result('b', 'b.example.net'));
+    const received = [
+      conversation({ remoteAddr: 'a' }),
+      conversation({ remoteAddr: 'b' }),
+      conversation({ localAddr: '192.168.1.11', remoteAddr: 'a' }),
+    ];
+    const shown = withEnrichment(received, map);
+    map.record(result('a', 'new.example.net'));
+    const next = replaceHostRows(shown, received, 'a', map);
+    expect(next.map((row) => row.remoteHostname)).toEqual(['new.example.net', 'b.example.net', 'new.example.net']);
+    expect(next[1]).toBe(shown[1]);
+    expect(next).toEqual(withEnrichment(received, map));
   });
 });

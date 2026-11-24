@@ -8,6 +8,22 @@ export interface RollupEnrichmentEvent {
 
 type HostEnrichment = Pick<Endpoint, 'remoteHostname' | 'enrichment'>;
 
+// Every ownership field: a result that differs in any of them is a new result.
+const ENRICHMENT_FIELDS = Object.keys({
+  org: true,
+  asn: true,
+  asnOrg: true,
+  country: true,
+  registrant: true,
+  source: true,
+  fetchedAt: true,
+} satisfies Record<keyof NonNullable<HostEnrichment['enrichment']>, true>) as (keyof NonNullable<HostEnrichment['enrichment']>)[];
+
+function sameEntry(a: HostEnrichment, b: HostEnrichment): boolean {
+  if (a.remoteHostname !== b.remoteHostname || !a.enrichment !== !b.enrichment) return false;
+  return ENRICHMENT_FIELDS.every((field) => a.enrichment?.[field] === b.enrichment?.[field]);
+}
+
 export const MAX_IDLE_ENRICHMENT = 1_000;
 
 // Ownership and PTR names by remote address, for one tab (KAN-131, design
@@ -20,13 +36,18 @@ export class EnrichmentMap {
   // Oldest first (Map iteration order).
   private idle = new Map<string, HostEnrichment>();
 
-  // Replaces the ownership data. A result without a PTR name keeps the known one.
-  record(event: RollupEnrichmentEvent): void {
+  // Replaces the ownership data. A result without a PTR name keeps the known
+  // one. Returns whether anything known about the host changed; an unchanged
+  // result still counts as use.
+  record(event: RollupEnrichmentEvent): boolean {
     const host = event.remoteAddr;
-    const entry: HostEnrichment = {
-      remoteHostname: event.remoteHostname || this.get(host)?.remoteHostname,
+    const known = this.get(host);
+    const received: HostEnrichment = {
+      remoteHostname: event.remoteHostname || known?.remoteHostname,
       enrichment: event.enrichment,
     };
+    const unchanged = known !== undefined && sameEntry(known, received);
+    const entry = unchanged ? known : received;
     if (this.currentHosts.has(host)) {
       this.current.set(host, entry);
     } else {
@@ -34,6 +55,7 @@ export class EnrichmentMap {
       this.idle.set(host, entry);
       this.trimIdle();
     }
+    return !unchanged;
   }
 
   setCurrentHosts(endpointHosts: Iterable<string>, conversationHosts: Iterable<string>): void {
@@ -69,16 +91,32 @@ export class EnrichmentMap {
   }
 }
 
+const remoteOf = (row: Endpoint | Conversation) => ('host' in row ? row.host : row.remoteAddr);
+
+function enrichRow<T extends Endpoint | Conversation>(row: T, map: EnrichmentMap): T {
+  const known = map.get(remoteOf(row));
+  if (!known) return row;
+  return {
+    ...row,
+    remoteHostname: row.remoteHostname ?? known.remoteHostname,
+    enrichment: row.enrichment ?? known.enrichment,
+  };
+}
+
 // Fills in ownership and PTR names; what a row already carries wins. Nothing
 // else is retained: observedName is always the latest event's.
 export function withEnrichment<T extends Endpoint | Conversation>(rows: T[], map: EnrichmentMap): T[] {
-  return rows.map((row) => {
-    const known = map.get('host' in row ? row.host : row.remoteAddr);
-    if (!known) return row;
-    return {
-      ...row,
-      remoteHostname: row.remoteHostname ?? known.remoteHostname,
-      enrichment: row.enrichment ?? known.enrichment,
-    };
-  });
+  return rows.map((row) => enrichRow(row, map));
+}
+
+// `shown` after a new result for `host`: its rows are enriched again from the
+// received rows (an enriched row would keep its old result); the others are the
+// same objects. `shown` and `received` hold the same rows in the same order.
+export function replaceHostRows<T extends Endpoint | Conversation>(
+  shown: T[],
+  received: T[],
+  host: string,
+  map: EnrichmentMap,
+): T[] {
+  return shown.map((row, i) => (remoteOf(row) === host ? enrichRow(received[i], map) : row));
 }
