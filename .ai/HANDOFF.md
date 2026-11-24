@@ -1,3 +1,12 @@
+# KAN-131 spec (2026-11-23)
+
+- Draft spec only (PR #348); nothing implemented. Decided by James (yes to all, 2026-11-23): default caps and N, union of four top-N lists, clearing rollups on interface switch, no feature flag, plain LRU under flooding.
+- Found while reading: `flow_count` is incremented only on a flow's first packet, so a host evicted and re-added on a live flow would show 0 flows (spec D5); `FlowTable::reset` does not clear rollups today (D6).
+- High-effort review: ten findings, all addressed in the spec. New events `endpoint_rollup`/`conversation_rollup`; an old open tab stops updating without a notice until reloaded (D4). Aikido's D6 finding is declined by James's decision and may still fail its check.
+- Not verified: Linux, live traffic, resident memory, browser render time, lock hold including row building.
+
+---
+
 # KAN-110 Task 3c-2 — Codex review continuation (2026-11-20)
 
 - Reviewed published head `9e91028`, the complete task Slack thread, GitHub reviews and CI. No additional production-code blocker found; inline-writer backpressure and store-lock contention remain the documented trade-offs. Cleanup relies on `Zeroizing` on task cancellation; this continuation did not add a release-observer test.

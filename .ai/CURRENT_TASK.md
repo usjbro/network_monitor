@@ -1,3 +1,9 @@
+# KAN-131 Bounded rollups — design spec (2026-11-23)
+
+James assigned KAN-131 to Claude and approved gate `kan-131__rollup-bounds-spec` (spec only; commit, push and PR authorized) in chat. Worktree `.worktrees/rollup-bounds-spec`, branch `KAN-131-rollup-bounds-spec`. Draft `docs/superpowers/specs/2026-11-23-rollup-bounds-design.md`, with benchmark numbers (throwaway, not committed). No code. PR #348. James approved all five decisions in chat, then the fixes for ten review findings (including new event names) and keeping D6 as is. Next: independent review and merge, then a plan with its own gate. All remaining KAN-110 work is assigned to Codex.
+
+---
+
 # KAN-110 Task 3c-2 — Codex continuation (2026-11-20)
 
 James requested review and continuation in this worktree. PR #346 is the only open PR; #342–#345 are merged. Published head `9e91028` passes Rust/Web/Playwright/fuzz/Sonar/Snyk, but CodeQL blocks on replay-test deserialization before size validation (alert 26). Follow-up fixes bound and validate the replay line before parsing, add a regression, and share the remaining duplicated PCAP writer with `io_graph_replay`. Verification: 964 Rust tests pass serially (15 ignored), clippy clean; independent code/security reviews found no actionable defect. Explicit cancellation/write-failure zeroization-observer coverage remains incomplete. James authorized commit/push in live chat. Next: publish and recheck CodeQL/Sonar. James owns merge. Task 4 remains next after this PR.
