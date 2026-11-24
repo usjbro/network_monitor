@@ -549,14 +549,16 @@ export interface NetworkInterface {
 }
 
 // Per-remote-host traffic rollup (JAM-14), from the agent's
-// `endpoint_update` wire event (docs/wire-protocol.md). Cumulative since
-// capture start, aggregated in the agent — not derived from `connections`
-// client-side, so totals survive a flow closing/evicting and the 200-row
-// connection cap (app/page.tsx). `enrichment` is populated the same way
+// `endpoint_rollup` wire event (docs/wire-protocol.md). Cumulative since the
+// host was last added to the agent's bounded table (KAN-131) — not derived
+// from `connections` client-side, so totals survive a flow closing/evicting
+// and the 200-row connection cap (app/page.tsx). `enrichment` is populated the same way
 // `NetworkConnection.enrichment` is: opt-in, looked up once per host here
 // rather than once per flow.
 export interface Endpoint {
   host: string;
+  // False: may have earlier history that the agent evicted.
+  historyComplete: boolean;
   // PTR name comes from relay-side connection_enrichment, not the agent rollup wire event.
   remoteHostname?: string;
   // JAM-21: the name an answered DNS response gave this address, observed
@@ -580,13 +582,14 @@ export interface Endpoint {
 }
 
 // Per-(local,remote)-pair traffic rollup (JAM-14), from the agent's
-// `conversation_update` wire event. Same cumulative-since-capture-start
+// `conversation_rollup` wire event. Same cumulative-since-insertion
 // contract as `Endpoint` above; distinct from it in that a local host
 // isn't collapsed away — two local addresses talking to the same remote
 // host are two separate conversations but one combined endpoint.
 export interface Conversation {
   localAddr: string;
   remoteAddr: string;
+  historyComplete: boolean;
   // Shared with the endpoint row for this remote host after opt-in enrichment.
   remoteHostname?: string;
   rxBytesTotal: number;
@@ -604,6 +607,39 @@ export interface Conversation {
   ja3Label?: string;
   enrichment?: NetworkConnection['enrichment'];
 }
+
+export interface RollupTraffic {
+  rxBytes: number;
+  txBytes: number;
+  rxPackets: number;
+  txPackets: number;
+}
+
+// What one rollup event leaves out (KAN-131, design D4). Counters are since
+// the agent started or last reset, and saturate.
+export interface RollupBounds {
+  cap: number;
+  topN: number;
+  tracked: number; // keys held now, of which `rows` is a subset
+  evictions: number; // events, not distinct keys
+  unkeyed: number; // packets with an unparseable address, in no row or total
+  sinceMs: number | null;
+  horizonMs: number | null; // latest lastSeenMs among evicted keys
+  totals: RollupTraffic;
+  evicted: RollupTraffic;
+}
+
+// `rows` keep the order sent: array position is the last ranking tie-break.
+export interface RollupUpdate<T> {
+  rows: T[];
+  bounds: RollupBounds;
+}
+
+export type RollupState<T> =
+  | { status: 'waiting' }
+  | { status: 'ready'; rows: T[]; bounds: RollupBounds }
+  | { status: 'agent-too-old' }
+  | { status: 'unreadable' };
 
 /** Socket handshake only; never forwarded to browser consumers. */
 export interface AgentAuthenticateMessage { type: 'authenticate'; token: string }

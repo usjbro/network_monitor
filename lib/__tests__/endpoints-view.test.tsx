@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { EndpointsView } from '../../components/EndpointsView';
 import { THEMES } from '../osi-engine';
-import { Conversation, Endpoint } from '../types';
+import { Conversation, Endpoint, RollupState } from '../types';
 
 // See connections-view-ownership.test.tsx's identical comment: this file
 // imports afterEach explicitly (vitest.config.ts doesn't enable globals),
@@ -28,6 +28,7 @@ function endpoint(overrides: Partial<Endpoint> = {}): Endpoint {
     lastSeenMs: 1000,
     processName: 'Safari',
     pid: 1234,
+    historyComplete: true,
     ...overrides,
   };
 }
@@ -48,7 +49,20 @@ function conversation(overrides: Partial<Conversation> = {}): Conversation {
     durationMs: 1000,
     processName: 'Safari',
     pid: 1234,
+    historyComplete: true,
     ...overrides,
+  };
+}
+
+function ready<T>(rows: T[]): RollupState<T> {
+  const none = { rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0 };
+  return {
+    status: 'ready',
+    rows,
+    bounds: {
+      cap: 50_000, topN: 200, tracked: rows.length, evictions: 0, unkeyed: 0,
+      sinceMs: 0, horizonMs: null, totals: none, evicted: none,
+    },
   };
 }
 
@@ -56,8 +70,8 @@ describe('EndpointsView', () => {
   it('renders one row per host, matching a 50-flows-collapsed-into-one rollup', () => {
     render(
       <EndpointsView
-        endpoints={[endpoint({ host: '93.184.216.34', flowCount: 50, rxBytesTotal: 5000, txBytesTotal: 3000 })]}
-        conversations={[]}
+        endpoints={ready([endpoint({ host: '93.184.216.34', flowCount: 50, rxBytesTotal: 5000, txBytesTotal: 3000 })])}
+        conversations={ready([])}
         theme={theme}
       />,
     );
@@ -68,12 +82,12 @@ describe('EndpointsView', () => {
   it('defaults to sorting by bytes descending', () => {
     render(
       <EndpointsView
-        endpoints={[
+        endpoints={ready([
           endpoint({ host: 'small.example', rxBytesTotal: 10, txBytesTotal: 0 }),
           endpoint({ host: 'big.example', rxBytesTotal: 9000, txBytesTotal: 1000 }),
           endpoint({ host: 'mid.example', rxBytesTotal: 500, txBytesTotal: 0 }),
-        ]}
-        conversations={[]}
+        ])}
+        conversations={ready([])}
         theme={theme}
       />,
     );
@@ -85,11 +99,11 @@ describe('EndpointsView', () => {
   it('toggles sort direction when the same column header is clicked twice', () => {
     render(
       <EndpointsView
-        endpoints={[
+        endpoints={ready([
           endpoint({ host: 'a.example', rxBytesTotal: 10, txBytesTotal: 0 }),
           endpoint({ host: 'b.example', rxBytesTotal: 9000, txBytesTotal: 0 }),
-        ]}
-        conversations={[]}
+        ])}
+        conversations={ready([])}
         theme={theme}
       />,
     );
@@ -106,12 +120,12 @@ describe('EndpointsView', () => {
   it('sorts by an arbitrary column, e.g. flow count', () => {
     render(
       <EndpointsView
-        endpoints={[
+        endpoints={ready([
           endpoint({ host: 'a.example', flowCount: 1 }),
           endpoint({ host: 'b.example', flowCount: 9 }),
           endpoint({ host: 'c.example', flowCount: 5 }),
-        ]}
-        conversations={[]}
+        ])}
+        conversations={ready([])}
         theme={theme}
       />,
     );
@@ -124,12 +138,12 @@ describe('EndpointsView', () => {
   it('sorts by process name when the Process (PID) header is clicked', () => {
     render(
       <EndpointsView
-        endpoints={[
+        endpoints={ready([
           endpoint({ host: 'a.example', processName: 'Chrome', rxBytesTotal: 300 }),
           endpoint({ host: 'b.example', processName: 'Firefox', rxBytesTotal: 200 }),
           endpoint({ host: 'c.example', processName: 'Safari', rxBytesTotal: 100 }),
-        ]}
-        conversations={[]}
+        ])}
+        conversations={ready([])}
         theme={theme}
       />,
     );
@@ -143,12 +157,12 @@ describe('EndpointsView', () => {
   it('sorts by combined RX and TX rate when the Rate header is clicked', () => {
     render(
       <EndpointsView
-        endpoints={[
+        endpoints={ready([
           endpoint({ host: 'a.example', rxBytesTotal: 900, rxSpeed: 1, txSpeed: 0 }),
           endpoint({ host: 'b.example', rxBytesTotal: 500, rxSpeed: 4, txSpeed: 5 }),
           endpoint({ host: 'c.example', rxBytesTotal: 100, rxSpeed: 3, txSpeed: 1 }),
-        ]}
-        conversations={[]}
+        ])}
+        conversations={ready([])}
         theme={theme}
       />,
     );
@@ -162,8 +176,8 @@ describe('EndpointsView', () => {
   it('switches to the Conversations table and shows local<->remote pairs with duration', () => {
     render(
       <EndpointsView
-        endpoints={[endpoint()]}
-        conversations={[conversation({ localAddr: '192.168.1.10', remoteAddr: '93.184.216.34', durationMs: 4200 })]}
+        endpoints={ready([endpoint()])}
+        conversations={ready([conversation({ localAddr: '192.168.1.10', remoteAddr: '93.184.216.34', durationMs: 4200 })])}
         theme={theme}
       />,
     );
@@ -175,7 +189,7 @@ describe('EndpointsView', () => {
 
   describe('observed DNS names', () => {
     const renderOne = (e: Partial<Endpoint>) =>
-      render(<EndpointsView endpoints={[endpoint(e)]} conversations={[]} theme={theme} />);
+      render(<EndpointsView endpoints={ready([endpoint(e)])} conversations={ready([])} theme={theme} />);
 
     it('shows_the_observed_name_under_the_host', () => {
       renderOne({ observedName: 'example.com' });
@@ -225,8 +239,8 @@ describe('EndpointsView', () => {
     it('search_matches_the_observed_name', () => {
       render(
         <EndpointsView
-          endpoints={[endpoint({ host: '10.0.0.1', observedName: 'wanted.example' }), endpoint({ host: '10.0.0.2' })]}
-          conversations={[]}
+          endpoints={ready([endpoint({ host: '10.0.0.1', observedName: 'wanted.example' }), endpoint({ host: '10.0.0.2' })])}
+          conversations={ready([])}
           theme={theme}
         />,
       );
@@ -261,8 +275,8 @@ describe('EndpointsView', () => {
   it('filters rows by the search box', () => {
     render(
       <EndpointsView
-        endpoints={[endpoint({ host: 'match.example' }), endpoint({ host: 'other.example' })]}
-        conversations={[]}
+        endpoints={ready([endpoint({ host: 'match.example' }), endpoint({ host: 'other.example' })])}
+        conversations={ready([])}
         theme={theme}
       />,
     );
@@ -274,8 +288,8 @@ describe('EndpointsView', () => {
   it('shows and filters endpoint rows by the PTR hostname from ownership enrichment', () => {
     render(
       <EndpointsView
-        endpoints={[endpoint({ host: '93.184.216.34', remoteHostname: 'edge.example.net' })]}
-        conversations={[]}
+        endpoints={ready([endpoint({ host: '93.184.216.34', remoteHostname: 'edge.example.net' })])}
+        conversations={ready([])}
         theme={theme}
       />,
     );
@@ -289,7 +303,7 @@ describe('EndpointsView', () => {
 
   describe('Ownership section', () => {
     it('shows "Enrichment disabled" until a row is selected and enrichment is off', () => {
-      render(<EndpointsView endpoints={[endpoint()]} conversations={[]} theme={theme} enrichmentMode="off" />);
+      render(<EndpointsView endpoints={ready([endpoint()])} conversations={ready([])} theme={theme} enrichmentMode="off" />);
       fireEvent.click(screen.getByText('93.184.216.34'));
       expect(screen.getByText(/enrichment disabled/i)).toBeInTheDocument();
     });
@@ -298,8 +312,8 @@ describe('EndpointsView', () => {
       const onRequestLookup = vi.fn();
       render(
         <EndpointsView
-          endpoints={[endpoint()]}
-          conversations={[]}
+          endpoints={ready([endpoint()])}
+          conversations={ready([])}
           theme={theme}
           enrichmentMode="on-demand"
           onRequestLookup={onRequestLookup}
@@ -313,8 +327,8 @@ describe('EndpointsView', () => {
     it('shows org/ASN once enrichment data is attached to the row', () => {
       render(
         <EndpointsView
-          endpoints={[endpoint({ enrichment: { org: 'EXAMPLE-ORG', asn: 'AS15133', source: 'rdap', fetchedAt: '2026-08-28T00:00:00.000Z' } })]}
-          conversations={[]}
+          endpoints={ready([endpoint({ enrichment: { org: 'EXAMPLE-ORG', asn: 'AS15133', source: 'rdap', fetchedAt: '2026-08-28T00:00:00.000Z' } })])}
+          conversations={ready([])}
           theme={theme}
           enrichmentMode="on-demand"
         />,

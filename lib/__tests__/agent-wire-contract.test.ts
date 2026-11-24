@@ -45,7 +45,8 @@ import {
   mapCaptureFileStatusEvent,
   mapCaptureStatsEvent,
   mapConnectionEvent,
-  mapEndpointUpdateEvent,
+  mapConversationRollupEvent,
+  mapEndpointRollupEvent,
   mapFindingEvent,
   mapIoBucketsEvent,
   mapIoSeriesStatusEvent,
@@ -80,7 +81,8 @@ describe('agent wire contract: real captured agent output maps without throwing'
         'capture_file_status',
         'capture_stats',
         'connection_update',
-        'endpoint_update',
+        'conversation_rollup',
+        'endpoint_rollup',
         'finding',
         'io_buckets',
         'io_series_status',
@@ -139,10 +141,30 @@ describe('agent wire contract: real captured agent output maps without throwing'
     expect(typeof mapped.observedNameEvictions).toBe('number');
   });
 
-  it('endpoint_update maps and carries a real observedName', () => {
-    const mapped = mapEndpointUpdateEvent(sample('endpoint_update'));
-    expect(mapped.length).toBeGreaterThan(0);
-    expect(mapped.some((e) => typeof e.observedName === 'string' && e.observedName.length > 0)).toBe(true);
+  // KAN-131: both rollups captured from one replay of the capture that
+  // capture-agent/tests/non_ip_replay.rs builds (documentation addresses).
+  it('endpoint_rollup maps, with its bounds and a real observedName', () => {
+    const { rows, bounds } = mapEndpointRollupEvent(sample('endpoint_rollup'));
+    expect(rows.map((e) => [e.host, e.observedName, e.historyComplete])).toEqual([
+      ['198.51.100.53', undefined, true],
+      ['203.0.113.7', 'test.example', true],
+      ['203.0.113.8', undefined, true],
+    ]);
+    expect(bounds).toMatchObject({ cap: 50_000, topN: 200, tracked: 3, evictions: 0, unkeyed: 0, sinceMs: 0, horizonMs: null });
+    const sum = (pick: (e: (typeof rows)[number]) => number) => rows.reduce((total, e) => total + pick(e), 0);
+    expect(bounds.totals).toEqual({
+      rxBytes: sum((e) => e.rxBytesTotal), txBytes: sum((e) => e.txBytesTotal),
+      rxPackets: sum((e) => e.rxPacketsTotal), txPackets: sum((e) => e.txPacketsTotal),
+    });
+    expect(bounds.evicted).toEqual({ rxBytes: 0, txBytes: 0, rxPackets: 0, txPackets: 0 });
+  });
+
+  it('conversation_rollup maps, with its bounds', () => {
+    const { rows, bounds } = mapConversationRollupEvent(sample('conversation_rollup'));
+    expect(rows.map((c) => [c.localAddr, c.remoteAddr])).toEqual([
+      ['192.0.2.1', '198.51.100.53'], ['192.0.2.1', '203.0.113.7'], ['192.0.2.1', '203.0.113.8'],
+    ]);
+    expect(bounds).toMatchObject({ tracked: 3, horizonMs: null });
   });
 
   it('system_stats maps', () => {

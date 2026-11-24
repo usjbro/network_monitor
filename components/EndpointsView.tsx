@@ -2,7 +2,7 @@
 
 import React, { useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, Users } from 'lucide-react';
-import { Conversation, Endpoint, ThemeConfig } from '@/lib/types';
+import { Conversation, Endpoint, RollupState, ThemeConfig } from '@/lib/types';
 import { formatBytes, formatSpeed } from '@/lib/osi-engine';
 
 type SortKey =
@@ -157,9 +157,23 @@ const SortHeader: React.FC<SortHeaderProps> = ({ label, ownKey, sortKey, sortDir
   </th>
 );
 
+// What an empty table says. Undefined: rows are tracked, none is displayed.
+function emptyText(table: RollupState<unknown>, mode: 'endpoints' | 'conversations'): string | undefined {
+  switch (table.status) {
+    case 'waiting':
+      return 'Waiting for the first update.';
+    case 'agent-too-old':
+      return 'The running capture agent is older than this page. Restart the agent.';
+    case 'unreadable':
+      return "This table's data could not be read.";
+    case 'ready':
+      return table.bounds.tracked === 0 ? `No ${mode} observed yet.` : undefined;
+  }
+}
+
 interface EndpointsViewProps {
-  endpoints: Endpoint[];
-  conversations: Conversation[];
+  endpoints: RollupState<Endpoint>;
+  conversations: RollupState<Conversation>;
   theme: ThemeConfig;
   enrichmentMode?: 'off' | 'on-demand' | 'background';
   onRequestLookup?: (host: string) => void;
@@ -184,10 +198,10 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
-  const rows = useMemo(
-    () => (mode === 'endpoints' ? endpoints.map(endpointToRow) : conversations.map(conversationToRow)),
-    [mode, endpoints, conversations],
-  );
+  const rows = useMemo(() => {
+    if (mode === 'endpoints') return endpoints.status === 'ready' ? endpoints.rows.map(endpointToRow) : [];
+    return conversations.status === 'ready' ? conversations.rows.map(conversationToRow) : [];
+  }, [mode, endpoints, conversations]);
 
   const filtered = useMemo(
     () => rows.filter((row) => row.searchText.toLowerCase().includes(searchTerm.toLowerCase())),
@@ -213,6 +227,9 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
       setSortDir('desc');
     }
   };
+
+  const table = mode === 'endpoints' ? endpoints : conversations;
+  const empty = emptyText(table, mode);
 
   const selected = sorted.find((row) => row.key === selectedKey) ?? null;
 
@@ -245,11 +262,13 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
         />
       </div>
 
-      <div className="text-[11px] text-slate-500">
-        {mode === 'endpoints'
-          ? `${sorted.length} host(s) — totals aggregated in the agent, surviving flow eviction`
-          : `${sorted.length} conversation(s) between a local and remote host`}
-      </div>
+      {table.status === 'ready' && (
+        <div className="text-[11px] text-slate-500">
+          {mode === 'endpoints'
+            ? `${sorted.length} host(s) — totals aggregated in the agent, surviving flow eviction`
+            : `${sorted.length} conversation(s) between a local and remote host`}
+        </div>
+      )}
 
       <div className={`rounded border ${theme.border} ${theme.cardBg} overflow-x-auto`}>
         <table className="w-full text-left border-collapse min-w-[820px]">
@@ -300,10 +319,10 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
                 )}
               </tr>
             ))}
-            {sorted.length === 0 && (
+            {sorted.length === 0 && empty && (
               <tr>
                 <td colSpan={mode === 'conversations' ? 9 : 8} className="p-8 text-center text-slate-500">
-                  No {mode} observed yet.
+                  {empty}
                 </td>
               </tr>
             )}

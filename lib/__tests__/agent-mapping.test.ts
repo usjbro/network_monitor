@@ -8,8 +8,8 @@ import {
   mapConnectionClosedEvent,
   mapConnectionEvent,
   mapDecryptionStatusEvent,
-  mapConversationUpdateEvent,
-  mapEndpointUpdateEvent,
+  mapConversationRollupEvent,
+  mapEndpointRollupEvent,
   mapInterfaceErrorEvent,
   mapInterfaceListEvent,
   mapPacketEvent,
@@ -17,6 +17,7 @@ import {
   mapSystemStatsEvent,
   mapTracerouteHopEvent,
 } from '../agent-mapping';
+import { Conversation, Endpoint, RollupUpdate } from '../types';
 
 describe('mapDecryptionStatusEvent', () => {
   it('preserves bounded status metadata and tolerates future reasons', () => {
@@ -591,135 +592,198 @@ describe('mapInterfaceListEvent', () => {
   });
 });
 
-describe('mapEndpointUpdateEvent', () => {
-  it('maps a list of per-host rollups, camelCase fields intact', () => {
-    const event = {
-      type: 'endpoint_update',
-      endpoints: [
-        {
-          host: '93.184.216.34',
-          rxBytesTotal: 4096,
-          txBytesTotal: 2048,
-          rxPacketsTotal: 12,
-          txPacketsTotal: 8,
-          rxSpeed: 1024,
-          txSpeed: 512,
-          flowCount: 3,
-          firstSeenMs: 10,
-          lastSeenMs: 5000,
-          processName: 'Safari',
-          pid: 1234,
-        },
-      ],
-    };
-    expect(mapEndpointUpdateEvent(event)).toEqual([
-      {
-        host: '93.184.216.34',
-        rxBytesTotal: 4096,
-        txBytesTotal: 2048,
-        rxPacketsTotal: 12,
-        txPacketsTotal: 8,
-        rxSpeed: 1024,
-        txSpeed: 512,
-        flowCount: 3,
-        firstSeenMs: 10,
-        lastSeenMs: 5000,
-        processName: 'Safari',
-        pid: 1234,
-        ja3Label: undefined,
-        observedName: undefined,
-        enrichment: undefined,
-      },
-    ]);
+// KAN-131. The bounds from the design's D4 example.
+function rollupBounds(): Record<string, unknown> {
+  return {
+    cap: 50000, topN: 200,
+    tracked: 50000, evictions: 812, unkeyed: 0,
+    sinceMs: 1200, horizonMs: 41200,
+    totals: { rxBytes: 9, txBytes: 9, rxPackets: 9, txPackets: 9 },
+    evicted: { rxBytes: 1, txBytes: 1, rxPackets: 1, txPackets: 1 },
+  };
+}
+
+function rollupRow(): Record<string, unknown> {
+  return {
+    historyComplete: true, rxBytesTotal: 4096, txBytesTotal: 2048,
+    rxPacketsTotal: 12, txPacketsTotal: 8, rxSpeed: 1024, txSpeed: 512,
+    flowCount: 3, firstSeenMs: 10, lastSeenMs: 5000, processName: 'Safari', pid: 1234,
+  };
+}
+
+const ROLLUPS = [
+  {
+    type: 'endpoint_rollup',
+    key: 'endpoints',
+    map: mapEndpointRollupEvent as (json: unknown) => RollupUpdate<Endpoint | Conversation>,
+    row: (): Record<string, unknown> => ({ host: '93.184.216.34', ...rollupRow() }),
+    addresses: ['host'],
+    numbers: [] as string[],
+    labels: ['ja3Label', 'observedName'],
+  },
+  {
+    type: 'conversation_rollup',
+    key: 'conversations',
+    map: mapConversationRollupEvent as (json: unknown) => RollupUpdate<Endpoint | Conversation>,
+    row: (): Record<string, unknown> => ({
+      localAddr: '192.168.1.10', remoteAddr: '93.184.216.34', durationMs: 300, ...rollupRow(),
+    }),
+    addresses: ['localAddr', 'remoteAddr'],
+    numbers: ['durationMs'],
+    labels: ['ja3Label'],
+  },
+];
+
+describe.each(ROLLUPS)('$type mapper', ({ type, key, map, row, addresses, numbers, labels }) => {
+  const event = (rows: unknown, bounds: unknown = rollupBounds()) => ({ type, [key]: rows, bounds });
+
+  it('maps rows and bounds with every field intact', () => {
+    const optional = Object.fromEntries(labels.map((label) => [label, `${label} text`]));
+    const wire = { ...row(), ...optional };
+    expect(map(event([wire]))).toEqual({ rows: [{ ...wire, enrichment: undefined }], bounds: rollupBounds() });
   });
 
-  it('keeps observedName when it is a string, separate from remoteHostname', () => {
-    const base = {
-      host: '93.184.216.34', rxBytesTotal: 0, txBytesTotal: 0, rxPacketsTotal: 0,
-      txPacketsTotal: 0, rxSpeed: 0, txSpeed: 0, flowCount: 1, firstSeenMs: 0,
-      lastSeenMs: 0, processName: 'unknown', pid: 0,
-    };
-    const [named] = mapEndpointUpdateEvent({
-      type: 'endpoint_update',
-      endpoints: [{ ...base, observedName: 'example.com' }],
+  it('maps absent labels to undefined and never sets a PTR name', () => {
+    const [mapped] = map(event([row()])).rows;
+    expect(mapped).toEqual({ ...row(), enrichment: undefined });
+    expect(mapped.remoteHostname).toBeUndefined();
+  });
+
+  it('keeps historyComplete false', () => {
+    expect(map(event([{ ...row(), historyComplete: false }])).rows[0].historyComplete).toBe(false);
+  });
+
+  it('accepts an empty list, with keys tracked or without', () => {
+    expect(map(event([])).rows).toEqual([]);
+    expect(map(event([], { ...rollupBounds(), tracked: 0 })).rows).toEqual([]);
+  });
+
+  it('accepts an empty process name', () => {
+    expect(map(event([{ ...row(), processName: '' }])).rows[0].processName).toBe('');
+  });
+
+  it('accepts null since and horizon', () => {
+    const { bounds } = map(event([], { ...rollupBounds(), sinceMs: null, horizonMs: null }));
+    expect(bounds.sinceMs).toBeNull();
+    expect(bounds.horizonMs).toBeNull();
+  });
+
+  it('accepts counters above 2^53, as saturated or re-encoded floats', () => {
+    const big = 2 ** 60;
+    const update = map(event(
+      [{ ...row(), rxBytesTotal: big, txBytesTotal: 2 ** 64 }],
+      { ...rollupBounds(), evictions: big, totals: { rxBytes: big, txBytes: big, rxPackets: big, txPackets: big } },
+    ));
+    expect(update.rows[0].rxBytesTotal).toBe(big);
+    expect(update.rows[0].txBytesTotal).toBe(2 ** 64);
+    expect(update.bounds.evictions).toBe(big);
+    expect(update.bounds.totals.txPackets).toBe(big);
+  });
+
+  it('preserves row order', () => {
+    const addresses3 = ['10.0.0.9', '10.0.0.1', '10.0.0.5'];
+    const rows = addresses3.map((addr) => ({ ...row(), [addresses[addresses.length - 1]]: addr }));
+    expect(map(event(rows)).rows.map((r) => ('host' in r ? r.host : r.remoteAddr))).toEqual(addresses3);
+  });
+
+  it('keeps packet-derived text exactly as sent', () => {
+    const evil = '<img src=x onerror=alert(1)>';
+    const [mapped] = map(event([{ ...row(), processName: evil, ja3Label: evil }])).rows;
+    expect(mapped.processName).toBe(evil);
+    expect(mapped.ja3Label).toBe(evil);
+  });
+
+  describe('rejects', () => {
+    it.each([null, undefined, 'x', 7])('an event that is %s', (json) => {
+      expect(() => map(json)).toThrow();
     });
-    expect(named.observedName).toBe('example.com');
-    expect(named.remoteHostname).toBeUndefined();
-  });
 
-  it('leaves observedName undefined when missing or not a string, without throwing', () => {
-    const base = {
-      host: '93.184.216.34', rxBytesTotal: 0, txBytesTotal: 0, rxPacketsTotal: 0,
-      txPacketsTotal: 0, rxSpeed: 0, txSpeed: 0, flowCount: 1, firstSeenMs: 0,
-      lastSeenMs: 0, processName: 'unknown', pid: 0,
-    };
-    const mapped = mapEndpointUpdateEvent({
-      type: 'endpoint_update',
-      endpoints: [base, { ...base, observedName: 42 }, { ...base, observedName: null }],
+    it.each([undefined, null, {}, 'x', 1])('rows that are %s', (rows) => {
+      expect(() => map(event(rows))).toThrow(key);
     });
-    expect(mapped.map((e) => e.observedName)).toEqual([undefined, undefined, undefined]);
-  });
 
-  it('maps an empty list without throwing (nothing captured yet)', () => {
-    const event = { type: 'endpoint_update', endpoints: [] };
-    expect(mapEndpointUpdateEvent(event)).toEqual([]);
-  });
+    it.each([undefined, null, 'x', 1])('bounds that are %s', (bounds) => {
+      expect(() => map({ type, [key]: [], bounds })).toThrow('bounds');
+    });
 
-  it('throws on an event with no "endpoints" field at all', () => {
-    const event = { type: 'endpoint_update' };
-    expect(() => mapEndpointUpdateEvent(event)).toThrow('missing "endpoints" field');
-  });
-});
+    // "missing" removes the key; the rest are values JSON or the relay could carry.
+    const badNumbers: [string, unknown][] = [
+      ['missing', undefined], ['null', null], ['a string', '1'], ['negative', -1],
+      ['NaN', NaN], ['infinite', Infinity],
+    ];
 
-describe('mapConversationUpdateEvent', () => {
-  it('maps a list of per-pair rollups including duration and JA3 label', () => {
-    const event = {
-      type: 'conversation_update',
-      conversations: [
-        {
-          localAddr: '192.168.1.10',
-          remoteAddr: '93.184.216.34',
-          rxBytesTotal: 4096,
-          txBytesTotal: 2048,
-          rxPacketsTotal: 12,
-          txPacketsTotal: 8,
-          rxSpeed: 1024,
-          txSpeed: 512,
-          flowCount: 2,
-          firstSeenMs: 10,
-          lastSeenMs: 310,
-          durationMs: 300,
-          processName: 'unknown',
-          pid: 0,
-          ja3Label: 'matches Chrome 12x',
-        },
-      ],
-    };
-    expect(mapConversationUpdateEvent(event)).toEqual([
-      {
-        localAddr: '192.168.1.10',
-        remoteAddr: '93.184.216.34',
-        rxBytesTotal: 4096,
-        txBytesTotal: 2048,
-        rxPacketsTotal: 12,
-        txPacketsTotal: 8,
-        rxSpeed: 1024,
-        txSpeed: 512,
-        flowCount: 2,
-        firstSeenMs: 10,
-        lastSeenMs: 310,
-        durationMs: 300,
-        processName: 'unknown',
-        pid: 0,
-        ja3Label: 'matches Chrome 12x',
-        enrichment: undefined,
-      },
-    ]);
-  });
+    describe.each(['cap', 'topN', 'tracked', 'evictions', 'unkeyed'])('bounds.%s', (field) => {
+      it.each(badNumbers)('%s', (_label, value) => {
+        expect(() => map(event([], { ...rollupBounds(), [field]: value }))).toThrow(field);
+      });
+    });
 
-  it('throws on an event with no "conversations" field at all', () => {
-    const event = { type: 'conversation_update' };
-    expect(() => mapConversationUpdateEvent(event)).toThrow('missing "conversations" field');
+    describe.each(['sinceMs', 'horizonMs'])('bounds.%s', (field) => {
+      it.each(badNumbers.filter(([label]) => label !== 'null'))('%s', (_label, value) => {
+        expect(() => map(event([], { ...rollupBounds(), [field]: value }))).toThrow(field);
+      });
+    });
+
+    describe.each(['totals', 'evicted'])('bounds.%s', (part) => {
+      it.each([undefined, null, 'x', 1])('that is %s', (value) => {
+        expect(() => map(event([], { ...rollupBounds(), [part]: value }))).toThrow(part);
+      });
+      describe.each(['rxBytes', 'txBytes', 'rxPackets', 'txPackets'])('%s', (field) => {
+        it.each(badNumbers)('%s', (_label, value) => {
+          const bounds = rollupBounds();
+          expect(() => map(event([], { ...bounds, [part]: { ...(bounds[part] as object), [field]: value } }))).toThrow(field);
+        });
+      });
+    });
+
+    it.each(['cap', 'topN'])('bounds.%s below 1', (field) => {
+      expect(() => map(event([], { ...rollupBounds(), tracked: 0, [field]: 0 }))).toThrow(field);
+    });
+
+    it('tracked above cap', () => {
+      expect(() => map(event([], { ...rollupBounds(), cap: 10, tracked: 11 }))).toThrow('tracked');
+    });
+
+    it('more rows than tracked, but not as many', () => {
+      const rows = [row(), row()];
+      expect(() => map(event(rows, { ...rollupBounds(), tracked: 1 }))).toThrow('rows');
+      expect(map(event(rows, { ...rollupBounds(), tracked: 2 })).rows).toHaveLength(2);
+    });
+
+    it('more rows than 4 x topN, but not as many', () => {
+      const rows = Array.from({ length: 5 }, row);
+      expect(() => map(event(rows, { ...rollupBounds(), topN: 1 }))).toThrow('rows');
+      expect(map(event(rows.slice(1), { ...rollupBounds(), topN: 1 })).rows).toHaveLength(4);
+    });
+
+    it.each([null, 'x', 1, undefined])('a row that is %s', (bad) => {
+      expect(() => map(event([row(), bad]))).toThrow('row');
+    });
+
+    it.each([undefined, null, 1, 'true'])('historyComplete %s', (value) => {
+      expect(() => map(event([{ ...row(), historyComplete: value }]))).toThrow('historyComplete');
+    });
+
+    it.each(addresses.flatMap((field) => [undefined, null, 1, ''].map((value) => [field, value])))('%s %j', (field, value) => {
+      expect(() => map(event([{ ...row(), [field as string]: value }]))).toThrow(field as string);
+    });
+
+    it.each([undefined, null, 1])('processName %s', (value) => {
+      expect(() => map(event([{ ...row(), processName: value }]))).toThrow('processName');
+    });
+
+    it.each(labels.flatMap((field) => [null, 1, {}].map((value) => [field, value])))('%s %j', (field, value) => {
+      expect(() => map(event([{ ...row(), [field as string]: value }]))).toThrow(field as string);
+    });
+
+    describe.each([
+      'rxBytesTotal', 'txBytesTotal', 'rxPacketsTotal', 'txPacketsTotal', 'rxSpeed', 'txSpeed',
+      'flowCount', 'firstSeenMs', 'lastSeenMs', 'pid', ...numbers,
+    ])('row %s', (field) => {
+      it.each(badNumbers)('%s', (_label, value) => {
+        expect(() => map(event([{ ...row(), [field]: value }]))).toThrow(field);
+      });
+    });
   });
 });
 
