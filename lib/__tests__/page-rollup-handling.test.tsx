@@ -42,7 +42,7 @@ const conversationRollup = (remotes: string[], overrides: Record<string, unknown
   bounds: bounds({ tracked: remotes.length, ...overrides }),
 });
 const enrichmentEvent = (remoteAddr: string, remoteHostname: string) => ({
-  type: 'connection_enrichment', connectionId: remoteAddr, remoteAddr, remoteHostname,
+  type: 'connection_enrichment', connectionId: `Tcp-${remoteAddr}`, remoteAddr, remoteHostname,
   enrichment: { org: 'Example Org', source: 'rdap', fetchedAt: '2026-09-28T00:00:00.000Z' },
 });
 
@@ -112,7 +112,7 @@ describe.each(TABLES)('$table', ({ table, rollup, rowsKey, old, other, otherRoll
     openHosts();
     show(table);
     send(rollup(['10.0.0.1']));
-    fireEvent.change(screen.getByPlaceholderText(/filter/i), { target: { value: 'no such row' } });
+    fireEvent.change(screen.getByPlaceholderText(/search received rows/i), { target: { value: 'no such row' } });
     expect(screen.queryByText(`No ${table} observed yet.`)).not.toBeInTheDocument();
   });
 

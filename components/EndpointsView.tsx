@@ -4,6 +4,7 @@ import React, { useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, Users } from 'lucide-react';
 import { Conversation, Endpoint, RollupState, ThemeConfig } from '@/lib/types';
 import { formatBytes, formatSpeed } from '@/lib/osi-engine';
+import { RollupRanking, rankRows } from '@/lib/rollup-rank';
 
 type SortKey =
   | 'name'
@@ -39,7 +40,30 @@ interface Row {
   ja3Label?: string;
   host: string; // the address enrichment lookups key on (always the remote side)
   enrichment?: Endpoint['enrichment'];
+  historyComplete: boolean;
 }
+
+const fmt = (n: number) => n.toLocaleString('en-US');
+
+// The Rank by choices, and the column each one sorts (P6).
+const RANKINGS: RollupRanking[] = ['bytes', 'packets', 'rate', 'recent'];
+const RANK_COLUMN: Record<RollupRanking, SortKey> = {
+  bytes: 'bytes',
+  packets: 'packets',
+  rate: 'rate',
+  recent: 'lastSeen',
+};
+
+const EARLIER_HISTORY_TIP =
+  'Earlier history may have been evicted. The rate can be low in the second this row returned.';
+
+// Marks a total that may be missing earlier history. Rates never carry it.
+const AtLeast: React.FC<{ show: boolean }> = ({ show }) =>
+  show ? (
+    <span title={EARLIER_HISTORY_TIP} className="mr-0.5 text-amber-400 cursor-help">
+      ≥
+    </span>
+  ) : null;
 
 function endpointToRow(e: Endpoint): Row {
   // Names are attacker-controlled packet content: rendered only as React text.
@@ -79,6 +103,7 @@ function endpointToRow(e: Endpoint): Row {
     ja3Label: e.ja3Label,
     host: e.host,
     enrichment: e.enrichment,
+    historyComplete: e.historyComplete,
   };
 }
 
@@ -109,6 +134,7 @@ function conversationToRow(c: Conversation): Row {
     ja3Label: c.ja3Label,
     host: c.remoteAddr,
     enrichment: c.enrichment,
+    historyComplete: c.historyComplete,
   };
 }
 
@@ -191,25 +217,45 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
   unavailableIds,
 }) => {
   const [mode, setMode] = useState<'endpoints' | 'conversations'>('endpoints');
-  // Default sort: bytes descending — "what people actually scan for" per
-  // the acceptance criteria.
-  const [sortKey, setSortKey] = useState<SortKey>('bytes');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  // Rank by and the column sort are per table and not persisted. Default is
+  // bytes descending: "what people actually scan for" per the acceptance
+  // criteria. Rank by sets the matching column sort (P6); clicking a column
+  // never changes Rank by.
+  const [views, setViews] = useState<Record<typeof mode, { rankBy: RollupRanking; sortKey: SortKey; sortDir: SortDir }>>({
+    endpoints: { rankBy: 'bytes', sortKey: 'bytes', sortDir: 'desc' },
+    conversations: { rankBy: 'bytes', sortKey: 'bytes', sortDir: 'desc' },
+  });
+  const { rankBy, sortKey, sortDir } = views[mode];
+  const updateView = (patch: Partial<(typeof views)[typeof mode]>) =>
+    setViews((prev) => ({ ...prev, [mode]: { ...prev[mode], ...patch } }));
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
-  const rows = useMemo(() => {
+  const table = mode === 'endpoints' ? endpoints : conversations;
+  const noun = mode === 'endpoints' ? 'hosts' : 'conversations';
+
+  // Every row the agent sent for this table.
+  const received = useMemo(() => {
     if (mode === 'endpoints') return endpoints.status === 'ready' ? endpoints.rows.map(endpointToRow) : [];
     return conversations.status === 'ready' ? conversations.rows.map(conversationToRow) : [];
   }, [mode, endpoints, conversations]);
 
-  const filtered = useMemo(
-    () => rows.filter((row) => row.searchText.toLowerCase().includes(searchTerm.toLowerCase())),
-    [rows, searchTerm],
-  );
+  const hasSearch = searchTerm !== '';
+  const topN = table.status === 'ready' ? table.bounds.topN : 0;
+
+  // With a search term: every received row that matches. Without: the first
+  // topN by Rank by. The column sort then reorders only what is displayed.
+  const chosen = useMemo(() => {
+    if (hasSearch) {
+      const term = searchTerm.toLowerCase();
+      return received.filter((row) => row.searchText.toLowerCase().includes(term));
+    }
+    return rankRows(received, rankBy).slice(0, topN);
+  }, [received, hasSearch, searchTerm, rankBy, topN]);
 
   const sorted = useMemo(() => {
-    const copy = [...filtered];
+    // Array.prototype.sort is stable: ties keep the order chosen above.
+    const copy = [...chosen];
     copy.sort((a, b) => {
       const av = sortValue(a, sortKey);
       const bv = sortValue(b, sortKey);
@@ -217,21 +263,44 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
       return sortDir === 'desc' ? -cmp : cmp;
     });
     return copy;
-  }, [filtered, sortKey, sortDir]);
+  }, [chosen, sortKey, sortDir]);
 
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {
-      setSortDir((prev) => (prev === 'desc' ? 'asc' : 'desc'));
+      updateView({ sortDir: sortDir === 'desc' ? 'asc' : 'desc' });
     } else {
-      setSortKey(key);
-      setSortDir('desc');
+      updateView({ sortKey: key, sortDir: 'desc' });
     }
   };
 
-  const table = mode === 'endpoints' ? endpoints : conversations;
+  const handleRankBy = (ranking: RollupRanking) => updateView({ rankBy: ranking, sortKey: RANK_COLUMN[ranking], sortDir: 'desc' });
+
   const empty = emptyText(table, mode);
 
-  const selected = sorted.find((row) => row.key === selectedKey) ?? null;
+  // Looked up among all received rows (P7), not the displayed ones.
+  const selected = selectedKey === null ? null : (received.find((row) => row.key === selectedKey) ?? null);
+  const selectedGone = selectedKey !== null && selected === null && table.status === 'ready';
+
+  let countsLine: string | undefined;
+  let sortNote: string | undefined;
+  let noMatch: string | undefined;
+  if (table.status === 'ready') {
+    const b = table.bounds;
+    const tracked = `${fmt(b.tracked)} ${noun} tracked${b.sinceMs === null ? '' : ` since ${fmt(b.sinceMs)} ms`}.`;
+    countsLine = hasSearch
+      ? `${fmt(sorted.length)} matches in ${fmt(received.length)} received; ${tracked}`
+      : `Showing ${fmt(sorted.length)} of ${fmt(received.length)} received; ${tracked}`;
+    if (hasSearch) {
+      sortNote = 'sorted within matching received rows';
+      const unsent = b.tracked - received.length;
+      noMatch = `No match among the ${fmt(received.length)} rows received${unsent > 0 ? `; ${fmt(unsent)} more are tracked but not sent` : ''}.`;
+    } else if (!(sortKey === RANK_COLUMN[rankBy] && sortDir === 'desc')) {
+      sortNote = `sorted within the top ${fmt(b.topN)} by ${rankBy}`;
+    }
+  }
+  const emptyMessage = hasSearch && noMatch ? noMatch : empty;
+  const readyBounds = table.status === 'ready' ? table.bounds : null;
+  const capitalNoun = noun.charAt(0).toUpperCase() + noun.slice(1);
 
   return (
     <div className="space-y-3 font-mono text-xs p-3">
@@ -257,16 +326,43 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
           type="text"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
-          placeholder={mode === 'endpoints' ? 'Filter by host or process...' : 'Filter by address or process...'}
+          placeholder="Search received rows…"
           className="flex-1 min-w-[200px] bg-transparent text-slate-200 placeholder-slate-600 focus:outline-none text-xs border-l border-slate-800 pl-2"
         />
       </div>
 
-      {table.status === 'ready' && (
-        <div className="text-[11px] text-slate-500">
-          {mode === 'endpoints'
-            ? `${sorted.length} host(s) — totals aggregated in the agent, surviving flow eviction`
-            : `${sorted.length} conversation(s) between a local and remote host`}
+      {readyBounds && (
+        <div className="space-y-1 text-[11px] text-slate-500">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <div>{countsLine}</div>
+            <label className="flex items-center gap-1">
+              <span>Rank by</span>
+              <select
+                aria-label="Rank by"
+                value={rankBy}
+                onChange={(e) => handleRankBy(e.target.value as RollupRanking)}
+                className="rounded border border-slate-800 bg-slate-900 px-1 py-0.5 text-slate-200"
+              >
+                {RANKINGS.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {sortNote && <div>{sortNote}</div>}
+          </div>
+          {readyBounds.evictions > 0 && (
+            <div className="text-amber-400">
+              {`${fmt(readyBounds.evictions)} evictions (cap ${fmt(readyBounds.cap)}): least recently active ${noun} were dropped; their totals (${formatBytes(readyBounds.evicted.rxBytes + readyBounds.evicted.txBytes)}) are not in any row.`}
+            </div>
+          )}
+          {readyBounds.horizonMs !== null && (
+            <div className="text-amber-400">{`${capitalNoun} last active at or before ${fmt(readyBounds.horizonMs)} ms may be missing.`}</div>
+          )}
+          {readyBounds.unkeyed > 0 && (
+            <div className="text-amber-400">{`${fmt(readyBounds.unkeyed)} packets had an unreadable address and are not counted.`}</div>
+          )}
         </div>
       )}
 
@@ -302,27 +398,40 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
                   <div className="text-[10px] text-slate-500">PID: {row.pid}</div>
                 </td>
                 <td className="p-2.5 text-right text-slate-300">
-                  <div>{formatBytes(row.rxBytesTotal)} / {formatBytes(row.txBytesTotal)}</div>
+                  <div>
+                    <AtLeast show={!row.historyComplete} />
+                    {formatBytes(row.rxBytesTotal)} / {formatBytes(row.txBytesTotal)}
+                  </div>
                 </td>
                 <td className="p-2.5 text-right text-slate-300">
+                  <AtLeast show={!row.historyComplete} />
                   {row.rxPacketsTotal.toLocaleString()} / {row.txPacketsTotal.toLocaleString()}
                 </td>
                 <td className="p-2.5 text-right">
                   <div className="text-emerald-400 font-bold">{formatSpeed(row.rxSpeed)}</div>
                   <div className="text-sky-400 font-bold">{formatSpeed(row.txSpeed)}</div>
                 </td>
-                <td className="p-2.5 text-right text-slate-300">{row.flowCount}</td>
-                <td className="p-2.5 text-right text-slate-500 text-[10px]">{row.firstSeenMs.toLocaleString()} ms</td>
+                <td className="p-2.5 text-right text-slate-300">
+                  <AtLeast show={!row.historyComplete} />
+                  {row.flowCount}
+                </td>
+                <td className="p-2.5 text-right text-slate-500 text-[10px]">
+                  {row.firstSeenMs.toLocaleString()} ms
+                  {!row.historyComplete && <span className="block">may be earlier</span>}
+                </td>
                 <td className="p-2.5 text-right text-slate-500 text-[10px]">{row.lastSeenMs.toLocaleString()} ms</td>
                 {mode === 'conversations' && (
-                  <td className="p-2.5 text-right text-slate-500 text-[10px]">{(row.durationMs ?? 0).toLocaleString()} ms</td>
+                  <td className="p-2.5 text-right text-slate-500 text-[10px]">
+                    <AtLeast show={!row.historyComplete} />
+                    {(row.durationMs ?? 0).toLocaleString()} ms
+                  </td>
                 )}
               </tr>
             ))}
-            {sorted.length === 0 && empty && (
+            {sorted.length === 0 && emptyMessage && (
               <tr>
                 <td colSpan={mode === 'conversations' ? 9 : 8} className="p-8 text-center text-slate-500">
-                  {empty}
+                  {emptyMessage}
                 </td>
               </tr>
             )}
@@ -336,6 +445,9 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
           minus GeoIP: there's no existing general per-host geoIP lookup to
           reuse (lib/geoip.ts is wired only to traceroute hops today), so
           it's deliberately not included here. */}
+      {selectedGone && (
+        <div className={`p-3.5 rounded border ${theme.border} ${theme.cardBg} text-slate-500`}>No longer among the received rows</div>
+      )}
       {selected && (
         <div className={`p-3.5 rounded border ${theme.border} ${theme.cardBg} space-y-2`}>
           <div className="flex items-center justify-between border-b border-slate-800 pb-2 font-bold text-slate-200">
