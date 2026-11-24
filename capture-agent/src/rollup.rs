@@ -10,6 +10,7 @@
 //! up front. The index keeps std's randomly keyed hasher because remote
 //! addresses are attacker-chosen. A key that returns after eviction starts from
 //! zero: nothing is restored or estimated.
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -185,57 +186,43 @@ impl<K: Copy + Eq + Hash> RollupTable<K> {
     }
 
     /// The union of the four top-N lists in id order; drains the tick counters
-    /// of every entry.
+    /// of every entry. One pass over the table: O(K + N log N) in any order.
     pub fn snapshot(&mut self, elapsed_s: f64) -> Vec<RollupRow<K>> {
-        let speeds: Vec<(f64, f64)> = self
-            .entries
-            .iter_mut()
-            .map(|e| {
-                let s = (
-                    e.rx_bytes_this_tick as f64 / elapsed_s,
-                    e.tx_bytes_this_tick as f64 / elapsed_s,
-                );
-                e.rx_bytes_this_tick = 0;
-                e.tx_bytes_this_tick = 0;
-                s
-            })
-            .collect();
-        let entries = &self.entries;
-        let n = self.top_n.min(entries.len());
-        let mut chosen: Vec<u32> = Vec::new();
-        if n > 0 {
-            let mut slots: Vec<u32> = Vec::with_capacity(entries.len());
-            // Each ranking: value desc, then last_seen_ms desc, then id asc.
-            let mut select = |value: &dyn Fn(u32) -> RankValue| {
-                slots.clear();
-                slots.extend(0..entries.len() as u32);
-                let cmp = |a: &u32, b: &u32| {
-                    let (ea, eb) = (&entries[*a as usize], &entries[*b as usize]);
-                    value(*b)
-                        .cmp(&value(*a))
-                        .then(eb.last_seen_ms.cmp(&ea.last_seen_ms))
-                        .then(ea.id.cmp(&eb.id))
-                };
-                if n < slots.len() {
-                    slots.select_nth_unstable_by(n - 1, cmp);
-                }
-                chosen.extend_from_slice(&slots[..n]);
-            };
-            select(&|s| RankValue::Int(entries[s as usize].total.bytes()));
-            select(&|s| RankValue::Int(entries[s as usize].total.packets()));
-            select(&|s| {
-                let (rx, tx) = speeds[s as usize];
-                RankValue::Float(rx + tx)
-            });
-            select(&|s| RankValue::Int(entries[s as usize].last_seen_ms));
+        let n = self.top_n.min(self.entries.len());
+        if n == 0 {
+            return Vec::new();
         }
-        chosen.sort_unstable_by_key(|&s| entries[s as usize].id);
-        chosen.dedup();
+        let buffer = n.saturating_mul(2).min(self.entries.len());
+        let mut by_bytes = TopN::new(n, buffer);
+        let mut by_packets = TopN::new(n, buffer);
+        let mut by_rate = TopN::new(n, buffer);
+        let mut by_recency = TopN::new(n, buffer);
+        for (slot, e) in self.entries.iter_mut().enumerate() {
+            let candidate = |value| Candidate {
+                rank: (value, e.last_seen_ms, Reverse(e.id)),
+                slot: slot as u32,
+                rx_bytes_this_tick: e.rx_bytes_this_tick,
+                tx_bytes_this_tick: e.tx_bytes_this_tick,
+            };
+            let (rx_speed, tx_speed) = candidate(0).speeds(elapsed_s);
+            by_bytes.offer(candidate(e.total.bytes()));
+            by_packets.offer(candidate(e.total.packets()));
+            by_rate.offer(candidate(total_order_bits(rx_speed + tx_speed)));
+            by_recency.offer(candidate(e.last_seen_ms));
+            e.rx_bytes_this_tick = 0;
+            e.tx_bytes_this_tick = 0;
+        }
+        let mut chosen = Vec::with_capacity(4 * n);
+        for top in [by_bytes, by_packets, by_rate, by_recency] {
+            chosen.extend(top.finish());
+        }
+        chosen.sort_unstable_by_key(Candidate::id);
+        chosen.dedup_by_key(|c| c.id());
         chosen
             .into_iter()
-            .map(|s| {
-                let e = &entries[s as usize];
-                let (rx_speed, tx_speed) = speeds[s as usize];
+            .map(|c| {
+                let e = &self.entries[c.slot as usize];
+                let (rx_speed, tx_speed) = c.speeds(elapsed_s);
                 RollupRow {
                     id: e.id,
                     key: e.key,
@@ -355,21 +342,88 @@ impl<K: Copy + Eq + Hash> RollupTable<K> {
     }
 }
 
-/// A rank value: integers compare as integers, rates by `f64::total_cmp` (P1).
-#[derive(Clone, Copy)]
-enum RankValue {
-    Int(u64),
-    Float(f64),
+/// Where an entry stands in one ranking; greater is better. Value desc, then
+/// last_seen_ms desc, then id asc. Ids are unique, so no two ranks are equal.
+type Rank = (u64, u64, Reverse<u64>);
+
+/// Maps a rate to an integer that orders exactly as `f64::total_cmp` (P1), so
+/// every ranking compares the same type.
+fn total_order_bits(rate: f64) -> u64 {
+    let bits = rate.to_bits();
+    if bits >> 63 == 1 {
+        !bits
+    } else {
+        bits | 1 << 63
+    }
 }
 
-impl RankValue {
-    fn cmp(&self, other: &RankValue) -> std::cmp::Ordering {
-        match (self, other) {
-            (RankValue::Int(a), RankValue::Int(b)) => a.cmp(b),
-            (RankValue::Float(a), RankValue::Float(b)) => a.total_cmp(b),
-            // One call site only ever mixes values of the same ranking.
-            _ => std::cmp::Ordering::Equal,
+/// An entry that may be in a ranking's top N. It carries the tick counters
+/// because the pass that offers it also drains them from the entry.
+struct Candidate {
+    rank: Rank,
+    slot: u32,
+    rx_bytes_this_tick: u64,
+    tx_bytes_this_tick: u64,
+}
+
+impl Candidate {
+    fn id(&self) -> u64 {
+        self.rank.2 .0
+    }
+
+    fn speeds(&self, elapsed_s: f64) -> (f64, f64) {
+        (
+            self.rx_bytes_this_tick as f64 / elapsed_s,
+            self.tx_bytes_this_tick as f64 / elapsed_s,
+        )
+    }
+}
+
+/// Keeps the best `n` of the candidates offered. Holds up to 2n; when full, an
+/// O(n) selection drops the worse half and the worst one kept becomes the
+/// threshold. At least n offers separate two selections, so an offer is
+/// amortized O(1) whatever the order, and one under the threshold costs a
+/// comparison.
+struct TopN {
+    n: usize,
+    threshold: Rank,
+    kept: Vec<Candidate>,
+}
+
+impl TopN {
+    fn new(n: usize, buffer: usize) -> Self {
+        Self {
+            n,
+            // Below every real rank: ids never reach u64::MAX.
+            threshold: (0, 0, Reverse(u64::MAX)),
+            kept: Vec::with_capacity(buffer),
         }
+    }
+
+    #[inline]
+    fn offer(&mut self, candidate: Candidate) {
+        if candidate.rank <= self.threshold {
+            return;
+        }
+        self.kept.push(candidate);
+        if self.kept.len() / 2 >= self.n {
+            self.shrink();
+        }
+    }
+
+    fn shrink(&mut self) {
+        if self.kept.len() > self.n {
+            let last = self.n - 1;
+            self.kept
+                .select_nth_unstable_by(last, |a, b| b.rank.cmp(&a.rank));
+            self.kept.truncate(self.n);
+            self.threshold = self.kept[last].rank;
+        }
+    }
+
+    fn finish(mut self) -> Vec<Candidate> {
+        self.shrink();
+        self.kept
     }
 }
 
@@ -694,5 +748,124 @@ mod tests {
         );
         assert!(t.snapshot(1.0).is_empty());
         assert!(t.record(9, false, 1, 6, 0) > last);
+    }
+
+    #[test]
+    fn rate_bits_order_exactly_as_total_cmp() {
+        let values = [
+            f64::NAN,
+            -f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            f64::MIN,
+            1.5,
+            -1.5,
+            f64::MIN_POSITIVE,
+            5e-324,
+            -5e-324,
+            0.0,
+            -0.0,
+        ];
+        for a in values {
+            for b in values {
+                let got = total_order_bits(a).cmp(&total_order_bits(b));
+                assert_eq!(got, a.total_cmp(&b), "{a} {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn slot_order_never_changes_the_selection() {
+        // One ranking follows the slot order (so an ascending one beats the
+        // threshold at every entry) while the other three are scattered.
+        for n in [1usize, 2, 7, 50] {
+            let k_max = 20 * n;
+            for len in [n - 1, n, n + 1, 2 * n - 1, 2 * n, 2 * n + 1, k_max] {
+                for ranking in 0..4 {
+                    for (order, ms_seed) in ["ascending", "descending", "equal", "equal ms too"]
+                        .into_iter()
+                        .flat_map(|o| [(o, 1u64), (o, 99)])
+                    {
+                        let mut t = RollupTable::new(k_max, n);
+                        for k in 0..len {
+                            t.record(k as u32, false, 0, 0, 0);
+                        }
+                        // Ids must not follow the slots, or a tie-break by slot
+                        // would pass.
+                        let mut ids: Vec<u64> = (1..=len as u64).collect();
+                        let mut s = 0x9E37_79B9_7F4A_7C15u64 ^ ms_seed;
+                        for i in (1..len).rev() {
+                            ids.swap(i, (xorshift(&mut s) % (i as u64 + 1)) as usize);
+                        }
+                        for (i, e) in t.entries.iter_mut().enumerate() {
+                            let i = i as u64;
+                            let mut v = [0u64; 4];
+                            for x in &mut v {
+                                *x = xorshift(&mut s) % (len as u64);
+                            }
+                            if order == "equal ms too" {
+                                v[3] = 5;
+                            }
+                            v[ranking] = match order {
+                                "ascending" => i,
+                                "descending" => len as u64 - i,
+                                _ => 5,
+                            };
+                            e.id = ids[i as usize];
+                            e.total.rx_bytes = v[0];
+                            e.total.rx_packets = v[1];
+                            e.rx_bytes_this_tick = v[2];
+                            e.tx_bytes_this_tick = 1;
+                            e.last_seen_ms = v[3];
+                        }
+                        let all: Vec<RollupRow<u32>> = t
+                            .entries
+                            .iter()
+                            .map(|e| RollupRow {
+                                id: e.id,
+                                key: e.key,
+                                total: e.total,
+                                rx_speed: e.rx_bytes_this_tick as f64 / 3.0,
+                                tx_speed: e.tx_bytes_this_tick as f64 / 3.0,
+                                flow_count: e.flow_count,
+                                first_seen_ms: e.first_seen_ms,
+                                last_seen_ms: e.last_seen_ms,
+                                ja3_label: e.ja3_label,
+                                history_complete: e.history_complete,
+                            })
+                            .collect();
+                        let rankings: [Ranking; 4] = [
+                            Box::new(|a, b| b.total.rx_bytes.cmp(&a.total.rx_bytes)),
+                            Box::new(|a, b| b.total.rx_packets.cmp(&a.total.rx_packets)),
+                            Box::new(|a, b| {
+                                (b.rx_speed + b.tx_speed).total_cmp(&(a.rx_speed + a.tx_speed))
+                            }),
+                            Box::new(|a, b| b.last_seen_ms.cmp(&a.last_seen_ms)),
+                        ];
+                        let mut want = Map::new();
+                        for rank in &rankings {
+                            let mut sorted = all.clone();
+                            sorted.sort_by(|a, b| {
+                                rank(a, b)
+                                    .then(b.last_seen_ms.cmp(&a.last_seen_ms))
+                                    .then(a.id.cmp(&b.id))
+                            });
+                            for row in sorted.into_iter().take(n) {
+                                want.insert(row.id, row);
+                            }
+                        }
+                        let mut want: Vec<_> = want.into_values().collect();
+                        want.sort_by_key(|r| r.id);
+                        let got = t.snapshot(3.0);
+                        assert_eq!(got, want, "n={n} len={len} ranking={ranking} {order}");
+                        assert!(t
+                            .entries
+                            .iter()
+                            .all(|e| (e.rx_bytes_this_tick, e.tx_bytes_this_tick) == (0, 0)));
+                    }
+                }
+            }
+        }
     }
 }
