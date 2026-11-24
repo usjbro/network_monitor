@@ -1,3 +1,11 @@
+# KAN-131 plan (2026-11-23)
+
+- Spec re-check found the benchmark's "Tick" figures do not cover the merged D3 (recent came from the recency list, rate was an integer sum). Plan Task 3 re-measures and stops if it fails its limit (P9).
+- Read from code, not run: fragmented datagrams may be counted twice in rollups today; needs a separate issue.
+- Nothing implemented; no tests run beyond the docs-sync check.
+
+---
+
 # KAN-131 spec (2026-11-23)
 
 - Draft spec only (PR #348); nothing implemented. Decided by James (yes to all, 2026-11-23): default caps and N, union of four top-N lists, clearing rollups on interface switch, no feature flag, plain LRU under flooding.
