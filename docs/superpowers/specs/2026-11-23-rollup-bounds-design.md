@@ -46,7 +46,7 @@ So the first thing to break is the wire, not memory: 10,000 keys already cost 6 
 | 100,000 | 157 ns | 200 ns | 116 ns | 226 ns | 52.7 MiB | 42.3 MiB | 7.5 ms |
 | 500,000 | 235 ns | 320 ns | 208 ns | 283 ns | 263 MiB | 202 MiB | 51 ms |
 
-**The "Tick" column is superseded** by "Measured implementation, 2026-11-23" below: it measured a different selection and excluded row building. "Hit" is the rollup part only, not all of `observe`. "Tick" is selecting four top-N lists in each table and draining the per-tick counters; it excludes building rows and encoding.
+**The "Tick" column is superseded** by the 2026-11-23 and 2026-11-24 tables below: it measured a different selection and excluded row building. "Hit" is the rollup part only, not all of `observe`. "Tick" is selecting four top-N lists in each table and draining the per-tick counters; it excludes building rows and encoding.
 
 The union of the four rankings has fewer than 4N rows because they overlap: at 50,000 keys, 190 rows for N=100, 396 for N=200, 974 for N=500, 1,943 for N=1,000. Overlap depends on the traffic; the worst case is 4N. The relay's parse plus stringify is 0.15 ms for 350 rows, 0.40 ms for 900 and 0.8 ms for 1,800.
 
@@ -85,6 +85,36 @@ Memory (`capture-agent/tests/rollup_memory.rs`, live bytes requested by one `Rol
 
 Superseded by this: the "Tick" column above; D2's 1.5 ms, 7.5 ms and 51 ms scan figures and its statement that row building is not measured; and "Memory, `IpAddr`" for the implementation, with D2's 21 MiB and 200 MiB. "Today"'s "Lock held" column was one run with different rows and is not comparable with the old column here. The "Hit" and "Evict" columns were not re-measured.
 
+### Re-measured after the selector change, 2026-11-24: gate passed
+
+The 2026-11-23 result above stands for `36949c3`. Because it failed P9, James approved one faster attempt in chat, and `09e8136` replaced the selector. This run compares old `7fe5f29` with new `25e936d`, which has that selector. One run of the driver, 10:53:35 to 10:56:06, on AC, low-power mode off; Apple M3, 16 GB, macOS 26.6.2, rustc 1.98.0, release build. The driver would have aborted on a sleep or wake transition between its checks, or on a digest mismatch; it completed.
+
+The pass rule was fixed before the run: median new no greater than median old in each gated cell. **All five gated cells pass.** Milliseconds, the same two snapshot calls in one lock hold; each cell is the median of five runs (range), each run the median of five ticks. Within each pair the version that ran first alternated. New was faster in all 50 pairs.
+
+| Shape | K | N | Old | New | New rows per table | Gate |
+|---|---|---|---|---|---|---|
+| original | 10,000 | 200 | 1.443 (1.226–1.605) | 0.770 (0.724–0.852) | 800 | reported only |
+| **original (P9)** | **50,000** | **200** | **7.545 (7.404–7.731)** | **1.113 (1.057–1.133)** | 800 | pass |
+| original | 100,000 | 200 | 16.035 (14.594–16.913) | 1.486 (1.444–1.513) | 800 | reported only |
+| original | 500,000 | 200 | 108.937 (108.725–109.921) | 4.186 (4.128–4.282) | 800 | reported only |
+| original | 50,000 | 1,000 | 7.142 (6.801–7.486) | 4.016 (3.973–4.073) | 4,000 | reported only |
+| scan, zero rates | 50,000 | 200 | 4.746 (4.665–5.029) | 2.559 (2.550–2.565) | 200 | pass |
+| scan, zero rates | 50,000 | 1,000 | 4.703 (4.497–4.951) | 3.453 (3.446–3.494) | 1,000 | pass |
+| scan, equal rates | 50,000 | 200 | 7.157 (7.019–7.627) | 2.654 (2.634–2.670) | 200 | pass |
+| scan, equal rates | 50,000 | 1,000 | 7.207 (7.051–7.458) | 3.619 (3.604–3.641) | 1,000 | pass |
+| evicting | 50,000 | 200 | 52.581 (49.925–56.134) | 1.911 (1.892–1.949) | 399–400 | reported only |
+
+"Original" is the traffic of the failed run; its packet and DNS digests match. In the scan shapes every key gets one equal packet in slot order with strictly ascending timestamps, so every row beats the last and the four rankings agree. For zero rates an untimed snapshot drains the counters first. For equal rates it does not, and the tick is K ms long. In "evicting" K new keys arrive each tick.
+
+Limits:
+
+- **The scan shapes are the slower ones for the new code at N=200**: 2.559 and 2.654 ms against 1.113 ms for the original shape, so that shape alone understates its cost. At N=1,000 the original shape is the slowest of the three (4.016 ms). No shape is proved to be the worst.
+- The machine was not quiet. The driver's header shows `installd` at 97.8% of a core; the controller's own `ps` just before it showed 93%. The 1-minute load was 4.04 before the first pair, 2.66 after the last, and between 2.66 and 4.63 over all pairs.
+- Absolute times are not stable across runs: the old median at 50,000 and N=200 is 7.5 ms here and was 5.7 ms on 2026-11-23. Compare old with new within one run only.
+- The evicting cell is not like for like. The old maps are unbounded, so they held 150,000 to 350,000 keys over the timed ticks while the new tables held 50,000.
+- One Apple M3 laptop. Linux and live traffic are not measured.
+- As before, only the two calls are timed: freeing the rows, the rest of the emitter's critical section, per-packet work in `flow.rs`, JA3 labels and lock contention are not. Memory was not re-measured.
+
 ## Design
 
 ### D1. One bounded LRU store per table
@@ -105,7 +135,7 @@ A `RollupTable<K>` (new `capture-agent/src/rollup.rs`) replaces both maps, with 
 
 Startup-only. Unset or blank means the default; zero, non-numeric or out-of-range fails startup with the variable's name, as `MAX_FLOWS` does. `MAX_FLOWS` has no upper limit today; these do, because tick work is linear in the cap and runs under the flow-table lock.
 
-Why these: a home LAN (hundreds of keys) and a busy office (thousands) never evict. At 50,000 both tables full cost about 21 MiB and a 1.5 ms tick scan under the lock. *(Both figures are superseded: see "Measured implementation, 2026-11-23" in Measurements.)* The "Tick" column excludes building rows, and today's "Lock held" column includes it, so the two are not directly comparable: at 100,000 the scan alone is 7.5 ms against 6.4 ms for today's whole snapshot, so a bound that high does not shorten the lock and is an operator's choice. Row building adds work for at most 4N rows per table; it is not measured here, and the plan must measure the whole lock hold before the defaults ship. The 500,000 ceiling is a scan of about 51 ms per tick and 200 MiB; it is allowed for a datacenter link, and documented as such.
+Why these: a home LAN (hundreds of keys) and a busy office (thousands) never evict. At 50,000 both tables full cost about 21 MiB and a 1.5 ms tick scan under the lock. *(Both figures are superseded by Measurements: see "Measured implementation, 2026-11-23" for the memory and the failed lock-hold table, and "Re-measured after the selector change, 2026-11-24" for the lock-hold table of the current selector.)* The "Tick" column excludes building rows, and today's "Lock held" column includes it, so the two are not directly comparable: at 100,000 the scan alone is 7.5 ms against 6.4 ms for today's whole snapshot, so a bound that high does not shorten the lock and is an operator's choice. Row building adds work for at most 4N rows per table; it is not measured here, and the plan must measure the whole lock hold before the defaults ship. The 500,000 ceiling is a scan of about 51 ms per tick and 200 MiB; it is allowed for a datacenter link, and documented as such.
 
 ### D3. Ranking: one top-N per key, no control message
 
