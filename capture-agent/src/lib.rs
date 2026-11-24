@@ -23,6 +23,7 @@ pub mod reassembly;
 pub mod redact;
 pub mod ring;
 pub mod ring_buffer;
+pub mod rollup;
 pub mod tls_decrypt;
 pub mod tls_handshake;
 pub mod tls_stream;
