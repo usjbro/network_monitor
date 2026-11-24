@@ -2,7 +2,7 @@
 
 **Issue:** KAN-131 (legacy JAM-162) — "Bound per-capture endpoint and conversation rollup growth"
 **Epic:** KAN-18 (Analysis surfaces, legacy JAM-127)
-**Status:** Spec merged (PR #348). James approved all five recommendations in "Decisions" in chat on 2026-11-23. Implemented on branch `KAN-131-rollup-bounds` (PR not yet merged); the code is not on `main`.
+**Status:** Spec merged (PR #348). James approved all five recommendations in "Decisions" in chat on 2026-11-23. Implemented by the KAN-131 PR (#350).
 
 ## Problem
 
@@ -20,6 +20,8 @@ This spec does not reopen these. It proposes the values and the semantics they l
 ## Measurements
 
 Throwaway benchmark, not committed. A separate release-built crate linked this repo's `capture_agent` library at `a6db720`. Apple M3, 16 GB, rustc 1.98.0, Node 26.12.1. Memory is bytes requested from the allocator (a counting `GlobalAlloc`), not resident memory. K is the number of keys in **each** table, with one local address, so conversations equal endpoints. Nothing here was run on Linux or against live traffic.
+
+**All memory figures in this spec:** They cover the tables only and exclude the agent's event queue, which keeps up to the last 1,024 encoded events in memory even with no client connected, because `main.rs` holds an unread receiver. That is not new, and it is not measured (KAN-314).
 
 **Today** (the real `FlowTable` and `wire::encode_event`; one run; flows evicted so that only rollups remain; 1,000 extra priming keys are included in the rows and lines but not in the memory; rows filled with fixed, mid-sized counters, process `unknown`, no name or JA3):
 

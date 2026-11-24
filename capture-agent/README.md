@@ -85,7 +85,14 @@ selection change and excluding the snapshot's temporary buffers. Linux, live
 traffic, resident memory and the rest of the per-tick work are not measured,
 and no traffic shape is proved to be the worst. Higher caps cost more: at
 500,000 the same calls took 4.2 ms on mixed traffic and the tables about
-268 MiB. Method and limits:
+268 MiB.
+
+The memory figures: they cover the tables only and exclude the agent's event
+queue, which keeps up to the last 1,024 encoded events in memory even with
+no client connected, because `main.rs` holds an unread receiver. That is not
+new, and it is not measured (KAN-314).
+
+Method and limits:
 `docs/superpowers/specs/2026-11-23-rollup-bounds-design.md`.
 
 See [../docs/wire-protocol.md](../docs/wire-protocol.md) for the full JSON
