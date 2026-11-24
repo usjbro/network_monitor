@@ -413,7 +413,7 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
                 </td>
                 <td className="p-2.5 text-right text-slate-300">
                   <AtLeast show={!row.historyComplete} />
-                  {row.flowCount}
+                  {fmt(row.flowCount)}
                 </td>
                 <td className="p-2.5 text-right text-slate-500 text-[10px]">
                   {fmt(row.firstSeenMs)} ms

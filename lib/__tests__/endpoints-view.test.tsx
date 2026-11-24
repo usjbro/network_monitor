@@ -704,7 +704,7 @@ describe('EndpointsView partial lists', () => {
       return original.call(this, locale ?? 'de-DE', options);
     });
     try {
-      const times = { rxPacketsTotal: 1234, txPacketsTotal: 5678, firstSeenMs: 11111, lastSeenMs: 22222 };
+      const times = { rxPacketsTotal: 1234, txPacketsTotal: 5678, flowCount: 44444, firstSeenMs: 11111, lastSeenMs: 22222 };
       render(
         <EndpointsView
           endpoints={ready([endpoint({ host: 'h.example', ...times })])}
@@ -712,9 +712,9 @@ describe('EndpointsView partial lists', () => {
           theme={theme}
         />,
       );
-      for (const shown of ['1,234 / 5,678', '11,111 ms', '22,222 ms']) expect(screen.getByText(shown)).toBeInTheDocument();
+      for (const shown of ['1,234 / 5,678', '44,444', '11,111 ms', '22,222 ms']) expect(screen.getByText(shown)).toBeInTheDocument();
       fireEvent.click(screen.getByText('conversations'));
-      for (const shown of ['1,234 / 5,678', '11,111 ms', '22,222 ms', '33,333 ms']) expect(screen.getByText(shown)).toBeInTheDocument();
+      for (const shown of ['1,234 / 5,678', '44,444', '11,111 ms', '22,222 ms', '33,333 ms']) expect(screen.getByText(shown)).toBeInTheDocument();
     } finally {
       spy.mockRestore();
     }

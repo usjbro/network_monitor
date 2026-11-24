@@ -3741,10 +3741,11 @@ async fn main() -> std::io::Result<()> {
                         wire::EndpointJson::from_snapshot(endpoint, process_name, pid)
                     })
                     .collect();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::EndpointRollup {
+                // Sent last in the tick, below.
+                let endpoint_rollup = wire::encode_event(&wire::AgentEvent::EndpointRollup {
                     endpoints,
                     bounds: endpoint_bounds.into(),
-                }));
+                });
                 let summaries = service_time_stats.lock().unwrap().snapshot();
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::ServiceTimeUpdate {
                     summaries,
@@ -3763,10 +3764,10 @@ async fn main() -> std::io::Result<()> {
                         wire::ConversationJson::from_snapshot(conversation, process_name, pid)
                     })
                     .collect();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConversationRollup {
+                let conversation_rollup = wire::encode_event(&wire::AgentEvent::ConversationRollup {
                     conversations,
                     bounds: conversation_bounds.into(),
-                }));
+                });
 
                 // Per-layer aggregates for the layer_update event, accumulated
                 // alongside the per-connection events below. This agent only
@@ -4041,6 +4042,16 @@ async fn main() -> std::io::Result<()> {
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::AgentStatus {
                     status: agent_status,
                 }));
+
+                // KAN-131: the rollups go last. A client's queue drops its
+                // oldest events, so with more live flows than it holds,
+                // anything sent before the per-flow events is lost every
+                // tick. Released first, so these sends hold no lock longer.
+                drop(decrypt_state);
+                drop(keylog_watcher);
+                drop(processes);
+                let _ = tx.send(endpoint_rollup);
+                let _ = tx.send(conversation_rollup);
             }
         });
     }
