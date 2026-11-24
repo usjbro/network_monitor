@@ -87,7 +87,7 @@ and no traffic shape is proved to be the worst. Higher caps cost more: at
 500,000 the same calls took 4.2 ms on mixed traffic and the tables about
 268 MiB.
 
-The memory figures: they cover the tables only and exclude the agent's event
+The memory figures cover the tables only and exclude the agent's event
 queue, which keeps up to the last 1,024 encoded events in memory even with
 no client connected, because `main.rs` holds an unread receiver. That is not
 new, and it is not measured (KAN-314).
