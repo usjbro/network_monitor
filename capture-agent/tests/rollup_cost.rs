@@ -1,10 +1,23 @@
-//! KAN-131: how long the flow lock is held for both rollup snapshots, on
-//! traffic where the four rankings have disjoint leaders, so each table sends
-//! its worst case of 4N rows. Ignored by default; run with
+//! KAN-131: how long the flow lock is held for both rollup snapshots. Ignored
+//! by default; run with
 //! `cargo test --release --locked --test rollup_cost -- --ignored --nocapture`.
-//! `ROLLUP_COST_K` and `ROLLUP_COST_N` together select a single case and one
-//! run, so that a driver can interleave this binary with one built from an
-//! older commit. `digest` identifies the packet and DNS sequence.
+//! `ROLLUP_COST_SHAPE`, `ROLLUP_COST_K` and `ROLLUP_COST_N` together select a
+//! single case and one run, so that a driver can interleave this binary with
+//! one built from an older commit. `digest` identifies the packet and DNS
+//! sequence.
+//!
+//! Shapes:
+//! - `original`: the four rankings have disjoint leaders, so each table sends
+//!   its worst case of 4N rows.
+//! - `scan_zero`: every key gets one equal packet in slot order with strictly
+//!   ascending timestamps. Each tick repeats that, then drains the rates with
+//!   an untimed snapshot, so the timed one finds new traffic but zero rates.
+//! - `scan_equal`: the same feed without the drain, so all rates are equal and
+//!   not zero. Strict millisecond timestamps make each tick K ms long.
+//! - `evicting`: K new keys every tick, so a full table replaces itself. The
+//!   unbounded baseline keeps every key instead, so the two do unlike work.
+//!
+//! In the scan shapes all four rankings agree: the N most recent keys.
 //!
 //! No counting allocator here: it would slow code that allocates more. The
 //! memory measurement is in `rollup_memory.rs`.
@@ -15,9 +28,84 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use capture_agent::dns_names::DEFAULT_MAX_OBSERVED_DNS_NAMES;
-use capture_agent::flow::{FlowTable, RollupConfig};
+use capture_agent::flow::{ConversationSnapshot, EndpointSnapshot, FlowTable};
 use capture_agent::l7::{DnsAnswer, L7Info};
 use capture_agent::parse::{ParsedPacket, TransportProtocol};
+
+// API-BEGIN: the only part that differs in the copy built against the old API.
+use capture_agent::flow::RollupConfig;
+use capture_agent::rollup::Bounds;
+
+type Raw = (
+    (Vec<EndpointSnapshot>, Bounds),
+    (Vec<ConversationSnapshot>, Bounds),
+);
+
+fn new_table(k: usize, n: usize) -> FlowTable {
+    FlowTable::new(vec![LOCAL.to_string()]).with_rollup_config(RollupConfig {
+        max_endpoints: k,
+        max_conversations: k,
+        top_n: n,
+    })
+}
+
+/// The bounded tables hold exactly K keys and send exactly the expected rows.
+fn check(raw: Raw, e: &Expect) -> (Vec<EndpointSnapshot>, Vec<ConversationSnapshot>) {
+    let ((endpoints, endpoint_bounds), (conversations, conversation_bounds)) = raw;
+    for b in [&endpoint_bounds, &conversation_bounds] {
+        assert_eq!((b.tracked, b.unkeyed), (e.k, 0));
+        assert_eq!(b.evictions, (e.keys_seen - e.k) as u64);
+    }
+    match &e.sent {
+        Some(sent) => {
+            assert_eq!(endpoints.len(), sent.len());
+            assert_eq!(conversations.len(), sent.len());
+            assert!(endpoints.iter().all(|r| sent.contains(r.host.as_str())));
+            assert!(conversations.iter().all(|r| sent.contains(r.remote_addr.as_str())));
+            assert!(endpoints.iter().all(|r| r.observed_name.is_some()));
+        }
+        None => {
+            assert!((e.n..=4 * e.n).contains(&endpoints.len()));
+            assert_eq!(conversations.len(), endpoints.len());
+        }
+    }
+    (endpoints, conversations)
+}
+// API-END
+
+/// What one tick must produce: `keys_seen` distinct keys so far, and the exact
+/// rows a bounded table sends, when the shape fixes them.
+struct Expect<'a> {
+    k: usize,
+    n: usize,
+    keys_seen: usize,
+    sent: Option<HashSet<&'a str>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Shape {
+    Original,
+    ScanZero,
+    ScanEqual,
+    Evicting,
+}
+
+impl Shape {
+    fn name(self) -> &'static str {
+        match self {
+            Shape::Original => "original",
+            Shape::ScanZero => "scan_zero",
+            Shape::ScanEqual => "scan_equal",
+            Shape::Evicting => "evicting",
+        }
+    }
+    fn parse(name: &str) -> Shape {
+        [Shape::Original, Shape::ScanZero, Shape::ScanEqual, Shape::Evicting]
+            .into_iter()
+            .find(|s| s.name() == name)
+            .unwrap_or_else(|| panic!("unknown ROLLUP_COST_SHAPE {name}"))
+    }
+}
 
 const LOCAL: &str = "2001:db8:1:2:a1b2:c3d4:e5f6:1234";
 const TICKS: usize = 5;
@@ -134,23 +222,72 @@ struct Sample {
     named: usize,
 }
 
+/// Both snapshots in one lock hold, as in the emitter, with the rows kept past
+/// it. Checked against `expect` outside the timed region.
+fn timed(
+    f: &Feed,
+    shape: Shape,
+    now: u64,
+    expect: &Expect,
+) -> Sample {
+    let mut guard = f.table.lock().unwrap();
+    let start = Instant::now();
+    let endpoints = black_box(guard.endpoint_snapshot(black_box(now)));
+    let conversations = black_box(guard.conversation_snapshot(black_box(now)));
+    let elapsed = start.elapsed();
+    drop(guard);
+    let (endpoints, conversations) = check((endpoints, conversations), expect);
+    let rates: Vec<f64> = endpoints
+        .iter()
+        .map(|r| r.rx_speed + r.tx_speed)
+        .chain(conversations.iter().map(|r| r.rx_speed + r.tx_speed))
+        .collect();
+    match shape {
+        Shape::ScanZero => assert!(rates.iter().all(|r| *r == 0.0)),
+        Shape::ScanEqual => assert!(rates[0] > 0.0 && rates.iter().all(|r| *r == rates[0])),
+        Shape::Original | Shape::Evicting => {
+            assert!(rates[..endpoints.len()].iter().any(|r| *r > 0.0));
+            assert!(rates[endpoints.len()..].iter().any(|r| *r > 0.0));
+        }
+    }
+    Sample {
+        ms: elapsed.as_secs_f64() * 1e3,
+        endpoints: endpoints.len(),
+        conversations: conversations.len(),
+        named: endpoints.iter().filter(|r| r.observed_name.is_some()).count(),
+    }
+}
+
+fn untimed(f: &Feed, now: u64) {
+    let mut guard = f.table.lock().unwrap();
+    black_box(guard.endpoint_snapshot(now));
+    black_box(guard.conversation_snapshot(now));
+}
+
 /// One run: a new table, K keys loaded and their counters drained, one untimed
-/// tick, then TICKS timed ones, each after its own second of traffic.
-fn run(k: usize, n: usize) -> (Vec<Sample>, u64, u64) {
-    let sets = 2 + 2 * (TICKS + 1);
-    assert!(k > sets * n + 1_000, "not enough keys for disjoint leaders");
-    let table = FlowTable::new(vec![LOCAL.to_string()]).with_rollup_config(RollupConfig {
-        max_endpoints: k,
-        max_conversations: k,
-        top_n: n,
-    });
+/// tick, then TICKS timed ones, each after its own traffic. Every tick's rows
+/// are checked, the untimed one's included.
+fn run(shape: Shape, k: usize, n: usize) -> (Vec<Sample>, u64, u64) {
+    let keys = if shape == Shape::Evicting { k * (TICKS + 2) } else { k };
     let mut f = Feed {
-        table: Mutex::new(table),
-        addrs: (0..k).map(remote).collect(),
+        table: Mutex::new(new_table(k, n)),
+        addrs: (0..keys).map(remote).collect(),
         rng: Rng(0x1234_5678_9abc_def1),
         digest: 0xcbf2_9ce4_8422_2325,
         packets: 0,
     };
+    let mut samples = match shape {
+        Shape::Original => run_original(&mut f, k, n),
+        Shape::ScanZero | Shape::ScanEqual => run_scan(&mut f, shape, k, n),
+        Shape::Evicting => run_evicting(&mut f, k, n),
+    };
+    samples.remove(0);
+    (samples, f.digest, f.packets)
+}
+
+fn run_original(f: &mut Feed, k: usize, n: usize) -> Vec<Sample> {
+    let sets = 2 + 2 * (TICKS + 1);
+    assert!(k > sets * n + 1_000, "not enough keys for disjoint leaders");
     // A shuffle, so a group's members are scattered over the table's slots.
     let mut order: Vec<usize> = (0..k).collect();
     for i in (1..k).rev() {
@@ -183,11 +320,7 @@ fn run(k: usize, n: usize) -> (Vec<Sample>, u64, u64) {
     f.drop_flows(now);
     // Drains the loading traffic: otherwise the byte leaders would also lead
     // the first tick's rate.
-    {
-        let mut guard = f.table.lock().unwrap();
-        black_box(guard.endpoint_snapshot(now));
-        black_box(guard.conversation_snapshot(now));
-    }
+    untimed(f, now);
 
     let mut samples = Vec::new();
     for tick in 0..=TICKS {
@@ -214,43 +347,86 @@ fn run(k: usize, n: usize) -> (Vec<Sample>, u64, u64) {
         now += 1_000;
         f.drop_flows(now);
 
-        // The emitter's region: both snapshots in one lock hold, with the rows
-        // kept past it.
-        let mut guard = f.table.lock().unwrap();
-        let start = Instant::now();
-        let endpoints = black_box(guard.endpoint_snapshot(black_box(now)));
-        let conversations = black_box(guard.conversation_snapshot(black_box(now)));
-        let elapsed = start.elapsed();
-        drop(guard);
-        // BASELINE-REMOVE-BEGIN: not in the copy built against the old API.
-        let (endpoints, endpoint_bounds) = endpoints;
-        let (conversations, conversation_bounds) = conversations;
-        for b in [&endpoint_bounds, &conversation_bounds] {
-            assert_eq!((b.tracked, b.evictions, b.unkeyed), (k, 0, 0));
-        }
-        let expected: HashSet<&str> = [group(0), group(1), rate, recent]
-            .iter()
-            .flat_map(|g| g.iter().map(|&i| f.addrs[i].as_str()))
-            .collect();
-        assert_eq!(expected.len(), 4 * n);
-        assert_eq!(endpoints.len(), 4 * n);
-        assert_eq!(conversations.len(), 4 * n);
-        assert!(endpoints.iter().all(|r| expected.contains(r.host.as_str())));
-        assert!(conversations.iter().all(|r| expected.contains(r.remote_addr.as_str())));
-        assert!(endpoints.iter().all(|r| r.observed_name.is_some()));
-        // BASELINE-REMOVE-END
-        assert!(endpoints.iter().any(|r| r.rx_speed + r.tx_speed > 0.0));
-        assert!(conversations.iter().any(|r| r.rx_speed + r.tx_speed > 0.0));
-        if tick > 0 {
-            samples.push(Sample {
-                ms: elapsed.as_secs_f64() * 1e3,
-                endpoints: endpoints.len(),
-                conversations: conversations.len(),
-                named: endpoints.iter().filter(|r| r.observed_name.is_some()).count(),
-            });
-        }
+        let expect = Expect {
+            k,
+            n,
+            keys_seen: k,
+            sent: Some(
+                [group(0), group(1), rate, recent]
+                    .iter()
+                    .flat_map(|g| g.iter().map(|&i| f.addrs[i].as_str()))
+                    .collect(),
+            ),
+        };
+        assert_eq!(expect.sent.as_ref().map(HashSet::len), Some(4 * n));
+        samples.push(timed(f, Shape::Original, now, &expect));
     }
-    (samples, f.digest, f.packets)
+    samples
+}
+
+fn run_scan(f: &mut Feed, shape: Shape, k: usize, n: usize) -> Vec<Sample> {
+    let mut now = 0;
+    // Insertion order is slot order, so feeding 0..K feeds in slot order.
+    let scan = |f: &mut Feed, now: u64| {
+        for i in 0..k {
+            f.send(i, 100, now + 1 + i as u64);
+        }
+        now + 1 + k as u64
+    };
+    now = scan(f, now);
+    // The newest keys first, so every row sent has a name.
+    for i in (0..k).rev().take(DEFAULT_MAX_OBSERVED_DNS_NAMES) {
+        f.learn_name(i, now);
+    }
+    f.drop_flows(now);
+    untimed(f, now);
+
+    let mut samples = Vec::new();
+    for _ in 0..=TICKS {
+        now = scan(f, now);
+        f.drop_flows(now);
+        if shape == Shape::ScanZero {
+            untimed(f, now);
+            now += 1_000;
+        }
+        let expect = Expect {
+            k,
+            n,
+            keys_seen: k,
+            sent: Some(f.addrs[k - n..].iter().map(String::as_str).collect()),
+        };
+        assert_eq!(expect.sent.as_ref().map(HashSet::len), Some(n));
+        samples.push(timed(f, shape, now, &expect));
+    }
+    samples
+}
+
+fn run_evicting(f: &mut Feed, k: usize, n: usize) -> Vec<Sample> {
+    let mut now = 0;
+    let mut seen = 0;
+    let mut fill = |f: &mut Feed, now: u64| {
+        for j in 0..k {
+            let len = f.rng.size();
+            f.send(seen + j, len, now + 1 + (j * 900 / k) as u64);
+        }
+        for j in (0..k).rev().take(DEFAULT_MAX_OBSERVED_DNS_NAMES) {
+            f.learn_name(seen + j, now + 950);
+        }
+        seen += k;
+        f.drop_flows(now + 1_000);
+        (now + 1_000, seen)
+    };
+    (now, _) = fill(f, now);
+    untimed(f, now);
+
+    let mut samples = Vec::new();
+    for _ in 0..=TICKS {
+        let keys_seen;
+        (now, keys_seen) = fill(f, now);
+        let expect = Expect { k, n, keys_seen, sent: None };
+        samples.push(timed(f, Shape::Evicting, now, &expect));
+    }
+    samples
 }
 
 fn median(values: impl Iterator<Item = f64>) -> f64 {
@@ -259,37 +435,49 @@ fn median(values: impl Iterator<Item = f64>) -> f64 {
     v[v.len() / 2]
 }
 
-fn report(k: usize, n: usize, runs: usize) {
+fn join<T: std::fmt::Display>(values: impl Iterator<Item = T>) -> String {
+    values.map(|v| v.to_string()).collect::<Vec<_>>().join(" ")
+}
+
+fn report(shape: Shape, k: usize, n: usize, runs: usize) {
+    let label = format!("shape={} K={k} N={n}", shape.name());
     let mut medians = Vec::new();
     for _ in 0..runs {
-        let (samples, digest, packets) = run(k, n);
+        let (samples, digest, packets) = run(shape, k, n);
+        assert_eq!(samples.len(), TICKS);
         let m = median(samples.iter().map(|s| s.ms));
-        let all: Vec<String> = samples.iter().map(|s| format!("{:.3}", s.ms)).collect();
         println!(
-            "K={k} N={n} run_median_ms={m:.3} ticks_ms=[{}] endpoint_rows={} conversation_rows={} \
-             named={} packets={packets} digest={digest:016x}",
-            all.join(" "),
-            samples[0].endpoints,
-            samples[0].conversations,
-            samples[0].named,
+            "{label} run_median_ms={m:.3} ticks_ms=[{}] endpoint_rows=[{}] \
+             conversation_rows=[{}] named=[{}] packets={packets} digest={digest:016x}",
+            join(samples.iter().map(|s| format!("{:.3}", s.ms))),
+            join(samples.iter().map(|s| s.endpoints)),
+            join(samples.iter().map(|s| s.conversations)),
+            join(samples.iter().map(|s| s.named)),
         );
         medians.push(m);
     }
     if runs > 1 {
-        println!("K={k} N={n} median_of_{runs}_runs_ms={:.3}", median(medians.into_iter()));
+        println!("{label} median_of_{runs}_runs_ms={:.3}", median(medians.into_iter()));
     }
 }
 
 #[test]
 #[ignore = "measurement, not a check; prints the lock-hold time of both snapshots"]
 fn rollup_cost() {
-    let env = |name: &str| std::env::var(name).ok().map(|v| v.parse::<usize>().unwrap());
-    if let (Some(k), Some(n)) = (env("ROLLUP_COST_K"), env("ROLLUP_COST_N")) {
-        report(k, n, 1);
+    let var = |name: &str| std::env::var(name).ok();
+    let one = (var("ROLLUP_COST_SHAPE"), var("ROLLUP_COST_K"), var("ROLLUP_COST_N"));
+    if let (Some(shape), Some(k), Some(n)) = one {
+        report(Shape::parse(&shape), k.parse().unwrap(), n.parse().unwrap(), 1);
         return;
     }
     for k in [10_000, 50_000, 100_000, 500_000] {
-        report(k, 200, RUNS);
+        report(Shape::Original, k, 200, RUNS);
     }
-    report(50_000, 1_000, RUNS);
+    report(Shape::Original, 50_000, 1_000, RUNS);
+    for shape in [Shape::ScanZero, Shape::ScanEqual] {
+        for n in [200, 1_000] {
+            report(shape, 50_000, n, RUNS);
+        }
+    }
+    report(Shape::Evicting, 50_000, 200, RUNS);
 }
