@@ -1406,6 +1406,53 @@ fn parse_positive_env(name: &str, raw: Option<String>, default: usize) -> usize 
     }
 }
 
+/// `parse_positive_env` with an upper bound: a value above `max` panics
+/// naming the variable and the maximum.
+fn parse_bounded_env(name: &str, raw: Option<String>, default: usize, max: usize) -> usize {
+    let n = parse_positive_env(name, raw, default);
+    if n > max {
+        panic!("{name}={n} is above the maximum of {max}");
+    }
+    n
+}
+
+/// Startup-only sizes of the endpoint and conversation rollup tables and of
+/// each snapshot (KAN-131); same parsing rules as `MAX_FLOWS`.
+fn resolve_rollup_config() -> flow::RollupConfig {
+    flow::RollupConfig {
+        max_endpoints: parse_max_endpoints(std::env::var("MAX_ENDPOINTS").ok()),
+        max_conversations: parse_max_conversations(std::env::var("MAX_CONVERSATIONS").ok()),
+        top_n: parse_rollup_top_n(std::env::var("ROLLUP_TOP_N").ok()),
+    }
+}
+
+fn parse_max_endpoints(raw: Option<String>) -> usize {
+    parse_bounded_env(
+        "MAX_ENDPOINTS",
+        raw,
+        capture_agent::rollup::DEFAULT_MAX_ENDPOINTS,
+        capture_agent::rollup::MAX_ROLLUP_CAP,
+    )
+}
+
+fn parse_max_conversations(raw: Option<String>) -> usize {
+    parse_bounded_env(
+        "MAX_CONVERSATIONS",
+        raw,
+        capture_agent::rollup::DEFAULT_MAX_CONVERSATIONS,
+        capture_agent::rollup::MAX_ROLLUP_CAP,
+    )
+}
+
+fn parse_rollup_top_n(raw: Option<String>) -> usize {
+    parse_bounded_env(
+        "ROLLUP_TOP_N",
+        raw,
+        capture_agent::rollup::DEFAULT_ROLLUP_TOP_N,
+        capture_agent::rollup::MAX_ROLLUP_TOP_N,
+    )
+}
+
 /// Startup-only capacity of the observed DNS name table (JAM-21). Same
 /// parsing rules as `MAX_FLOWS`, for the same reasons.
 fn resolve_max_observed_dns_names() -> usize {
@@ -2643,7 +2690,8 @@ async fn main() -> std::io::Result<()> {
         local_addrs,
         resolve_max_flows(),
     )
-    .with_observed_name_capacity(resolve_max_observed_dns_names())));
+    .with_observed_name_capacity(resolve_max_observed_dns_names())
+    .with_rollup_config(resolve_rollup_config())));
     // JAM-15: written by the capture thread's `TransactionTracker`, read by
     // the periodic emitter for `service_time_update`.
     let service_time_stats = Arc::new(Mutex::new(ServiceTimeStats::default()));
@@ -3617,8 +3665,9 @@ async fn main() -> std::io::Result<()> {
                     // capture start -- same "gather under the lock, convert
                     // to wire JSON after release" pattern as protocol_tree
                     // below.
-                    let endpoint_snapshots = ft.endpoint_snapshot(now_ms);
-                    let conversation_snapshots = ft.conversation_snapshot(now_ms);
+                    // The bounds are not sent yet; later KAN-131 tasks do.
+                    let (endpoint_snapshots, _) = ft.endpoint_snapshot(now_ms);
+                    let (conversation_snapshots, _) = ft.conversation_snapshot(now_ms);
                     (
                         evicted,
                         snapshots,
@@ -4413,7 +4462,8 @@ mod tests {
         emit_unanswered_findings, find_device_by_name, flow_aging_now_ms, is_capturable,
         is_meaningful_override, learnable_dns_response, looks_like_pcapng, malformed_frame_summary,
         note_capture_truncation, packet_osi_layer, parse_max_flows,
-        parse_max_observed_dns_names, parse_replay_local_addrs,
+        parse_max_conversations, parse_max_endpoints, parse_max_observed_dns_names,
+        parse_replay_local_addrs, parse_rollup_top_n,
         parse_replay_speed, protocol_node_to_json, reassembly_now_ms, resolve_link_type,
         validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, with_flow_observation, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN,
@@ -5354,6 +5404,38 @@ mod tests {
     #[should_panic(expected = "MAX_OBSERVED_DNS_NAMES=lots")]
     fn parse_max_observed_dns_names_rejects_non_numeric() {
         parse_max_observed_dns_names(Some("lots".to_string()));
+    }
+
+    // --- MAX_ENDPOINTS / MAX_CONVERSATIONS / ROLLUP_TOP_N (KAN-131) ---
+
+    #[test]
+    fn rollup_env_parsing() {
+        use capture_agent::rollup::*;
+        type Parser = fn(Option<String>) -> usize;
+        let cases: [(&str, Parser, usize, usize); 3] = [
+            ("MAX_ENDPOINTS", parse_max_endpoints, DEFAULT_MAX_ENDPOINTS, MAX_ROLLUP_CAP),
+            ("MAX_CONVERSATIONS", parse_max_conversations, DEFAULT_MAX_CONVERSATIONS, MAX_ROLLUP_CAP),
+            ("ROLLUP_TOP_N", parse_rollup_top_n, DEFAULT_ROLLUP_TOP_N, MAX_ROLLUP_TOP_N),
+        ];
+        for (name, parse, default, max) in cases {
+            assert_eq!(parse(None), default, "{name}");
+            assert_eq!(parse(Some(String::new())), default, "{name}");
+            assert_eq!(parse(Some("  ".to_string())), default, "{name}");
+            assert_eq!(parse(Some("1".to_string())), 1, "{name}");
+            assert_eq!(parse(Some(max.to_string())), max, "{name}");
+            for bad in ["0".to_string(), "-1".to_string(), "x".to_string(), (max + 1).to_string()] {
+                let result = std::panic::catch_unwind(|| parse(Some(bad.clone())));
+                let payload = result.expect_err(&format!("{name}={bad} must panic"));
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_default();
+                assert!(message.contains(name), "{message}");
+                if bad == (max + 1).to_string() {
+                    assert!(message.contains(&max.to_string()), "{message}");
+                }
+            }
+        }
     }
 
     // --- learnable_dns_response (JAM-21) ---
