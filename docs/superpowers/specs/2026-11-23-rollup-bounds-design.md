@@ -46,9 +46,44 @@ So the first thing to break is the wire, not memory: 10,000 keys already cost 6 
 | 100,000 | 157 ns | 200 ns | 116 ns | 226 ns | 52.7 MiB | 42.3 MiB | 7.5 ms |
 | 500,000 | 235 ns | 320 ns | 208 ns | 283 ns | 263 MiB | 202 MiB | 51 ms |
 
-"Hit" is the rollup part only, not all of `observe`. "Tick" is selecting four top-N lists in each table and draining the per-tick counters; it excludes building rows and encoding.
+**The "Tick" column is superseded** by "Measured implementation, 2026-11-23" below: it measured a different selection and excluded row building. "Hit" is the rollup part only, not all of `observe`. "Tick" is selecting four top-N lists in each table and draining the per-tick counters; it excludes building rows and encoding.
 
 The union of the four rankings has fewer than 4N rows because they overlap: at 50,000 keys, 190 rows for N=100, 396 for N=200, 974 for N=500, 1,943 for N=1,000. Overlap depends on the traffic; the worst case is 4N. The relay's parse plus stringify is 0.15 ms for 350 rows, 0.40 ms for 900 and 0.8 ms for 1,800.
+
+### Measured implementation, 2026-11-23: limit P9 failed
+
+**The bounded rollups hold the lock longer than the code they replace, at every K measured.** At the 50,000 default with N=200 the median of five runs is 10.4 ms against 5.7 ms. The plan's limit (P9) is that the new median must not exceed the old one, so it fails by about 1.8 times. The 50,000 defaults are not supported by this measurement. Nothing was tuned in response.
+
+Old is `7fe5f29`, new is `36949c3`. Apple M3, 16 GB, macOS 26.6.2, rustc 1.98.0, release build, on battery, low-power mode off. Other desktop apps were open: load average 3.8 at the start and 3.3 at the end, with a VS Code renderer at 55% of a core when the runs began. Old and new runs alternated (old, new, old, new…), five of each per row, each in its own process. Linux and live traffic are not measured.
+
+**The machine slept during this run.** macOS's power log shows it running in maintenance dark wakes, asleep from 23:36:31 to 23:37:39 inside the 23:36:20–23:38:04 run. No sample is near 68 s, and the timer is expected to stop during sleep, but conditions were not those of an awake, quiet machine. All 25 old/new pairs ran interleaved and the new version was slower in every one. The run was not repeated; absolute times should be confirmed awake and on mains power.
+
+Time is milliseconds for `endpoint_snapshot` plus `conversation_snapshot` in one lock hold, row building and observed-name lookup included. Freeing the rows is outside it, as in the emitter. A run's value is the median of five timed ticks; each cell is the median of the five runs, with their range.
+
+| K | N | Old | New | New / old | Old rows per table | New rows per table |
+|---|---|---|---|---|---|---|
+| 10,000 | 200 | 0.985 (0.962–1.002) | 2.149 (2.137–2.192) | 2.2 | 10,000 | 800 |
+| **50,000** | **200** | **5.687 (5.471–6.097)** | **10.398 (10.316–10.589)** | **1.8** | 50,000 | 800 |
+| 100,000 | 200 | 13.379 (12.716–16.785) | 23.689 (21.860–24.492) | 1.8 | 100,000 | 800 |
+| 500,000 | 200 | 104.992 (104.692–124.706) | 135.734 (127.010–151.578) | 1.3 | 500,000 | 800 |
+| 50,000 | 1,000 | 5.887 (5.731–6.186) | 13.044 (12.988–13.092) | 2.2 | 50,000 | 4,000 |
+
+At 500,000 the new time rose on successive ticks in all five runs (from 110–129 ms on the first to 149–175 ms on the last); the cause was not investigated, so that row may understate a longer run.
+
+Method (`capture-agent/tests/rollup_cost.rs`): one local IPv6 address, K IPv6 remotes, both caps K, no evictions. Both versions got the identical packet and DNS sequence, confirmed by a digest. Before each snapshot comes one second of fresh traffic: 20,000 packets with log-uniform sizes to uniformly chosen other keys, and four disjoint groups of N keys, each leading one of bytes, packets, rate and recent. The test asserts in the new version that each table sends exactly those 4N rows; both assert that rates are not all zero. Names fill the production 16,384-entry table, every sent row's name included. Flows are evicted before timing.
+
+This is the worst case for rows sent. It does not cover a full table that is evicting, JA3 labels, or other threads waiting for the lock. The rest of the emitter's critical section (flow eviction, flow snapshot, protocol tree) is excluded from both.
+
+Memory (`capture-agent/tests/rollup_memory.rs`, live bytes requested by one `RollupTable`, IPv6, no flows): at first fill, then after 10 × K further distinct keys. The snapshot's temporary buffers are not included.
+
+| K | Endpoints, first fill | Endpoints, after churn | Conversations, first fill | Conversations, after churn | Both, after churn |
+|---|---|---|---|---|---|
+| 10,000 | 2.4 MiB | 2.8 MiB | 2.9 MiB | 3.5 MiB | 6.3 MiB |
+| 50,000 | 9.6 MiB | 11.1 MiB | 11.6 MiB | 14.1 MiB | 25.3 MiB |
+| 100,000 | 19.1 MiB | 22.3 MiB | 23.1 MiB | 28.3 MiB | 50.5 MiB |
+| 500,000 | 89.0 MiB | 114.0 MiB | 113.0 MiB | 154.0 MiB | 268.0 MiB |
+
+Superseded by this: the "Tick" column above; D2's 1.5 ms, 7.5 ms and 51 ms scan figures and its statement that row building is not measured; and "Memory, `IpAddr`" for the implementation, with D2's 21 MiB and 200 MiB. "Today"'s "Lock held" column was one run with different rows and is not comparable with the old column here. The "Hit" and "Evict" columns were not re-measured.
 
 ## Design
 
