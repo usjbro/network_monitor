@@ -225,6 +225,8 @@ Anyone able to put packets with many source addresses in front of the capture ca
 
 This is an availability effect on an analysis view, not disclosure, and it is visible: `evictions` climbs and `evicted` accounts for every dropped byte. Memory, wire and tick cost stay bounded throughout. Plain LRU cannot prevent it. A segmented LRU (one-packet keys evicted first) would protect repeat talkers, but it changes the decided policy; see decision 5. `observe` work per flood packet rises to about 180 ns at 50,000 for these tables.
 
+*(Note, 2026-11-24, added in Task 7; the decision above is unchanged.)* "It is visible" holds only while the list events reach the browser. The agent drops a client's oldest events past a 1,024-event queue, and the same flood adds one event per live flow and one per evicted flow each tick. As first implemented the lists were sent before those, so at 1,500 or more live flows none reached the client in five 8 s runs (synthetic replay). James approved, in chat, sending them last; then all arrived at up to 10,000 live flows. A client that stays behind can still lose them, and the page marks nothing as stale.
+
 ## Failure and locking
 
 Snapshotting stays under the `FlowTable` lock, so a row set and its `bounds` are from one instant; encoding stays outside it. The whole-table scan (rank selection and drain) is the only linear work. Per-entry tick epochs could remove the drain, and the plan may use them, but the ranking scan remains.

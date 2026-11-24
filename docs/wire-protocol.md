@@ -266,7 +266,7 @@ Field notes:
 
 ### `endpoint_rollup` / `conversation_rollup`
 
-Sent once per tick (~1 second), immediately after that tick's `protocol_hierarchy_update`: `endpoint_rollup`, then `service_time_update`, then `conversation_rollup`. Per-remote-host and per-(local,remote)-pair traffic rollups (JAM-14/GitHub #81), bounded since KAN-131. Each event is a full replacement of the rows the client holds, not a delta, but the rows are **a partial list**: the agent tracks a bounded number of keys and sends only those in its top N. `bounds` says exactly what is left out.
+Sent once per tick (~1 second), `endpoint_rollup` then `conversation_rollup`, as the last two events of the tick, after `agent_status`. They are last because a client's queue drops its oldest events (see `relayLaggedEvents`): a tick with more per-flow events than the queue holds would lose anything sent before them. Per-remote-host and per-(local,remote)-pair traffic rollups (JAM-14/GitHub #81), bounded since KAN-131. Each event is a full replacement of the rows the client holds, not a delta, but the rows are **a partial list**: the agent tracks a bounded number of keys and sends only those in its top N. `bounds` says exactly what is left out.
 
 The agent keeps the totals itself rather than deriving them from currently-live flows, so a tracked host's total survives its flows closing or being evicted. It does not survive the host's own eviction from the rollup table (`evictions` below) or an interface switch (see "Reset").
 
@@ -369,7 +369,7 @@ Counters are JSON numbers and saturate in the agent. Above 2^53 JavaScript loses
 
 ### `service_time_update`
 
-Sent once per tick (~1 second), right after `endpoint_rollup`. Service response time per protocol (JAM-15), from `transaction::ServiceTimeStats`. Always one entry per protocol (`DNS`, then `HTTP`), so a client can show "0 answered" rather than guess why one is missing.
+Sent once per tick (~1 second), before that tick's `connection_update` events, so a tick that overflows a client's queue drops it (see `relayLaggedEvents`). Service response time per protocol (JAM-15), from `transaction::ServiceTimeStats`. Always one entry per protocol (`DNS`, then `HTTP`), so a client can show "0 answered" rather than guess why one is missing.
 
 ```json
 {
@@ -392,7 +392,7 @@ Field notes:
 
 ### `capture_stats`
 
-Sent once per tick (~1 second), immediately after that tick's `layer_update`. Reports capture health — issue #61.
+Sent once per tick (~1 second), immediately after that tick's `protocol_hierarchy_update`. Reports capture health — issue #61.
 
 ```json
 {
@@ -418,7 +418,7 @@ Note the nesting: fields sit under a `stats` key, not flat on the event — same
 
 Field notes:
 - `received`, `dropped`, `if_dropped` come straight from `pcap::Capture::stats()` (`ps_recv`/`ps_drop`/`ps_ifdrop`) — cumulative since the capture handle opened, not per-tick deltas. `dropped` is the kernel/driver's capture buffer filling up before the agent could read from it; `if_dropped` is the network interface driver dropping frames upstream of that buffer (`0` on platforms that don't report it separately). Both are `0` until the capture thread's first successful poll (roughly one second after the agent starts).
-- `relayLaggedEvents` is unrelated to the three fields above: it's this relay process's own outbound backlog — a cumulative count (since agent start, not per-tick) of discrete `packet`/`decrypted_payload` events silently dropped for an SSE client that fell behind the broadcast channel (see `RecvError::Lagged` in `main.rs`). A capture can have `dropped: 0` and still have a nonzero `relayLaggedEvents` if the browser tab itself is slow to consume events.
+- `relayLaggedEvents` is unrelated to the three fields above: it's the **agent's** own outbound backlog — a cumulative count (since agent start, not per-tick) of events dropped for a connected client (normally the Next.js relay) that fell behind its 1,024-event broadcast queue, oldest first (see `RecvError::Lagged` in `main.rs`), summed over every connected client. The agent does the counting. Any event type sent on that channel can be dropped, not only `packet`/`decrypted_payload`. A client need not be slow: a tick sends one `connection_update` per live flow and one `connection_closed` per flow evicted that tick in one burst, so a tick of more than about 1,000 of those can overflow the queue by itself. A capture can have `dropped: 0` and still have a nonzero `relayLaggedEvents`.
 - `unparseableFrames` is a fourth, independent signal: a cumulative count of frames the agent *did* receive from the capture handle but couldn't decode (e.g. malformed/truncated input or known encapsulation beyond the decoder nesting limit or opaque MACsec or undecoded PPPoE sessions, MPLS, PBB, E-tag, or IP-over-SNAP). Successfully framed non-IP Ethernet traffic (including ARP and unknown non-IP EtherTypes) is intentionally excluded: it is outside IP flow analysis, not evidence of degraded capture. Unlike `dropped`/`if_dropped`, counted frames did reach this process; unlike `relayLaggedEvents`, this has nothing to do with the relay's outbound side. The dashboard labels these as "frame(s) could not be parsed (non-IP traffic excluded)". The wire field name and shape are unchanged.
 
   Visibility trade-off: excluded ARP, LLDP, and 802.3/LLC traffic (such as STP) produces no packet/flow events and has no dedicated wire counter. This fixes misleading capture-health warnings without expanding the Rust/TypeScript contract; it does not provide non-IP traffic visibility. Ethernet padding on an otherwise decodable ARP frame does not change its classification. Unknown EtherType and LLC payload contents are not validated or certified valid. 802.3 lengths require all declared payload bytes (padding is allowed); reserved type/length values 1501–1535 remain failures. Undecoded PPPoE sessions (`0x8864`), MPLS (`0x8847`/`0x8848`), 802.1ah PBB (`0x88E7`), 802.1BR E-tag (`0x893F`), and 802.3 LLC/SNAP carrying IPv4/IPv6 (OUI `00-00-00` or `00-00-F8`) remain decode failures because they may carry IP (decoding is tracked in JAM-253). This is a fixed list, not proof that every other EtherType or SNAP protocol is IP-free. Encrypted/modified MACsec remains a decode failure because its opaque payload could contain IP; decodable cleartext MACsec follows its inner protocol.
@@ -436,7 +436,7 @@ Any connection's `packetLoss` (in `connection_update`) is derived purely from ob
 
 ### `system_stats`
 
-Sent once per tick (~1 second), immediately after that tick's `capture_stats`. Host/interface identity and aggregate throughput — issue #64. Replaces the placeholder `SystemStats` values the UI used to seed itself with client-side; every field here is a real measurement.
+Sent once per tick (~1 second), after that tick's `capture_stats` and any `io_buckets` lines. Host/interface identity and aggregate throughput — issue #64. Replaces the placeholder `SystemStats` values the UI used to seed itself with client-side; every field here is a real measurement.
 
 ```json
 {
