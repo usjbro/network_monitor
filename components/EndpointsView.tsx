@@ -405,7 +405,7 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
                 </td>
                 <td className="p-2.5 text-right text-slate-300">
                   <AtLeast show={!row.historyComplete} />
-                  {row.rxPacketsTotal.toLocaleString()} / {row.txPacketsTotal.toLocaleString()}
+                  {fmt(row.rxPacketsTotal)} / {fmt(row.txPacketsTotal)}
                 </td>
                 <td className="p-2.5 text-right">
                   <div className="text-emerald-400 font-bold">{formatSpeed(row.rxSpeed)}</div>
@@ -416,14 +416,14 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
                   {row.flowCount}
                 </td>
                 <td className="p-2.5 text-right text-slate-500 text-[10px]">
-                  {row.firstSeenMs.toLocaleString()} ms
+                  {fmt(row.firstSeenMs)} ms
                   {!row.historyComplete && <span className="block">may be earlier</span>}
                 </td>
-                <td className="p-2.5 text-right text-slate-500 text-[10px]">{row.lastSeenMs.toLocaleString()} ms</td>
+                <td className="p-2.5 text-right text-slate-500 text-[10px]">{fmt(row.lastSeenMs)} ms</td>
                 {mode === 'conversations' && (
                   <td className="p-2.5 text-right text-slate-500 text-[10px]">
                     <AtLeast show={!row.historyComplete} />
-                    {(row.durationMs ?? 0).toLocaleString()} ms
+                    {fmt(row.durationMs ?? 0)} ms
                   </td>
                 )}
               </tr>
@@ -446,7 +446,10 @@ export const EndpointsView: React.FC<EndpointsViewProps> = ({
           reuse (lib/geoip.ts is wired only to traceroute hops today), so
           it's deliberately not included here. */}
       {selectedGone && (
-        <div className={`p-3.5 rounded border ${theme.border} ${theme.cardBg} text-slate-500`}>No longer among the received rows</div>
+        <div className={`p-3.5 rounded border ${theme.border} ${theme.cardBg} text-slate-500`}>
+          <div>No longer among the received rows</div>
+          <div className="break-all text-slate-300">{selectedKey}</div>
+        </div>
       )}
       {selected && (
         <div className={`p-3.5 rounded border ${theme.border} ${theme.cardBg} space-y-2`}>

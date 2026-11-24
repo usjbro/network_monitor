@@ -661,6 +661,16 @@ describe('EndpointsView partial lists', () => {
       expect(screen.queryByText(/OWNERSHIP FOR host-3/)).not.toBeInTheDocument();
     });
 
+    it('names the row that is no longer received, as text', () => {
+      const name = '<img src=x>';
+      const { rerender } = render(<EndpointsView endpoints={ready([endpoint({ host: name })])} conversations={ready([])} theme={theme} />);
+      fireEvent.click(screen.getByText(name));
+      rerender(<EndpointsView endpoints={ready(many(3))} conversations={ready([])} theme={theme} />);
+      const panel = screen.getByText('No longer among the received rows').parentElement!;
+      expect(panel).toHaveTextContent(name);
+      expect(panel.querySelector('img')).toBeNull();
+    });
+
     it('after a reset with a row selected and a search active, leaves no old notice or panel', () => {
       const evicted = { rxBytes: 9, txBytes: 9, rxPackets: 0, txPackets: 0 };
       const before = ready(many(5), {
@@ -686,6 +696,28 @@ describe('EndpointsView partial lists', () => {
       expect(screen.getByText('No match among the 1 rows received.')).toBeInTheDocument();
       expect(screen.getByText('0 matches in 1 received; 1 hosts tracked since 77 ms.')).toBeInTheDocument();
     });
+  });
+
+  it('formats row times and packet counts as en-US, like the notices, whatever the browser locale', () => {
+    const original = Number.prototype.toLocaleString;
+    const spy = vi.spyOn(Number.prototype, 'toLocaleString').mockImplementation(function (this: number, locale, options) {
+      return original.call(this, locale ?? 'de-DE', options);
+    });
+    try {
+      const times = { rxPacketsTotal: 1234, txPacketsTotal: 5678, firstSeenMs: 11111, lastSeenMs: 22222 };
+      render(
+        <EndpointsView
+          endpoints={ready([endpoint({ host: 'h.example', ...times })])}
+          conversations={ready([conversation({ ...times, durationMs: 33333 })])}
+          theme={theme}
+        />,
+      );
+      for (const shown of ['1,234 / 5,678', '11,111 ms', '22,222 ms']) expect(screen.getByText(shown)).toBeInTheDocument();
+      fireEvent.click(screen.getByText('conversations'));
+      for (const shown of ['1,234 / 5,678', '11,111 ms', '22,222 ms', '33,333 ms']) expect(screen.getByText(shown)).toBeInTheDocument();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('renders markup in a host or conversation name as text', () => {
