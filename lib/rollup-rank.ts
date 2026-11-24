@@ -11,7 +11,7 @@ export type RankedRow = Pick<
   'rxBytesTotal' | 'txBytesTotal' | 'rxPacketsTotal' | 'txPacketsTotal' | 'rxSpeed' | 'txSpeed' | 'lastSeenMs'
 >;
 
-function rankValue(row: RankedRow, ranking: RollupRanking): number {
+export function rankValue(row: RankedRow, ranking: RollupRanking): number {
   switch (ranking) {
     case 'bytes':
       return row.rxBytesTotal + row.txBytesTotal;

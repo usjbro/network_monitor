@@ -4,7 +4,7 @@ import React, { useMemo, useState } from 'react';
 import { ArrowDown, ArrowUp, Users } from 'lucide-react';
 import { Conversation, Endpoint, RollupState, ThemeConfig } from '@/lib/types';
 import { formatBytes, formatSpeed } from '@/lib/osi-engine';
-import { RollupRanking, rankRows } from '@/lib/rollup-rank';
+import { RollupRanking, rankRows, rankValue } from '@/lib/rollup-rank';
 
 type SortKey =
   | 'name'
@@ -145,18 +145,16 @@ function sortValue(row: Row, key: SortKey): number | string {
     case 'process':
       return `${row.processName.toLowerCase()}\0${row.pid.toString().padStart(10, '0')}`;
     case 'bytes':
-      return row.rxBytesTotal + row.txBytesTotal;
     case 'packets':
-      return row.rxPacketsTotal + row.txPacketsTotal;
     case 'rate':
-      // RX/TX is one paired column, so sort by its combined throughput.
-      return row.rxSpeed + row.txSpeed;
+      // RX/TX is one paired column, so each sorts by its sum, as Rank by does.
+      return rankValue(row, key);
     case 'flowCount':
       return row.flowCount;
     case 'firstSeen':
       return row.firstSeenMs;
     case 'lastSeen':
-      return row.lastSeenMs;
+      return rankValue(row, 'recent');
     case 'duration':
       return row.durationMs ?? 0;
   }
