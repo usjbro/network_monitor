@@ -26,6 +26,10 @@ struct Gen {
     rx_speed: f64,
     tx_speed: f64,
     last_seen_ms: u64,
+    /// Inserted before the first eviction.
+    history_complete: bool,
+    /// Evicted from the table: counted in `bounds.evicted`, never sent.
+    evicted: bool,
 }
 
 struct Rng(u64);
@@ -43,14 +47,22 @@ impl Rng {
     }
 }
 
-const SPEEDS: [f64; 5] = [0.0, 100.0, 250.5, 350.5, 1024.0];
-
-/// Few distinct values everywhere, so ties are the common case. Ids run in
-/// insertion order; `last_seen_ms` climbs and then steps backward, as a
+/// `tight` builds a table where the cut at N falls inside a tie for every
+/// ranking: each of bytes, packets and rate has one champion row, most other
+/// rows share the next level, and `last_seen_ms` has only a few values. A
+/// ranking's top N is then its champion plus the first rows of the shared
+/// level, and the rows that the other rankings add share that level too.
+///
+/// The table holds `rows` keys at its cap. Ids 1..=rows were inserted before
+/// any eviction (history complete); every fourth of them was later evicted
+/// and replaced by ids rows+1..=rows+rows/4, which are not complete. So
+/// `evictions` is rows/4. `last_seen_ms` climbs and then steps backward, as a
 /// replay with a timestamp reset does.
-fn generate(rows: u64, seed: u64, conversation: bool) -> Vec<Gen> {
+fn generate(rows: u64, seed: u64, conversation: bool, tight: bool) -> Vec<Gen> {
     let mut rng = Rng(seed);
-    (1..=rows)
+    let speeds: &[f64] = &[0.0, 100.0, 250.5, 350.5, 1024.0];
+    let later = rows / 4;
+    (1..=rows + later)
         .map(|id| {
             let i = id - 1;
             let remote = format!("10.{}.{}.{}", i / 65_536, (i / 256) % 256, i % 256);
@@ -59,22 +71,48 @@ fn generate(rows: u64, seed: u64, conversation: bool) -> Vec<Gen> {
             } else {
                 remote
             };
-            let last_seen_ms = if id <= rows / 2 {
-                1_000 + 10 * rng.pick(6)
-            } else {
-                500 + 10 * rng.pick(6)
-            };
-            Gen {
+            let mut row = Gen {
                 id,
                 key,
-                rx_bytes: 1_000 * rng.pick(4),
-                tx_bytes: 1_000 * rng.pick(4),
-                rx_packets: rng.pick(3),
-                tx_packets: rng.pick(3),
-                rx_speed: SPEEDS[rng.pick(5) as usize],
-                tx_speed: SPEEDS[rng.pick(5) as usize],
-                last_seen_ms,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                rx_packets: 0,
+                tx_packets: 0,
+                rx_speed: 0.0,
+                tx_speed: 0.0,
+                last_seen_ms: 0,
+                history_complete: id <= rows,
+                evicted: id <= rows && id % 4 == 0,
+            };
+            if tight {
+                let shared = |rng: &mut Rng| rng.pick(5) < 3;
+                // Champions are late ids, so they are never among the first
+                // rows of a shared level. Two rows are newest; the second
+                // half steps back in time.
+                row.rx_bytes = if id == rows + 3 { 2_000 } else if shared(&mut rng) { 1_000 } else { 0 };
+                row.rx_packets = if id == rows + 5 { 2 } else if shared(&mut rng) { 1 } else { 0 };
+                row.rx_speed = if id == rows + 7 { 200.0 } else if shared(&mut rng) { 100.0 } else { 0.0 };
+                row.last_seen_ms = if id == rows / 2 + 2 || id == rows / 2 + 3 {
+                    1_010
+                } else if id <= rows / 2 {
+                    1_000
+                } else {
+                    990 + 10 * rng.pick(2)
+                };
+            } else {
+                row.rx_bytes = 1_000 * rng.pick(4);
+                row.tx_bytes = 1_000 * rng.pick(4);
+                row.rx_packets = rng.pick(3);
+                row.tx_packets = rng.pick(3);
+                row.rx_speed = speeds[rng.pick(5) as usize];
+                row.tx_speed = speeds[rng.pick(5) as usize];
+                row.last_seen_ms = if id <= rows / 2 {
+                    1_000 + 10 * rng.pick(3)
+                } else {
+                    500 + 10 * rng.pick(3)
+                };
             }
+            row
         })
         .collect()
 }
@@ -111,17 +149,36 @@ fn rank_all(rows: &[Gen], n: usize) -> Model {
     }
 }
 
-fn bounds(tracked: usize) -> Bounds {
+/// Bounds consistent with the generated rows: `totals - evicted` is the sum
+/// over the tracked rows, `tracked` is their count, and `horizonMs` is the
+/// latest `last_seen_ms` among the evicted.
+fn bounds(all: &[Gen], n: usize) -> Bounds {
+    fn sum<'a>(rows: impl Iterator<Item = &'a Gen>) -> Traffic {
+        rows.fold(Traffic::default(), |t, g| Traffic {
+            rx_bytes: t.rx_bytes + g.rx_bytes,
+            tx_bytes: t.tx_bytes + g.tx_bytes,
+            rx_packets: t.rx_packets + g.rx_packets,
+            tx_packets: t.tx_packets + g.tx_packets,
+        })
+    }
+    let tracked: Vec<&Gen> = all.iter().filter(|g| !g.evicted).collect();
+    let evicted = sum(all.iter().filter(|g| g.evicted));
+    let held = sum(tracked.iter().copied());
     Bounds {
-        cap: 50_000,
-        top_n: 200,
-        tracked,
-        evictions: 0,
+        cap: tracked.len(),
+        top_n: n,
+        tracked: tracked.len(),
+        evictions: all.iter().filter(|g| g.evicted).count() as u64,
         unkeyed: 0,
         since_ms: Some(0),
-        horizon_ms: None,
-        totals: Traffic { rx_bytes: 1, tx_bytes: 1, rx_packets: 1, tx_packets: 1 },
-        evicted: Traffic::default(),
+        horizon_ms: all.iter().filter(|g| g.evicted).map(|g| g.last_seen_ms).max(),
+        totals: Traffic {
+            rx_bytes: held.rx_bytes + evicted.rx_bytes,
+            tx_bytes: held.tx_bytes + evicted.tx_bytes,
+            rx_packets: held.rx_packets + evicted.rx_packets,
+            tx_packets: held.tx_packets + evicted.tx_packets,
+        },
+        evicted,
     }
 }
 
@@ -138,7 +195,7 @@ fn endpoint_snapshot(g: &Gen) -> EndpointSnapshot {
         first_seen_ms: 0,
         last_seen_ms: g.last_seen_ms,
         ja3_label: None,
-        history_complete: true,
+        history_complete: g.history_complete,
         observed_name: None,
     }
 }
@@ -159,16 +216,16 @@ fn conversation_snapshot(g: &Gen) -> ConversationSnapshot {
         last_seen_ms: g.last_seen_ms,
         duration_ms: g.last_seen_ms,
         ja3_label: None,
-        history_complete: true,
+        history_complete: g.history_complete,
     }
 }
 
 /// The union of the four top-N lists, in id order, as one encoded event.
-fn event_for(rows: &[Gen], model: &Model, conversation: bool) -> Value {
+fn event_for(all: &[Gen], n: usize, model: &Model, conversation: bool) -> Value {
     let mut union: Vec<&Gen> = model.expected.iter().flatten().collect();
     union.sort_by_key(|g| g.id);
     union.dedup_by_key(|g| g.id);
-    let bounds = bounds(rows.len()).into();
+    let bounds = bounds(all, n).into();
     let event = if conversation {
         AgentEvent::ConversationRollup {
             conversations: union
@@ -195,12 +252,18 @@ fn keys(list: &[Gen]) -> Vec<&str> {
 
 fn generated_fixture() -> String {
     let mut out = String::new();
-    for (conversation, seed) in [(false, 0x9e37_79b9_7f4a_7c15u64), (true, 0xd1b5_4a32_d192_ed03u64)] {
+    // Chosen by scanning seeds until the N=3 lines tie at the cut in every
+    // ranking and on `lastSeenMs` for bytes, packets and rate, and the
+    // lastSeenMs and id tie-breaks change which rows are in the top 3. The
+    // test below asserts the ties; the break-it checks cover the rest, so a generator change cannot lose it silently.
+    let seed = 0xdaa6_6d2c_7ddf_743fu64;
+    for conversation in [false, true] {
         for (n, rows) in [(3usize, 40u64), (200, 600)] {
-            let generated = generate(rows, seed ^ n as u64, conversation);
-            let model = rank_all(&generated, n);
+            let all = generate(rows, if n == 3 { seed ^ 3 } else { seed ^ 200 }, conversation, n == 3);
+            let tracked: Vec<Gen> = all.iter().filter(|g| !g.evicted).cloned().collect();
+            let model = rank_all(&tracked, n);
             let line = json!({
-                "event": event_for(&generated, &model, conversation),
+                "event": event_for(&all, n, &model, conversation),
                 "topN": n,
                 "expected": {
                     "bytes": keys(&model.expected[0]),
@@ -216,22 +279,24 @@ fn generated_fixture() -> String {
     out
 }
 
-/// The browser's view: rank the rows on the wire, ties by array position.
-fn rank_from_wire(rows: &[Value], n: usize, key: impl Fn(&Value) -> String, value: impl Fn(&Value) -> f64) -> Vec<String> {
-    let mut indexed: Vec<(usize, &Value)> = rows.iter().enumerate().collect();
-    indexed.sort_by(|(ia, a), (ib, b)| {
+/// The browser's view: rank the rows on the wire by value, then
+/// `lastSeenMs`, then array position. Returns row indices, best first.
+fn rank_from_wire(rows: &[Value], value: impl Fn(&Value) -> f64) -> Vec<usize> {
+    let mut indexed: Vec<usize> = (0..rows.len()).collect();
+    indexed.sort_by(|&ia, &ib| {
+        let (a, b) = (&rows[ia], &rows[ib]);
         value(b)
             .total_cmp(&value(a))
             .then(b["lastSeenMs"].as_u64().cmp(&a["lastSeenMs"].as_u64()))
-            .then(ia.cmp(ib))
+            .then(ia.cmp(&ib))
     });
-    indexed.into_iter().take(n).map(|(_, row)| key(row)).collect()
+    indexed
 }
 
 #[test]
 fn rank_fixture_matches() {
     let generated = generated_fixture();
-    if std::env::var_os("UPDATE_ROLLUP_FIXTURE").is_some() {
+    if std::env::var("UPDATE_ROLLUP_FIXTURE").as_deref() == Ok("1") {
         std::fs::write(FIXTURE, &generated).unwrap();
     }
     let on_disk = std::fs::read_to_string(FIXTURE).expect("testdata/rollup-rank.jsonl is missing; run with UPDATE_ROLLUP_FIXTURE=1");
@@ -239,7 +304,10 @@ fn rank_fixture_matches() {
 
     let lines: Vec<Value> = on_disk.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
     assert_eq!(lines.len(), 4);
-    for line in &lines {
+    let mut failures: Vec<String> = Vec::new();
+    // Per event kind and ranking: some line ties on lastSeenMs at the cut.
+    let mut last_seen_ties: std::collections::HashSet<(bool, &str)> = std::collections::HashSet::new();
+    for (index, line) in lines.iter().enumerate() {
         let event = &line["event"];
         let conversation = event["type"] == "conversation_rollup";
         let rows = event[if conversation { "conversations" } else { "endpoints" }].as_array().unwrap();
@@ -252,36 +320,65 @@ fn rank_fixture_matches() {
             }
         };
         let num = |row: &Value, f: &str| row[f].as_u64().unwrap() as f64;
-        let ranked = [
-            ("bytes", rank_from_wire(rows, n, key, |r| num(r, "rxBytesTotal") + num(r, "txBytesTotal"))),
-            ("packets", rank_from_wire(rows, n, key, |r| num(r, "rxPacketsTotal") + num(r, "txPacketsTotal"))),
-            ("rate", rank_from_wire(rows, n, key, |r| r["rxSpeed"].as_f64().unwrap() + r["txSpeed"].as_f64().unwrap())),
-            ("recent", rank_from_wire(rows, n, key, |r| r["lastSeenMs"].as_u64().unwrap() as f64)),
+        type Rank<'a> = (&'static str, Box<dyn Fn(&Value) -> f64 + 'a>);
+        let rankings: [Rank; 4] = [
+            ("bytes", Box::new(|r| num(r, "rxBytesTotal") + num(r, "txBytesTotal"))),
+            ("packets", Box::new(|r| num(r, "rxPacketsTotal") + num(r, "txPacketsTotal"))),
+            ("rate", Box::new(|r| r["rxSpeed"].as_f64().unwrap() + r["txSpeed"].as_f64().unwrap())),
+            ("recent", Box::new(|r| num(r, "lastSeenMs"))),
         ];
-        for (name, got) in ranked {
-            let want: Vec<String> = line["expected"][name].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
-            assert_eq!(got, want, "{name} at N={n}");
+        assert!(rows.len() > n && rows.len() <= 4 * n, "line {index}: {} rows at N={n}", rows.len());
+        for (name, value) in &rankings {
+            let order = rank_from_wire(rows, value);
+            let got: Vec<String> = order.iter().take(n).map(|&i| key(&rows[i])).collect();
+            let want: Vec<String> = line["expected"][*name].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+            if got != want {
+                failures.push(format!("line {index} ({}, N={n}): {name} ranking differs from expected", event["type"]));
+            }
+            // The cut falls inside a tie, so the tie-break decides who is in.
+            let (last, next) = (&rows[order[n - 1]], &rows[order[n]]);
+            if value(last) != value(next) {
+                failures.push(format!("line {index} ({}, N={n}): {name} does not tie across the cut", event["type"]));
+            } else if last["lastSeenMs"] == next["lastSeenMs"] {
+                last_seen_ties.insert((conversation, name));
+            }
         }
-        // Ties were really exercised: some value is shared by many rows.
-        let distinct_bytes: std::collections::HashSet<u64> = rows
-            .iter()
-            .map(|r| r["rxBytesTotal"].as_u64().unwrap() + r["txBytesTotal"].as_u64().unwrap())
-            .collect();
-        assert!(distinct_bytes.len() <= 7 && rows.len() > distinct_bytes.len(), "fixture must be tie-heavy");
     }
+    for conversation in [false, true] {
+        for name in ["bytes", "packets", "rate"] {
+            if !last_seen_ties.contains(&(conversation, name)) {
+                failures.push(format!("no line ties {name} on lastSeenMs too (conversation={conversation})"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+    // Rows that are not history-complete are present, with evictions to match.
+    let incomplete = lines.iter().filter(|l| {
+        let e = &l["event"];
+        e[if e["type"] == "conversation_rollup" { "conversations" } else { "endpoints" }]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["historyComplete"] == false)
+    });
+    assert_eq!(incomplete.count(), 4, "every line carries a historyComplete:false row");
+    assert!(lines.iter().all(|l| l["event"]["bounds"]["evictions"].as_u64().unwrap() > 0));
 }
 
-/// One MiB-scale bound check. The longest rollup line the agent can write:
-/// N=1,000 so up to 4,000 rows, IPv6 addresses (the longest textual form is
-/// the 45-byte IPv4-mapped one), 253-byte observed names, a 64-byte JA3
-/// label (the label table is empty today, so this is a stand-in), u64-max
-/// counters and 24-byte f64 speeds. Process names stay short: they are not
-/// bounded by this work.
+/// Size of a very large rollup line: N=1,000 so 4,000 rows, IPv6 addresses
+/// (45 bytes at most, the IPv4-mapped form), 253-byte observed names, a
+/// 64-byte JA3 label (the label table is empty today, so this is a
+/// stand-in), u64-max counters and f64::MAX speeds. The process name is 9
+/// backslashes, which JSON escapes to 18 bytes. The 9-byte length comes from
+/// `lsof`'s default COMMAND truncation (our parser takes that field as is),
+/// not from any limit in this code, so a different lister could send more.
 #[test]
 fn worst_case_line_length() {
     const LIMIT: usize = 4 * 1024 * 1024;
     const MAPPED_V6: &str = "ffff:ffff:ffff:ffff:ffff:ffff:255.255.255.255";
     let label: &'static str = Box::leak("L".repeat(64).into_boxed_str());
+    const PROCESS: &str = "\\\\\\\\\\\\\\\\\\";
     let name = "a".repeat(253);
     let rows = 4_000u64;
     let bounds = Bounds {
@@ -313,7 +410,7 @@ fn worst_case_line_length() {
                     history_complete: false,
                     observed_name: Some(name.clone()),
                 },
-                "unknown".to_string(),
+                PROCESS.to_string(),
                 u32::MAX,
             )
         })
@@ -337,7 +434,7 @@ fn worst_case_line_length() {
                     ja3_label: Some(label),
                     history_complete: false,
                 },
-                "unknown".to_string(),
+                PROCESS.to_string(),
                 u32::MAX,
             )
         })
