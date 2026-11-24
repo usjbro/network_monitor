@@ -252,10 +252,8 @@ fn keys(list: &[Gen]) -> Vec<&str> {
 
 fn generated_fixture() -> String {
     let mut out = String::new();
-    // Chosen by scanning seeds until the N=3 lines tie at the cut in every
-    // ranking and on `lastSeenMs` for bytes, packets and rate, and the
-    // lastSeenMs and id tie-breaks change which rows are in the top 3. The
-    // test below asserts the ties; the break-it checks cover the rest, so a generator change cannot lose it silently.
+    // The test below asserts the ties; the seed was chosen so the tie-breaks
+    // matter.
     let seed = 0xdaa6_6d2c_7ddf_743fu64;
     for conversation in [false, true] {
         for (n, rows) in [(3usize, 40u64), (200, 600)] {

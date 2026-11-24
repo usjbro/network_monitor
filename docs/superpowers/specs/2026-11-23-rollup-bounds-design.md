@@ -2,7 +2,7 @@
 
 **Issue:** KAN-131 (legacy JAM-162) — "Bound per-capture endpoint and conversation rollup growth"
 **Epic:** KAN-18 (Analysis surfaces, legacy JAM-127)
-**Status:** DRAFT, in review (PR #348). James approved all five recommendations in "Decisions" in chat on 2026-11-23. Nothing here is implemented. The implementation plan and code each need their own gate.
+**Status:** Spec merged (PR #348). James approved all five recommendations in "Decisions" in chat on 2026-11-23. Implemented on branch `KAN-131-rollup-bounds` (PR not yet merged); the code is not on `main`.
 
 ## Problem
 
@@ -135,7 +135,7 @@ A `RollupTable<K>` (new `capture-agent/src/rollup.rs`) replaces both maps, with 
 
 Startup-only. Unset or blank means the default; zero, non-numeric or out-of-range fails startup with the variable's name, as `MAX_FLOWS` does. `MAX_FLOWS` has no upper limit today; these do, because tick work is linear in the cap and runs under the flow-table lock.
 
-Why these: a home LAN (hundreds of keys) and a busy office (thousands) never evict. At 50,000 both tables full cost about 21 MiB and a 1.5 ms tick scan under the lock. *(Both figures are superseded by Measurements: see "Measured implementation, 2026-11-23" for the memory and the failed lock-hold table, and "Re-measured after the selector change, 2026-11-24" for the lock-hold table of the current selector.)* The "Tick" column excludes building rows, and today's "Lock held" column includes it, so the two are not directly comparable: at 100,000 the scan alone is 7.5 ms against 6.4 ms for today's whole snapshot, so a bound that high does not shorten the lock and is an operator's choice. Row building adds work for at most 4N rows per table; it is not measured here, and the plan must measure the whole lock hold before the defaults ship. The 500,000 ceiling is a scan of about 51 ms per tick and 200 MiB; it is allowed for a datacenter link, and documented as such.
+Why these: a home LAN (hundreds of keys) and a busy office (thousands) never evict. At 50,000 both tables full cost about 21 MiB and a 1.5 ms tick scan under the lock. *(Both figures are superseded by Measurements: see "Measured implementation, 2026-11-23" for the memory and the failed lock-hold table, and "Re-measured after the selector change, 2026-11-24" for the lock-hold table of the current selector.)* The "Tick" column excludes building rows, and today's "Lock held" column includes it, so the two are not directly comparable: at 100,000 the scan alone is 7.5 ms against 6.4 ms for today's whole snapshot, so a bound that high does not shorten the lock and is an operator's choice. Row building adds work for at most 4N rows per table; it is not measured at this point in the text (it is measured later: see "Measured implementation, 2026-11-23" and "Re-measured after the selector change, 2026-11-24"). The 500,000 ceiling is a scan of about 51 ms per tick and 200 MiB; it is allowed for a datacenter link, and documented as such.
 
 ### D3. Ranking: one top-N per key, no control message
 
@@ -256,4 +256,4 @@ After the review of PR #348, James also approved (in chat, 2026-11-23) the new e
 
 ## Not verified
 
-Linux, live traffic, resident memory, browser render time, and tick cost with real process attribution. `historyComplete` and the flow-id scheme were reasoned from the code, not prototyped. Row building under the new lock hold is not measured. Benchmark numbers are from one machine, and the "today" column is a single run.
+Linux, live traffic, resident memory, browser render time, and tick cost with real process attribution. Memory after the selector change is also not re-measured. Update 2026-11-24: row building is measured (both tables, see the two measurement sections above), and the `historyComplete` and flow-id schemes are implemented and tested. Benchmark numbers are from one machine, and the "today" column is a single run.

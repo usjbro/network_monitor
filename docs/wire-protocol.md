@@ -363,7 +363,7 @@ Field notes:
 
 Counters are JSON numbers and saturate in the agent. Above 2^53 JavaScript loses precision, so the ranking guarantee and the balance hold only below that. The mapper accepts such values.
 
-**Reset.** An interface switch (`set_interface`) clears both tables and every `bounds` counter, `sinceMs` and `horizonMs` included. `protocol_hierarchy_update` and `service_time_update` are not cleared.
+**Reset.** An interface switch (`set_interface`) clears both tables and every `bounds` counter, `sinceMs` and `horizonMs` included. `protocol_hierarchy_update` and `service_time_update` are not cleared. One rollup pair built before a switch may arrive after `interface_changed`; the next tick replaces it.
 
 **Validation and version mismatch.** The mapper rejects an event whose `bounds` or rows are missing or malformed, including `tracked` above `cap` or more rows than `min(tracked, 4 x topN)`. `app/page.tsx` then clears that table and says its data could not be read, until the next valid event. These events replace `endpoint_update` and `conversation_update`, which the agent no longer sends; the names changed because a full list became a partial one. A page that receives the old events does not render them and says the running agent must be restarted. A tab opened before the upgrade ignores the new events (see `docs/troubleshooting.md`).
 

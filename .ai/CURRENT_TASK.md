@@ -1,3 +1,9 @@
+# KAN-131 Bounded rollups — implementation (2026-11-24)
+
+James approved code gate `kan-131__rollup-bounds` in chat ("approve all": all seven tasks, commit, push, PR; James merges). Worktree `.worktrees/rollup-bounds`, branch `KAN-131-rollup-bounds`. Seven tasks done and reviewed. P9 failed at `36949c3` (10.4 ms vs 5.7 ms at 50,000); James approved one faster attempt, which passed on AC at `25e936d` (1.1 vs 7.5 ms; the pre-registered scan shape gate also passed). Rollups are sent last in each tick, with James's approval, because above about 1,000 live flows the 1,024-event queue dropped them. Security review: no findings. Independent whole-branch review: docs and comment fixes only. Follow-ups filed: KAN-313 (process-name cap), KAN-314 (event queue and stale rows). PR not yet open. Remaining: PR review and merge by James.
+
+---
+
 # KAN-131 Bounded rollups — implementation plan (2026-11-23)
 
 James approved gate `kan-131__rollup-bounds-plan` in chat (plan only), then the plan, P1–P9, its Task 3 re-measurement, and commit, push and PR, also in chat. Execution when the code gate is approved: subagent-driven. Spec merged as `7fe5f29` (PR #348). Worktree `.worktrees/rollup-bounds-plan`, branch `KAN-131-rollup-bounds-plan`. Plan `docs/superpowers/plans/2026-11-23-rollup-bounds.md`, seven tasks, one PR for the code. No code. Next: independent review and merge; the code needs its own gate.

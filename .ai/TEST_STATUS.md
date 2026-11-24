@@ -1,3 +1,11 @@
+# KAN-131 bounded rollups — verification at 22fb958 (2026-11-24)
+
+- Rust: 994 passed, 19 ignored, both ignored replays run, clippy `-D warnings` clean. Web: 1,728 tests, tsc, lint pass. Docs sync passes. Playwright 7/7.
+- P9 lock-hold gate: failed at `36949c3` (10.4 ms vs 5.7 ms at 50,000); passed at `25e936d` (1.1 vs 7.5 ms), plus the pre-registered scan shape gate.
+- Not run on 22fb958: fuzz, audits, `live_loopback`, the mTLS script, a production build. One earlier `control_auth` flake, not reproduced.
+
+---
+
 # KAN-110 Task 3c-2 — Codex continuation verification (2026-11-20)
 
 - Final local change: bounded replay-test line reader and shared PCAP writer.

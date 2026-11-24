@@ -1,3 +1,13 @@
+# KAN-131 implementation (2026-11-24)
+
+- Branch `KAN-131-rollup-bounds` in `.worktrees/rollup-bounds`; PR not yet open; James merges. Seven tasks done, reviewed, security review clean; final review fixes were docs and comments only.
+- Not verified: Linux, live-load memory, slow client, production-build timing, unreadable/unkeyed notices and live evictions in a browser.
+- An earlier `control_auth` test flake was seen once and not reproduced (likely KAN-186's race, unconfirmed).
+- Follow-ups: KAN-313 (process-name cap), KAN-314 (event queue and stale rows).
+
+
+---
+
 # KAN-131 plan (2026-11-23)
 
 - Spec re-check found the benchmark's "Tick" figures do not cover the merged D3 (recent came from the recency list, rate was an integer sum). Plan Task 3 re-measures and stops if it fails its limit (P9).

@@ -441,9 +441,10 @@ pub enum AgentEvent {
     ProtocolHierarchyUpdate {
         hierarchy: Box<ProtocolNodeJson>,
     },
-    /// Per-remote-host traffic rollups (JAM-14) — cumulative since capture
-    /// start, surviving flow eviction; see `flow::EndpointSnapshot`. KAN-131:
-    /// a bounded subset of the table plus its `bounds`.
+    /// Per-remote-host traffic rollups (JAM-14) — cumulative since the entry was
+    /// inserted or the last reset, surviving flow eviction; see
+    /// `flow::EndpointSnapshot`. KAN-131: a bounded subset of the table plus
+    /// its `bounds`.
     EndpointRollup {
         endpoints: Vec<EndpointJson>,
         bounds: BoundsJson,

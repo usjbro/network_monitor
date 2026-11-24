@@ -311,7 +311,8 @@ pub struct EndpointSnapshot {
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
     pub ja3_label: Option<&'static str>,
-    /// False once any host has been evicted before this one was first seen.
+    /// False once an eviction happened before this entry was inserted; the
+    /// insertion's own eviction does not count.
     pub history_complete: bool,
     /// JAM-21: the name an answered DNS response gave this address, when one
     /// is still live. Not a reverse lookup.
@@ -337,7 +338,8 @@ pub struct ConversationSnapshot {
     pub last_seen_ms: u64,
     pub duration_ms: u64,
     pub ja3_label: Option<&'static str>,
-    /// False once any pair has been evicted before this one was first seen.
+    /// False once an eviction happened before this entry was inserted; the
+    /// insertion's own eviction does not count.
     pub history_complete: bool,
 }
 
