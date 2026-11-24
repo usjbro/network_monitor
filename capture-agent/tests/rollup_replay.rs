@@ -3,24 +3,14 @@
 //! the code under test.
 #[path = "fixtures/agent_auth.rs"]
 mod agent_auth;
+#[path = "fixtures/replay_agent.rs"]
+mod replay_agent;
+use replay_agent::{classic_pcap, run_until_replayed, write_temp, Agent, AGENT_LOCK};
 use serde_json::{json, Value};
-use std::io::{BufRead, Read};
+use std::io::{BufRead, Error, ErrorKind, Read};
 use std::net::{TcpListener, TcpStream};
-use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-
-/// The tests share 127.0.0.1:9990, so they run one at a time even without
-/// `--test-threads=1`.
-static REPLAY_AGENT_LOCK: Mutex<()> = Mutex::new(());
-
-struct Agent(Child);
-impl Drop for Agent {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 const LOCAL: [u8; 4] = [192, 0, 2, 1];
 // Neither address order nor text order matches arrival order.
@@ -54,29 +44,20 @@ type Remote = [u8; 4];
 
 /// A classic pcap of (time in ms, remote, outbound, payload bytes) UDP packets.
 fn pcap(packets: impl Iterator<Item = (u32, Remote, bool, usize)>) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend(0xa1b2c3d4u32.to_le_bytes());
-    out.extend(2u16.to_le_bytes());
-    out.extend(4u16.to_le_bytes());
-    out.extend([0; 8]);
-    out.extend(65535u32.to_le_bytes());
-    out.extend(1u32.to_le_bytes()); // LINKTYPE_ETHERNET
-    for (ms, remote, outbound, payload) in packets {
-        let (src, dst, ports) = if outbound { (LOCAL, remote, (40000, 4000)) } else { (remote, LOCAL, (4000, 40000)) };
-        let mut frame = Vec::new();
-        etherparse::PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
-            .ipv4(src, dst, 64)
-            .udp(ports.0, ports.1)
-            .write(&mut frame, &vec![0u8; payload])
-            .unwrap();
-        assert_eq!(frame.len() as u64, HEADERS + payload as u64);
-        out.extend((100 + ms / 1000).to_le_bytes());
-        out.extend((ms % 1000 * 1000).to_le_bytes());
-        out.extend((frame.len() as u32).to_le_bytes());
-        out.extend((frame.len() as u32).to_le_bytes());
-        out.extend(frame);
-    }
-    out
+    let frames: Vec<_> = packets
+        .map(|(ms, remote, outbound, payload)| {
+            let (src, dst, ports) = if outbound { (LOCAL, remote, (40000, 4000)) } else { (remote, LOCAL, (4000, 40000)) };
+            let mut frame = Vec::new();
+            etherparse::PacketBuilder::ethernet2([0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11])
+                .ipv4(src, dst, 64)
+                .udp(ports.0, ports.1)
+                .write(&mut frame, &vec![0u8; payload])
+                .unwrap();
+            assert_eq!(frame.len() as u64, HEADERS + payload as u64);
+            (100_000_000 + u64::from(ms) * 1000, frame)
+        })
+        .collect();
+    classic_pcap(&frames)
 }
 
 /// `limits`: MAX_ENDPOINTS, MAX_CONVERSATIONS, ROLLUP_TOP_N.
@@ -101,9 +82,89 @@ fn agent(token: &std::path::Path, replay: &std::path::Path, limits: [&str; 3]) -
         .env("REPLAY_LOCAL_ADDRS", "192.0.2.1")
         .env("MAX_ENDPOINTS", limits[0])
         .env("MAX_CONVERSATIONS", limits[1])
-        .env("ROLLUP_TOP_N", limits[2])
-        .stdout(Stdio::null());
+        .env("ROLLUP_TOP_N", limits[2]);
     command
+}
+
+/// Far above any line these replays produce (N is 1, and payloads are small).
+const MAX_AGENT_LINE_BYTES: usize = 64 * 1024;
+
+/// Completes `line` and parses it. The limit is on the whole line however many
+/// reads it takes: after a read timeout, call again with the same `line`.
+/// Bytes, not a `String`, so a timeout inside a character loses nothing.
+fn read_agent_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<Value> {
+    let room = (MAX_AGENT_LINE_BYTES + 1).saturating_sub(line.len());
+    reader.take(room as u64).read_until(b'\n', line)?;
+    if line.len() > MAX_AGENT_LINE_BYTES || !line.ends_with(b"\n") {
+        return Err(Error::new(ErrorKind::InvalidData, "oversized or incomplete agent line"));
+    }
+    let value = serde_json::from_slice(line).map_err(|_| Error::new(ErrorKind::InvalidData, "invalid agent JSON"))?;
+    line.clear();
+    Ok(value)
+}
+
+/// Yields each chunk, then times out once, like a socket with a read timeout.
+struct Stuttering(std::collections::VecDeque<Vec<u8>>, bool, usize);
+impl Read for Stuttering {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if std::mem::take(&mut self.1) {
+            return Err(ErrorKind::WouldBlock.into());
+        }
+        let Some(chunk) = self.0.front_mut() else { return Ok(0) };
+        let n = chunk.len().min(out.len());
+        out[..n].copy_from_slice(&chunk[..n]);
+        chunk.drain(..n);
+        self.2 += n;
+        if chunk.is_empty() {
+            self.0.pop_front();
+            self.1 = true;
+        }
+        Ok(n)
+    }
+}
+
+fn stuttering(chunks: &[&[u8]]) -> std::io::BufReader<Stuttering> {
+    std::io::BufReader::with_capacity(1, Stuttering(chunks.iter().map(|c| c.to_vec()).collect(), false, 0))
+}
+
+#[test]
+fn agent_line_reader_enforces_the_limit_before_parsing() {
+    let mut oversized = std::io::Cursor::new(vec![b' '; MAX_AGENT_LINE_BYTES * 2]);
+    assert!(read_agent_line(&mut oversized, &mut Vec::new()).is_err());
+    assert_eq!(oversized.position(), (MAX_AGENT_LINE_BYTES + 1) as u64);
+
+    // Valid JSON, one byte over.
+    let mut over = vec![b' '; MAX_AGENT_LINE_BYTES + 1];
+    over[0] = b'0';
+    over[MAX_AGENT_LINE_BYTES] = b'\n';
+    assert!(read_agent_line(&mut &over[..], &mut Vec::new()).is_err());
+    // Exactly the limit.
+    over.remove(1);
+    assert_eq!(read_agent_line(&mut &over[..], &mut Vec::new()).unwrap(), 0);
+
+    for bad in [&b"0"[..], b"", b"{nope}\n"] {
+        assert_eq!(read_agent_line(&mut &bad[..], &mut Vec::new()).unwrap_err().kind(), ErrorKind::InvalidData);
+    }
+}
+
+#[test]
+fn agent_line_reader_keeps_a_partial_line_across_a_timeout() {
+    // The first split is inside a two-byte character.
+    let mut reader = stuttering(&[b"{\"a\":\"\xc3", b"\xa9\"}", b"\n1\n"]);
+    let mut line = Vec::new();
+    for _ in 0..2 {
+        assert_eq!(read_agent_line(&mut reader, &mut line).unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+    assert_eq!(read_agent_line(&mut reader, &mut line).unwrap(), json!({"a": "\u{e9}"}));
+    assert_eq!(read_agent_line(&mut reader, &mut line).unwrap(), 1);
+
+    // The limit is on the accumulated line, not on each read.
+    let half = vec![b' '; MAX_AGENT_LINE_BYTES / 2 + 1];
+    let mut reader = stuttering(&[&half, &half, &half]);
+    let mut line = Vec::new();
+    assert_eq!(read_agent_line(&mut reader, &mut line).unwrap_err().kind(), ErrorKind::WouldBlock);
+    assert_eq!(read_agent_line(&mut reader, &mut line).unwrap_err().kind(), ErrorKind::InvalidData);
+    assert_eq!(reader.get_ref().2, MAX_AGENT_LINE_BYTES + 1);
 }
 
 /// What a client saw up to the third event of each kind whose totals hold all
@@ -123,24 +184,17 @@ struct Seen {
 
 fn watch(auth: &agent_auth::AuthFixture, packets: u64) -> Seen {
     let deadline = Instant::now() + Duration::from_secs(15);
-    let stream = loop {
-        match TcpStream::connect("127.0.0.1:9990") {
-            Ok(stream) => break stream,
-            Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => panic!("agent did not listen: {error}"),
-        }
-    };
+    // The agent listens before it publishes its token.
+    agent_auth::read_token(&auth.token_path());
+    let stream = TcpStream::connect("127.0.0.1:9990").expect("agent listening");
     let mut reader = auth.authenticate(stream);
     reader.get_mut().set_read_timeout(Some(Duration::from_millis(100))).unwrap();
     let mut seen = Seen::default();
     let mut recent = std::collections::VecDeque::from([String::new(), String::new(), String::new()]);
-    let mut line = String::new();
+    let mut line = Vec::new();
     while Instant::now() < deadline && (seen.endpoints_complete < 3 || seen.conversations_complete < 3) {
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {
-                let event: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
-                line.clear();
+        match read_agent_line(&mut reader, &mut line) {
+            Ok(event) => {
                 let kind = event["type"].as_str().unwrap_or_default().to_string();
                 recent.pop_front();
                 recent.push_back(kind.clone());
@@ -165,7 +219,7 @@ fn watch(auth: &agent_auth::AuthFixture, packets: u64) -> Seen {
                 }
             }
             // A partial line stays in `line` and is completed by the next read.
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
             Err(error) => panic!("wire read failed: {error}"),
         }
     }
@@ -196,15 +250,14 @@ fn minus(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 #[test]
 #[ignore = "requires exclusive 127.0.0.1:9990; run with --ignored --test-threads=1"]
 fn rollup_replay_through_the_real_binary() {
-    let _serial = REPLAY_AGENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serial = AGENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // Refuse to connect to an operator's agent if the port is occupied.
     drop(TcpListener::bind("127.0.0.1:9990").expect("exclusive test port required"));
     let auth = agent_auth::AuthFixture::new();
-    let path = auth.token_path().with_extension("pcap");
     let packets = PACKETS.iter().enumerate().map(|(i, &(remote, outbound, payload))| (i as u32 * 10, remote, outbound, payload));
-    std::fs::write(&path, pcap(packets)).unwrap();
+    let file = write_temp("kan131", "rollup", &pcap(packets));
 
-    let running = Agent(agent(&auth.token_path(), &path, ["2", "3", "1"]).stderr(Stdio::null()).spawn().unwrap());
+    let running = run_until_replayed(&mut agent(&auth.token_path(), &file.0, ["2", "3", "1"]), Duration::from_secs(15));
     let Seen { endpoint, conversation, legacy, .. } = watch(&auth, PACKETS.len() as u64);
     drop(running);
     assert_eq!(legacy, Vec::<String>::new());
@@ -272,7 +325,8 @@ fn rollup_replay_through_the_real_binary() {
 
     // Out of range: startup fails and the error names the variable.
     let mut refused = Agent(
-        agent(&auth.token_path().with_extension("refused"), &path, ["2", "3", "1001"])
+        agent(&auth.token_path().with_extension("refused"), &file.0, ["2", "3", "1001"])
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
@@ -304,14 +358,13 @@ fn rollup_replay_through_the_real_binary() {
 #[ignore = "requires exclusive 127.0.0.1:9990; run with --ignored --test-threads=1"]
 fn rollups_survive_a_tick_larger_than_the_client_queue() {
     const FLOWS: u32 = 4_000;
-    let _serial = REPLAY_AGENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _serial = AGENT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     drop(TcpListener::bind("127.0.0.1:9990").expect("exclusive test port required"));
     let auth = agent_auth::AuthFixture::new();
-    let path = auth.token_path().with_extension("pcap");
     let packets = (0..FLOWS).map(|i| (i / 10, [198, 18, (i >> 8) as u8, i as u8], true, 20));
-    std::fs::write(&path, pcap(packets)).unwrap();
+    let file = write_temp("kan131", "rollup", &pcap(packets));
 
-    let running = Agent(agent(&auth.token_path(), &path, ["5000", "5000", "1"]).stderr(Stdio::null()).spawn().unwrap());
+    let running = run_until_replayed(&mut agent(&auth.token_path(), &file.0, ["5000", "5000", "1"]), Duration::from_secs(15));
     let seen = watch(&auth, u64::from(FLOWS));
     drop(running);
     assert_eq!(seen.flows_observed, u64::from(FLOWS));
