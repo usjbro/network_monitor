@@ -264,13 +264,15 @@ Field notes:
 - An app-protocol child (`HTTP`, `DNS`, `HTTPS/TLS`, or a well-known-port guess) only nests under `TCP`/`UDP` — `ICMP`/`Other` have no app-layer concept in this model, so their path stops at the transport label.
 - `Unknown` under a transport node is real, unidentified traffic — deliberately visible rather than rounded away, per the task's "identify unknown traffic honestly" requirement. Its size is a useful signal for prioritizing future dissector work (epic JAM-128/GitHub #58).
 
-### `endpoint_update` / `conversation_update`
+### `endpoint_rollup` / `conversation_rollup`
 
-Sent once per tick (~1 second), immediately after that tick's `protocol_hierarchy_update`. Per-remote-host (`endpoint_update`) and per-(local,remote)-pair (`conversation_update`) traffic rollups (JAM-14/GitHub #81): "Conversations and Endpoints — per-pair and per-host byte, packet and duration totals." Same permanence contract as `protocol_hierarchy_update` — cumulative since capture start, never derived from currently-live flows, so a host's total survives every one of its flows closing or being evicted (see `flow::RollupState`'s doc comment in `capture-agent/src/flow.rs`). Each event is a full replacement list, not incremental — the agent's own rollups only ever grow, so a client just replaces its whole table on every event rather than diffing.
+Sent once per tick (~1 second), immediately after that tick's `protocol_hierarchy_update`: `endpoint_rollup`, then `service_time_update`, then `conversation_rollup`. Per-remote-host and per-(local,remote)-pair traffic rollups (JAM-14/GitHub #81), bounded since KAN-131. Each event is a full replacement of the rows the client holds, not a delta, but the rows are **a partial list**: the agent tracks a bounded number of keys and sends only those in its top N. `bounds` says exactly what is left out.
+
+The agent keeps the totals itself rather than deriving them from currently-live flows, so a tracked host's total survives its flows closing or being evicted. It does not survive the host's own eviction from the rollup table (`evictions` below) or an interface switch (see "Reset").
 
 ```json
 {
-  "type": "endpoint_update",
+  "type": "endpoint_rollup",
   "endpoints": [
     {
       "host": "93.184.216.34",
@@ -286,15 +288,23 @@ Sent once per tick (~1 second), immediately after that tick's `protocol_hierarch
       "processName": "Safari",
       "pid": 1234,
       "ja3Label": "matches Chrome 12x",
-      "observedName": "example.com"
+      "observedName": "example.com",
+      "historyComplete": true
     }
-  ]
+  ],
+  "bounds": {
+    "cap": 50000, "topN": 200,
+    "tracked": 50000, "evictions": 812, "unkeyed": 0,
+    "sinceMs": 1200, "horizonMs": 41200,
+    "totals":  { "rxBytes": 90000000, "txBytes": 40000000, "rxPackets": 120000, "txPackets": 80000 },
+    "evicted": { "rxBytes": 61000, "txBytes": 22000, "rxPackets": 900, "txPackets": 810 }
+  }
 }
 ```
 
 ```json
 {
-  "type": "conversation_update",
+  "type": "conversation_rollup",
   "conversations": [
     {
       "localAddr": "192.168.1.10",
@@ -311,27 +321,55 @@ Sent once per tick (~1 second), immediately after that tick's `protocol_hierarch
       "durationMs": 60000,
       "processName": "Safari",
       "pid": 1234,
-      "ja3Label": "matches Chrome 12x"
+      "ja3Label": "matches Chrome 12x",
+      "historyComplete": false
     }
-  ]
+  ],
+  "bounds": {
+    "cap": 50000, "topN": 200,
+    "tracked": 50000, "evictions": 40, "unkeyed": 0,
+    "sinceMs": 1200, "horizonMs": 38000,
+    "totals":  { "rxBytes": 90000000, "txBytes": 40000000, "rxPackets": 120000, "txPackets": 80000 },
+    "evicted": { "rxBytes": 61000, "txBytes": 22000, "rxPackets": 900, "txPackets": 810 }
+  }
 }
 ```
 
-Both are flat arrays under their own key (`mapEndpointUpdateEvent`/`mapConversationUpdateEvent` in `lib/agent-mapping.ts` own the unwrap, same convention as `mapInterfaceListEvent`'s `interfaces` key) — not nested under a singular envelope key the way `protocol_hierarchy_update`'s `hierarchy` is.
+Both are flat arrays under their own key (`mapEndpointRollupEvent`/`mapConversationRollupEvent` in `lib/agent-mapping.ts` own the unwrap, same convention as `mapInterfaceListEvent`'s `interfaces` key) — not nested under a singular envelope key the way `protocol_hierarchy_update`'s `hierarchy` is.
 
 Field notes:
-- `host` (endpoint) is always the flow's *remote* address — the local side is "this machine" and isn't itself an interesting dimension to break `endpoint_update` down by. `localAddr`/`remoteAddr` (conversation) keep both: two local addresses talking to the same remote host are two separate conversations but one combined endpoint.
-- A host that opened many short-lived flows (e.g. a browser opening 50 connections to one CDN endpoint) always collapses to exactly one row — `flowCount` is the number of distinct flows that ever contributed, not a count of currently-live ones.
-- `rxSpeed`/`txSpeed` are this-tick-only rates (same tick-elapsed/drain contract as `connection_update`'s own `rxSpeed`/`txSpeed`) — every other numeric field is a running cumulative total.
-- `processName`/`pid` reflect whichever of this tick's currently-*live* flows contributing to that host/pair was most recently active (largest `last_seen_ms`) — a host with zero currently-live flows (every contributing flow evicted, only the cumulative rollup surviving) reports `"unknown"`/`0`, the same fallback `connection_update` uses for an unrecognized local port.
+- `host` (endpoint) is always the flow's *remote* address — the local side is "this machine" and isn't itself an interesting dimension to break `endpoint_rollup` down by. `localAddr`/`remoteAddr` (conversation) keep both: two local addresses talking to the same remote host are two separate conversations but one combined endpoint.
+- A host that opened many short-lived flows (e.g. a browser opening 50 connections to one CDN endpoint) always collapses to exactly one row — `flowCount` is the number of distinct flows seen since this row's entry was inserted, not a count of currently-live ones.
+- `rxSpeed`/`txSpeed` are this-tick-only rates (same tick-elapsed/drain contract as `connection_update`'s own `rxSpeed`/`txSpeed`) — every other traffic counter is a running total since the entry was inserted. If a key is evicted and returns within one tick, that tick's rate omits its earlier packets. The first rate after an interface switch is averaged over the whole tick that contains the switch.
+- `processName`/`pid` reflect whichever of this tick's currently-*live* flows contributing to that host/pair was most recently active (largest `last_seen_ms`) — a host with zero currently-live flows (every contributing flow gone, only the rollup surviving) reports `"unknown"`/`0`, the same fallback `connection_update` uses for an unrecognized local port.
 - `ja3Label` is the most recently observed non-empty label across every flow contributing to that host/pair — deliberately not "first ClientHello wins" the way a single connection's own `ja3Label` is, since a host with many short-lived TLS flows should show its current fingerprint. Omitted (not `null`) when no flow contributing to that host/pair has ever completed a TLS handshake.
 - `durationMs` (conversation only) is `lastSeenMs - firstSeenMs`.
 - `observedName` (endpoint only, JAM-21) is the name the local host asked for in an answered DNS response that listed this `host` among its A/AAAA records. Omitted (not `null`) when no live name is known. Rules: only a UDP/53 response matched to its query with rcode 0 teaches a name (unmatched, duplicate, error and DNS-over-TCP responses do not); the name is the *question* name, and an address counts only when an A/AAAA record's owner is the question or is reachable from it through the response's CNAMEs; only ASCII letters, digits, `-`, `_` and `.` up to 253 bytes are accepted, stored lowercase, and a name whose last label is all digits (`8.8.8.8`, `host.123`) is not learned, so an IP-shaped name never stands in for an address; one name per address, the most recent response winning; an entry lives `clamp(ttl, 1 h, 24 h)` on the agent's flow clock (replay time in replay mode) and is gone at exactly that time; the table holds `MAX_OBSERVED_DNS_NAMES` entries (see `docs/architecture.md`) and is cleared on an interface switch. It is passive and unauthenticated: the name is whatever the queried server said, and any process able to send a query, or any zone owner, can choose it (no on-path attacker is needed), so it is a separate field from `remoteHostname` (reverse DNS) and no new event carries it.
 - Reverse-DNS/ownership and geoIP enrichment are not part of this wire event at all — they're looked up client-side, opt-in, exactly as `connection_update`'s own `enrichment` already is, just triggered once per `host` row instead of once per flow. `observedName` is the one name the agent itself supplies here, and it is not a substitute for them.
 
+- `historyComplete` is `true` only if no eviction had been counted in that table when the entry was inserted. `false` means "may have earlier, evicted history": it is conservative, and does not say that this key was evicted.
+- A key that returns after eviction starts from zero, with `firstSeenMs` at its return. Nothing is restored or estimated, and a conversation's `durationMs` covers only the time since the return. A flow that outlived its host's eviction counts again, once, towards the new entry.
+
+**Which rows are sent.** The union of four top-N lists (bytes, packets, current rate, most recent), so between N and 4N rows, or every tracked key when fewer than N are tracked. The rank values are computed only from fields on the wire: `rxBytesTotal + txBytesTotal`, `rxPacketsTotal + txPacketsTotal`, `rxSpeed + txSpeed` and `lastSeenMs`. Ties go to the higher `lastSeenMs`, then to the older entry. Rows are sent oldest entry first, so a client's last tie-break is array position and it must preserve that order. For each ranking, descending, the first N rows a client computes are exactly the agent's top N *tracked* keys. Nothing is claimed about evicted keys. `lib/rollup-rank.ts` is the client side; `testdata/rollup-rank.jsonl` is the shared fixture.
+
+**`bounds`** belongs to its own event's table: the two tables have separate caps and evict independently. The row set and its `bounds` are from one instant.
+- `cap`, `topN` — the limits in force (`MAX_ENDPOINTS` or `MAX_CONVERSATIONS`, and `ROLLUP_TOP_N`; defaults 50,000, 50,000 and 200, accepted ranges 1 to 500,000, 1 to 500,000 and 1 to 1,000, startup-only).
+- `tracked` — keys held now. `tracked` minus the rows sent is exactly the number held but not sent.
+- `evictions` — eviction **events** since the last reset. It is not a number of distinct hosts: one key may be evicted more than once, so it is only an upper bound on them.
+- `unkeyed` — packets since the last reset whose address did not parse. They are in no row and not in `totals`.
+- `sinceMs` — time of the first packet recorded or counted as `unkeyed` since the agent started or last reset, in the same clock as `firstSeenMs`; `null` before any. The cumulative counters in `bounds` start there.
+- `horizonMs` — the latest `lastSeenMs` among evicted entries, `null` if none. With a forward-moving clock, every key active after it is still tracked. Eviction follows packet **arrival**, not timestamps, so in a replay whose timestamps go backward this does not hold.
+- `totals`, `evicted` — all traffic recorded since the last reset, and the part of it that belonged to evicted entries. `totals - evicted` equals the sum over the tracked keys, sent or not.
+
+Counters are JSON numbers and saturate in the agent. Above 2^53 JavaScript loses precision, so the ranking guarantee and the balance hold only below that. The mapper accepts such values.
+
+**Reset.** An interface switch (`set_interface`) clears both tables and every `bounds` counter, `sinceMs` and `horizonMs` included. `protocol_hierarchy_update` and `service_time_update` are not cleared.
+
+**Validation and version mismatch.** The mapper rejects an event whose `bounds` or rows are missing or malformed, including `tracked` above `cap` or more rows than `min(tracked, 4 x topN)`. `app/page.tsx` then clears that table and says its data could not be read, until the next valid event. These events replace `endpoint_update` and `conversation_update`, which the agent no longer sends; the names changed because a full list became a partial one. A page that receives the old events does not render them and says the running agent must be restarted. A tab opened before the upgrade ignores the new events (see `docs/troubleshooting.md`).
+
 ### `service_time_update`
 
-Sent once per tick (~1 second), right after `endpoint_update`. Service response time per protocol (JAM-15), from `transaction::ServiceTimeStats`. Always one entry per protocol (`DNS`, then `HTTP`), so a client can show "0 answered" rather than guess why one is missing.
+Sent once per tick (~1 second), right after `endpoint_rollup`. Service response time per protocol (JAM-15), from `transaction::ServiceTimeStats`. Always one entry per protocol (`DNS`, then `HTTP`), so a client can show "0 answered" rather than guess why one is missing.
 
 ```json
 {
@@ -388,7 +426,7 @@ Field notes:
   Capture truncation and decode failure are separate decisions. The existing capture-length check runs before classification and still reports when captured length is less than original length. A cut non-IP frame remains excluded from `unparseableFrames` if the available framing/known headers decode successfully; a cut Ethernet, VLAN, or ARP header, or an 802.3 payload shorter than its declared length, still increments the counter and emits a malformed-frame finding. An authenticated replay regression covers cut LLDP framing with the truncation warning preserved and no added parse-failure count.
 - `totalConnectionsObserved` — the "N" half of an honest "showing N of M" horizon (JAM-6/GitHub #73): a cumulative count of every distinct flow this session's `FlowTable` has ever observed. A repeat packet on an already-tracked flow never inflates this, so it climbs only as genuinely new connections appear.
 - `capacityEvictions`/`idleEvictions` — two independent reasons a flow can leave the table. `capacityEvictions` counts flows dropped because the table exceeded its capacity ceiling (`MAX_FLOWS`) — a nonzero, growing value here means this session is losing still-active flows under memory pressure, a materially different health signal from ordinary churn. `idleEvictions` counts flows evicted for going idle past their status-appropriate threshold — normal connection turnover, not a capacity concern.
-- `observedNameEvictions` — cumulative count of observed DNS names (the `observedName` source on `endpoint_update`) dropped because the name table reached `MAX_OBSERVED_DNS_NAMES`, soonest-to-expire first. Names that simply expired are not counted. A nonzero, growing value means `observedName` may be absent for hosts whose DNS answer was seen earlier. The mapper treats it as optional (unlike its sibling counters): an agent that predates it omits the field, and the mapper then leaves it `undefined` rather than 0. The Connections view shows nothing for either `undefined` or 0 (it only displays a positive count).
+- `observedNameEvictions` — cumulative count of observed DNS names (the `observedName` source on `endpoint_rollup`) dropped because the name table reached `MAX_OBSERVED_DNS_NAMES`, soonest-to-expire first. Names that simply expired are not counted. A nonzero, growing value means `observedName` may be absent for hosts whose DNS answer was seen earlier. The mapper treats it as optional (unlike its sibling counters): an agent that predates it omits the field, and the mapper then leaves it `undefined` rather than 0. The Connections view shows nothing for either `undefined` or 0 (it only displays a positive count).
 - `tcpSampleRings`, `tcpSampleRingBytes`, `tcpSampleRingsRecycled` (KAN-129) — the cost of the per-flow TCP sample rings behind `tcp_samples`. `tcpSampleRings` is the number of rings held now (at most 128); `tcpSampleRingBytes` is their **reserved capacity**, not their fill (each ring reserves its full 4 096 × 32-byte sample buffer and both directions' 256-entry RTT tables from the start, 137 384 bytes in the current build, so at most about 17.6 MB); `tcpSampleRingsRecycled` is a cumulative count of rings taken from the least recently active flow because all 128 were in use. The first two rise and fall with the flows that own rings and are cleared by a `set_interface` switch; only `tcpSampleRingsRecycled` is a counter. The mapper treats all three as optional and leaves them `undefined` (unknown, not 0) for an older agent.
 - The other nine counters are monotonically non-decreasing for the life of the agent process (never reset mid-run, even across a `pause`/`resume`).
 

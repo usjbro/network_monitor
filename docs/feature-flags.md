@@ -12,7 +12,9 @@ Standing Rule 6 (`CLAUDE.md` / `AGENTS.md`): new features start behind a flag th
 | Capture replay | `REPLAY_FILE=<path>` (with `REPLAY_SPEED`, `REPLAY_LOCAL_ADDRS`, `REPLAY_WAIT_FOR_IO_SERIES`) | off (live capture) | `capture-agent/src/main.rs` | shipped (a mode, not a feature flag) |
 | Dev HMR disable | `DISABLE_HMR=true` | HMR on | `next.config.ts` | dev-only, from AI Studio scaffold |
 
-Configuration values that aren't features (`CAPTURE_INTERFACE`, `RELAY_PORT`, `FRONT_DOOR_PORT`, `MAX_FLOWS`, `MAX_OBSERVED_DNS_NAMES`, `AGENT_TOKEN_FILE`, `ALLOWED_HOSTS`, `OSI_INSPECT_RELAY_URL`) are listed by name in `.env.example`.
+Configuration values that aren't features (`CAPTURE_INTERFACE`, `RELAY_PORT`, `FRONT_DOOR_PORT`, `MAX_FLOWS`, `MAX_OBSERVED_DNS_NAMES`, `MAX_ENDPOINTS`, `MAX_CONVERSATIONS`, `ROLLUP_TOP_N`, `AGENT_TOKEN_FILE`, `ALLOWED_HOSTS`, `OSI_INSPECT_RELAY_URL`) are listed by name in `.env.example`.
+
+The bounded Hosts rollups (KAN-131) have no flag: James exempted them from Standing Rule 6 on 2026-11-23, because they bound an existing feature and off-by-default would leave it unbounded. `endpoint_rollup` and `conversation_rollup` replace the older events outright; `MAX_ENDPOINTS`, `MAX_CONVERSATIONS` and `ROLLUP_TOP_N` are startup limits.
 
 ## Planned (not built)
 

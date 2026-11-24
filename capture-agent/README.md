@@ -64,6 +64,30 @@ surfaces the agent's capacity-eviction count separately from ordinary idle
 turnover, since the former means the flow table may be missing recent
 activity.
 
+## Rollup limits (`MAX_ENDPOINTS`, `MAX_CONVERSATIONS`, `ROLLUP_TOP_N`)
+
+The Hosts view's totals come from two tables, 50,000 remote hosts and 50,000
+local/remote pairs by default. At its cap a table evicts the key whose last
+packet arrived longest ago. Each second the agent sends the union of the top
+200 keys by bytes, packets, rate and most recent activity, plus counts of
+what that leaves out. The caps accept 1 to 500,000 and `ROLLUP_TOP_N` 1 to
+1,000; blank is the default, and anything else fails startup naming the
+variable. A cap reserves no memory up front. An interface switch clears both
+tables. The counts' meaning is in
+[../docs/wire-protocol.md](../docs/wire-protocol.md).
+
+Measured on one Apple M3 laptop, with both tables full at 50,000, N=200 and
+IPv6 remotes: the two snapshot calls took 1.1 ms (median) under the flow-table
+lock on mixed traffic and 2.6 to 2.7 ms on scan traffic, against 7.5 ms and
+4.7 to 7.2 ms for the unbounded code in the same runs. Both tables held about
+25 MiB of live requested bytes after churn, measured before the final
+selection change and excluding the snapshot's temporary buffers. Linux, live
+traffic, resident memory and the rest of the per-tick work are not measured,
+and no traffic shape is proved to be the worst. Higher caps cost more: at
+500,000 the same calls took 4.2 ms on mixed traffic and the tables about
+268 MiB. Method and limits:
+`docs/superpowers/specs/2026-11-23-rollup-bounds-design.md`.
+
 See [../docs/wire-protocol.md](../docs/wire-protocol.md) for the full JSON
 event contract this binary produces.
 
@@ -188,14 +212,18 @@ with `pid: 0`.
 | `REPLAY_SPEED` | `realtime` to pace by recorded timestamps; otherwise as fast as possible | Startup |
 | `MAX_FLOWS` | Flow-table capacity ceiling (default 10,000) | Startup |
 | `MAX_OBSERVED_DNS_NAMES` | Observed DNS name table capacity (default 16,384) | Startup |
+| `MAX_ENDPOINTS` | Remote hosts tracked (default 50,000, 1 to 500,000) | Startup |
+| `MAX_CONVERSATIONS` | Local/remote pairs tracked (default 50,000, 1 to 500,000) | Startup |
+| `ROLLUP_TOP_N` | Top-N sent per ranking (default 200, 1 to 1,000) | Startup |
 | `FOLLOW_STREAM` | `1` turns on Follow Stream; anything else leaves it off | Startup |
 | `RELAY_PORT` | The relay's port, excluded from live capture (default 3000); read only with `FOLLOW_STREAM=1` | Startup |
 | `FRONT_DOOR_PORT` | The mTLS front door's port, excluded from live capture (default 8443); read only with `FOLLOW_STREAM=1` | Startup |
 
-All nine are read at most once, at startup (`RELAY_PORT` and
+All twelve are read at most once, at startup (`RELAY_PORT` and
 `FRONT_DOOR_PORT` only with `FOLLOW_STREAM=1`). Invalid `CAPTURE_INTERFACE` and nonpositive/non-numeric
-`MAX_FLOWS` or `MAX_OBSERVED_DNS_NAMES` fail startup; blank values are
-unset, except the two ports: with `FOLLOW_STREAM=1`, unset is the default,
+`MAX_FLOWS` or `MAX_OBSERVED_DNS_NAMES` fail startup, as does a
+non-numeric or out-of-range `MAX_ENDPOINTS`, `MAX_CONVERSATIONS` or
+`ROLLUP_TOP_N`; blank values are unset, except the two ports: with `FOLLOW_STREAM=1`, unset is the default,
 and blank or invalid fails startup. `REPLAY_FILE` must name a readable supported file.
 `REPLAY_LOCAL_ADDRS` only splits/trims strings, and only exact
 `REPLAY_SPEED=realtime` selects pacing; other speed values select fast mode.

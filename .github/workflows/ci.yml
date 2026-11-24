@@ -101,6 +101,11 @@ jobs:
       - name: Non-IP replay integration test
         run: cargo test --locked --test non_ip_replay -- --ignored --test-threads=1
 
+      # KAN-131: the bounded rollups from a replay file to the wire. Same
+      # exclusive-port reason and placement as the step above.
+      - name: Rollup replay integration test
+        run: cargo test --locked --test rollup_replay -- --ignored --test-threads=1
+
       - name: Clippy (warnings deny)
         run: cargo clippy --all-targets --locked -- -D warnings
 

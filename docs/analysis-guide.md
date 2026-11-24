@@ -148,11 +148,11 @@ Findings such as retransmissions, resets and unanswered requests are diagnostic 
 
 ## Find top talkers and TCP/UDP conversations
 
-**Prerequisite:** traffic has accumulated. Click **F7: HOSTS**, then choose **Endpoints** for hosts or **Conversations** for address pairs. The initial order is total bytes descending; click the Bytes/Packets/rate columns to sort and use the search box for an address, hostname or process. A selected row exposes ownership and available JA3 information.
+**Prerequisite:** traffic has accumulated. Click **F7: HOSTS**, then choose **Endpoints** for hosts or **Conversations** for address pairs. The initial ranking is total bytes descending. **Rank by** (bytes, packets, rate, recent) chooses which received rows are shown; a column click only reorders those. The search box covers every received row by address, hostname or process. A selected row exposes ownership and available JA3 information.
 
-**Read the result:** compare byte totals, packet totals, flow count and first/last seen; Conversations also shows duration. These are traffic rollups across TCP/UDP flows, not reassembled conversation text or an application transaction list. Rollups can outlive individual flow eviction. To inspect a particular socket, return to `conn` and apply address/port filters.
+**Read the result:** compare byte totals, packet totals, flow count and first/last seen; Conversations also shows duration. These are traffic rollups across TCP/UDP flows, not reassembled conversation text or an application transaction list. Rollups outlive individual flow eviction, but not their own limits or an interface switch, which clears them. Read the line above the table first: rows shown, rows received, keys tracked. A `≥` means the row may have earlier, evicted history, so treat its total as a minimum. To inspect a particular socket, return to `conn` and apply address/port filters.
 
-**If totals differ from visible rows:** the Hosts rollup and sampled/retained packet list cover different horizons. Display filters affect Packets and Connections, not Hosts. Capture/BPF/decoder omissions still limit rollups.
+**If totals differ from visible rows:** the table is the top of a bounded list. Hosts tracked but not sent are in no row, and evicted hosts' bytes are stated in the amber line. "Evictions" counts events, not distinct hosts. A rising count means the capture has more hosts than the cap, whether from real traffic, a scan or spoofed addresses. "Last active at or before … may be missing" assumes time moves forward, so don't rely on it for a replay whose timestamps go backward. Also, the Hosts rollup and sampled/retained packet list cover different horizons. Display filters affect Packets and Connections, not Hosts. Capture/BPF/decoder omissions still limit rollups.
 
 ## Inspect DNS/HTTP metadata and response time
 
