@@ -3635,8 +3635,8 @@ async fn main() -> std::io::Result<()> {
                 let (
                     evicted,
                     snapshots,
-                    endpoint_snapshots,
-                    conversation_snapshots,
+                    (endpoint_snapshots, endpoint_bounds),
+                    (conversation_snapshots, conversation_bounds),
                     total_flows_observed,
                     capacity_evictions,
                     idle_evictions,
@@ -3665,9 +3665,10 @@ async fn main() -> std::io::Result<()> {
                     // capture start -- same "gather under the lock, convert
                     // to wire JSON after release" pattern as protocol_tree
                     // below.
-                    // The bounds are not sent yet; later KAN-131 tasks do.
-                    let (endpoint_snapshots, _) = ft.endpoint_snapshot(now_ms);
-                    let (conversation_snapshots, _) = ft.conversation_snapshot(now_ms);
+                    // KAN-131: each snapshot's bounds come from the same
+                    // lock hold as its rows.
+                    let endpoint_snapshots = ft.endpoint_snapshot(now_ms);
+                    let conversation_snapshots = ft.conversation_snapshot(now_ms);
                     (
                         evicted,
                         snapshots,
@@ -3737,26 +3738,12 @@ async fn main() -> std::io::Result<()> {
                             .get(&endpoint.host)
                             .cloned()
                             .unwrap_or_else(|| ("unknown".to_string(), 0, 0));
-                        wire::EndpointJson {
-                            host: endpoint.host,
-                            rx_bytes_total: endpoint.rx_bytes_total,
-                            tx_bytes_total: endpoint.tx_bytes_total,
-                            rx_packets_total: endpoint.rx_packets_total,
-                            tx_packets_total: endpoint.tx_packets_total,
-                            rx_speed: endpoint.rx_speed,
-                            tx_speed: endpoint.tx_speed,
-                            flow_count: endpoint.flow_count,
-                            first_seen_ms: endpoint.first_seen_ms,
-                            last_seen_ms: endpoint.last_seen_ms,
-                            process_name,
-                            pid,
-                            ja3_label: endpoint.ja3_label.map(|s| s.to_string()),
-                            observed_name: endpoint.observed_name,
-                        }
+                        wire::EndpointJson::from_snapshot(endpoint, process_name, pid)
                     })
                     .collect();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::EndpointUpdate {
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::EndpointRollup {
                     endpoints,
+                    bounds: endpoint_bounds.into(),
                 }));
                 let summaries = service_time_stats.lock().unwrap().snapshot();
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::ServiceTimeUpdate {
@@ -3773,27 +3760,12 @@ async fn main() -> std::io::Result<()> {
                             ))
                             .cloned()
                             .unwrap_or_else(|| ("unknown".to_string(), 0, 0));
-                        wire::ConversationJson {
-                            local_addr: conversation.local_addr,
-                            remote_addr: conversation.remote_addr,
-                            rx_bytes_total: conversation.rx_bytes_total,
-                            tx_bytes_total: conversation.tx_bytes_total,
-                            rx_packets_total: conversation.rx_packets_total,
-                            tx_packets_total: conversation.tx_packets_total,
-                            rx_speed: conversation.rx_speed,
-                            tx_speed: conversation.tx_speed,
-                            flow_count: conversation.flow_count,
-                            first_seen_ms: conversation.first_seen_ms,
-                            last_seen_ms: conversation.last_seen_ms,
-                            duration_ms: conversation.duration_ms,
-                            process_name,
-                            pid,
-                            ja3_label: conversation.ja3_label.map(|s| s.to_string()),
-                        }
+                        wire::ConversationJson::from_snapshot(conversation, process_name, pid)
                     })
                     .collect();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConversationUpdate {
+                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConversationRollup {
                     conversations,
+                    bounds: conversation_bounds.into(),
                 }));
 
                 // Per-layer aggregates for the layer_update event, accumulated
