@@ -528,12 +528,13 @@ mod tests {
         t.record(1, false, 100, 1, 0);
         t.record(2, false, 5, 2, 0);
         t.record(1, false, 40, 3, 0);
+        t.record(1, true, 30, 3, 0);
         let rows = t.snapshot(2.0);
-        assert_eq!(rows[0].rx_speed, 20.0);
-        t.record(1, false, 50, 4, 0);
+        assert_eq!((rows[0].rx_speed, rows[0].tx_speed), (20.0, 15.0));
+        t.record(1, true, 50, 4, 0);
         let rows = t.snapshot(1.0);
-        assert_eq!(rows[0].rx_speed, 50.0);
-        assert_eq!(rows[0].total.rx_bytes, 90);
+        assert_eq!((rows[0].rx_speed, rows[0].tx_speed), (0.0, 50.0));
+        assert_eq!((rows[0].total.rx_bytes, rows[0].total.tx_bytes), (40, 80));
     }
 
     #[test]
@@ -576,45 +577,49 @@ mod tests {
     fn each_ranking_matches_a_full_sort_with_ties() {
         const SIZES: [u64; 5] = [10, 20, 30, 40, 50];
         for n in [1usize, 10, 200] {
-            let mut t = RollupTable::new(10_000, n);
-            let mut s = 0x1234_5678_9ABC_DEF1u64;
-            for k in 0..2000u32 {
-                let r = xorshift(&mut s);
-                t.record(
-                    k,
-                    r & 1 == 0,
-                    SIZES[(r >> 8) as usize % 5],
-                    (r >> 16) % 3,
-                    0,
-                );
-            }
-            // Give the rate ranking some non-zero, tied values.
-            t.snapshot(1.0);
-            let rows_after = {
-                for k in 0..300u32 {
+            // The same input drives the table under test and a reference
+            // table that keeps everything, so the reference snapshot is a
+            // full sort's input.
+            let feed = |t: &mut RollupTable<u32>| {
+                let mut s = 0x1234_5678_9ABC_DEF1u64;
+                for k in 0..2000u32 {
                     let r = xorshift(&mut s);
-                    t.record(k, false, SIZES[(r >> 8) as usize % 5], 3 + (r >> 16) % 3, 0);
+                    t.record(
+                        k,
+                        r & 1 == 0,
+                        SIZES[(r >> 8) as usize % 5],
+                        (r >> 16) % 3,
+                        0,
+                    );
                 }
-                t.snapshot(2.0)
+                // Drain, so the rates below come from the second phase only.
+                t.snapshot(1.0);
+                // Decorrelate packets, recency, bytes and rate: old keys with
+                // many small mixed-direction packets, the newest keys with one
+                // small packet, and mid-age keys with one large packet.
+                for k in 0..2000u32 {
+                    let r = xorshift(&mut s);
+                    match k % 4 {
+                        0 => {
+                            for i in 0..3 + (r >> 4) % 3 {
+                                t.record(k, (r >> i) & 1 == 0, SIZES[0], 1 + (r >> 16) % 2, 0);
+                            }
+                        }
+                        1 => {
+                            t.record(k, r & 1 == 0, SIZES[0], 3 + (r >> 16) % 3, 0);
+                        }
+                        2 => {
+                            t.record(k, r & 1 == 0, SIZES[(r >> 8) as usize % 5] * 100, 2, 0);
+                        }
+                        _ => {}
+                    }
+                }
             };
-            // Reference: all entries, as rows with the same speeds.
+            let mut t = RollupTable::new(10_000, n);
+            feed(&mut t);
+            let rows_after = t.snapshot(2.0);
             let mut reference = RollupTable::new(10_000, 10_000);
-            let mut s2 = 0x1234_5678_9ABC_DEF1u64;
-            for k in 0..2000u32 {
-                let r = xorshift(&mut s2);
-                reference.record(
-                    k,
-                    r & 1 == 0,
-                    SIZES[(r >> 8) as usize % 5],
-                    (r >> 16) % 3,
-                    0,
-                );
-            }
-            reference.snapshot(1.0);
-            for k in 0..300u32 {
-                let r = xorshift(&mut s2);
-                reference.record(k, false, SIZES[(r >> 8) as usize % 5], 3 + (r >> 16) % 3, 0);
-            }
+            feed(&mut reference);
             let all = reference.snapshot(2.0);
             let rankings: Vec<Ranking> = vec![
                 Box::new(|a, b| {
