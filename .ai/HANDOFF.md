@@ -1,7 +1,7 @@
 # KAN-131 plan (2026-11-23)
 
 - Spec re-check found the benchmark's "Tick" figures do not cover the merged D3 (recent came from the recency list, rate was an integer sum). Plan Task 3 re-measures and stops if it fails its limit (P9).
-- Read from code, not run: fragmented datagrams may be counted twice in rollups today; needs a separate issue.
+- High-effort review of PR #349: ten findings, all addressed in the plan; the fixes are not independently reviewed (Codex usage limit). The earlier claim that rollups may count fragments twice was wrong: the test at `reassembly.rs:1868` shows a fragmented datagram counted once.
 - Nothing implemented; no tests run beyond the docs-sync check.
 
 ---

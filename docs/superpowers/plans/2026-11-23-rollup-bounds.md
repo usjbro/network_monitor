@@ -34,7 +34,6 @@ Checked against `7fe5f29`. James approved this plan in chat on 2026-11-23, inclu
 2. **Saturated counters are invalid beyond 2^53 in JavaScript.** The relay also re-encodes them, so precision is lost before the browser. D3 already stops its guarantee there; the mapper must accept such values, not reject them. No change proposed.
 3. **D7 does not say whether a selected row that is received but filtered out keeps its panel.** Plan: it does (P7).
 4. **`historyComplete` does not say whether the insertion's own eviction counts.** Plan: it does not (P3).
-5. **Out of scope, read from code and not run:** `observe_reassembled_inner` calls `observe_inner` for the last physical fragment and again for the reassembled datagram, and a first fragment carrying ports is recorded too. Rollups may count such bytes twice today. D4 says "recorded", so the invariants hold either way; a separate issue should confirm it.
 
 ## Decisions taken by this plan
 
@@ -42,10 +41,10 @@ Checked against `7fe5f29`. James approved this plan in chat on 2026-11-23, inclu
 - **P2. Selection.** For each ranking, `select_nth_unstable_by` over one reusable `Vec<u32>` of slots, comparing (rank value desc, `last_seen_ms` desc, id asc). The union is deduplicated and sorted by id.
 - **P3. `historyComplete`** is decided from `evictions` before the insertion's own eviction: the key inserted at cap+1 is complete, the next new key is not.
 - **P4. Ids** start at 1; 0 in `FlowState` means "not counted yet". They keep rising across `reset`.
-- **P5. Bounds validation.** The mapper rejects the event unless every number is finite and at least 0, `cap` and `topN` are at least 1, `sinceMs`/`horizonMs` are a number or `null`, `historyComplete` is a boolean on every row, `tracked <= cap`, `rows.length <= min(tracked, 4 * topN)`.
+- **P5. Bounds validation.** The mapper rejects the event unless every number is finite and at least 0, `cap` and `topN` are at least 1, `sinceMs`/`horizonMs` are a number or `null`, every row is a non-null object, `historyComplete` is a boolean, `host`/`localAddr`/`remoteAddr`/`processName` are strings (the addresses non-empty), `ja3Label`/`observedName` are strings or absent, `tracked <= cap`, `rows.length <= min(tracked, 4 * topN)`.
 - **P6. Rank by and column sort.** Changing Rank by also sets the column sort to the matching column, descending ("recent" sets Last Seen). Clicking a column never changes Rank by.
 - **P7. Selection** is looked up in all received rows. Its panel stays when a filter or Rank by hides the row, and says "No longer among the received rows" only when it is not received.
-- **P8. Shared fixture.** `testdata/rollup-rank.jsonl`, next to the display-filter corpus. Written by the Rust test under `UPDATE_ROLLUP_FIXTURE=1` and otherwise compared byte for byte, so it cannot drift from the encoder.
+- **P8. Shared fixture.** `testdata/rollup-rank.jsonl`, next to the display-filter corpus. Rows are built by the same library conversion the emitter calls (Task 4), not a copy. Written by the Rust test under `UPDATE_ROLLUP_FIXTURE=1` and otherwise compared byte for byte, so it cannot drift from the encoder.
 - **P9. Lock limit.** Both tables full at the default caps with IPv6 remotes, one lock hold for both snapshots, row building included: the median of five runs must not exceed the median of five runs of `7fe5f29` at the same K on the same machine. Above it, stop and ask James; do not raise the limit or lower the caps. Process attribution runs after the flow lock is released, so it is not part of this number.
 
 ## Review Focus
@@ -124,7 +123,7 @@ impl<K: Copy + Eq + std::hash::Hash> RollupTable<K> {
   - `recency_ignores_equal_and_backward_timestamps`: the same, all at `now_ms = 5`, then with 9, 8, 7, 6, 5; same keys.
   - `totals_minus_evicted_equals_the_sum_over_tracked`: 20,000 xorshift records over 500 keys at cap 64 and N=64, checked after each 1,000 for all four fields.
   - `cap_one_top_one_balances`: 100 distinct keys; `tracked == 1`, `evictions == 99`, the same equation.
-  - `slots_are_reused`: 10 × cap distinct keys; slab length is never above cap.
+  - `slots_are_reused`: 10 × cap distinct keys; slab length is never above cap. In the same test, with cap 1,000, the index capacity never exceeds 4 × cap. This is the CI check for "memory stable over 10x cap".
   - `history_complete_follows_p3`: cap 2; keys 1, 2, 3 are true and 4 is false.
   - `a_returning_key_starts_from_zero`: evicted then recorded: `total` covers one packet, `first_seen_ms` is the return time, a new id, `history_complete == false`.
   - `evicted_and_returned_within_one_tick`: the rate covers only the packets after its return; the next tick's rate is whole.
@@ -141,7 +140,7 @@ impl<K: Copy + Eq + std::hash::Hash> RollupTable<K> {
 
 ### Task 2: `FlowTable` uses it; flow ids, reset, caps
 
-**Files:** Modify `capture-agent/src/flow.rs` (maps at 190-197, `RollupState`, `observe_inner` 762-840, snapshots 1104-1160, `reset` 1172), `capture-agent/src/main.rs` (parsers near 1398, construction near 2643, emitter near 3620).
+**Files:** Modify `capture-agent/src/reassembly.rs:1905` (the test's tuple return only; its assertions stay), `capture-agent/src/flow.rs` (maps at 190-197, `RollupState`, `observe_inner` 762-840, snapshots 1104-1160, `reset` 1172), `capture-agent/src/main.rs` (parsers near 1398, construction near 2643, emitter near 3620).
 
 **Interfaces — consumes** Task 1. **Produces:**
 
@@ -154,7 +153,7 @@ impl FlowTable {
 }
 // both snapshot structs gain: pub history_complete: bool
 // FlowState gains: endpoint_entry_id: u64, conversation_entry_id: u64
-fn parse_bounded_env(name: &str, raw: Option<String>, default: usize, max: usize) -> usize; // main.rs
+fn parse_bounded_env(name: &str, raw: Option<String>, default: usize, max: usize) -> usize; // main.rs; calls parse_positive_env, then checks max
 ```
 
 - [ ] **Step 1: Write the failing tests** in `flow.rs`:
@@ -179,29 +178,29 @@ fn parse_bounded_env(name: &str, raw: Option<String>, default: usize, max: usize
 
 **Interfaces — consumes** `FlowTable::with_rollup_config`, both snapshots.
 
-- [ ] **Step 1:** Write `rollup_cost`: one local address, K distinct IPv6 remotes in {10,000, 50,000, 100,000, 500,000}, caps K, N=200; five runs. Print per K: live bytes, median lock-hold time for both snapshots together (row building and observed-name lookup included), and row counts. Then at 50,000 for N=1,000.
-- [ ] **Step 2:** Write the same loop against `7fe5f29` in a throwaway worktree (old snapshot API; not committed) and run both on one machine: `cargo test --release --locked --test rollup_cost -- --ignored --nocapture`.
+- [ ] **Step 1:** Write `rollup_cost`: one local address, K distinct IPv6 remotes in {10,000, 50,000, 100,000, 500,000}, caps K, N=200; five runs. Traffic: before **each** timed snapshot, feed packets so that bytes, packets, rate and recency have disjoint leaders (four groups of N hosts, each leading one ranking only), with log-uniform sizes elsewhere and an advancing clock; assert the union is 4N rows per table and that no run has all-zero rates. Keep few flows: after loading the keys, call `evict_stale` past the idle limit before timing. Print per K: median lock-hold time for both snapshots together (row building and observed-name lookup included), and row counts. Then at 50,000 for N=1,000.
+- [ ] **Step 2:** Feed the identical traffic to the same loop against `7fe5f29` in a throwaway worktree (old snapshot API; not committed) and run both on one machine: `cargo test --release --locked --test rollup_cost -- --ignored --nocapture`.
 - [ ] **Step 3: Apply P9.** If the new median at 50,000 is above the old one, stop and report both tables to James.
-- [ ] **Step 4:** Assert memory stays flat: after 10 × cap distinct keys, live bytes are within 5% of live bytes at 2 × cap.
+- [ ] **Step 4:** Measure memory on `RollupTable<IpAddr>` and `RollupTable<(IpAddr, IpAddr)>` directly, so no `FlowState` is counted: print live bytes per K at first fill, and again after 10 × cap distinct keys of churn (index growth under remove/insert included).
 - [ ] **Step 5:** Put the results in the spec's Measurements section as a new dated table, marking the old "Tick" column as superseded. **Commit** `test(agent): measure bounded rollup cost (KAN-131)`.
 
 ### Task 4: Wire events
 
 **Files:** Modify `capture-agent/src/wire.rs` (45-88, 335-350, tests near 2110), `capture-agent/src/main.rs` emitter, `capture-agent/tests/non_ip_replay.rs:563`. Create `capture-agent/tests/rollup_rank_fixture.rs`, `testdata/rollup-rank.jsonl`.
 
-**Interfaces — produces:** `AgentEvent::EndpointRollup { endpoints: Vec<EndpointJson>, bounds: BoundsJson }`, `AgentEvent::ConversationRollup { conversations: Vec<ConversationJson>, bounds: BoundsJson }` (replacing the two `*Update` variants); `history_complete: bool` on both row structs; `BoundsJson` and `TrafficJson` in camelCase, with `since_ms`/`horizon_ms` as `Option<u64>` serialized as `null`; `impl From<rollup::Bounds> for BoundsJson`.
+**Interfaces — produces:** `AgentEvent::EndpointRollup { endpoints: Vec<EndpointJson>, bounds: BoundsJson }`, `AgentEvent::ConversationRollup { conversations: Vec<ConversationJson>, bounds: BoundsJson }` (replacing the two `*Update` variants); `history_complete: bool` on both row structs; `BoundsJson` and `TrafficJson` in camelCase, with `since_ms`/`horizon_ms` as `Option<u64>` serialized as `null`; `impl From<rollup::Bounds> for BoundsJson`; and in `wire.rs`, moved out of the emitter, `EndpointJson::from_snapshot(snapshot: EndpointSnapshot, process_name: String, pid: u32) -> EndpointJson` and the same for `ConversationJson`. `main.rs` calls only these and keeps the snapshot order.
 
 Fixture: one JSON object per line, `{"event": <event>, "topN": n, "expected": {"bytes": [...], "packets": [...], "rate": [...], "recent": [...]}}`, where each list is the first N keys (`host`, or `local|remote`). Four lines: endpoints and conversations, each with many ties and at N=3 and N=200. Timestamps include a backward step.
 
 - [ ] **Step 1: Write the failing tests:** `encodes_endpoint_rollup_exactly` and `encodes_conversation_rollup_exactly` parse the line and compare the **whole** value with `serde_json::json!` (the spec's D4 example, `null` horizon included); `rank_fixture_matches` (P8), with `expected` from a full sort of the reference model, not from `RollupTable`; `worst_case_line_length`: N=1,000, 4,000 IPv6 rows, 253-byte names and the longest JA3 label, u64-max counters: print the length and assert it is below 4 MiB.
 - [ ] **Step 2:** `cargo test --locked` fails to compile.
 - [ ] **Step 3: Implement**; the emitter sends both events, with `bounds` from the same lock hold. Update `non_ip_replay.rs` to the new name. Generate the fixture: `UPDATE_ROLLUP_FIXTURE=1 cargo test --locked --test rollup_rank_fixture`.
-- [ ] **Step 4:** `cargo test --locked` passes without the variable; `grep -rn "endpoint_update\|conversation_update" src tests` prints nothing. If the line test exceeds 4 MiB, stop and report the size.
+- [ ] **Step 4:** `cargo test --locked` passes without the variable; so does `cargo test --locked --test non_ip_replay -- --ignored --test-threads=1` (ignored tests otherwise do not run); `grep -rn "endpoint_update\|conversation_update" src tests` prints nothing. If the line test exceeds 4 MiB, stop and report the size.
 - [ ] **Step 5: Commit** `feat(agent): endpoint_rollup and conversation_rollup wire events (KAN-131)`.
 
 ### Task 5: Types, mappers, state and notices
 
-**Files:** Modify `lib/types.ts` (552-610), `lib/agent-mapping.ts` (582-645), `lib/rollup-state.ts`, `app/page.tsx` (126-134, 363-370, 420-432, 1121), `lib/__tests__/agent-mapping.test.ts`, `rollup-state.test.ts`, `agent-wire-contract.test.ts`, `fixtures/agent-wire-samples.jsonl`. Create `lib/rollup-rank.ts`, `lib/__tests__/rollup-rank.test.ts`, `lib/__tests__/page-rollup-handling.test.tsx`.
+**Files:** Modify `lib/types.ts` (552-610), `lib/agent-mapping.ts` (582-645), `lib/rollup-state.ts`, `app/page.tsx` (126-134, 363-370, 420-432, 1121, 1248), `components/EndpointsView.tsx` (props, notices and empty states only), `lib/__tests__/endpoints-view.test.tsx` (new props and `historyComplete`; assertions unchanged), `lib/__tests__/agent-mapping.test.ts`, `rollup-state.test.ts`, `agent-wire-contract.test.ts`, `fixtures/agent-wire-samples.jsonl`. Create `lib/rollup-rank.ts`, `lib/__tests__/rollup-rank.test.ts`, `lib/__tests__/page-rollup-handling.test.tsx`.
 
 **Interfaces — produces:**
 
@@ -242,8 +241,8 @@ These replace `mapEndpointUpdateEvent`, `mapConversationUpdateEvent` and the fou
   - Enrichment: survives leaving and re-entering; a name or PTR gone from a snapshot follows today's rules (`observedName` is never kept; the PTR name and ownership are); 1,001 idle hosts keep 1,000, evicting the oldest; 8,000 current hosts are all kept and `size <= 9,000`; a result for a host in neither list is kept as idle.
   - `page-rollup-handling.test.tsx`: an `endpoint_update` shows "The running capture agent is older than this page. Restart the agent." and renders no rows, as does `conversation_update`; a malformed event clears that table only and shows "This table's data could not be read."; each clears on the next valid event; a first event received mid-capture renders whole; the tab reads `F7: HOSTS (50,000)` from `tracked`, and `F7: HOSTS (–)` unless ready.
   - Wire contract: `agent-wire-samples.jsonl` regenerated from the real agent by that test's documented procedure, with one `endpoint_rollup` and one `conversation_rollup` line replacing `endpoint_update`.
-- [ ] **Step 2:** `npx vitest run lib/__tests__/rollup-rank.test.ts lib/__tests__/rollup-state.test.ts lib/__tests__/page-rollup-handling.test.tsx lib/__tests__/agent-mapping.test.ts lib/__tests__/agent-wire-contract.test.ts` fails.
-- [ ] **Step 3: Implement.** In `page.tsx`, each rollup event gets its own inner `try/catch` that sets `unreadable`; the outer catch stays. The enrichment map is a ref, and `connection_enrichment` calls `record` and re-derives the rows. `EndpointsView` receives the two `RollupState`s and shows the notices; its other changes are Task 6.
+- [ ] **Step 2:** `npx vitest run lib/__tests__/endpoints-view.test.tsx lib/__tests__/rollup-rank.test.ts lib/__tests__/rollup-state.test.ts lib/__tests__/page-rollup-handling.test.tsx lib/__tests__/agent-mapping.test.ts lib/__tests__/agent-wire-contract.test.ts` fails.
+- [ ] **Step 3: Implement.** In `page.tsx`, each rollup event gets its own inner `try/catch` that sets `unreadable`; the outer catch stays. The enrichment map is a ref, and `connection_enrichment` calls `record` and re-derives the rows. `EndpointsView`'s props `endpoints`/`conversations` become `RollupState<Endpoint>`/`RollupState<Conversation>` here, and it shows the notices and empty states; its other changes are Task 6. A page test covers each empty state: waiting `Waiting for the first update.`; `agent-too-old` and `unreadable` show their notice and no other row; ready with nothing tracked `No endpoints observed yet.` (or `conversations`).
 - [ ] **Step 4:** The same command passes; `./node_modules/.bin/tsc --noEmit` and `npm run lint` are clean.
 - [ ] **Step 5: Commit** `feat(web): map bounded rollups and surface version mismatch (KAN-131)`.
 
@@ -251,7 +250,7 @@ These replace `mapEndpointUpdateEvent`, `mapConversationUpdateEvent` and the fou
 
 **Files:** Modify `components/EndpointsView.tsx`, `lib/__tests__/endpoints-view.test.tsx`.
 
-**Interfaces — consumes** `RollupState`, `rankRows`. Props `endpoints`/`conversations` become `RollupState<Endpoint>`/`RollupState<Conversation>`.
+**Interfaces — consumes** `RollupState`, `rankRows` and Task 5's props.
 
 Exact copy (hosts shown; the conversations table says "conversations"):
 
@@ -259,12 +258,12 @@ Exact copy (hosts shown; the conversations table says "conversations"):
 - `812 evictions (cap 50,000): least recently active hosts were dropped; their totals (<formatBytes of evicted rx+tx>) are not in any row.` when `evictions > 0`
 - `Hosts last active at or before 41,200 ms may be missing.` when `horizonMs` is not `null`
 - `<n> packets had an unreadable address and are not counted.` when `unkeyed > 0`
-- Search placeholder `Search received rows…`; with a term, `3 matches in 396 received`
-- Empty search: `No match among the 396 rows received; 49,604 more are tracked but not sent.`
-- Note: `sorted within the top 200 by bytes` for an ascending or non-ranked sort; `sorted within matching received rows` with a search
+- Search placeholder `Search received rows…`; with a term, the first line becomes `3 matches in 396 received; 50,000 hosts tracked since 1,200 ms.`
+- Empty search: `No match among the 396 rows received; 49,604 more are tracked but not sent.`; when nothing is unsent, only `No match among the 396 rows received.`
+- Note: `sorted within the top 200 by bytes` unless the sort is the current Rank by, descending (so Packets descending under Rank by bytes shows it); `sorted within matching received rows` with a search
 - `≥` tooltip: `Earlier history may have been evicted. The rate can be low in the second this row returned.` First Seen reads `may be earlier` after its value.
 
-- [ ] **Step 1: Write the failing tests:** every string above, present and absent; 396 rows with `topN` 200 show 200; Rank by each ranking shows `rankRows(...).slice(0, topN)`, per table, default bytes, and sets the column sort (P6); search finds a row ranked 300th; `≥` on bytes, packets, flows and duration but not on rate, and only when `historyComplete` is false; a filtered-out selected row keeps its panel, one no longer received shows P7's text; after a reset event (`tracked` 1, new `sinceMs`, no evictions) with a row selected and a search active, no old notice remains and the panel says it is no longer received; markup in a name is still text. Existing tests move to the new props with their assertions unchanged.
+- [ ] **Step 1: Write the failing tests:** every string above, present and absent, with Packets descending under Rank by bytes among the note's cases; 396 rows with `topN` 200 show 200; Rank by each ranking shows `rankRows(...).slice(0, topN)`, per table, default bytes, and sets the column sort (P6); search finds a row ranked 300th; `≥` on bytes, packets, flows and duration but not on rate, and only when `historyComplete` is false; a filtered-out selected row keeps its panel, one no longer received shows P7's text; after a reset event (`tracked` 1, new `sinceMs`, no evictions) with a row selected and a search active, no old notice remains and the panel says it is no longer received; markup in a name is still text. Existing tests change only their placeholder query (`/search received rows/i`).
 - [ ] **Step 2:** `npx vitest run lib/__tests__/endpoints-view.test.tsx` fails.
 - [ ] **Step 3: Implement.** Order of work on rows: search if there is a term, otherwise rank and slice; then the column sort, which must be stable.
 - [ ] **Step 4:** Passes; then `npx vitest run && ./node_modules/.bin/tsc --noEmit && npm run lint`.
@@ -272,12 +271,12 @@ Exact copy (hosts shown; the conversations table says "conversations"):
 
 ### Task 7: Docs, replay end to end, real browser
 
-**Files:** Modify `docs/wire-protocol.md` (267-330), `docs/usage.md`, `docs/analysis-guide.md`, `docs/architecture.md` (limits table), `docs/security.md:74` (event name; eviction flooding), `docs/feature-flags.md:15`, `docs/troubleshooting.md`, `.env.example` (three names), release note in the PR body and `docs/troubleshooting.md` (the repo has no changelog). Test: `capture-agent/tests/rollup_replay.rs` (new).
+**Files:** Modify `docs/wire-protocol.md` (267-330, plus the references near 334 and 391), `docs/usage.md`, `docs/analysis-guide.md`, `docs/architecture.md` (limits table), `docs/security.md:74` (event name; eviction flooding), `docs/feature-flags.md:15`, `docs/troubleshooting.md`, `.env.example` (three names), `capture-agent/README.md` (env table and its "All nine" / fail-startup text near 186-198), `.github/workflows/ci.yml` (one step beside the `non_ip_replay` one near line 102; approved by James in chat, 2026-11-23). The release note goes in the PR body and `docs/troubleshooting.md` (the repo has no changelog). Test: `capture-agent/tests/rollup_replay.rs` (new).
 
-- [ ] **Step 1: Write the failing test** `rollup_replay_through_the_real_binary`, modelled on `non_ip_replay.rs`: a generated pcap with 5 remotes, `MAX_ENDPOINTS=2 MAX_CONVERSATIONS=3 ROLLUP_TOP_N=1`. The last `endpoint_rollup` has `tracked == 2` and `evictions == 3`, `conversation_rollup` has 3 and 2, totals balance, and no `endpoint_update` or `conversation_update` line appears. A second run with `ROLLUP_TOP_N=1001` exits with an error naming `ROLLUP_TOP_N`.
-- [ ] **Step 2:** Show it failing with the emitter's `EndpointRollup` send disabled, then restore it and see it pass.
-- [ ] **Step 3: Docs.** State the limits, the reset, the backward-clock caveat, the `evictions` versus distinct-host distinction, and the 2^53 limit. Release note, verbatim: "After upgrading the capture agent, reload every open Network Monitor tab. A tab left open keeps its last host and conversation lists without a warning until it is reloaded."
-- [ ] **Step 4: Full checks:** the five commands in `CLAUDE.md` §4 that apply (web, Rust, docs sync, manual bind check), plus `cargo build --release --locked` and `npx playwright test`.
+- [ ] **Step 1: Write the failing test** `rollup_replay_through_the_real_binary`, modelled on `non_ip_replay.rs` (including its `#[ignore]` for exclusive 127.0.0.1:9990): a generated pcap with 5 remotes, `MAX_ENDPOINTS=2 MAX_CONVERSATIONS=3 ROLLUP_TOP_N=1`. The last `endpoint_rollup` has `tracked == 2` and `evictions == 3`, `conversation_rollup` has 3 and 2, totals balance, the rows equal the expected hosts, order and `historyComplete` values exactly, each event carries its own table's `cap`, and no `endpoint_update` or `conversation_update` line appears. A second run with `ROLLUP_TOP_N=1001` exits with an error naming `ROLLUP_TOP_N`.
+- [ ] **Step 2:** Run `cargo test --locked --test rollup_replay -- --ignored --test-threads=1`, and add the same command as the CI step. Show it failing with the emitter's `EndpointRollup` send disabled, then restore it and see it pass.
+- [ ] **Step 3: Docs.** State the limits, the reset, the backward-clock caveat, the `evictions` versus distinct-host distinction, and the 2^53 limit. Then `grep -rn "endpoint_update\|conversation_update" docs/*.md capture-agent/README.md lib app components` prints only the old-agent handling, its tests and the release or troubleshooting notes. Release note, verbatim: "After upgrading the capture agent, reload every open Network Monitor tab. A tab left open keeps its last host and conversation lists without a warning until it is reloaded."
+- [ ] **Step 4: Full checks:** the five commands in `CLAUDE.md` §4 that apply (web, Rust, docs sync, manual bind check), plus `cargo build --release --locked`, both ignored replay tests (`non_ip_replay`, `rollup_replay`) and `npx playwright test`.
 - [ ] **Step 5: Real browser** against the real agent, replaying the Task 7 pcap with small caps and then a live capture: the counts, each Rank by, search, an interface switch, and the old-agent notice using a `7fe5f29` agent with the new page. Record what was and was not seen.
 - [ ] **Step 6:** Run the `security-review` skill and an independent `/code-review` on the branch. **Commit** `docs: bounded rollups (KAN-131)`.
 
