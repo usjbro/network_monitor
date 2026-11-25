@@ -1,6 +1,6 @@
 // lib/__tests__/enrichment-client.test.ts
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentClient } from '../enrichment';
@@ -48,13 +48,7 @@ describe('EnrichmentClient', () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('startup pruning writes nothing to a fresh data directory', async () => {
-    const prune = vi.spyOn(QueryLog.prototype, 'prune');
-    try {
-      new EnrichmentClient({ dataDir: dir });
-      await prune.mock.results[0].value;
-    } finally {
-      prune.mockRestore();
-    }
+    await new EnrichmentClient({ dataDir: dir }).startPruning();
     expect(readdirSync(dir)).toEqual([]);
   });
 
@@ -65,9 +59,7 @@ describe('EnrichmentClient', () => {
     if (failWith) prune.mockRejectedValueOnce(failWith);
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      new EnrichmentClient({ dataDir: dir });
-      await Promise.resolve(prune.mock.results[0].value).catch(() => {});
-      await new Promise((r) => setTimeout(r, 0));
+      await new EnrichmentClient({ dataDir: dir }).startPruning();
       return error.mock.calls;
     } finally {
       prune.mockRestore();
@@ -91,6 +83,82 @@ describe('EnrichmentClient', () => {
 
   it('reports a failed startup prune by error name when it has no code, without the message', async () => {
     expect(await pruneReport(() => {}, new SyntaxError('Unexpected token in 198.51.100.7'))).toEqual([['[enrichment] query-log prune failed:', 'SyntaxError']]);
+  });
+
+  // KAN-321
+  describe('pruning schedule', () => {
+    const SIX_HOURS = 6 * 60 * 60 * 1000;
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    });
+
+    it('constructing a client prunes nothing', () => {
+      const prune = vi.spyOn(QueryLog.prototype, 'prune').mockResolvedValue(0);
+      new EnrichmentClient({ dataDir: dir });
+      expect(prune).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('prunes at once and then six hours after each prune', async () => {
+      const prune = vi.spyOn(QueryLog.prototype, 'prune').mockResolvedValue(0);
+      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      expect(prune.mock.calls).toEqual([[30]]);
+      await vi.advanceTimersByTimeAsync(SIX_HOURS - 1);
+      expect(prune).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(prune).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(SIX_HOURS);
+      expect(prune).toHaveBeenCalledTimes(3);
+    });
+
+    it('removes an entry that expires while the server runs', async () => {
+      const file = join(dir, 'query-log.ndjson');
+      const timestamp = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000 + 60_000).toISOString();
+      writeFileSync(file, JSON.stringify({ target: 't', endpoint: 'e', cacheStatus: 'hit', timestamp }) + '\n');
+      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      expect(readFileSync(file, 'utf8')).not.toBe('');
+      await vi.advanceTimersByTimeAsync(SIX_HOURS);
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(readFileSync(file, 'utf8')).toBe(''));
+    });
+
+    it('does not start another prune while one is running', async () => {
+      let finish = (_: number) => {};
+      const prune = vi.spyOn(QueryLog.prototype, 'prune').mockReturnValue(new Promise((r) => { finish = r; }));
+      const started = new EnrichmentClient({ dataDir: dir }).startPruning();
+      await vi.advanceTimersByTimeAsync(SIX_HOURS * 3);
+      expect(prune).toHaveBeenCalledTimes(1);
+      finish(0);
+      await started;
+      await vi.advanceTimersByTimeAsync(SIX_HOURS);
+      expect(prune).toHaveBeenCalledTimes(2);
+    });
+
+    it('a repeat call starts nothing new', async () => {
+      const prune = vi.spyOn(QueryLog.prototype, 'prune').mockResolvedValue(0);
+      const client = new EnrichmentClient({ dataDir: dir });
+      await Promise.all([client.startPruning(), client.startPruning()]);
+      await client.startPruning();
+      expect(prune).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+    });
+
+    it('tries again after a failed prune', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const prune = vi.spyOn(QueryLog.prototype, 'prune').mockRejectedValueOnce(new Error('x')).mockResolvedValue(0);
+      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      await vi.advanceTimersByTimeAsync(SIX_HOURS);
+      expect(prune).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not keep the process alive', async () => {
+      vi.spyOn(QueryLog.prototype, 'prune').mockResolvedValue(0);
+      const timer = vi.spyOn(globalThis, 'setTimeout');
+      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      expect((timer.mock.results[0].value as NodeJS.Timeout).hasRef()).toBe(false);
+    });
   });
 
   it('makes zero HTTP calls when disabled', async () => {

@@ -7,9 +7,12 @@
 import { promises as fs, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import { QueryLogEntry } from './types';
 
 type QueryLogInput = Omit<QueryLogEntry, 'timestamp'>;
+
+const READ_CHUNK_BYTES = 64 * 1024;
 
 // Null when the line has no readable date and so could never expire. Nothing
 // else is checked: a dated line is kept until it expires, whatever it holds.
@@ -62,8 +65,19 @@ export class QueryLog {
       timestamp,
     };
     const isNew = !existsSync(this.filePath);
-    await fs.appendFile(this.filePath, JSON.stringify(line) + '\n', { mode: 0o600 });
-    // Belt-and-suspenders: appendFile's `mode` option only applies when it
+    const handle = await fs.open(this.filePath, 'a+', 0o600);
+    try {
+      // After a cut-off write the file ends mid-line; joining that line would
+      // lose this entry along with it (KAN-320).
+      const { size } = await handle.stat();
+      const last = Buffer.alloc(1);
+      if (size > 0) await handle.read(last, 0, 1, size - 1);
+      const separator = size > 0 && last[0] !== 0x0a ? '\n' : '';
+      await handle.appendFile(separator + JSON.stringify(line) + '\n');
+    } finally {
+      await handle.close();
+    }
+    // Belt-and-suspenders: open's `mode` argument only applies when it
     // creates the file, and even then isn't honored on every platform/umask
     // combination, so force the permission explicitly for a freshly created
     // file rather than trusting the option alone.
@@ -72,19 +86,42 @@ export class QueryLog {
 
   /** Every dated entry; unreadable lines are skipped. */
   readAll(): QueryLogEntry[] {
-    return this.read().entries;
+    if (!existsSync(this.filePath)) return [];
+    return readFileSync(this.filePath, 'utf8')
+      .split('\n')
+      .map((l) => parseEntry(l.trim()))
+      .filter((e) => e !== null);
   }
 
-  private read(): { entries: QueryLogEntry[]; unreadable: number } {
-    if (!existsSync(this.filePath)) return { entries: [], unreadable: 0 };
-    const raw = readFileSync(this.filePath, 'utf8');
-    const parsed = raw
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-      .map(parseEntry);
-    const entries = parsed.filter((e) => e !== null);
-    return { entries, unreadable: parsed.length - entries.length };
+  // Batches of complete lines, one read at a time, so a large log neither
+  // blocks the server nor sits in memory. A dangling symlink has no lines.
+  private async *readLines(): AsyncGenerator<string[]> {
+    const handle = await fs.open(this.filePath, 'r').catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null;
+      throw err;
+    });
+    if (!handle) return;
+    try {
+      const buffer = Buffer.alloc(READ_CHUNK_BYTES);
+      const decoder = new StringDecoder('utf8');
+      let partial: string[] = [];
+      for (;;) {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
+        if (bytesRead === 0) break;
+        const lines = decoder.write(buffer.subarray(0, bytesRead)).split('\n');
+        // Joined only once complete: re-splitting a long line on every read
+        // would take time quadratic in its length.
+        partial.push(lines[0]);
+        if (lines.length === 1) continue;
+        lines[0] = partial.join('');
+        partial = [lines.pop()!];
+        yield lines;
+      }
+      partial.push(decoder.end());
+      yield [partial.join('')];
+    } finally {
+      await handle.close();
+    }
   }
 
   private async pruneNow(retentionDays: number, now: Date): Promise<number> {
@@ -93,16 +130,34 @@ export class QueryLog {
     // lstat, not existsSync: a symlink to nothing is still there to replace.
     if (!lstatSync(this.filePath, { throwIfNoEntry: false })) return 0;
     const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
-    const { entries, unreadable } = this.read();
-    const kept = entries.filter((e) => new Date(e.timestamp).getTime() >= cutoff);
-    const body = kept.map((e) => JSON.stringify(e) + '\n').join('');
     // Rewritten via temp-file-then-rename for the same atomic-replace
     // guarantee as EnrichmentCache.persist() (Task 2's atomicWriteJson) —
     // not reused verbatim because this file is NDJSON, one entry per line,
     // not a single JSON document.
     const tmpPath = `${this.filePath}.tmp-${randomBytes(6).toString('hex')}`;
-    await fs.writeFile(tmpPath, body, { mode: 0o600 });
-    await fs.rename(tmpPath, this.filePath);
+    let unreadable = 0;
+    try {
+      const out = await fs.open(tmpPath, 'wx', 0o600);
+      try {
+        for await (const lines of this.readLines()) {
+          let kept = '';
+          for (const raw of lines) {
+            const line = raw.trim();
+            if (line.length === 0) continue;
+            const entry = parseEntry(line);
+            if (!entry) unreadable += 1;
+            else if (new Date(entry.timestamp).getTime() >= cutoff) kept += JSON.stringify(entry) + '\n';
+          }
+          if (kept) await out.appendFile(kept);
+        }
+      } finally {
+        await out.close();
+      }
+      await fs.rename(tmpPath, this.filePath);
+    } catch (err) {
+      await fs.rm(tmpPath, { force: true }).catch(() => {});
+      throw err;
+    }
     return unreadable;
   }
 

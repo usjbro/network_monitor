@@ -1,3 +1,9 @@
+# KAN-321 and KAN-320 query-log retention (2026-11-25)
+
+James approved gate `kan-321__query-log-retention` in chat (commit, push, PR; James merges). The query log is pruned when the server starts (`instrumentation.ts`) and six hours after each prune, in chunks; `append()` starts a new line after a cut-off one. KAN-316 merged as `214a2ef` (#355) and is Done.
+
+---
+
 # KAN-316 malformed query-log lines (2026-11-25)
 
 James approved gate `kan-316__query-log-malformed` in chat (commit, push, PR; James merges). `prune()` drops and counts only lines without a readable date (James narrowed this in chat from the gate's full schema check); dated lines stay until they expire, and `EnrichmentClient` logs the count, or a failed prune's code or name. KAN-286 is Done (#352, #353). KAN-315 step one merged as `e643f73` (#354); its check is still open.

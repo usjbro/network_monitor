@@ -69,6 +69,7 @@ export interface StreamGeoIpClient {
 export function getEnrichmentClient(): EnrichmentClient {
   if (!global.__enrichmentClient) {
     global.__enrichmentClient = new EnrichmentClient({ dataDir: join(process.cwd(), '.data', 'enrichment') });
+    void global.__enrichmentClient.startPruning();
   }
   return global.__enrichmentClient;
 }
