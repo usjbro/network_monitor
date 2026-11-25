@@ -94,13 +94,10 @@ export class QueryLog {
   }
 
   // Batches of complete lines, one read at a time, so a large log neither
-  // blocks the server nor sits in memory. A dangling symlink has no lines.
+  // blocks the server nor sits in memory. A symlink to nothing has no lines.
   private async *readLines(): AsyncGenerator<string[]> {
-    const handle = await fs.open(this.filePath, 'r').catch((err: NodeJS.ErrnoException) => {
-      if (err.code === 'ENOENT') return null;
-      throw err;
-    });
-    if (!handle) return;
+    if (!existsSync(this.filePath)) return;
+    const handle = await fs.open(this.filePath, 'r');
     try {
       const buffer = Buffer.alloc(READ_CHUNK_BYTES);
       const decoder = new StringDecoder('utf8');
@@ -150,6 +147,7 @@ export class QueryLog {
           }
           if (kept) await out.appendFile(kept);
         }
+        await out.sync();
       } finally {
         await out.close();
       }

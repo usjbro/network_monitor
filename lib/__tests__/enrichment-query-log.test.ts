@@ -319,6 +319,36 @@ describe('QueryLog', () => {
     }
   });
 
+  it('prune() replaces a symlink that points to itself', async () => {
+    if (process.platform === 'win32') return;
+    symlinkSync(filePath, filePath);
+    await new QueryLog(filePath).prune(30);
+    expect(lstatSync(filePath).isFile()).toBe(true);
+  });
+
+  it('prune() flushes the new log to disk before replacing the old one', async () => {
+    writeFileSync(filePath, row('recent.example'));
+    const order: string[] = [];
+    const { open, rename } = fs;
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => { await sync(); order.push('sync'); };
+      return handle;
+    });
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (...args) => {
+      order.push('rename');
+      await rename(...args);
+    });
+    try {
+      await new QueryLog(filePath).prune(30);
+    } finally {
+      openSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+    expect(order).toEqual(['sync', 'rename']);
+  });
+
   it('a failed prune() removes its temp file and keeps the log', async () => {
     const before = row('old.example', EXPIRED) + row('recent.example');
     writeFileSync(filePath, before);

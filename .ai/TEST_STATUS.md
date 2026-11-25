@@ -1,8 +1,8 @@
 # KAN-321 and KAN-320 query-log retention — verification (2026-11-25)
 
-- 22 deliberate breaks are caught. Full vitest 1,797, tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run locally (no Rust change).
+- 23 deliberate breaks are caught. Full vitest 1,799, tsc, lint, production build, docs sync and Playwright 7/7 pass (Playwright and the server runs below before the last review fixes). Rust not run locally (no Rust change).
 - In a throwaway copy, `next start` and `next dev` pruned a seeded log with no requests; `next build` left it alone.
-- Longest server stall for one prune (Mac, AC, median of 5): 422 ms before and 1.4 ms after at 500,000 entries; 80 and 1.4 ms at 100,000.
+- Longest server stall for one prune (Mac, AC, median of 5): 422 ms before and 1.9 ms after at 500,000 entries; 80 and 1.8 ms at 100,000. Later writes still wait for the prune (364 ms at 500,000).
 
 ---
 
