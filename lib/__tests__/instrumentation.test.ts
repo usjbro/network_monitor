@@ -25,9 +25,10 @@ describe('register', () => {
   });
 
   it('is ready without waiting for the prune', async () => {
-    startPruning().mockReturnValue(new Promise(() => {}));
+    const start = startPruning().mockReturnValue(new Promise(() => {}));
     vi.stubEnv('NEXT_RUNTIME', 'nodejs');
     await register();
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   it.each([
