@@ -1,3 +1,10 @@
+# KAN-315 IO graph timing — verification (2026-11-25)
+
+- Production Playwright, 10 runs each on this Mac: median compute about 3.4 ms before, 2.7 ms after; key update about 4.1 and 3.5 ms. Path and query results are pinned to the old code's output. Two deliberate breaks of the shared x coordinates are caught.
+- A deliberate 20 ms slowdown fails the check. Full Playwright, vitest, tsc, lint, build and docs sync: see the PR.
+
+---
+
 # KAN-286 query log writes — verification at fd9d466 (2026-11-24)
 
 - Deleting the data directory right after creating the client: ENOTEMPTY 465 of 3,000 before, 0 of 3,000 after.

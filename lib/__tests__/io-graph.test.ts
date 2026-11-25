@@ -15,6 +15,7 @@ import {
   rate,
   ticks,
 } from '../io-graph';
+import { MIXED_END, MIXED_T0, digest, mixedHistory } from './io-graph-fixture';
 import type { IoBucket, IoBuckets, IoSeriesStatus } from '../types';
 
 const T0 = 1_794_120_000_000; // a whole minute
@@ -441,5 +442,21 @@ describe('aggregates', () => {
   it('unknown and not-observed intervals have no aggregate value', () => {
     const h = aggHistory();
     expect(aggregateValue(query(h, 'win', 1000, T0 + 5000, T0 + 6000)[0], 'sum', 1000)).toBeNull();
+  });
+});
+
+describe('query results are pinned (KAN-315)', () => {
+  // Recorded from the code before query() was made faster.
+  it.each([
+    [100, '8052bf4424570410'],
+    [1000, '2402b2be31183bcb'],
+    [10000, '5d8c6ddc3a742828'],
+    [60000, '8d0df2ed1db5816b'],
+  ] as const)('%i ms points match the recorded ones', (interval, expected) => {
+    const h = mixedHistory();
+    const windows = [[MIXED_T0 - 5000, MIXED_T0 + 60_000], [MIXED_END - 183_050, MIXED_END + 3000], [MIXED_T0, MIXED_END]];
+    const points = windows.flatMap(([from, to]) => h.ids.map((id) => query(h, id, interval, from, to)));
+    if (interval <= 1000) expect(new Set(points.flat().map((p) => p.state))).toEqual(new Set(['value', 'unknown', 'notObserved']));
+    expect(digest(points)).toBe(expected);
   });
 });

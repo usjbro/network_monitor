@@ -7,6 +7,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { IoGraphView, formatSi, type SetIoSeriesMessage } from '@/components/IoGraphView';
 import { THEMES } from '@/lib/osi-engine';
 import { createHistory, ingestBuckets, ingestStatus } from '@/lib/io-graph';
+import { digest, mixedHistory, mixedStatus } from '@/lib/__tests__/io-graph-fixture';
 import type { IoSeriesStatus } from '@/lib/types';
 
 afterEach(cleanup);
@@ -477,5 +478,22 @@ describe('IoGraphView: numeric-field aggregates (JAM-18 Task 5)', () => {
     // pkt/s, tcp.window_size, bit/s: the third is refused.
     expect(screen.getByTestId('io-unit-refused-dns')).toHaveTextContent('Not drawn: at most two y-axes (pkt/s, tcp.window_size)');
     expect(screen.getByTestId('io-path-dns').getAttribute('d')).toBe('');
+  });
+});
+
+describe('IoGraphView: drawn paths are pinned (KAN-315)', () => {
+  // Recorded from the code before the paths shared their x coordinates.
+  it('every series path, with gaps and two axes, matches the recorded one', () => {
+    view({ history: mixedHistory(), status: mixedStatus });
+    const graph = screen.getByTestId('io-graph');
+    for (let i = 0; i < 5; i++) fireEvent.keyDown(graph, { key: '-' });
+    fireEvent.keyDown(graph, { key: 'ArrowLeft' });
+    fireEvent.change(screen.getByTestId('io-interval'), { target: { value: '100' } });
+    const paths = ['all', 'dns', 'win'].map((id) => screen.getByTestId(`io-path-${id}`).getAttribute('d') ?? '');
+    for (const d of paths) {
+      expect(d.split('M').length).toBeGreaterThan(5);
+      expect(d.split('L').length).toBeGreaterThan(200);
+    }
+    expect(digest(paths)).toBe('30515a0ac734b405');
   });
 });
