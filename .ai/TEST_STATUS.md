@@ -1,4 +1,11 @@
-# KAN-286 query log writes — verification at fd9d466 (2026-11-24)
+# KAN-286 query log follow-up — verification (2026-11-25)
+
+- At a0f71e1: 20 of 20 consecutive full vitest runs (1,756 tests each, AC power, sleep prevented), no ENOTEMPTY; 0 of 3,000 in the folder-deletion check; build and docs sync pass. Later commits change tests, comments and notes only.
+- An earlier version (0a95b6e) passed 19 of 20; the last run hit timeouts when the Mac woke from deep idle (likely cause, not proved).
+
+---
+
+# KAN-286 query log writes — verification of #352 at fd9d466 (2026-11-24)
 
 - Deleting the data directory right after creating the client: ENOTEMPTY 465 of 3,000 before, 0 of 3,000 after.
 - Five of the eight new tests fail on the old code; eight of eight deliberate breaks of the fix are caught.

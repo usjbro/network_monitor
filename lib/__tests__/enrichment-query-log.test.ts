@@ -94,12 +94,15 @@ describe('QueryLog', () => {
   it('prune() replaces a symlink and leaves its target alone', async () => {
     if (process.platform === 'win32') return;
     const target = join(dir, 'elsewhere');
-    writeFileSync(target, row('recent.example'));
+    const before = row('recent.example');
+    writeFileSync(target, before);
     chmodSync(target, 0o644);
     symlinkSync(target, filePath);
     await new QueryLog(filePath).prune(30);
     expect(lstatSync(filePath).isFile()).toBe(true);
     expect(statSync(target).mode & 0o777).toBe(0o644);
+    expect(readFileSync(target, 'utf8')).toBe(before);
+    expect(readFileSync(filePath, 'utf8')).toBe(before);
   });
 
   it('prune() replaces a symlink whose target does not exist', async () => {
@@ -112,21 +115,30 @@ describe('QueryLog', () => {
 
   it('prune() detaches a hard-linked log', async () => {
     const other = join(dir, 'other');
-    writeFileSync(filePath, row('recent.example'), { mode: 0o600 });
+    const before = row('recent.example');
+    writeFileSync(filePath, before, { mode: 0o600 });
     linkSync(filePath, other);
     await new QueryLog(filePath).prune(30);
     expect(statSync(other).nlink).toBe(1);
+    expect(readFileSync(other, 'utf8')).toBe(before);
+    expect(readFileSync(filePath, 'utf8')).toBe(before);
   });
 
   it('stamps an entry when append() is called, not when its write runs', async () => {
     writeFileSync(filePath, row('old.example', EXPIRED));
     const log = new QueryLog(filePath);
-    let called = 0;
-    await duringPrune(log, () => {
-      called = Date.now();
-      return log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'miss' });
-    });
-    expect(Date.parse(log.readAll()[0].timestamp) - called).toBeLessThan(20);
+    const called = new Date('2030-01-01T00:00:00.000Z');
+    try {
+      await duringPrune(log, () => {
+        vi.useFakeTimers({ toFake: ['Date'], now: called });
+        const write = log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'miss' });
+        vi.setSystemTime('2030-01-01T01:00:00.000Z');
+        return write;
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(log.readAll().map((e) => e.timestamp)).toEqual([called.toISOString()]);
   });
 
   // Holds prune() just before it replaces the file, so `during` runs at the

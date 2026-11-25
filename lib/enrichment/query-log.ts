@@ -65,7 +65,7 @@ export class QueryLog {
   }
 
   private async pruneNow(retentionDays: number, now: Date): Promise<void> {
-    // No log, nothing to write. An existing log is always rewritten, which
+    // No log, nothing to write. A readable log is always rewritten, which
     // also restores its newline, 0600 and ownership and detaches links.
     // lstat, not existsSync: a symlink to nothing is still there to replace.
     if (!lstatSync(this.filePath, { throwIfNoEntry: false })) return;

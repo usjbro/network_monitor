@@ -47,7 +47,7 @@ describe('EnrichmentClient', () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'enrichment-client-')); });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('writes nothing to a fresh data directory until something is looked up', async () => {
+  it('startup pruning writes nothing to a fresh data directory', async () => {
     const prune = vi.spyOn(QueryLog.prototype, 'prune');
     try {
       new EnrichmentClient({ dataDir: dir });
