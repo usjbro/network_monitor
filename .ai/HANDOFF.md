@@ -7,7 +7,7 @@
 
 # KAN-286 query log writes (2026-11-24)
 
-- Worktree `.worktrees/query-log-writes`, branch `KAN-286-query-log-writes`. Independent code and security review: no Critical or Important findings.
+- Worktree `.worktrees/query-log-writes`, branch `KAN-286-query-log-repairs` (follow-up to #352, merged as `b2e81a7`). Independent code and security review: no Critical or Important findings.
 - Serialization is per `QueryLog` instance; two processes sharing a data directory can still overlap.
 
 ---

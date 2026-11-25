@@ -4,6 +4,7 @@ import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentClient } from '../enrichment';
+import { QueryLog } from '../enrichment/query-log';
 import { shuffle } from '../enrichment/request-queue';
 
 // Fixture shaped like IANA's real ipv4.json (RFC 7484 bootstrap format),
@@ -46,9 +47,14 @@ describe('EnrichmentClient', () => {
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'enrichment-client-')); });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it('writes nothing to a fresh data directory until something is looked up', async () => {
-    new EnrichmentClient({ dataDir: dir });
-    await new Promise((r) => setTimeout(r, 50));
+  it('startup pruning writes nothing to a fresh data directory', async () => {
+    const prune = vi.spyOn(QueryLog.prototype, 'prune');
+    try {
+      new EnrichmentClient({ dataDir: dir });
+      await prune.mock.results[0].value;
+    } finally {
+      prune.mockRestore();
+    }
     expect(readdirSync(dir)).toEqual([]);
   });
 

@@ -6,7 +6,7 @@ James approved gate `kan-315__io-graph-timing` in chat (commit, push, PR; James 
 
 # KAN-286 query log writes (2026-11-24)
 
-James approved gate `kan-286__query-log-writes` in chat (commit, push, PR; James merges). `QueryLog` append, prune and clear run one at a time, and prune writes nothing when there is nothing to remove. Follow-ups filed: KAN-315 (io-graph timing test), KAN-316 (malformed log line), KAN-317 (`enrich clear` leftovers), KAN-318 (unhandled append failure). KAN-309 merged as `481519a` (#351) and is Done.
+James approved gate `kan-286__query-log-writes` in chat (commit, push, PR; James merges). `QueryLog` append, prune and clear run one at a time, and prune writes nothing when there is no log (an existing log is always rewritten: James chose this in chat over the skip #352 merged). Follow-ups filed: KAN-315 (io-graph timing test), KAN-316 (malformed log line), KAN-317 (`enrich clear` leftovers), KAN-318 (unhandled append failure). KAN-309 merged as `481519a` (#351) and is Done.
 
 ---
 
