@@ -1,6 +1,6 @@
 // lib/__tests__/enrichment-query-log.test.ts
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fs, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { promises as fs, chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QueryLog } from '../enrichment/query-log';
@@ -75,20 +75,70 @@ describe('QueryLog', () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
-  it('prune() does not rewrite a log with nothing to remove', async () => {
-    writeFileSync(filePath, row('recent.example'), { mode: 0o600 });
-    const before = statSync(filePath).ino;
-    await new QueryLog(filePath).prune(30);
-    expect(statSync(filePath).ino).toBe(before);
-    expect(readFileSync(filePath, 'utf8')).toContain('recent.example');
-  });
-
-  it('prune() restores 0600 on a log it does not rewrite', async () => {
+  it('prune() restores 0600 even when nothing has expired', async () => {
     if (process.platform === 'win32') return;
     writeFileSync(filePath, row('recent.example'));
     chmodSync(filePath, 0o644);
     await new QueryLog(filePath).prune(30);
     expect(statSync(filePath).mode & 0o777).toBe(0o600);
+  });
+
+  it('prune() restores a missing final newline, so the next append stays readable', async () => {
+    writeFileSync(filePath, row('recent.example').trimEnd(), { mode: 0o600 });
+    const log = new QueryLog(filePath);
+    await log.prune(30);
+    await log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'miss' });
+    expect(log.readAll().map((e) => e.target)).toEqual(['recent.example', 'new.example']);
+  });
+
+  it('prune() replaces a symlink and leaves its target alone', async () => {
+    if (process.platform === 'win32') return;
+    const target = join(dir, 'elsewhere');
+    const before = row('recent.example');
+    writeFileSync(target, before);
+    chmodSync(target, 0o644);
+    symlinkSync(target, filePath);
+    await new QueryLog(filePath).prune(30);
+    expect(lstatSync(filePath).isFile()).toBe(true);
+    expect(statSync(target).mode & 0o777).toBe(0o644);
+    expect(readFileSync(target, 'utf8')).toBe(before);
+    expect(readFileSync(filePath, 'utf8')).toBe(before);
+  });
+
+  it('prune() replaces a symlink whose target does not exist', async () => {
+    if (process.platform === 'win32') return;
+    symlinkSync(join(dir, 'missing'), filePath);
+    await new QueryLog(filePath).prune(30);
+    expect(lstatSync(filePath).isFile()).toBe(true);
+    expect(readdirSync(dir)).toEqual(['query-log.ndjson']);
+  });
+
+  it('prune() detaches a hard-linked log', async () => {
+    const other = join(dir, 'other');
+    const before = row('recent.example');
+    writeFileSync(filePath, before, { mode: 0o600 });
+    linkSync(filePath, other);
+    await new QueryLog(filePath).prune(30);
+    expect(statSync(other).nlink).toBe(1);
+    expect(readFileSync(other, 'utf8')).toBe(before);
+    expect(readFileSync(filePath, 'utf8')).toBe(before);
+  });
+
+  it('stamps an entry when append() is called, not when its write runs', async () => {
+    writeFileSync(filePath, row('old.example', EXPIRED));
+    const log = new QueryLog(filePath);
+    const called = new Date('2030-01-01T00:00:00.000Z');
+    try {
+      await duringPrune(log, () => {
+        vi.useFakeTimers({ toFake: ['Date'], now: called });
+        const write = log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'miss' });
+        vi.setSystemTime('2030-01-01T01:00:00.000Z');
+        return write;
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(log.readAll().map((e) => e.timestamp)).toEqual([called.toISOString()]);
   });
 
   // Holds prune() just before it replaces the file, so `during` runs at the
