@@ -1,3 +1,10 @@
+# KAN-309 vite upgrade (2026-11-24)
+
+- Worktree `.worktrees/vite-upgrade`, branch `KAN-309-vite-upgrade`; `package-lock.json` and `.ai` only. Existing checkouts need `npm ci` to pick it up.
+- KAN-131 merged as `8384bfd` (#350); its entry below predates the merge.
+
+---
+
 # KAN-131 implementation (2026-11-24)
 
 - Branch `KAN-131-rollup-bounds` in `.worktrees/rollup-bounds`; PR #350 is open (its head moves); James merges. Seven tasks done, reviewed, security review clean; final review fixes were docs and comments only; PR review fixes then changed code and etherparse (0.20.4).

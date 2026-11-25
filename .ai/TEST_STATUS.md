@@ -1,3 +1,10 @@
+# KAN-309 vite upgrade — verification (2026-11-24)
+
+- Marker check from the lockfile installs: module IDs unescaped with vite 8.3.5 + rolldown 1.2.16, escaped with 8.3.8 + 1.2.19 (both virtual modules; plugin container only, no listening server).
+- Vitest 1,744 passed, twice; tsc, lint, production build, npm audit check and docs sync pass. Playwright 7/7 (next dev). Rust not run locally (no Rust change).
+
+---
+
 # KAN-131 bounded rollups — verification at 22fb958 (2026-11-24)
 
 - Rust: 994 passed, 19 ignored, both ignored replays run, clippy `-D warnings` clean. Web: 1,728 tests, tsc, lint pass. Docs sync passes. Playwright 7/7.
