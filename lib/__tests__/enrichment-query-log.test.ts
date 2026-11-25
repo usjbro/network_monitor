@@ -228,10 +228,11 @@ describe('QueryLog', () => {
     ['an extra field', { extra: 'kept' }],
     ['a numeric timestamp', { timestamp: Date.now() }],
   ])('prune() keeps a dated line with %s until it expires', async (_name, over) => {
-    writeFileSync(filePath, entry(over));
+    const before = entry(over);
+    writeFileSync(filePath, before);
     const log = new QueryLog(filePath);
     expect(await log.prune(30)).toBe(0);
-    expect(readFileSync(filePath, 'utf8')).toBe(entry({ timestamp: JSON.parse(readFileSync(filePath, 'utf8')).timestamp, ...over }));
+    expect(readFileSync(filePath, 'utf8')).toBe(before);
     expect(await log.prune(30, new Date(Date.now() + 31 * 24 * 60 * 60 * 1000))).toBe(0);
     expect(readFileSync(filePath, 'utf8')).toBe('');
   });

@@ -1,7 +1,7 @@
 # KAN-316 malformed query-log lines (2026-11-25)
 
 - Worktree `.worktrees/query-log-malformed`, branch `KAN-316-query-log-malformed`.
-- Not covered: prune runs only at start, so a server that keeps running keeps entries past 30 days; far-future timestamps are kept; KAN-317, KAN-318, KAN-319.
+- Not covered: prune runs once per server process, at the first request that uses enrichment, so a server that keeps running keeps entries past 30 days; far-future timestamps are kept; KAN-317, KAN-318, KAN-319.
 
 ---
 
