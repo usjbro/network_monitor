@@ -494,6 +494,10 @@ describe('IoGraphView: drawn paths are pinned (KAN-315)', () => {
       expect(d.split('M').length).toBeGreaterThan(5);
       expect(d.split('L').length).toBeGreaterThan(200);
     }
-    expect(digest(paths)).toBe('30515a0ac734b405');
+    expect(paths.map((d) => `${d.slice(0, 24)} ${d.length} ${digest(d)}`)).toEqual([
+      'M63.8,232.0L64.3,83.8L64 19219 72ef86b8f32b44c6',
+      'M63.8,110.8L64.3,232.0L6 19257 e3c3dfbda0b606ac',
+      'M64.3,42.5l0,0M65.3,21.5 10434 468ae72f2124704f',
+    ]);
   });
 });

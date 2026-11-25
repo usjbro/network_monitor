@@ -1,11 +1,11 @@
-// A seeded IO graph history covering every point state (KAN-315): gaps,
-// not-observed time, late frames, loss, aggregates and a wrapped ring.
+// A seeded IO graph history with gaps, not-observed time, late frames, loss
+// and aggregates (KAN-315).
 import { createHash } from 'node:crypto';
 import { createHistory, ingestBuckets, ingestStatus, type IoHistory } from '../io-graph';
 import type { IoBucket, IoSeriesStatus } from '../types';
 
-export const MIXED_T0 = 1_794_120_000_000;
-export const MIXED_END = MIXED_T0 + 1_000_000;
+const MIXED_T0 = 1_794_120_000_000;
+const MIXED_END = MIXED_T0 + 1_000_000;
 
 export const mixedStatus: IoSeriesStatus = {
   revision: 3,
@@ -21,8 +21,8 @@ export const mixedStatus: IoSeriesStatus = {
 export function mixedHistory(): IoHistory {
   let seed = 315;
   const rnd = (n: number) => {
-    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
-    return Math.floor((seed / 2_147_483_648) * n);
+    seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
+    return Math.floor((seed / 2 ** 32) * n);
   };
   const h = createHistory();
   ingestStatus(h, mixedStatus);
@@ -49,8 +49,6 @@ export function mixedHistory(): IoHistory {
   return h;
 }
 
-/** A digest that keeps undefined and non-finite values distinct. */
-export function digest(value: unknown): string {
-  const text = JSON.stringify(value, (_k, v) => (v === undefined || (typeof v === 'number' && !Number.isFinite(v)) ? `<${String(v)}>` : v));
+export function digest(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }

@@ -66,26 +66,23 @@ test('IO graph renders 8 series of ~1800 points and stays within a frame per upd
   const median = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
   const fmt = (xs: number[]) => xs.map((t) => t.toFixed(1)).join(', ');
 
-  // A fixed workload of the same kind as the chart's (objects, then number
-  // formatting and string building), independent of the app's code. Logged
-  // before and after the timings, so a slow runner can be told from a slow
-  // chart (KAN-315). Not asserted on.
-  const reference = () => page.evaluate(() => {
-    const runs: number[] = [];
-    let sink = 0;
-    for (let r = 0; r < 9; r++) {
+  // A fixed CPU workload (objects, number formatting, strings), independent
+  // of the app's code, run once after each timed update and logged beside it
+  // so a slow runner can be told from a slow chart (KAN-315). A rough guide,
+  // not asserted on: it has no React or DOM work.
+  await page.evaluate(() => {
+    (window as unknown as { __reference: () => number }).__reference = () => {
       const t0 = performance.now();
-      for (let s = 0; s < 8; s++) {
+      let sink = 0;
+      for (let s = 0; s < 4; s++) {
         const points = Array.from({ length: 1830 }, (_, k) => ({ startMs: k * 100, packets: 1 + ((k + s * 7) % 13) }));
         let d = '';
         for (const p of points) d += `L${(64 + p.startMs / 209.8).toFixed(1)},${(232 - (p.packets / 13) * 220).toFixed(1)}`;
         sink += d.charCodeAt(d.length - 1);
       }
-      runs.push(performance.now() - t0);
-    }
-    return sink > 0 ? runs : [];
+      return sink > 0 ? performance.now() - t0 : NaN;
+    };
   });
-  const referenceBefore = await reference();
 
   // 1. Interaction: from the keyboard event until React has committed the
   // new path to the DOM (a MutationObserver on a series path). Excludes paint.
@@ -94,6 +91,7 @@ test('IO graph renders 8 series of ~1800 points and stays within a frame per upd
     const path = document.querySelector('[data-testid="io-path-s1"]') as SVGPathElement;
     const update: number[] = [];
     const compute: number[] = [];
+    const reference: number[] = [];
     for (let i = 0; i < 9; i++) {
       performance.clearMeasures('io-graph-compute');
       const committed = new Promise<number>((resolve) => {
@@ -105,9 +103,10 @@ test('IO graph renders 8 series of ~1800 points and stays within a frame per upd
       update.push((await committed) - t0);
       const m = performance.getEntriesByName('io-graph-compute');
       compute.push(m.length ? m[m.length - 1].duration : NaN);
+      reference.push((window as unknown as { __reference: () => number }).__reference());
       await new Promise((r) => requestAnimationFrame(() => r(null)));
     }
-    return { update, compute };
+    return { update, compute, reference };
   });
 
   // 2. Live data: one second of 100 ms buckets for all 8 series arrives
@@ -115,7 +114,7 @@ test('IO graph renders 8 series of ~1800 points and stays within a frame per upd
   // handler) + the chart's recompute for the render it schedules.
   await page.keyboard.press('End');
   await expect(page.getByTestId('io-follow')).toHaveText(/live/);
-  const live: { ingest: number; compute: number }[] = [];
+  const live: { ingest: number; compute: number; reference: number }[] = [];
   for (let k = 0; k < 9; k++) {
     await page.evaluate(() => {
       performance.clearMeasures('io-graph-ingest');
@@ -142,18 +141,20 @@ test('IO graph renders 8 series of ~1800 points and stays within a frame per upd
         const m = performance.getEntriesByName(name);
         return m.length ? m[m.length - 1].duration : NaN;
       };
-      return { ingest: last('io-graph-ingest'), compute: last('io-graph-compute') };
+      const ingest = last('io-graph-ingest');
+      const compute = last('io-graph-compute');
+      return { ingest, compute, reference: (window as unknown as { __reference: () => number }).__reference() };
     }));
   }
   const liveTotal = live.map((l) => l.ingest + l.compute);
-  const referenceAfter = await reference();
 
   console.log(`JAM-18 IO graph (${production ? 'production' : 'next dev'}), 8 series x ~1830 points, median of 9:`
     + ` key update ${median(keys.update).toFixed(1)} ms (worst ${Math.max(...keys.update).toFixed(1)}),`
     + ` compute ${median(keys.compute).toFixed(1)} ms,`
     + ` live ingest+compute ${median(liveTotal).toFixed(1)} ms (worst ${Math.max(...liveTotal).toFixed(1)}; ingest ${median(live.map((l) => l.ingest)).toFixed(2)} ms)`
-    + ` | reference ${median(referenceBefore).toFixed(1)} ms before, ${median(referenceAfter).toFixed(1)} ms after`
-    + ` | updates: ${fmt(keys.update)} | live: ${fmt(liveTotal)}`);
+    + ` | reference ${median(keys.reference).toFixed(1)} ms with keys, ${median(live.map((l) => l.reference)).toFixed(1)} ms with live`
+    + ` | updates: ${fmt(keys.update)} | live: ${fmt(liveTotal)}`
+    + ` | key references: ${fmt(keys.reference)} | live references: ${fmt(live.map((l) => l.reference))}`);
   expect(keys.compute.every((c) => Number.isFinite(c))).toBe(true);
   expect(liveTotal.every((c) => Number.isFinite(c))).toBe(true);
   expect(median(keys.update)).toBeLessThan(budget);

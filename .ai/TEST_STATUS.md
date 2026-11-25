@@ -1,7 +1,8 @@
 # KAN-315 IO graph timing — verification (2026-11-25)
 
-- Production Playwright, 10 runs each on this Mac: median compute about 3.4 ms before, 2.7 ms after; key update about 4.1 and 3.5 ms. Path and query results are pinned to the old code's output. Two deliberate breaks of the shared x coordinates are caught.
-- A deliberate 20 ms slowdown fails the check. Full Playwright, vitest, tsc, lint, build and docs sync: see the PR.
+- Production Playwright, 10 runs each way on this Mac, same spec: median compute 3.05 ms before, 2.5 ms after; key update 3.75 and 3.2 ms. Drawn paths are pinned to the old code's output; three deliberate breaks are caught.
+- The interleaved reference itself changes the timings slightly (compute before the change was 3.35 ms without it), so later CI logs are not directly comparable with earlier ones.
+- A deliberate 20 ms slowdown fails the check. Full Playwright (7), vitest, tsc, lint, build and docs sync pass.
 
 ---
 

@@ -269,8 +269,8 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
     });
     const x = (ms: number) => M.left + ((ms - windowStart) / span) * PLOT_W;
     // Every series is queried over the same window, so point k has the same
-    // x in each: format it once (KAN-315).
-    const xs = (perSeries[0]?.points ?? []).map((p) => x(p.startMs + interval / 2).toFixed(1));
+    // x in each: format it once, when first drawn (KAN-315).
+    const xs: string[] = [];
     const paths = perSeries.map((s, si) => {
       const axis = axisOf(s.id);
       if (axis >= MAX_AXES) return { id: s.id, d: '' }; // a third unit: refused
@@ -287,7 +287,8 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
           continue;
         }
         const py = (M.top + PLOT_H - (v / top) * PLOT_H).toFixed(1);
-        d += `${run > 0 ? 'L' : 'M'}${xs[k]},${py}`;
+        const px = (xs[k] ??= x(s.points[k].startMs + interval / 2).toFixed(1));
+        d += `${run > 0 ? 'L' : 'M'}${px},${py}`;
         run++;
       }
       if (run === 1) d += 'l0,0';
