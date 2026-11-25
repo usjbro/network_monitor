@@ -1,9 +1,13 @@
 use crate::dns_names::{ObservedDnsNames, DEFAULT_MAX_OBSERVED_DNS_NAMES};
 use crate::l7::{DnsAnswer, L7Info};
 use crate::parse::{ParsedPacket, TransportProtocol};
+use crate::rollup::{
+    Bounds, RollupTable, DEFAULT_MAX_CONVERSATIONS, DEFAULT_MAX_ENDPOINTS, DEFAULT_ROLLUP_TOP_N,
+};
 use crate::tcp_samples::{flag, label_for, RingHandle, RingView, SegmentObservation, TcpSampleStore};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct FlowKey {
@@ -71,6 +75,11 @@ struct FlowState {
     /// KAN-129: this flow's claim on a TCP sample ring. `None` until its
     /// first TCP segment; stale once a more recent flow took the ring.
     tcp_ring: Option<RingHandle>,
+    /// The id of the endpoint-table entry this flow last counted itself in;
+    /// 0 means not counted yet. A recreated flow starts at 0 and counts again.
+    endpoint_entry_id: u64,
+    /// The same for the conversation table.
+    conversation_entry_id: u64,
 }
 
 impl Default for FlowState {
@@ -100,6 +109,8 @@ impl Default for FlowState {
             // construction time — never actually read as empty.
             connection_id: String::new(),
             tcp_ring: None,
+            endpoint_entry_id: 0,
+            conversation_entry_id: 0,
         }
     }
 }
@@ -187,12 +198,13 @@ pub struct FlowTable {
     /// `reset()` either, matching `total_flows_observed`'s cumulative-
     /// since-capture-start contract.
     protocol_tree: ProtocolNode,
-    /// JAM-14: per-remote-host traffic rollup, keyed by `FlowKey::remote_addr`
-    /// — see `RollupState`/`EndpointSnapshot`.
-    endpoint_rollups: HashMap<String, RollupState>,
-    /// JAM-14: per-(local,remote)-pair traffic rollup — see
-    /// `RollupState`/`ConversationSnapshot`.
-    conversation_rollups: HashMap<(String, String), RollupState>,
+    /// JAM-14: per-remote-host traffic rollup, keyed by the parsed
+    /// `FlowKey::remote_addr` — bounded and evicting least recently seen
+    /// first (KAN-131); see `RollupTable`/`EndpointSnapshot`.
+    endpoint_rollups: RollupTable<IpAddr>,
+    /// JAM-14: per-(local,remote)-pair traffic rollup — bounded like
+    /// `endpoint_rollups`; see `RollupTable`/`ConversationSnapshot`.
+    conversation_rollups: RollupTable<(IpAddr, IpAddr)>,
     last_endpoint_snapshot_ms: u64,
     last_conversation_snapshot_ms: u64,
     /// JAM-21: names seen in answered DNS responses. Lives here because the
@@ -268,60 +280,25 @@ impl ProtocolNode {
     }
 }
 
-/// Cumulative traffic totals for one remote host (Endpoint, JAM-14) or one
-/// local<->remote pair (Conversation, JAM-14). Updated on every `observe()`
-/// call and never removed by `evict_stale`/`reset` — same permanence
-/// contract as `ProtocolNode` above, so a host's or pair's total footprint
-/// survives every one of its individual flows closing or being evicted.
-/// `_this_tick` counters are drained by `endpoint_snapshot`/
-/// `conversation_snapshot` exactly like `FlowState`'s own tick counters are
-/// drained by `snapshot()`.
-#[derive(Debug, Clone, Default)]
-struct RollupState {
-    rx_bytes_total: u64,
-    tx_bytes_total: u64,
-    rx_packets_total: u64,
-    tx_packets_total: u64,
-    rx_bytes_this_tick: u64,
-    tx_bytes_this_tick: u64,
-    /// Count of distinct flows that have ever contributed to this host/pair
-    /// — incremented once per new flow (see `observe`'s own `is_new`), never
-    /// once per packet.
-    flow_count: u64,
-    /// `None` until the first packet is recorded. Deliberately not a plain
-    /// `u64` defaulting to 0: the very first packet can legitimately arrive
-    /// at `now_ms == 0` (e.g. in tests), and a "0 means unset" sentinel
-    /// would then keep resetting this on every later packet too.
-    first_seen_ms: Option<u64>,
-    last_seen_ms: u64,
-    /// The most recently observed non-empty JA3 label across every flow
-    /// contributing to this host/pair — a host with many short-lived TLS
-    /// flows should show its current fingerprint, not whichever flow
-    /// happened to be first (contrast `FlowState.ja3_label`'s own
-    /// first-ClientHello-wins rule, which is scoped to a single flow).
-    ja3_label: Option<&'static str>,
+/// Sizes of the two rollup tables and of each snapshot (KAN-131).
+#[derive(Debug, Clone, Copy)]
+pub struct RollupConfig {
+    pub max_endpoints: usize,
+    pub max_conversations: usize,
+    pub top_n: usize,
 }
 
-impl RollupState {
-    fn record(&mut self, is_outbound: bool, bytes: u64, now_ms: u64, is_new_flow: bool) {
-        if is_outbound {
-            self.tx_bytes_total += bytes;
-            self.tx_bytes_this_tick += bytes;
-            self.tx_packets_total += 1;
-        } else {
-            self.rx_bytes_total += bytes;
-            self.rx_bytes_this_tick += bytes;
-            self.rx_packets_total += 1;
-        }
-        self.first_seen_ms.get_or_insert(now_ms);
-        self.last_seen_ms = now_ms;
-        if is_new_flow {
-            self.flow_count += 1;
+impl Default for RollupConfig {
+    fn default() -> Self {
+        RollupConfig {
+            max_endpoints: DEFAULT_MAX_ENDPOINTS,
+            max_conversations: DEFAULT_MAX_CONVERSATIONS,
+            top_n: DEFAULT_ROLLUP_TOP_N,
         }
     }
 }
 
-/// One remote host's cumulative traffic rollup (JAM-14) — see `RollupState`.
+/// One remote host's cumulative traffic rollup (JAM-14) — see `RollupTable`.
 pub struct EndpointSnapshot {
     pub host: String,
     pub rx_bytes_total: u64,
@@ -334,13 +311,16 @@ pub struct EndpointSnapshot {
     pub first_seen_ms: u64,
     pub last_seen_ms: u64,
     pub ja3_label: Option<&'static str>,
+    /// False once an eviction happened before this entry was inserted; the
+    /// insertion's own eviction does not count.
+    pub history_complete: bool,
     /// JAM-21: the name an answered DNS response gave this address, when one
     /// is still live. Not a reverse lookup.
     pub observed_name: Option<String>,
 }
 
 /// One (local, remote) pair's cumulative traffic rollup (JAM-14) — see
-/// `RollupState`. Distinct from `EndpointSnapshot` in that it does not
+/// `RollupTable`. Distinct from `EndpointSnapshot` in that it does not
 /// collapse across multiple local addresses: two local hosts talking to the
 /// same remote host are two separate conversations but one combined
 /// endpoint.
@@ -358,6 +338,9 @@ pub struct ConversationSnapshot {
     pub last_seen_ms: u64,
     pub duration_ms: u64,
     pub ja3_label: Option<&'static str>,
+    /// False once an eviction happened before this entry was inserted; the
+    /// insertion's own eviction does not count.
+    pub history_complete: bool,
 }
 
 fn well_known_protocol(port: u16) -> Option<&'static str> {
@@ -464,8 +447,11 @@ impl FlowTable {
             capacity_evictions: 0,
             idle_evictions: 0,
             protocol_tree: ProtocolNode::default(),
-            endpoint_rollups: HashMap::new(),
-            conversation_rollups: HashMap::new(),
+            endpoint_rollups: RollupTable::new(DEFAULT_MAX_ENDPOINTS, DEFAULT_ROLLUP_TOP_N),
+            conversation_rollups: RollupTable::new(
+                DEFAULT_MAX_CONVERSATIONS,
+                DEFAULT_ROLLUP_TOP_N,
+            ),
             last_endpoint_snapshot_ms: 0,
             last_conversation_snapshot_ms: 0,
             observed_names: ObservedDnsNames::new(DEFAULT_MAX_OBSERVED_DNS_NAMES),
@@ -511,6 +497,14 @@ impl FlowTable {
     /// (`MAX_OBSERVED_DNS_NAMES`, resolved at startup).
     pub fn with_observed_name_capacity(mut self, capacity: usize) -> Self {
         self.observed_names = ObservedDnsNames::new(capacity);
+        self
+    }
+
+    /// Replaces the rollup tables with ones sized by `config` (`MAX_ENDPOINTS`,
+    /// `MAX_CONVERSATIONS`, `ROLLUP_TOP_N`, resolved at startup).
+    pub fn with_rollup_config(mut self, config: RollupConfig) -> Self {
+        self.endpoint_rollups = RollupTable::new(config.max_endpoints, config.top_n);
+        self.conversation_rollups = RollupTable::new(config.max_conversations, config.top_n);
         self
     }
 
@@ -758,23 +752,16 @@ impl FlowTable {
         };
         let closed_key = closed_connection_id.as_ref().map(|_| key.clone());
         let remote_port = key.remote_port;
-        // Saved before `key` is consumed by `self.flows.entry(key)` below —
+        // Parsed before `key` is consumed by `self.flows.entry(key)` below —
         // JAM-14's endpoint/conversation rollups are keyed independently of
-        // the flow table itself.
-        let local_addr = key.local_addr.clone();
-        let remote_addr = key.remote_addr.clone();
+        // the flow table itself. An address that does not parse is counted
+        // by the table and recorded in no row.
+        let local_ip = key.local_addr.parse::<IpAddr>().ok();
+        let remote_ip = key.remote_addr.parse::<IpAddr>().ok();
         let is_new = matches!(self.flows.entry(key.clone()), Entry::Vacant(_));
         if is_new {
             self.total_flows_observed += 1;
         }
-        self.endpoint_rollups
-            .entry(remote_addr.clone())
-            .or_default()
-            .record(is_outbound, packet.total_len as u64, now_ms, is_new);
-        self.conversation_rollups
-            .entry((local_addr.clone(), remote_addr.clone()))
-            .or_default()
-            .record(is_outbound, packet.total_len as u64, now_ms, is_new);
         // `or_insert_with_key` (not `or_default`) so `connection_id` — a
         // pure function of a key that never changes for this flow's
         // lifetime — is computed once, only for a genuinely new flow, not
@@ -784,6 +771,35 @@ impl FlowTable {
             ..Default::default()
         });
         state.last_seen_ms = now_ms;
+
+        // Each table counts this flow once per entry id; the ids live in the
+        // flow, so a returning key after eviction counts only live flows.
+        let bytes = packet.total_len as u64;
+        match remote_ip {
+            Some(remote) => {
+                state.endpoint_entry_id = self.endpoint_rollups.record(
+                    remote,
+                    is_outbound,
+                    bytes,
+                    now_ms,
+                    state.endpoint_entry_id,
+                );
+            }
+            None => self.endpoint_rollups.record_unkeyed(now_ms),
+        }
+        let conversation_key = local_ip.zip(remote_ip);
+        match conversation_key {
+            Some(pair) => {
+                state.conversation_entry_id = self.conversation_rollups.record(
+                    pair,
+                    is_outbound,
+                    bytes,
+                    now_ms,
+                    state.conversation_entry_id,
+                );
+            }
+            None => self.conversation_rollups.record_unkeyed(now_ms),
+        }
 
         if packet.tcp_flags.is_some_and(|flags| flags.syn) {
             if let Some(sequence) = packet.seq {
@@ -828,15 +844,12 @@ impl FlowTable {
                 // above, the host/pair rollup always takes the freshest
                 // label — a host with many short-lived TLS flows should show
                 // its current fingerprint.
-                if ja3_label.is_some() {
-                    if let Some(rollup) = self.endpoint_rollups.get_mut(&remote_addr) {
-                        rollup.ja3_label = *ja3_label;
+                if let Some(label) = *ja3_label {
+                    if let Some(remote) = remote_ip {
+                        self.endpoint_rollups.set_ja3_label(&remote, label);
                     }
-                    if let Some(rollup) = self
-                        .conversation_rollups
-                        .get_mut(&(local_addr.clone(), remote_addr.clone()))
-                    {
-                        rollup.ja3_label = *ja3_label;
+                    if let Some(pair) = conversation_key {
+                        self.conversation_rollups.set_ja3_label(&pair, label);
                     }
                 }
             }
@@ -1097,67 +1110,69 @@ impl FlowTable {
     }
 
     /// Per-remote-host traffic rollup (JAM-14), cumulative since capture
-    /// start — never derived from currently-live flows, so a host's total
-    /// survives every one of its flows closing or being evicted. Drains
-    /// each rollup's `_this_tick` counters, same tick-elapsed contract as
-    /// `snapshot()`.
-    pub fn endpoint_snapshot(&mut self, now_ms: u64) -> Vec<EndpointSnapshot> {
+    /// start for every host still tracked — a host's total survives all of
+    /// its flows closing, but not its own eviction from the bounded table
+    /// (KAN-131). Drains each rollup's `_this_tick` counters, same
+    /// tick-elapsed contract as `snapshot()`.
+    pub fn endpoint_snapshot(&mut self, now_ms: u64) -> (Vec<EndpointSnapshot>, Bounds) {
         let elapsed_s =
             ((now_ms.saturating_sub(self.last_endpoint_snapshot_ms)).max(1)) as f64 / 1000.0;
         self.last_endpoint_snapshot_ms = now_ms;
 
-        let mut result = Vec::with_capacity(self.endpoint_rollups.len());
-        for (host, state) in self.endpoint_rollups.iter_mut() {
-            result.push(EndpointSnapshot {
-                host: host.clone(),
-                rx_bytes_total: state.rx_bytes_total,
-                tx_bytes_total: state.tx_bytes_total,
-                rx_packets_total: state.rx_packets_total,
-                tx_packets_total: state.tx_packets_total,
-                rx_speed: state.rx_bytes_this_tick as f64 / elapsed_s,
-                tx_speed: state.tx_bytes_this_tick as f64 / elapsed_s,
-                flow_count: state.flow_count,
-                first_seen_ms: state.first_seen_ms.unwrap_or(0),
-                last_seen_ms: state.last_seen_ms,
-                ja3_label: state.ja3_label,
-                observed_name: self.observed_names.lookup(host, now_ms).map(str::to_string),
-            });
-            state.rx_bytes_this_tick = 0;
-            state.tx_bytes_this_tick = 0;
-        }
-        result
+        let rows = self.endpoint_rollups.snapshot(elapsed_s);
+        let result = rows
+            .into_iter()
+            .map(|row| {
+                let host = row.key.to_string();
+                EndpointSnapshot {
+                    rx_bytes_total: row.total.rx_bytes,
+                    tx_bytes_total: row.total.tx_bytes,
+                    rx_packets_total: row.total.rx_packets,
+                    tx_packets_total: row.total.tx_packets,
+                    rx_speed: row.rx_speed,
+                    tx_speed: row.tx_speed,
+                    flow_count: row.flow_count,
+                    first_seen_ms: row.first_seen_ms,
+                    last_seen_ms: row.last_seen_ms,
+                    ja3_label: row.ja3_label,
+                    history_complete: row.history_complete,
+                    observed_name: self.observed_names.lookup(&host, now_ms).map(str::to_string),
+                    host,
+                }
+            })
+            .collect();
+        (result, self.endpoint_rollups.bounds())
     }
 
     /// Per-(local,remote)-pair traffic rollup (JAM-14) — see
-    /// `endpoint_snapshot`'s doc comment for the permanence/tick-draining
+    /// `endpoint_snapshot`'s doc comment for the bounding/tick-draining
     /// contract, identical here.
-    pub fn conversation_snapshot(&mut self, now_ms: u64) -> Vec<ConversationSnapshot> {
+    pub fn conversation_snapshot(&mut self, now_ms: u64) -> (Vec<ConversationSnapshot>, Bounds) {
         let elapsed_s =
             ((now_ms.saturating_sub(self.last_conversation_snapshot_ms)).max(1)) as f64 / 1000.0;
         self.last_conversation_snapshot_ms = now_ms;
 
-        let mut result = Vec::with_capacity(self.conversation_rollups.len());
-        for ((local_addr, remote_addr), state) in self.conversation_rollups.iter_mut() {
-            let first_seen_ms = state.first_seen_ms.unwrap_or(0);
-            result.push(ConversationSnapshot {
-                local_addr: local_addr.clone(),
-                remote_addr: remote_addr.clone(),
-                rx_bytes_total: state.rx_bytes_total,
-                tx_bytes_total: state.tx_bytes_total,
-                rx_packets_total: state.rx_packets_total,
-                tx_packets_total: state.tx_packets_total,
-                rx_speed: state.rx_bytes_this_tick as f64 / elapsed_s,
-                tx_speed: state.tx_bytes_this_tick as f64 / elapsed_s,
-                flow_count: state.flow_count,
-                first_seen_ms,
-                last_seen_ms: state.last_seen_ms,
-                duration_ms: state.last_seen_ms.saturating_sub(first_seen_ms),
-                ja3_label: state.ja3_label,
-            });
-            state.rx_bytes_this_tick = 0;
-            state.tx_bytes_this_tick = 0;
-        }
-        result
+        let rows = self.conversation_rollups.snapshot(elapsed_s);
+        let result = rows
+            .into_iter()
+            .map(|row| ConversationSnapshot {
+                local_addr: row.key.0.to_string(),
+                remote_addr: row.key.1.to_string(),
+                rx_bytes_total: row.total.rx_bytes,
+                tx_bytes_total: row.total.tx_bytes,
+                rx_packets_total: row.total.rx_packets,
+                tx_packets_total: row.total.tx_packets,
+                rx_speed: row.rx_speed,
+                tx_speed: row.tx_speed,
+                flow_count: row.flow_count,
+                first_seen_ms: row.first_seen_ms,
+                last_seen_ms: row.last_seen_ms,
+                duration_ms: row.last_seen_ms.saturating_sub(row.first_seen_ms),
+                ja3_label: row.ja3_label,
+                history_complete: row.history_complete,
+            })
+            .collect();
+        (result, self.conversation_rollups.bounds())
     }
 
     /// Discards every tracked flow and replaces the local-address list used
@@ -1173,6 +1188,8 @@ impl FlowTable {
         self.local_addrs = local_addrs;
         self.observed_names.clear();
         self.tcp_samples.clear();
+        self.endpoint_rollups.clear();
+        self.conversation_rollups.clear();
         self.flows.drain().map(|(key, _)| key).collect()
     }
 }
@@ -2618,8 +2635,8 @@ mod tests {
     }
 
     // JAM-14: per-host (endpoint) and per-(local,remote)-pair (conversation)
-    // rollups, aggregated in the agent so totals survive flow eviction —
-    // same permanence contract as protocol_tree above.
+    // rollups, aggregated in the agent so totals survive flow eviction (but
+    // not a rollup entry's own LRU eviction, KAN-131).
 
     #[test]
     fn fifty_short_lived_flows_to_one_host_collapse_into_one_endpoint_row() {
@@ -2630,7 +2647,7 @@ mod tests {
             let out = tcp_packet_to(true, TcpFlags::default(), port);
             table.observe(&out, &L7Info::None, 0);
         }
-        let endpoints = table.endpoint_snapshot(1000);
+        let (endpoints, _) = table.endpoint_snapshot(1000);
         assert_eq!(
             endpoints.len(),
             1,
@@ -2668,7 +2685,7 @@ mod tests {
             "the underlying flow is gone"
         );
 
-        let endpoints = table.endpoint_snapshot(120_001);
+        let (endpoints, _) = table.endpoint_snapshot(120_001);
         assert_eq!(
             endpoints.len(),
             1,
@@ -2686,7 +2703,7 @@ mod tests {
         table.observe(&out, &L7Info::None, 0);
         table.observe(&inb, &L7Info::None, 0);
 
-        let endpoints = table.endpoint_snapshot(1000);
+        let (endpoints, _) = table.endpoint_snapshot(1000);
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].tx_bytes_total, 100);
         assert_eq!(endpoints[0].rx_bytes_total, 250);
@@ -2708,7 +2725,7 @@ mod tests {
             500,
         );
 
-        let endpoints = table.endpoint_snapshot(1000);
+        let (endpoints, _) = table.endpoint_snapshot(1000);
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].first_seen_ms, 10);
         assert_eq!(endpoints[0].last_seen_ms, 500);
@@ -2727,7 +2744,7 @@ mod tests {
             200,
         );
 
-        let endpoints = table.endpoint_snapshot(1000);
+        let (endpoints, _) = table.endpoint_snapshot(1000);
         assert_eq!(endpoints[0].first_seen_ms, 0);
         assert_eq!(endpoints[0].last_seen_ms, 200);
     }
@@ -2740,13 +2757,13 @@ mod tests {
             &L7Info::None,
             0,
         );
-        let first = table.endpoint_snapshot(1000); // 1000ms elapsed
+        let (first, _) = table.endpoint_snapshot(1000); // 1000ms elapsed
         assert_eq!(first[0].tx_speed, 100.0 / 1.0);
 
         // No new packets this tick -- rate must fall back to 0, not keep
         // reporting the previous tick's speed forever (same tick-draining
         // contract as FlowTable::snapshot's rx/tx_speed).
-        let second = table.endpoint_snapshot(2000);
+        let (second, _) = table.endpoint_snapshot(2000);
         assert_eq!(second[0].tx_speed, 0.0);
     }
 
@@ -2782,7 +2799,7 @@ mod tests {
         };
         table.observe(&other, &L7Info::None, 0);
 
-        let endpoints = table.endpoint_snapshot(1000);
+        let (endpoints, _) = table.endpoint_snapshot(1000);
         assert_eq!(endpoints.len(), 2);
         let hosts: std::collections::HashSet<&str> =
             endpoints.iter().map(|e| e.host.as_str()).collect();
@@ -2803,7 +2820,7 @@ mod tests {
             0,
         );
 
-        let conversations = table.conversation_snapshot(1000);
+        let (conversations, _) = table.conversation_snapshot(1000);
         assert_eq!(
             conversations.len(),
             1,
@@ -2828,7 +2845,7 @@ mod tests {
             310,
         );
 
-        let conversations = table.conversation_snapshot(1000);
+        let (conversations, _) = table.conversation_snapshot(1000);
         assert_eq!(conversations[0].duration_ms, 300);
     }
 
@@ -2846,8 +2863,235 @@ mod tests {
         };
         table.observe(&packet, &hello, 0);
 
-        let endpoints = table.endpoint_snapshot(1000);
+        let (endpoints, _) = table.endpoint_snapshot(1000);
         assert_eq!(endpoints[0].ja3_label, Some("matches Chrome 12x"));
+    }
+
+    // KAN-131: the bounded rollup tables, flow counts by entry id, reset.
+
+    const LOCAL_IP: &str = "192.168.1.10";
+
+    fn rollup_table(
+        local: Vec<String>,
+        max_endpoints: usize,
+        max_conversations: usize,
+    ) -> FlowTable {
+        FlowTable::new(local).with_rollup_config(RollupConfig {
+            max_endpoints,
+            max_conversations,
+            top_n: 10,
+        })
+    }
+
+    fn flow_packet(src_ip: &str, dst_ip: &str, src_port: u16, dst_port: u16) -> ParsedPacket {
+        let mut packet = packet_between(src_ip, dst_ip);
+        packet.src_port = Some(src_port);
+        packet.dst_port = Some(dst_port);
+        packet
+    }
+
+    /// An outbound packet from the local host's `local_port` to `remote`.
+    fn out_to(remote: &str, local_port: u16) -> ParsedPacket {
+        flow_packet(LOCAL_IP, remote, local_port, 443)
+    }
+
+    fn host_flow_count(table: &mut FlowTable, host: &str) -> (u64, bool) {
+        let (rows, _) = table.endpoint_snapshot(1000);
+        let row = rows.iter().find(|r| r.host == host).expect("host row");
+        (row.flow_count, row.history_complete)
+    }
+
+    #[test]
+    fn a_returning_host_on_a_live_flow_counts_that_flow() {
+        let mut table = rollup_table(vec![LOCAL_IP.to_string()], 1, 1);
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 1);
+        table.observe(&out_to("10.0.0.2", 51001), &L7Info::None, 2);
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 3);
+        // A second packet on the same live flow must not count it again.
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 4);
+
+        let (rows, _) = table.conversation_snapshot(1000);
+        assert_eq!((rows[0].flow_count, rows[0].history_complete), (1, false));
+        assert_eq!(host_flow_count(&mut table, "10.0.0.1"), (1, false));
+    }
+
+    #[test]
+    fn two_live_flows_to_a_returning_host_count_two() {
+        let mut table = rollup_table(vec![LOCAL_IP.to_string()], 1, 10);
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 1);
+        table.observe(&out_to("10.0.0.1", 51001), &L7Info::None, 2);
+        table.observe(&out_to("10.0.0.2", 51002), &L7Info::None, 3);
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 4);
+        table.observe(&out_to("10.0.0.1", 51001), &L7Info::None, 5);
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 6);
+
+        assert_eq!(host_flow_count(&mut table, "10.0.0.1"), (2, false));
+    }
+
+    #[test]
+    fn the_same_holds_with_no_local_address() {
+        // With no local address the lower (ip, port) pair is "local".
+        let mut table = rollup_table(vec![], 1, 1);
+        let to = |remote: &str| flow_packet("1.1.1.1", remote, 5000, 443);
+        table.observe(&to("2.2.2.2"), &L7Info::None, 1);
+        table.observe(&to("2.2.2.2"), &L7Info::None, 2);
+        table.observe(&to("3.3.3.3"), &L7Info::None, 3);
+        table.observe(&to("2.2.2.2"), &L7Info::None, 4);
+        table.observe(&to("2.2.2.2"), &L7Info::None, 5);
+
+        assert_eq!(host_flow_count(&mut table, "2.2.2.2"), (1, false));
+        let (rows, _) = table.conversation_snapshot(1000);
+        assert_eq!((rows[0].flow_count, rows[0].history_complete), (1, false));
+    }
+
+    #[test]
+    fn rollups_survive_idle_and_capacity_flow_eviction() {
+        let mut table = FlowTable::new_with_capacity(vec![LOCAL_IP.to_string()], 1);
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 1);
+        table.observe(&out_to("10.0.0.2", 51001), &L7Info::None, 2);
+        table.evict_stale(3);
+        assert_eq!(table.capacity_evictions(), 1);
+        let (rows, bounds) = table.endpoint_snapshot(10);
+        assert_eq!((rows.len(), bounds.totals.tx_packets), (2, 2));
+
+        table.evict_stale(10_000_000);
+        assert_eq!(table.idle_evictions(), 1);
+        assert!(table.snapshot(10_000_000).is_empty());
+        let (rows, bounds) = table.endpoint_snapshot(10_000_001);
+        assert_eq!((rows.len(), bounds.totals.tx_packets), (2, 2));
+        let (rows, bounds) = table.conversation_snapshot(10_000_001);
+        assert_eq!((rows.len(), bounds.totals.tx_packets), (2, 2));
+    }
+
+    #[test]
+    fn the_tables_evict_independently() {
+        let mut table = rollup_table(vec![LOCAL_IP.to_string()], 2, 10);
+        for (i, remote) in ["10.0.0.1", "10.0.0.2", "10.0.0.3"].iter().enumerate() {
+            table.observe(&out_to(remote, 51000 + i as u16), &L7Info::None, i as u64);
+        }
+        assert_eq!(table.endpoint_snapshot(1000).1.evictions, 1);
+        assert_eq!(table.conversation_snapshot(1000).1.evictions, 0);
+    }
+
+    #[test]
+    fn an_unparsable_address_is_counted_and_not_recorded() {
+        let mut table = rollup_table(vec![LOCAL_IP.to_string()], 10, 10);
+        table.observe(&out_to("not-an-ip", 51000), &L7Info::None, 1);
+        assert_eq!(table.snapshot(1).len(), 1, "the flow itself is still tracked");
+        let (rows, bounds) = table.endpoint_snapshot(1000);
+        assert_eq!((rows.len(), bounds.unkeyed, bounds.totals.tx_packets), (0, 1, 0));
+        let (rows, bounds) = table.conversation_snapshot(1000);
+        assert_eq!((rows.len(), bounds.unkeyed, bounds.totals.tx_packets), (0, 1, 0));
+
+        let mut table = rollup_table(vec!["not-an-ip".to_string()], 10, 10);
+        table.observe(&flow_packet("not-an-ip", "10.0.0.1", 51000, 443), &L7Info::None, 1);
+        assert_eq!(table.snapshot(1).len(), 1, "the flow itself is still tracked");
+        let (rows, bounds) = table.endpoint_snapshot(1000);
+        assert_eq!((rows.len(), bounds.unkeyed), (1, 0));
+        let (rows, bounds) = table.conversation_snapshot(1000);
+        assert_eq!((rows.len(), bounds.unkeyed), (0, 1));
+    }
+
+    #[test]
+    fn ipv4_and_ipv6_render_as_before() {
+        let mut table = rollup_table(vec![LOCAL_IP.to_string()], 10, 10);
+        let hosts = ["93.184.216.34", "2001:db8::1", "::ffff:1.2.3.4"];
+        for (i, remote) in hosts.iter().enumerate() {
+            table.observe(&out_to(remote, 51000 + i as u16), &L7Info::None, 1);
+        }
+        let (endpoints, _) = table.endpoint_snapshot(1000);
+        let (conversations, _) = table.conversation_snapshot(1000);
+        for remote in hosts {
+            assert!(endpoints.iter().any(|e| e.host == remote), "{remote}");
+            assert!(
+                conversations
+                    .iter()
+                    .any(|c| c.remote_addr == remote && c.local_addr == LOCAL_IP),
+                "{remote}"
+            );
+        }
+    }
+
+    #[test]
+    fn reset_clears_rollups_and_bounds() {
+        let mut table = rollup_table(vec![LOCAL_IP.to_string()], 1, 1);
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 1);
+        table.observe(&out_to("10.0.0.2", 51001), &L7Info::None, 2);
+        table.observe(&out_to("not-an-ip", 51002), &L7Info::None, 3);
+        let hierarchy_before = (
+            table.protocol_hierarchy().bytes,
+            table.protocol_hierarchy().packets,
+        );
+        let (_, bounds) = table.endpoint_snapshot(5000);
+        assert!(bounds.evictions > 0 && bounds.unkeyed > 0 && bounds.evicted.tx_packets > 0);
+        table.conversation_snapshot(5000);
+
+        table.reset(vec![LOCAL_IP.to_string()]);
+
+        let (endpoints, endpoint_bounds) = table.endpoint_snapshot(5000);
+        let (conversations, conversation_bounds) = table.conversation_snapshot(5000);
+        assert!(endpoints.is_empty() && conversations.is_empty());
+        for bounds in [endpoint_bounds, conversation_bounds] {
+            assert_eq!(
+                (bounds.tracked, bounds.evictions, bounds.unkeyed),
+                (0, 0, 0)
+            );
+            assert_eq!(bounds.totals, Default::default());
+            assert_eq!(bounds.evicted, Default::default());
+            assert_eq!((bounds.since_ms, bounds.horizon_ms), (None, None));
+        }
+        assert_eq!(
+            (
+                table.protocol_hierarchy().bytes,
+                table.protocol_hierarchy().packets
+            ),
+            hierarchy_before,
+            "reset leaves the protocol hierarchy alone"
+        );
+
+        // The next packet sets since_ms and a flow after reset counts.
+        table.observe(&out_to("10.0.0.1", 51000), &L7Info::None, 5200);
+        let (rows, bounds) = table.endpoint_snapshot(6000);
+        assert_eq!(bounds.since_ms, Some(5200));
+        assert_eq!(rows[0].flow_count, 1);
+        let (rows, bounds) = table.conversation_snapshot(6000);
+        assert_eq!(bounds.since_ms, Some(5200));
+        assert_eq!(rows[0].flow_count, 1);
+    }
+
+    #[test]
+    fn reset_keeps_the_snapshot_clocks() {
+        // D6: the last-snapshot timestamps survive reset, so the first
+        // snapshot after it measures 6000 - 5000 ms, not 6000 ms.
+        let mut table = rollup_table(vec![LOCAL_IP.to_string()], 10, 10);
+        table.endpoint_snapshot(5000);
+        table.conversation_snapshot(5000);
+        table.reset(vec![LOCAL_IP.to_string()]);
+        let mut packet = out_to("10.0.0.1", 51000);
+        packet.total_len = 1000;
+        table.observe(&packet, &L7Info::None, 5200);
+        assert_eq!(table.endpoint_snapshot(6000).0[0].tx_speed, 1000.0);
+        assert_eq!(table.conversation_snapshot(6000).0[0].tx_speed, 1000.0);
+    }
+
+    #[test]
+    fn a_ja3_label_reaches_both_tables_at_cap_one() {
+        let hello = |label: &'static str| L7Info::TlsClientHello {
+            sni: "example.com".to_string(),
+            ja3: Some("abc".to_string()),
+            ja3_label: Some(label),
+            client_random: None,
+            sni_offset: 0,
+            sni_len: 0,
+        };
+        let mut table = rollup_table(vec![LOCAL_IP.to_string()], 1, 1);
+        table.observe(&out_to("10.0.0.1", 51000), &hello("label one"), 1);
+        assert_eq!(table.endpoint_snapshot(10).0[0].ja3_label, Some("label one"));
+        assert_eq!(table.conversation_snapshot(10).0[0].ja3_label, Some("label one"));
+
+        table.observe(&out_to("10.0.0.2", 51001), &hello("label two"), 2);
+        assert_eq!(table.endpoint_snapshot(20).0[0].ja3_label, Some("label two"));
+        assert_eq!(table.conversation_snapshot(20).0[0].ja3_label, Some("label two"));
     }
 
     fn dns_answer(name: &str, ip: &str) -> DnsAnswer {
@@ -2864,7 +3108,7 @@ mod tests {
     fn endpoint_snapshot_carries_a_live_observed_name() {
         let mut table = table_with_remote_93_184_216_34();
         table.learn_dns_response("example.com", &[dns_answer("example.com", "93.184.216.34")], 0);
-        let endpoints = table.endpoint_snapshot(1000);
+        let (endpoints, _) = table.endpoint_snapshot(1000);
         assert_eq!(endpoints[0].observed_name.as_deref(), Some("example.com"));
     }
 
@@ -2872,7 +3116,7 @@ mod tests {
     fn endpoint_snapshot_omits_an_expired_name() {
         let mut table = table_with_remote_93_184_216_34();
         table.learn_dns_response("example.com", &[dns_answer("example.com", "93.184.216.34")], 0);
-        let endpoints = table.endpoint_snapshot(crate::dns_names::MIN_NAME_RETENTION_MS);
+        let (endpoints, _) = table.endpoint_snapshot(crate::dns_names::MIN_NAME_RETENTION_MS);
         assert_eq!(endpoints[0].observed_name, None);
     }
 
@@ -2881,12 +3125,12 @@ mod tests {
         let mut table = table_with_remote_93_184_216_34();
         table.learn_dns_response("example.com", &[dns_answer("example.com", "93.184.216.34")], 0);
         assert_eq!(
-            table.endpoint_snapshot(500)[0].observed_name.as_deref(),
+            table.endpoint_snapshot(500).0[0].observed_name.as_deref(),
             Some("example.com")
         );
         table.reset(vec!["192.168.1.10".to_string()]);
         table.observe(&tcp_packet(true, TcpFlags::default(), 60), &L7Info::None, 1);
-        let endpoints = table.endpoint_snapshot(1000);
+        let (endpoints, _) = table.endpoint_snapshot(1000);
         assert_eq!(endpoints[0].observed_name, None);
     }
 
@@ -2910,8 +3154,8 @@ mod tests {
         let mut table = FlowTable::new(vec!["192.168.1.10".to_string()]);
         table.observe(&icmp_packet(60), &L7Info::None, 0);
 
-        assert!(table.endpoint_snapshot(1000).is_empty());
-        assert!(table.conversation_snapshot(1000).is_empty());
+        assert!(table.endpoint_snapshot(1000).0.is_empty());
+        assert!(table.conversation_snapshot(1000).0.is_empty());
     }
 
     #[test]

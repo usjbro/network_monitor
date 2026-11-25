@@ -1406,6 +1406,53 @@ fn parse_positive_env(name: &str, raw: Option<String>, default: usize) -> usize 
     }
 }
 
+/// `parse_positive_env` with an upper bound: a value above `max` panics
+/// naming the variable and the maximum.
+fn parse_bounded_env(name: &str, raw: Option<String>, default: usize, max: usize) -> usize {
+    let n = parse_positive_env(name, raw, default);
+    if n > max {
+        panic!("{name}={n} is above the maximum of {max}");
+    }
+    n
+}
+
+/// Startup-only sizes of the endpoint and conversation rollup tables and of
+/// each snapshot (KAN-131); same parsing rules as `MAX_FLOWS`.
+fn resolve_rollup_config() -> flow::RollupConfig {
+    flow::RollupConfig {
+        max_endpoints: parse_max_endpoints(std::env::var("MAX_ENDPOINTS").ok()),
+        max_conversations: parse_max_conversations(std::env::var("MAX_CONVERSATIONS").ok()),
+        top_n: parse_rollup_top_n(std::env::var("ROLLUP_TOP_N").ok()),
+    }
+}
+
+fn parse_max_endpoints(raw: Option<String>) -> usize {
+    parse_bounded_env(
+        "MAX_ENDPOINTS",
+        raw,
+        capture_agent::rollup::DEFAULT_MAX_ENDPOINTS,
+        capture_agent::rollup::MAX_ROLLUP_CAP,
+    )
+}
+
+fn parse_max_conversations(raw: Option<String>) -> usize {
+    parse_bounded_env(
+        "MAX_CONVERSATIONS",
+        raw,
+        capture_agent::rollup::DEFAULT_MAX_CONVERSATIONS,
+        capture_agent::rollup::MAX_ROLLUP_CAP,
+    )
+}
+
+fn parse_rollup_top_n(raw: Option<String>) -> usize {
+    parse_bounded_env(
+        "ROLLUP_TOP_N",
+        raw,
+        capture_agent::rollup::DEFAULT_ROLLUP_TOP_N,
+        capture_agent::rollup::MAX_ROLLUP_TOP_N,
+    )
+}
+
 /// Startup-only capacity of the observed DNS name table (JAM-21). Same
 /// parsing rules as `MAX_FLOWS`, for the same reasons.
 fn resolve_max_observed_dns_names() -> usize {
@@ -2643,7 +2690,8 @@ async fn main() -> std::io::Result<()> {
         local_addrs,
         resolve_max_flows(),
     )
-    .with_observed_name_capacity(resolve_max_observed_dns_names())));
+    .with_observed_name_capacity(resolve_max_observed_dns_names())
+    .with_rollup_config(resolve_rollup_config())));
     // JAM-15: written by the capture thread's `TransactionTracker`, read by
     // the periodic emitter for `service_time_update`.
     let service_time_stats = Arc::new(Mutex::new(ServiceTimeStats::default()));
@@ -3587,8 +3635,8 @@ async fn main() -> std::io::Result<()> {
                 let (
                     evicted,
                     snapshots,
-                    endpoint_snapshots,
-                    conversation_snapshots,
+                    (endpoint_snapshots, endpoint_bounds),
+                    (conversation_snapshots, conversation_bounds),
                     total_flows_observed,
                     capacity_evictions,
                     idle_evictions,
@@ -3617,6 +3665,8 @@ async fn main() -> std::io::Result<()> {
                     // capture start -- same "gather under the lock, convert
                     // to wire JSON after release" pattern as protocol_tree
                     // below.
+                    // KAN-131: each snapshot's bounds come from the same
+                    // lock hold as its rows.
                     let endpoint_snapshots = ft.endpoint_snapshot(now_ms);
                     let conversation_snapshots = ft.conversation_snapshot(now_ms);
                     (
@@ -3688,27 +3738,14 @@ async fn main() -> std::io::Result<()> {
                             .get(&endpoint.host)
                             .cloned()
                             .unwrap_or_else(|| ("unknown".to_string(), 0, 0));
-                        wire::EndpointJson {
-                            host: endpoint.host,
-                            rx_bytes_total: endpoint.rx_bytes_total,
-                            tx_bytes_total: endpoint.tx_bytes_total,
-                            rx_packets_total: endpoint.rx_packets_total,
-                            tx_packets_total: endpoint.tx_packets_total,
-                            rx_speed: endpoint.rx_speed,
-                            tx_speed: endpoint.tx_speed,
-                            flow_count: endpoint.flow_count,
-                            first_seen_ms: endpoint.first_seen_ms,
-                            last_seen_ms: endpoint.last_seen_ms,
-                            process_name,
-                            pid,
-                            ja3_label: endpoint.ja3_label.map(|s| s.to_string()),
-                            observed_name: endpoint.observed_name,
-                        }
+                        wire::EndpointJson::from_snapshot(endpoint, process_name, pid)
                     })
                     .collect();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::EndpointUpdate {
+                // Sent last in the tick, below.
+                let endpoint_rollup = wire::encode_event(&wire::AgentEvent::EndpointRollup {
                     endpoints,
-                }));
+                    bounds: endpoint_bounds.into(),
+                });
                 let summaries = service_time_stats.lock().unwrap().snapshot();
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::ServiceTimeUpdate {
                     summaries,
@@ -3724,28 +3761,13 @@ async fn main() -> std::io::Result<()> {
                             ))
                             .cloned()
                             .unwrap_or_else(|| ("unknown".to_string(), 0, 0));
-                        wire::ConversationJson {
-                            local_addr: conversation.local_addr,
-                            remote_addr: conversation.remote_addr,
-                            rx_bytes_total: conversation.rx_bytes_total,
-                            tx_bytes_total: conversation.tx_bytes_total,
-                            rx_packets_total: conversation.rx_packets_total,
-                            tx_packets_total: conversation.tx_packets_total,
-                            rx_speed: conversation.rx_speed,
-                            tx_speed: conversation.tx_speed,
-                            flow_count: conversation.flow_count,
-                            first_seen_ms: conversation.first_seen_ms,
-                            last_seen_ms: conversation.last_seen_ms,
-                            duration_ms: conversation.duration_ms,
-                            process_name,
-                            pid,
-                            ja3_label: conversation.ja3_label.map(|s| s.to_string()),
-                        }
+                        wire::ConversationJson::from_snapshot(conversation, process_name, pid)
                     })
                     .collect();
-                let _ = tx.send(wire::encode_event(&wire::AgentEvent::ConversationUpdate {
+                let conversation_rollup = wire::encode_event(&wire::AgentEvent::ConversationRollup {
                     conversations,
-                }));
+                    bounds: conversation_bounds.into(),
+                });
 
                 // Per-layer aggregates for the layer_update event, accumulated
                 // alongside the per-connection events below. This agent only
@@ -4020,6 +4042,16 @@ async fn main() -> std::io::Result<()> {
                 let _ = tx.send(wire::encode_event(&wire::AgentEvent::AgentStatus {
                     status: agent_status,
                 }));
+
+                // KAN-131: the rollups go last. A client's queue drops its
+                // oldest events, so with more live flows than it holds,
+                // anything sent before the per-flow events is lost every
+                // tick. Released first, so these sends hold no lock longer.
+                drop(decrypt_state);
+                drop(keylog_watcher);
+                drop(processes);
+                let _ = tx.send(endpoint_rollup);
+                let _ = tx.send(conversation_rollup);
             }
         });
     }
@@ -4413,7 +4445,8 @@ mod tests {
         emit_unanswered_findings, find_device_by_name, flow_aging_now_ms, is_capturable,
         is_meaningful_override, learnable_dns_response, looks_like_pcapng, malformed_frame_summary,
         note_capture_truncation, packet_osi_layer, parse_max_flows,
-        parse_max_observed_dns_names, parse_replay_local_addrs,
+        parse_max_conversations, parse_max_endpoints, parse_max_observed_dns_names,
+        parse_replay_local_addrs, parse_rollup_top_n,
         parse_replay_speed, protocol_node_to_json, reassembly_now_ms, resolve_link_type,
         validate_capture_file_path, validate_capture_filter_len, validate_interface_name_len,
         validate_snaplen, with_flow_observation, ReplayClock, ReplaySpeed, MAX_CAPTURE_FILTER_LEN,
@@ -5354,6 +5387,38 @@ mod tests {
     #[should_panic(expected = "MAX_OBSERVED_DNS_NAMES=lots")]
     fn parse_max_observed_dns_names_rejects_non_numeric() {
         parse_max_observed_dns_names(Some("lots".to_string()));
+    }
+
+    // --- MAX_ENDPOINTS / MAX_CONVERSATIONS / ROLLUP_TOP_N (KAN-131) ---
+
+    #[test]
+    fn rollup_env_parsing() {
+        use capture_agent::rollup::*;
+        type Parser = fn(Option<String>) -> usize;
+        let cases: [(&str, Parser, usize, usize); 3] = [
+            ("MAX_ENDPOINTS", parse_max_endpoints, DEFAULT_MAX_ENDPOINTS, MAX_ROLLUP_CAP),
+            ("MAX_CONVERSATIONS", parse_max_conversations, DEFAULT_MAX_CONVERSATIONS, MAX_ROLLUP_CAP),
+            ("ROLLUP_TOP_N", parse_rollup_top_n, DEFAULT_ROLLUP_TOP_N, MAX_ROLLUP_TOP_N),
+        ];
+        for (name, parse, default, max) in cases {
+            assert_eq!(parse(None), default, "{name}");
+            assert_eq!(parse(Some(String::new())), default, "{name}");
+            assert_eq!(parse(Some("  ".to_string())), default, "{name}");
+            assert_eq!(parse(Some("1".to_string())), 1, "{name}");
+            assert_eq!(parse(Some(max.to_string())), max, "{name}");
+            for bad in ["0".to_string(), "-1".to_string(), "x".to_string(), (max + 1).to_string()] {
+                let result = std::panic::catch_unwind(|| parse(Some(bad.clone())));
+                let payload = result.expect_err(&format!("{name}={bad} must panic"));
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_default();
+                assert!(message.contains(name), "{message}");
+                if bad == (max + 1).to_string() {
+                    assert!(message.contains(&max.to_string()), "{message}");
+                }
+            }
+        }
     }
 
     // --- learnable_dns_response (JAM-21) ---

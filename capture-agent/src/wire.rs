@@ -1,4 +1,5 @@
-use crate::flow::{FlowKey, FlowTable};
+use crate::flow::{ConversationSnapshot, EndpointSnapshot, FlowKey, FlowTable};
+use crate::rollup::{Bounds, Traffic};
 use crate::tcp_samples::{flag, mark, relative_seq, LabelKind, RingView, TcpSample, TcpSampleStore};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -36,14 +37,15 @@ pub struct ConnectionJson {
 }
 
 /// One remote host's cumulative traffic rollup (JAM-14) — see
-/// `flow::EndpointSnapshot`. Sent as a full replacement list every tick
-/// (same "always-current snapshot" convention as `layer_update`), not
-/// incremental — a host's totals only ever grow, so a client just replaces
-/// its whole endpoint table on every event rather than diffing.
+/// `flow::EndpointSnapshot`. Sent every tick as the union of the top N by
+/// each ranking (KAN-131), not the whole table: a client replaces its rows
+/// on every event rather than diffing.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointJson {
     pub host: String,
+    /// False means the host may have earlier history that was evicted.
+    pub history_complete: bool,
     pub rx_bytes_total: u64,
     pub tx_bytes_total: u64,
     pub rx_packets_total: u64,
@@ -64,13 +66,14 @@ pub struct EndpointJson {
 }
 
 /// One (local, remote) pair's cumulative traffic rollup (JAM-14) — see
-/// `flow::ConversationSnapshot`. Same full-replacement-per-tick contract as
-/// `EndpointJson` above.
+/// `flow::ConversationSnapshot`. Same per-tick contract as `EndpointJson`
+/// above.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationJson {
     pub local_addr: String,
     pub remote_addr: String,
+    pub history_complete: bool,
     pub rx_bytes_total: u64,
     pub tx_bytes_total: u64,
     pub rx_packets_total: u64,
@@ -85,6 +88,108 @@ pub struct ConversationJson {
     pub pid: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ja3_label: Option<String>,
+}
+
+impl EndpointJson {
+    /// The one conversion from a snapshot row to its wire shape; process
+    /// attribution is decided by the caller, outside the flow lock.
+    pub fn from_snapshot(snapshot: EndpointSnapshot, process_name: String, pid: u32) -> EndpointJson {
+        EndpointJson {
+            host: snapshot.host,
+            history_complete: snapshot.history_complete,
+            rx_bytes_total: snapshot.rx_bytes_total,
+            tx_bytes_total: snapshot.tx_bytes_total,
+            rx_packets_total: snapshot.rx_packets_total,
+            tx_packets_total: snapshot.tx_packets_total,
+            rx_speed: snapshot.rx_speed,
+            tx_speed: snapshot.tx_speed,
+            flow_count: snapshot.flow_count,
+            first_seen_ms: snapshot.first_seen_ms,
+            last_seen_ms: snapshot.last_seen_ms,
+            process_name,
+            pid,
+            ja3_label: snapshot.ja3_label.map(|s| s.to_string()),
+            observed_name: snapshot.observed_name,
+        }
+    }
+}
+
+impl ConversationJson {
+    /// See `EndpointJson::from_snapshot`.
+    pub fn from_snapshot(snapshot: ConversationSnapshot, process_name: String, pid: u32) -> ConversationJson {
+        ConversationJson {
+            local_addr: snapshot.local_addr,
+            remote_addr: snapshot.remote_addr,
+            history_complete: snapshot.history_complete,
+            rx_bytes_total: snapshot.rx_bytes_total,
+            tx_bytes_total: snapshot.tx_bytes_total,
+            rx_packets_total: snapshot.rx_packets_total,
+            tx_packets_total: snapshot.tx_packets_total,
+            rx_speed: snapshot.rx_speed,
+            tx_speed: snapshot.tx_speed,
+            flow_count: snapshot.flow_count,
+            first_seen_ms: snapshot.first_seen_ms,
+            last_seen_ms: snapshot.last_seen_ms,
+            duration_ms: snapshot.duration_ms,
+            process_name,
+            pid,
+            ja3_label: snapshot.ja3_label.map(|s| s.to_string()),
+        }
+    }
+}
+
+/// Counters of one `bounds` object; see `BoundsJson`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrafficJson {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+}
+
+impl From<Traffic> for TrafficJson {
+    fn from(t: Traffic) -> Self {
+        TrafficJson {
+            rx_bytes: t.rx_bytes,
+            tx_bytes: t.tx_bytes,
+            rx_packets: t.rx_packets,
+            tx_packets: t.tx_packets,
+        }
+    }
+}
+
+/// The `bounds` object on `endpoint_rollup` and `conversation_rollup`
+/// (KAN-131, docs/superpowers/specs/2026-11-23-rollup-bounds-design.md D4).
+/// `since_ms` and `horizon_ms` are `null` until there is something to say.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundsJson {
+    pub cap: u64,
+    pub top_n: u64,
+    pub tracked: u64,
+    pub evictions: u64,
+    pub unkeyed: u64,
+    pub since_ms: Option<u64>,
+    pub horizon_ms: Option<u64>,
+    pub totals: TrafficJson,
+    pub evicted: TrafficJson,
+}
+
+impl From<Bounds> for BoundsJson {
+    fn from(b: Bounds) -> Self {
+        BoundsJson {
+            cap: b.cap as u64,
+            top_n: b.top_n as u64,
+            tracked: b.tracked as u64,
+            evictions: b.evictions,
+            unkeyed: b.unkeyed,
+            since_ms: b.since_ms,
+            horizon_ms: b.horizon_ms,
+            totals: b.totals.into(),
+            evicted: b.evicted.into(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -336,15 +441,19 @@ pub enum AgentEvent {
     ProtocolHierarchyUpdate {
         hierarchy: Box<ProtocolNodeJson>,
     },
-    /// Per-remote-host traffic rollups (JAM-14) — cumulative since capture
-    /// start, surviving flow eviction; see `flow::EndpointSnapshot`.
-    EndpointUpdate {
+    /// Per-remote-host traffic rollups (JAM-14) — cumulative since the entry was
+    /// inserted or the last reset, surviving flow eviction; see
+    /// `flow::EndpointSnapshot`. KAN-131: a bounded subset of the table plus
+    /// its `bounds`.
+    EndpointRollup {
         endpoints: Vec<EndpointJson>,
+        bounds: BoundsJson,
     },
     /// Per-(local,remote)-pair traffic rollups (JAM-14) — see
     /// `flow::ConversationSnapshot`.
-    ConversationUpdate {
+    ConversationRollup {
         conversations: Vec<ConversationJson>,
+        bounds: BoundsJson,
     },
     /// Service response time per protocol (JAM-15), sent every tick — see
     /// `ServiceTimeSummaryJson`.
@@ -1345,6 +1454,7 @@ pub fn classify_control_line(line: &str) -> ControlLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
 
     /// Shared fixture for `ConnectionJson` tests: fills every field with the
     /// same baseline values `encodes_connection_update_as_one_json_line_camel_case`
@@ -2106,93 +2216,159 @@ mod tests {
         assert!(line.contains("\"totalPacketsCaptured\":184200"));
     }
 
+    fn sample_bounds(since_ms: Option<u64>, horizon_ms: Option<u64>) -> crate::rollup::Bounds {
+        use crate::rollup::Traffic;
+        crate::rollup::Bounds {
+            cap: 50_000,
+            top_n: 200,
+            tracked: 50_000,
+            evictions: 812,
+            unkeyed: 0,
+            since_ms,
+            horizon_ms,
+            totals: Traffic { rx_bytes: 9, tx_bytes: 9, rx_packets: 9, tx_packets: 9 },
+            evicted: Traffic { rx_bytes: 1, tx_bytes: 1, rx_packets: 1, tx_packets: 1 },
+        }
+    }
+
+    fn sample_endpoint(ja3_label: Option<&'static str>, observed_name: Option<String>) -> crate::flow::EndpointSnapshot {
+        crate::flow::EndpointSnapshot {
+            host: "93.184.216.34".to_string(),
+            rx_bytes_total: 4096,
+            tx_bytes_total: 2048,
+            rx_packets_total: 12,
+            tx_packets_total: 8,
+            rx_speed: 1024.0,
+            tx_speed: 512.0,
+            flow_count: 3,
+            first_seen_ms: 10,
+            last_seen_ms: 5000,
+            ja3_label,
+            history_complete: true,
+            observed_name,
+        }
+    }
+
     #[test]
-    fn encodes_endpoint_update_camel_case_and_omits_ja3_label_when_absent() {
-        let event = AgentEvent::EndpointUpdate {
-            endpoints: vec![EndpointJson {
-                host: "93.184.216.34".to_string(),
-                rx_bytes_total: 4096,
-                tx_bytes_total: 2048,
-                rx_packets_total: 12,
-                tx_packets_total: 8,
-                rx_speed: 1024.0,
-                tx_speed: 512.0,
-                flow_count: 3,
-                first_seen_ms: 10,
-                last_seen_ms: 5000,
-                process_name: "Safari".to_string(),
-                pid: 1234,
-                ja3_label: None,
-                observed_name: None,
-            }],
+    fn encodes_endpoint_rollup_exactly() {
+        let event = AgentEvent::EndpointRollup {
+            endpoints: vec![EndpointJson::from_snapshot(
+                sample_endpoint(Some("matches Chrome 12x"), Some("example.com".to_string())),
+                "Safari".to_string(),
+                1234,
+            )],
+            bounds: sample_bounds(Some(1200), None).into(),
         };
-        let line = encode_event(&event);
-        assert!(line.contains("\"type\":\"endpoint_update\""));
-        assert!(line.contains("\"host\":\"93.184.216.34\""));
-        assert!(line.contains("\"flowCount\":3"));
-        assert!(line.contains("\"firstSeenMs\":10"));
-        assert!(line.contains("\"lastSeenMs\":5000"));
-        assert!(line.contains("\"processName\":\"Safari\""));
-        assert!(
-            !line.contains("ja3Label"),
-            "absent JA3 label must be omitted, not null: {line}"
-        );
-        assert!(
-            !line.contains("observedName"),
-            "absent observed name must be omitted, not null: {line}"
+        let parsed: Value = serde_json::from_str(encode_event(&event).trim_end()).unwrap();
+        assert_eq!(
+            parsed,
+            json!({
+                "type": "endpoint_rollup",
+                "endpoints": [{
+                    "host": "93.184.216.34",
+                    "historyComplete": true,
+                    "rxBytesTotal": 4096,
+                    "txBytesTotal": 2048,
+                    "rxPacketsTotal": 12,
+                    "txPacketsTotal": 8,
+                    "rxSpeed": 1024.0,
+                    "txSpeed": 512.0,
+                    "flowCount": 3,
+                    "firstSeenMs": 10,
+                    "lastSeenMs": 5000,
+                    "processName": "Safari",
+                    "pid": 1234,
+                    "ja3Label": "matches Chrome 12x",
+                    "observedName": "example.com"
+                }],
+                "bounds": {
+                    "cap": 50000, "topN": 200,
+                    "tracked": 50000, "evictions": 812, "unkeyed": 0,
+                    "sinceMs": 1200, "horizonMs": null,
+                    "totals": { "rxBytes": 9, "txBytes": 9, "rxPackets": 9, "txPackets": 9 },
+                    "evicted": { "rxBytes": 1, "txBytes": 1, "rxPackets": 1, "txPackets": 1 }
+                }
+            })
         );
     }
 
     #[test]
-    fn encodes_observed_name_on_an_endpoint_when_present() {
-        let event = AgentEvent::EndpointUpdate {
-            endpoints: vec![EndpointJson {
-                host: "93.184.216.34".to_string(),
-                rx_bytes_total: 0,
-                tx_bytes_total: 0,
-                rx_packets_total: 0,
-                tx_packets_total: 0,
-                rx_speed: 0.0,
-                tx_speed: 0.0,
-                flow_count: 1,
-                first_seen_ms: 0,
-                last_seen_ms: 0,
-                process_name: "unknown".to_string(),
-                pid: 0,
-                ja3_label: None,
-                observed_name: Some("example.com".to_string()),
-            }],
+    fn endpoint_rollup_omits_absent_labels_and_carries_null_bounds() {
+        let event = AgentEvent::EndpointRollup {
+            endpoints: vec![EndpointJson::from_snapshot(
+                sample_endpoint(None, None),
+                "Safari".to_string(),
+                1234,
+            )],
+            bounds: sample_bounds(None, Some(41_200)).into(),
         };
-        assert!(encode_event(&event).contains("\"observedName\":\"example.com\""));
+        let line = encode_event(&event);
+        assert!(!line.contains("ja3Label"), "{line}");
+        assert!(!line.contains("observedName"), "{line}");
+        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["bounds"]["sinceMs"], Value::Null);
+        assert_eq!(parsed["bounds"]["horizonMs"], json!(41_200));
     }
 
     #[test]
-    fn encodes_conversation_update_with_duration_and_ja3_label() {
-        let event = AgentEvent::ConversationUpdate {
-            conversations: vec![ConversationJson {
-                local_addr: "192.168.1.10".to_string(),
-                remote_addr: "93.184.216.34".to_string(),
-                rx_bytes_total: 4096,
-                tx_bytes_total: 2048,
-                rx_packets_total: 12,
-                tx_packets_total: 8,
-                rx_speed: 1024.0,
-                tx_speed: 512.0,
-                flow_count: 2,
-                first_seen_ms: 10,
-                last_seen_ms: 310,
-                duration_ms: 300,
-                process_name: "unknown".to_string(),
-                pid: 0,
-                ja3_label: Some("matches Chrome 12x".to_string()),
-            }],
+    fn encodes_conversation_rollup_exactly() {
+        let snapshot = crate::flow::ConversationSnapshot {
+            local_addr: "192.168.1.10".to_string(),
+            remote_addr: "93.184.216.34".to_string(),
+            rx_bytes_total: u64::MAX,
+            tx_bytes_total: 2048,
+            rx_packets_total: 12,
+            tx_packets_total: 8,
+            rx_speed: 1024.0,
+            tx_speed: 512.0,
+            flow_count: 2,
+            first_seen_ms: 10,
+            last_seen_ms: 310,
+            duration_ms: 300,
+            ja3_label: Some("matches Chrome 12x"),
+            history_complete: false,
+        };
+        let event = AgentEvent::ConversationRollup {
+            conversations: vec![ConversationJson::from_snapshot(snapshot, "unknown".to_string(), 0)],
+            bounds: sample_bounds(Some(1200), None).into(),
         };
         let line = encode_event(&event);
-        assert!(line.contains("\"type\":\"conversation_update\""));
-        assert!(line.contains("\"localAddr\":\"192.168.1.10\""));
-        assert!(line.contains("\"remoteAddr\":\"93.184.216.34\""));
-        assert!(line.contains("\"durationMs\":300"));
-        assert!(line.contains("\"ja3Label\":\"matches Chrome 12x\""));
+        // Counters above 2^53 are emitted as written, not rounded.
+        assert!(line.contains("\"rxBytesTotal\":18446744073709551615"), "{line}");
+        let parsed: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["type"], "conversation_rollup");
+        assert_eq!(
+            parsed["conversations"],
+            json!([{
+                "localAddr": "192.168.1.10",
+                "remoteAddr": "93.184.216.34",
+                "historyComplete": false,
+                "rxBytesTotal": 18446744073709551615u64,
+                "txBytesTotal": 2048,
+                "rxPacketsTotal": 12,
+                "txPacketsTotal": 8,
+                "rxSpeed": 1024.0,
+                "txSpeed": 512.0,
+                "flowCount": 2,
+                "firstSeenMs": 10,
+                "lastSeenMs": 310,
+                "durationMs": 300,
+                "processName": "unknown",
+                "pid": 0,
+                "ja3Label": "matches Chrome 12x"
+            }])
+        );
+        assert_eq!(
+            parsed["bounds"],
+            json!({
+                "cap": 50000, "topN": 200,
+                "tracked": 50000, "evictions": 812, "unkeyed": 0,
+                "sinceMs": 1200, "horizonMs": null,
+                "totals":  { "rxBytes": 9, "txBytes": 9, "rxPackets": 9, "txPackets": 9 },
+                "evicted": { "rxBytes": 1, "txBytes": 1, "rxPackets": 1, "txPackets": 1 }
+            })
+        );
+        assert_eq!(parsed.as_object().unwrap().len(), 3);
     }
 
     #[test]

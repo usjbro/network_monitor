@@ -102,13 +102,27 @@ If speeds look wildly unrealistic (many multiples of what your actual connection
 
 ## Connections or packets are missing from the list
 
-Two different ceilings can be responsible, and the UI distinguishes them.
+Three different ceilings can be responsible, and the UI distinguishes them.
 
 **The browser tab's own buffer.** Each view keeps only its most recent N items (defaults: 100 packets, 200 connections, 100 decrypted segments) and says so in a "showing N of M observed" line beneath the controls. Raise it with `buffer packets <n>` / `buffer connections <n>` / `buffer decrypted <n>` in the command bar. This is purely client-side — it changes what this tab retains, nothing about what the agent captures, and it resets on reload.
 
 **The agent's flow table.** If the Connections view shows an amber "N connection(s) evicted for capacity" line, the agent hit its own ceiling (10,000 concurrent flows by default) and dropped flows to stay within it, so the table may be missing recent activity. A burst of this during a port scan or a traffic spike is the mechanism working as intended; a steadily growing count on ordinary traffic means the ceiling is too low for your link. Raise it by starting the agent with `MAX_FLOWS` set (see `capture-agent/README.md`). Note that this counter is specifically *capacity* eviction — ordinary idle-connection turnover is tracked separately and is not a problem.
 
-Neither of these is the same as **capture-side loss** (kernel/driver drops or a lagging relay), which shows up as the separate red "capture degraded" banner at the top of the window — that means data never reached the UI at all.
+**The agent's Hosts tables.** The Hosts view is a bounded list and says what it leaves out: the line above the table separates rows shown, rows received and keys tracked, and an amber line reports evictions. If evictions keep rising on ordinary traffic, start the agent with a higher `MAX_ENDPOINTS` or `MAX_CONVERSATIONS`; to receive more of what is tracked, raise `ROLLUP_TOP_N` (see `capture-agent/README.md`). An interface switch clears both tables by design.
+
+None of these is the same as **capture-side loss** (kernel/driver drops or a lagging relay), which shows up as the separate red "capture degraded" banner at the top of the window — that means data never reached the UI at all.
+
+## The Hosts view stopped updating, or says the agent is older or its data could not be read
+
+After upgrading the capture agent, reload every open Network Monitor tab. A tab left open keeps its last host and conversation lists without a warning until it is reloaded.
+
+- **"The running capture agent is older than this page. Restart the agent."** The agent still sends `endpoint_update`/`conversation_update`, which are full, unbounded lists this page does not render. Rebuild and restart it; the notice clears on the first new event.
+- **"Waiting for the first update.", or counts that don't move, with the "capture degraded … lagging client" banner.** The agent queues at most 1,024 events per client (normally the relay) and drops the oldest. Each second it sends one event per live flow plus one per flow evicted that second, then the Hosts lists last, so those survive a burst that overflows the queue. In a synthetic replay read by a raw local client for 8 s, 5 runs each at 500, 1,500, 5,000 and 10,000 live flows, all 8 of each list arrived every time. Sent before the per-flow events, as earlier builds did, none arrived in any run at 1,500 flows or more. What remains:
+  - Above roughly 1,000 live plus evicted flows in a second, other events are still dropped: connection rows go without updates or stay after their flow closed, and `service_time_update`, sent first in the tick, is lost too. At 1,500 and more flows that client got about 1,015 connection updates per second however many flows there were.
+  - A client that stays behind, or more than 1,022 further events before it catches up, can still lose the Hosts lists.
+  - The Hosts rows carry no stale marker. If lists are lost, the last ones stay on screen as if current, and an interface switch made meanwhile can leave the previous interface's rows there until a new list arrives.
+  - Lowering `MAX_FLOWS` reduces updates per second but not evictions: each flow evicted for capacity sends its own event, so under many new flows it can make no difference or add to the burst.
+- **"This table's data could not be read."** The agent's event was malformed, so the page cleared that table instead of leaving old rows up. It recovers on the next valid event; if it doesn't, the browser console has the reason, and the agent and page are probably from different versions.
 
 ## Ownership enrichment shows nothing, or is very slow
 

@@ -560,7 +560,7 @@ fn a_matched_dns_exchange_names_the_endpoint_and_an_unmatched_response_does_not(
             Ok(0) => break,
             Ok(_) => {
                 let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-                if event["type"] != "endpoint_update" {
+                if event["type"] != "endpoint_rollup" {
                     continue;
                 }
                 for endpoint in event["endpoints"].as_array().into_iter().flatten() {

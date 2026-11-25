@@ -1902,7 +1902,7 @@ mod tests {
         assert_eq!(snapshots[0].app_layer_protocol, "HTTP");
         assert_eq!(snapshots[0].tx_bytes_total, reconstructed.total_len as u64);
 
-        let endpoints = flows.endpoint_snapshot(1);
+        let (endpoints, _) = flows.endpoint_snapshot(1);
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].tx_packets_total, 1, "one reassembled datagram creates one attributed flow packet");
         assert_eq!(endpoints[0].tx_bytes_total, reconstructed.total_len as u64);

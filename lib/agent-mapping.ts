@@ -1,4 +1,4 @@
-import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, FOLLOW_LIMITS, FollowDirectionPage, FollowGap, FollowMask, FollowResponse, FollowTurn, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, ServiceTimeSummary, SystemStats, TCP_LABEL_TEXT_MAX, TCP_SAMPLE_MARK, TcpSample, TcpSampleLabel, TcpSamplesPage, TcpSamplesRelativeTo, TracerouteHop } from './types';
+import { AgentStatus, CaptureConfig, CaptureFileStatus, CaptureStats, Conversation, DecryptionDirection, DecryptionStatus, Endpoint, Finding, FOLLOW_LIMITS, FollowDirectionPage, FollowGap, FollowMask, FollowResponse, FollowTurn, IoAggregateBucket, IoAggregateFn, IoBucket, IoBuckets, IoPlainBucket, IoNotObserved, IoNotObservedReason, IoSeriesStatus, NetworkConnection, NetworkInterface, OSILayerInfo, OSILayerNumber, PacketFrame, ProtocolNode, RollupBounds, RollupTraffic, RollupUpdate, ServiceTimeSummary, SystemStats, TCP_LABEL_TEXT_MAX, TCP_SAMPLE_MARK, TcpSample, TcpSampleLabel, TcpSamplesPage, TcpSamplesRelativeTo, TracerouteHop } from './types';
 import { STATIC_LAYER_INFO } from './osi-engine';
 
 function requireField<T>(obj: Record<string, unknown>, key: string): T {
@@ -579,67 +579,121 @@ export function mapInterfaceErrorEvent(json: unknown): string {
   return requireField(w, 'message');
 }
 
-// JAM-14. Accepts the full `endpoint_update` event envelope — same
-// array-under-a-key convention as mapInterfaceListEvent above. Sent as a
-// full replacement list every tick (the agent's rollups only ever grow, so
-// there's nothing to diff); a missing/malformed `endpoints` array throws
-// rather than silently rendering an empty table. `enrichment` always comes
-// back `undefined` here — it's filled in client-side, once per host, the
-// same way `NetworkConnection.enrichment` is per flow.
-export function mapEndpointUpdateEvent(json: unknown): Endpoint[] {
-  const w = json as { endpoints?: unknown[] };
-  if (!w.endpoints) {
-    throw new Error('malformed endpoint_update event: missing "endpoints" field');
-  }
-  return w.endpoints.map((entry) => {
-    const e = entry as Record<string, unknown>;
-    return {
-      host: requireField<string>(e, 'host'),
-      rxBytesTotal: requireField<number>(e, 'rxBytesTotal'),
-      txBytesTotal: requireField<number>(e, 'txBytesTotal'),
-      rxPacketsTotal: requireField<number>(e, 'rxPacketsTotal'),
-      txPacketsTotal: requireField<number>(e, 'txPacketsTotal'),
-      rxSpeed: requireField<number>(e, 'rxSpeed'),
-      txSpeed: requireField<number>(e, 'txSpeed'),
-      flowCount: requireField<number>(e, 'flowCount'),
-      firstSeenMs: requireField<number>(e, 'firstSeenMs'),
-      lastSeenMs: requireField<number>(e, 'lastSeenMs'),
-      processName: requireField<string>(e, 'processName'),
-      pid: requireField<number>(e, 'pid'),
-      ja3Label: e.ja3Label as string | undefined,
-      observedName: typeof e.observedName === 'string' ? e.observedName : undefined,
-      enrichment: undefined,
-    };
-  });
+// KAN-131. Both rollup mappers reject a whole event rather than render part of
+// it: a partial or misread list must never look complete (plan P5). Counters
+// saturate and the relay re-encodes them, so any finite number >= 0 is
+// accepted, above 2^53 included.
+function rollupObject(value: unknown, what: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) throw new Error(`malformed rollup event: "${what}" is not an object`);
+  return value as Record<string, unknown>;
 }
 
-// JAM-14. Same array-under-a-key convention as mapEndpointUpdateEvent above.
-export function mapConversationUpdateEvent(json: unknown): Conversation[] {
-  const w = json as { conversations?: unknown[] };
-  if (!w.conversations) {
-    throw new Error('malformed conversation_update event: missing "conversations" field');
+function rollupNumber(obj: Record<string, unknown>, key: string, min = 0): number {
+  const value = obj[key];
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min) {
+    throw new Error(`malformed rollup event: "${key}" is not a finite number >= ${min}`);
   }
-  return w.conversations.map((entry) => {
-    const c = entry as Record<string, unknown>;
-    return {
-      localAddr: requireField<string>(c, 'localAddr'),
-      remoteAddr: requireField<string>(c, 'remoteAddr'),
-      rxBytesTotal: requireField<number>(c, 'rxBytesTotal'),
-      txBytesTotal: requireField<number>(c, 'txBytesTotal'),
-      rxPacketsTotal: requireField<number>(c, 'rxPacketsTotal'),
-      txPacketsTotal: requireField<number>(c, 'txPacketsTotal'),
-      rxSpeed: requireField<number>(c, 'rxSpeed'),
-      txSpeed: requireField<number>(c, 'txSpeed'),
-      flowCount: requireField<number>(c, 'flowCount'),
-      firstSeenMs: requireField<number>(c, 'firstSeenMs'),
-      lastSeenMs: requireField<number>(c, 'lastSeenMs'),
-      durationMs: requireField<number>(c, 'durationMs'),
-      processName: requireField<string>(c, 'processName'),
-      pid: requireField<number>(c, 'pid'),
-      ja3Label: c.ja3Label as string | undefined,
-      enrichment: undefined,
-    };
-  });
+  return value;
+}
+
+function rollupString(obj: Record<string, unknown>, key: string): string {
+  const value = obj[key];
+  if (typeof value !== 'string') throw new Error(`malformed rollup event: "${key}" is not a string`);
+  return value;
+}
+
+function rollupAddress(obj: Record<string, unknown>, key: string): string {
+  const value = rollupString(obj, key);
+  if (value === '') throw new Error(`malformed rollup event: "${key}" is empty`);
+  return value;
+}
+
+function rollupLabel(obj: Record<string, unknown>, key: string): string | undefined {
+  return obj[key] === undefined ? undefined : rollupString(obj, key);
+}
+
+function mapRollupTraffic(value: unknown, what: string): RollupTraffic {
+  const t = rollupObject(value, what);
+  return {
+    rxBytes: rollupNumber(t, 'rxBytes'),
+    txBytes: rollupNumber(t, 'txBytes'),
+    rxPackets: rollupNumber(t, 'rxPackets'),
+    txPackets: rollupNumber(t, 'txPackets'),
+  };
+}
+
+function mapRollupBounds(value: unknown): RollupBounds {
+  const b = rollupObject(value, 'bounds');
+  const bounds: RollupBounds = {
+    cap: rollupNumber(b, 'cap', 1),
+    topN: rollupNumber(b, 'topN', 1),
+    tracked: rollupNumber(b, 'tracked'),
+    evictions: rollupNumber(b, 'evictions'),
+    unkeyed: rollupNumber(b, 'unkeyed'),
+    sinceMs: b.sinceMs === null ? null : rollupNumber(b, 'sinceMs'),
+    horizonMs: b.horizonMs === null ? null : rollupNumber(b, 'horizonMs'),
+    totals: mapRollupTraffic(b.totals, 'totals'),
+    evicted: mapRollupTraffic(b.evicted, 'evicted'),
+  };
+  if (bounds.tracked > bounds.cap) throw new Error('malformed rollup event: "tracked" is above "cap"');
+  return bounds;
+}
+
+// Row order is kept as sent: it is the rankings' last tie-break.
+function mapRollup<T>(
+  json: unknown,
+  key: 'endpoints' | 'conversations',
+  mapRow: (row: Record<string, unknown>) => T,
+): RollupUpdate<T> {
+  const w = rollupObject(json, 'event');
+  const bounds = mapRollupBounds(w.bounds);
+  const rows = w[key];
+  if (!Array.isArray(rows)) throw new Error(`malformed rollup event: "${key}" is not an array`);
+  if (rows.length > Math.min(bounds.tracked, 4 * bounds.topN)) {
+    throw new Error('malformed rollup event: more rows than "tracked" or 4 x "topN"');
+  }
+  return { rows: rows.map((row) => mapRow(rollupObject(row, 'row'))), bounds };
+}
+
+// The fields both row types share. `enrichment` always comes back `undefined`
+// here: it is filled in client-side, once per host (lib/rollup-state.ts).
+function mapRollupRow(r: Record<string, unknown>) {
+  if (typeof r.historyComplete !== 'boolean') {
+    throw new Error('malformed rollup event: "historyComplete" is not a boolean');
+  }
+  return {
+    historyComplete: r.historyComplete,
+    rxBytesTotal: rollupNumber(r, 'rxBytesTotal'),
+    txBytesTotal: rollupNumber(r, 'txBytesTotal'),
+    rxPacketsTotal: rollupNumber(r, 'rxPacketsTotal'),
+    txPacketsTotal: rollupNumber(r, 'txPacketsTotal'),
+    rxSpeed: rollupNumber(r, 'rxSpeed'),
+    txSpeed: rollupNumber(r, 'txSpeed'),
+    flowCount: rollupNumber(r, 'flowCount'),
+    firstSeenMs: rollupNumber(r, 'firstSeenMs'),
+    lastSeenMs: rollupNumber(r, 'lastSeenMs'),
+    processName: rollupString(r, 'processName'),
+    pid: rollupNumber(r, 'pid'),
+    ja3Label: rollupLabel(r, 'ja3Label'),
+    enrichment: undefined,
+  };
+}
+
+export function mapEndpointRollupEvent(json: unknown): RollupUpdate<Endpoint> {
+  return mapRollup(json, 'endpoints', (row) => ({
+    host: rollupAddress(row, 'host'),
+    ...mapRollupRow(row),
+    observedName: rollupLabel(row, 'observedName'),
+  }));
+}
+
+export function mapConversationRollupEvent(json: unknown): RollupUpdate<Conversation> {
+  return mapRollup(json, 'conversations', (row) => ({
+    localAddr: rollupAddress(row, 'localAddr'),
+    remoteAddr: rollupAddress(row, 'remoteAddr'),
+    ...mapRollupRow(row),
+    durationMs: rollupNumber(row, 'durationMs'),
+  }));
 }
 
 export function mapPacketEvent(json: unknown): PacketFrame {

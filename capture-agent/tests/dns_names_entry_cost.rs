@@ -5,33 +5,13 @@
 //!
 //! Own integration-test binary because it installs a counting global
 //! allocator, which must not replace the allocator for the unit tests.
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[path = "fixtures/counting_allocator.rs"]
+mod counting_allocator;
+use counting_allocator::LIVE_BYTES;
+use std::sync::atomic::Ordering;
 
 use capture_agent::dns_names::ObservedDnsNames;
 use capture_agent::l7::DnsAnswer;
-
-struct Counting;
-static LIVE_BYTES: AtomicUsize = AtomicUsize::new(0);
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
-        System.alloc(layout)
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
-        System.dealloc(ptr, layout)
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        LIVE_BYTES.fetch_add(new_size, Ordering::Relaxed);
-        LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-static ALLOCATOR: Counting = Counting;
 
 /// A 253-byte name and a 39-byte address: the longest of each.
 fn worst_case_entry(i: usize) -> (String, DnsAnswer) {

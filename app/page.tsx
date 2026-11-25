@@ -25,6 +25,7 @@ import {
   NetworkInterface,
   PacketFrame,
   ProtocolNode,
+  RollupState,
   ServiceTimeSummary,
   SystemStats,
   TerminalTheme,
@@ -43,8 +44,8 @@ import {
   mapCaptureStatsEvent,
   mapConnectionClosedEvent,
   mapConnectionEvent,
-  mapConversationUpdateEvent,
-  mapEndpointUpdateEvent,
+  mapConversationRollupEvent,
+  mapEndpointRollupEvent,
   mapFindingEvent,
   mapInterfaceErrorEvent,
   mapInterfaceListEvent,
@@ -59,12 +60,7 @@ import {
 } from '@/lib/agent-mapping';
 import { mapDecryptedPayloadEvent } from '@/lib/decrypted-mapping';
 import { applyEnrichmentEvent } from '@/lib/enrichment-mapping';
-import {
-  applyConversationEnrichment,
-  applyEndpointEnrichment,
-  mergeConversationSnapshot,
-  mergeEndpointSnapshot,
-} from '@/lib/rollup-state';
+import { EnrichmentMap, replaceHostRows, withEnrichment } from '@/lib/rollup-state';
 import { isTraceComplete, mergeGeoHopUpdate, mergeTracerouteHop } from '@/lib/traceroute-state';
 import { HeaderBar } from '@/components/HeaderBar';
 import { DashboardView } from '@/components/DashboardView';
@@ -125,13 +121,17 @@ export default function TerminalApp() {
   // protocol_hierarchy_update tick arrives — ProtocolMatrixView shows an
   // honest "not yet measured" state for that gap, never a fabricated one.
   const [protocolHierarchy, setProtocolHierarchy] = useState<ProtocolNode | null>(null);
-  // JAM-14: per-host/per-pair traffic rollups, aggregated in the agent so
-  // totals survive flow eviction — see docs/wire-protocol.md's
-  // endpoint_update/conversation_update events. Each tick's event is a full
-  // replacement list (the agent's own rollups only ever grow), so these are
-  // just overwritten wholesale rather than upserted like `connections`.
-  const [endpoints, setEndpoints] = useState<Endpoint[]>([]);
-  const [conversations, setConversations] = useState<Conversation[]>([]);
+  // JAM-14/KAN-131: per-host/per-pair traffic rollups, aggregated in the agent
+  // so totals survive flow eviction — see docs/wire-protocol.md's
+  // endpoint_rollup/conversation_rollup events. Each tick's event carries a
+  // bounded part of the agent's table and replaces the previous one wholesale.
+  const [endpoints, setEndpoints] = useState<RollupState<Endpoint>>({ status: 'waiting' });
+  const [conversations, setConversations] = useState<RollupState<Conversation>>({ status: 'waiting' });
+  // The rows as received, before enrichment, so a later result can be applied
+  // to them; empty unless that table is ready.
+  const endpointRows = useRef<Endpoint[]>([]);
+  const conversationRows = useRef<Conversation[]>([]);
+  const rollupEnrichment = useRef(new EnrichmentMap());
   // JAM-15: per-protocol service response time, replaced wholesale each
   // tick. null until the first service_time_update arrives.
   const [serviceTimes, setServiceTimes] = useState<ServiceTimeSummary[] | null>(null);
@@ -309,6 +309,26 @@ export default function TerminalApp() {
       });
     };
 
+    // KAN-131: replace one table. Only that table's state changes; the other
+    // table's hosts are passed along so their enrichment is kept.
+    const trackCurrentHosts = () =>
+      rollupEnrichment.current.setCurrentHosts(
+        endpointRows.current.map((e) => e.host),
+        conversationRows.current.map((c) => c.remoteAddr),
+      );
+    const showEndpoints = (next: RollupState<Endpoint>) => {
+      endpointRows.current = next.status === 'ready' ? next.rows : [];
+      trackCurrentHosts();
+      setEndpoints(next.status === 'ready' ? { ...next, rows: withEnrichment(next.rows, rollupEnrichment.current) } : next);
+    };
+    const showConversations = (next: RollupState<Conversation>) => {
+      conversationRows.current = next.status === 'ready' ? next.rows : [];
+      trackCurrentHosts();
+      setConversations(
+        next.status === 'ready' ? { ...next, rows: withEnrichment(next.rows, rollupEnrichment.current) } : next,
+      );
+    };
+
     source.onmessage = (event) => {
       // A single malformed/unexpected event (e.g. an agent binary built
       // before this UI, sending a payload missing a field the mappers now
@@ -360,14 +380,27 @@ export default function TerminalApp() {
         if (data.type === 'protocol_hierarchy_update') {
           setProtocolHierarchy(mapProtocolHierarchyEvent(data));
         }
-        if (data.type === 'endpoint_update') {
-          const incoming = mapEndpointUpdateEvent(data);
-          setEndpoints((prev) => mergeEndpointSnapshot(prev, incoming));
+        // KAN-131: a rollup that cannot be read must not leave older rows on
+        // screen as if current, so each has its own catch.
+        if (data.type === 'endpoint_rollup') {
+          try {
+            showEndpoints({ status: 'ready', ...mapEndpointRollupEvent(data) });
+          } catch (err) {
+            console.error('capture-agent: unreadable endpoint_rollup', err);
+            showEndpoints({ status: 'unreadable' });
+          }
         }
-        if (data.type === 'conversation_update') {
-          const incoming = mapConversationUpdateEvent(data);
-          setConversations((prev) => mergeConversationSnapshot(prev, incoming));
+        if (data.type === 'conversation_rollup') {
+          try {
+            showConversations({ status: 'ready', ...mapConversationRollupEvent(data) });
+          } catch (err) {
+            console.error('capture-agent: unreadable conversation_rollup', err);
+            showConversations({ status: 'unreadable' });
+          }
         }
+        // Sent only by an agent older than this page; never rendered.
+        if (data.type === 'endpoint_update') showEndpoints({ status: 'agent-too-old' });
+        if (data.type === 'conversation_update') showConversations({ status: 'agent-too-old' });
         if (data.type === 'service_time_update') {
           setServiceTimes(mapServiceTimeUpdateEvent(data));
         }
@@ -421,13 +454,30 @@ export default function TerminalApp() {
           // JAM-14: on-demand lookups use the host as connectionId, while
           // background lookups use a real connection id. Both carry the
           // shared remoteAddr field, so merge rollup metadata by that host.
-          const rollupEnrichment = {
-            remoteAddr: data.remoteAddr,
+          // Cache hits repeat a result on every connection_update, so an
+          // unchanged one leaves both tables alone.
+          const host = data.remoteAddr;
+          const changed = rollupEnrichment.current.record({
+            remoteAddr: host,
             remoteHostname: data.remoteHostname,
             enrichment: data.enrichment,
-          };
-          setEndpoints((prev) => applyEndpointEnrichment(prev, rollupEnrichment));
-          setConversations((prev) => applyConversationEnrichment(prev, rollupEnrichment));
+          });
+          const received = endpointRows.current;
+          if (changed && received.some((e) => e.host === host)) {
+            setEndpoints((prev) =>
+              prev.status === 'ready'
+                ? { ...prev, rows: replaceHostRows(prev.rows, received, host, rollupEnrichment.current) }
+                : prev,
+            );
+          }
+          const receivedPairs = conversationRows.current;
+          if (changed && receivedPairs.some((c) => c.remoteAddr === host)) {
+            setConversations((prev) =>
+              prev.status === 'ready'
+                ? { ...prev, rows: replaceHostRows(prev.rows, receivedPairs, host, rollupEnrichment.current) }
+                : prev,
+            );
+          }
           // A result arrived for this connectionId — it's no longer "in
           // flight," and if it had previously timed out into "unavailable"
           // (e.g. a slow background-mode lookup that finished late), a real
@@ -1118,7 +1168,7 @@ export default function TerminalApp() {
             }`}
           >
             <Users className="h-3.5 w-3.5" />
-            <span>F7: HOSTS ({endpoints.length})</span>
+            <span>F7: HOSTS ({endpoints.status === 'ready' ? endpoints.bounds.tracked.toLocaleString('en-US') : '–'})</span>
           </button>
 
           <button

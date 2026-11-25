@@ -71,7 +71,16 @@ A cross-tab of layers vs. protocols currently in use, plus **SERVICE RESPONSE TI
 
 ### Hosts (click `F7: HOSTS`)
 
-**Endpoints** and **Conversations** modes roll up traffic per host and per address pair. Search by address/hostname/process, sort bytes/packets/rate to find top talkers, and select a row for ownership/available JA3 detail. Totals can outlive individual flow eviction. There is no `hosts` command.
+**Endpoints** and **Conversations** modes roll up traffic per host and per address pair. The list is **partial by design**: the agent tracks up to 50,000 hosts and 50,000 conversations by default and sends the union of its top 200 by bytes, packets, rate and most recent activity.
+
+- `F7: HOSTS (n)` counts the hosts tracked, not the rows shown. The line above the table gives rows shown, rows received and keys tracked separately.
+- **Rank by** (bytes, packets, rate, recent) picks which received rows are shown, the first N, and sets the column sort to match. It is per tab and per table and is not remembered. Clicking a column only reorders the rows displayed, and a note says so.
+- **Search** covers every *received* row by address/hostname/process, not only those shown. It can't find a row that is tracked but not sent.
+- When the agent has evicted keys, an amber line gives the number of **evictions** (not distinct hosts: one host can be evicted more than once), the bytes that are therefore in no row, and the time at or before which a host's last activity may be missing. That time is unreliable in a replay whose timestamps go backward.
+- `≥` on bytes, packets, flows or duration, and "may be earlier" under First Seen, mark a row that may have earlier, evicted history.
+- Select a row for ownership/available JA3 detail. If it leaves the received rows, the panel says so and names it.
+
+Totals outlive individual flow eviction, but an **interface switch clears both tables** and their counters. Totals above 2^53 are not exact in a browser. Ownership already looked up is kept per tab for every received host plus up to 1,000 others; if both tables become unreadable (or the agent turns out to be too old) at once, all but 1,000 hosts lose theirs until looked up again. The limits are startup settings ([agent README](../capture-agent/README.md#rollup-limits-max_endpoints-max_conversations-rollup_top_n)). There is no `hosts` command.
 
 ### Findings (click `F6: FINDINGS`)
 
