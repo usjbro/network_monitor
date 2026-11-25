@@ -56,8 +56,14 @@ export class QueryLog {
   }
 
   readAll(): QueryLogEntry[] {
-    if (!existsSync(this.filePath)) return [];
-    const raw = readFileSync(this.filePath, 'utf8');
+    return this.parse(this.readRaw());
+  }
+
+  private readRaw(): string {
+    return existsSync(this.filePath) ? readFileSync(this.filePath, 'utf8') : '';
+  }
+
+  private parse(raw: string): QueryLogEntry[] {
     return raw
       .split('\n')
       .filter((l) => l.trim().length > 0)
@@ -65,16 +71,19 @@ export class QueryLog {
   }
 
   private async pruneNow(retentionDays: number, now: Date): Promise<void> {
-    if (!existsSync(this.filePath)) return;
+    // lstat, not existsSync: a symlink to nothing is still there to replace.
+    const stat = lstatSync(this.filePath, { throwIfNoEntry: false });
+    if (!stat) return;
+    const raw = this.readRaw();
     const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
-    const kept = this.readAll().filter((e) => new Date(e.timestamp).getTime() >= cutoff);
+    const kept = this.parse(raw).filter((e) => new Date(e.timestamp).getTime() >= cutoff);
     const body = kept.map((e) => JSON.stringify(e) + '\n').join('');
     // Nothing to remove or repair: no rewrite. Replacing the file also
-    // restores a missing final newline, 0600 and our ownership, and drops a
-    // symlink, so any of those still rewrites.
-    const stat = lstatSync(this.filePath);
+    // restores a missing final newline, 0600 and our ownership, and detaches
+    // a symlink or hard link, so any of those still rewrites.
     const owned = !process.getuid || stat.uid === process.getuid();
-    if (stat.isFile() && owned && (stat.mode & 0o777) === 0o600 && readFileSync(this.filePath, 'utf8') === body) return;
+    const restricted = process.platform === 'win32' || (stat.mode & 0o777) === 0o600;
+    if (stat.isFile() && stat.nlink === 1 && owned && restricted && raw === body) return;
     // Rewritten via temp-file-then-rename for the same atomic-replace
     // guarantee as EnrichmentCache.persist() (Task 2's atomicWriteJson) —
     // not reused verbatim because this file is NDJSON, one entry per line,

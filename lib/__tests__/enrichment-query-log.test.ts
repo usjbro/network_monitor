@@ -1,6 +1,6 @@
 // lib/__tests__/enrichment-query-log.test.ts
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fs, chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { promises as fs, chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QueryLog } from '../enrichment/query-log';
@@ -108,6 +108,22 @@ describe('QueryLog', () => {
     await new QueryLog(filePath).prune(30);
     expect(lstatSync(filePath).isFile()).toBe(true);
     expect(statSync(target).mode & 0o777).toBe(0o644);
+  });
+
+  it('prune() replaces a symlink whose target does not exist', async () => {
+    if (process.platform === 'win32') return;
+    symlinkSync(join(dir, 'missing'), filePath);
+    await new QueryLog(filePath).prune(30);
+    expect(lstatSync(filePath).isFile()).toBe(true);
+    expect(readdirSync(dir)).toEqual(['query-log.ndjson']);
+  });
+
+  it('prune() detaches a hard-linked log', async () => {
+    const other = join(dir, 'other');
+    writeFileSync(filePath, row('recent.example'), { mode: 0o600 });
+    linkSync(filePath, other);
+    await new QueryLog(filePath).prune(30);
+    expect(statSync(other).nlink).toBe(1);
   });
 
   it('prune() replaces a log owned by another user', async () => {

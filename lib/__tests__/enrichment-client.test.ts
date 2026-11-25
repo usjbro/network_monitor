@@ -49,9 +49,12 @@ describe('EnrichmentClient', () => {
 
   it('writes nothing to a fresh data directory until something is looked up', async () => {
     const prune = vi.spyOn(QueryLog.prototype, 'prune');
-    new EnrichmentClient({ dataDir: dir });
-    await prune.mock.results[0].value;
-    prune.mockRestore();
+    try {
+      new EnrichmentClient({ dataDir: dir });
+      await prune.mock.results[0].value;
+    } finally {
+      prune.mockRestore();
+    }
     expect(readdirSync(dir)).toEqual([]);
   });
 
