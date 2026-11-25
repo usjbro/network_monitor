@@ -1,6 +1,12 @@
+# KAN-309 vite upgrade (2026-11-24)
+
+James approved gate `kan-309__vite-upgrade` in chat ("approve, commit and push"; James merges). Lockfile only: vite 8.3.5 to 8.3.8, which brings rolldown 1.2.16 to 1.2.19. The fix for AIKIDO-2026-137384 is in rolldown. Also moved: postcss 8.5.31 to 8.5.33 (the app's CSS build uses it), @rolldown/pluginutils 1.1.1, @napi-rs/wasm-runtime 1.2.6, and new optional WebAssembly packages including beta @emnapi 2.0.0-beta.2. KAN-131 merged as `8384bfd` (#350) and is Done.
+
+---
+
 # KAN-131 Bounded rollups — implementation (2026-11-24)
 
-James approved code gate `kan-131__rollup-bounds` in chat ("approve all": all seven tasks, commit, push, PR; James merges). Worktree `.worktrees/rollup-bounds`, branch `KAN-131-rollup-bounds`. Seven tasks done and reviewed. P9 failed at `36949c3` (10.4 ms vs 5.7 ms at 50,000); James approved one faster attempt, which passed on AC at `25e936d` (1.1 vs 7.5 ms; the pre-registered scan shape gate also passed). Rollups are sent last in each tick, with James's approval, because above about 1,000 live flows the 1,024-event queue dropped them. Security review: no findings. Independent whole-branch review: docs and comment fixes only. PR review fixes then changed code: bounded test reads, enrichment updates, shared sort values, and etherparse 0.20.4 (RUSTSEC-2026-0596, James approved it in #350). Follow-ups filed: KAN-313 (process-name cap), KAN-314 (event queue and stale rows). PR #350 is open (its head moves with review fixes). Remaining: PR review and merge by James.
+James approved code gate `kan-131__rollup-bounds` in chat ("approve all": all seven tasks, commit, push, PR; James merges). Worktree `.worktrees/rollup-bounds`, branch `KAN-131-rollup-bounds`. Seven tasks done and reviewed. P9 failed at `36949c3` (10.4 ms vs 5.7 ms at 50,000); James approved one faster attempt, which passed on AC at `25e936d` (1.1 vs 7.5 ms; the pre-registered scan shape gate also passed). Rollups are sent last in each tick, with James's approval, because above about 1,000 live flows the 1,024-event queue dropped them. Security review: no findings. Independent whole-branch review: docs and comment fixes only. PR review fixes then changed code: bounded test reads, enrichment updates, shared sort values, and etherparse 0.20.4 (RUSTSEC-2026-0596, James approved it in #350). Follow-ups filed: KAN-313 (process-name cap), KAN-314 (event queue and stale rows). PR #350 merged as `8384bfd`.
 
 ---
 
