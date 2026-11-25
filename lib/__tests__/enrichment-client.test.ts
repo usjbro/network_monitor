@@ -264,6 +264,25 @@ describe('EnrichmentClient', () => {
     });
   });
 
+  it('a lookup that throws outside its own error handling leaves nothing unhandled', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      writeFileSync(join(dir, 'cache.json'), JSON.stringify({ entries: [{ key: 5, record: null, expiresAt: 0 }] }));
+      const client = new EnrichmentClient({ dataDir: dir });
+      client.enableBackground();
+      client.requestLookup('conn-1', '93.184.216.34');
+      client.notifyObservedConnections([{ id: 'conn-2', remoteAddr: '93.184.216.34' }]);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(error.mock.calls).toEqual([['[enrichment] lookup failed:', 'TypeError'], ['[enrichment] lookup failed:', 'TypeError']]);
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      error.mockRestore();
+    }
+  });
+
   it('makes zero HTTP calls when disabled', async () => {
     const fetchImpl = vi.fn();
     const client = new EnrichmentClient({ dataDir: dir, fetchImpl: fetchImpl as unknown as typeof fetch });

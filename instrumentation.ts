@@ -11,8 +11,8 @@ export async function register() {
       const { getEnrichmentClient } = await import('./lib/stream-response');
       getEnrichmentClient();
     } catch (err) {
-      const { code, name } = err as NodeJS.ErrnoException;
-      console.error('[enrichment] could not start query-log pruning:', code ?? name);
+      const { errorLabel } = await import('./lib/enrichment/error-label');
+      console.error('[enrichment] could not start query-log pruning:', errorLabel(err));
     }
   }
 }

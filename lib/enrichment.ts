@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { isPrivateOrReserved, ipToInt } from './enrichment/scope-filter';
 import { EnrichmentCache } from './enrichment/cache';
 import { QueryLog } from './enrichment/query-log';
+import { errorLabel } from './enrichment/error-label';
 import { RequestQueue, RequestQueueOptions, shuffle } from './enrichment/request-queue';
 import { loadIpBootstrap, resolveRdapBaseForIp, loadDomainBootstrap, resolveRdapBaseForDomain } from './enrichment/bootstrap';
 import { RdapClient } from './enrichment/rdap-client';
@@ -18,15 +19,6 @@ const CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const NEGATIVE_TTL_MS = 60 * 60 * 1000;
 const QUERY_LOG_RETENTION_DAYS = 30;
 const QUERY_LOG_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
-// Code or name only: an error's message can quote an address, a hostname or
-// the log's path.
-function errorLabel(err: unknown): string {
-  if (!(err instanceof Error)) return typeof err;
-  const { code, name, cause } = err as NodeJS.ErrnoException;
-  const label = typeof code === 'string' ? code : name;
-  return cause instanceof Error ? `${label} (${errorLabel(cause)})` : label;
-}
 
 export const DISCLOSURE_TEXT =
   'Enabling ownership lookups sends the remote IP addresses this Mac talks to ' +
@@ -169,7 +161,7 @@ export class EnrichmentClient extends EventEmitter {
 
   requestLookup(connectionId: string, remoteAddr: string): void {
     if (this.mode === 'off') return;
-    void this.lookup(connectionId, remoteAddr);
+    this.startLookup(connectionId, remoteAddr);
   }
 
   notifyObservedConnections(conns: Array<{ id: string; remoteAddr: string }>): void {
@@ -179,7 +171,7 @@ export class EnrichmentClient extends EventEmitter {
     // (app/api/stream/route.ts, Task 9) to only pass connections not already
     // cached/in-flight, so this doesn't re-shuffle-and-requeue every tick.
     for (const conn of shuffle(conns, this.random)) {
-      void this.lookup(conn.id, conn.remoteAddr);
+      this.startLookup(conn.id, conn.remoteAddr);
     }
   }
 
@@ -195,6 +187,11 @@ export class EnrichmentClient extends EventEmitter {
       if (!this.cacheHitLogFailing) console.error('[enrichment] query-log write failed for cached lookups:', errorLabel(err));
       this.cacheHitLogFailing = true;
     }
+  }
+
+  // lookup() handles its own failures; this catches anything that escapes them.
+  private startLookup(connectionId: string, remoteAddr: string): void {
+    this.lookup(connectionId, remoteAddr).catch((err) => console.error('[enrichment] lookup failed:', errorLabel(err)));
   }
 
   private async lookup(connectionId: string, remoteAddr: string): Promise<void> {
@@ -295,7 +292,7 @@ export class EnrichmentClient extends EventEmitter {
         this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record, resolvedHostname));
       }
     } catch (err) {
-      // lookup() is always invoked fire-and-forget (`void this.lookup(...)`)
+      // lookup() is always invoked fire-and-forget (via startLookup())
       // from requestLookup()/notifyObservedConnections() — there is no
       // caller anywhere that awaits or attaches a rejection handler to it.
       // An uncaught error here (e.g. a transient disk error from
