@@ -4,10 +4,12 @@
 // miss), per the enrichment spec's egress hygiene requirement that "outbound
 // queries are logged ... never full response bodies" — entries carry only
 // the target, the endpoint queried, and hit/miss status.
-import { promises as fs, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { promises as fs, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { QueryLogEntry } from './types';
+
+type QueryLogInput = Omit<QueryLogEntry, 'timestamp'>;
 
 export class QueryLog {
   private tail: Promise<void> = Promise.resolve();
@@ -23,8 +25,9 @@ export class QueryLog {
     return result;
   }
 
-  append(entry: { target: string; endpoint: string; cacheStatus: 'hit' | 'miss' }): Promise<void> {
-    return this.serialize(() => this.appendNow(entry));
+  append(entry: QueryLogInput): Promise<void> {
+    const timestamp = new Date().toISOString();
+    return this.serialize(() => this.appendNow(entry, timestamp));
   }
 
   prune(retentionDays: number, now: Date = new Date()): Promise<void> {
@@ -35,13 +38,13 @@ export class QueryLog {
     return this.serialize(() => this.clearNow());
   }
 
-  private async appendNow(entry: { target: string; endpoint: string; cacheStatus: 'hit' | 'miss' }): Promise<void> {
+  private async appendNow(entry: QueryLogInput, timestamp: string): Promise<void> {
     mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
     const line: QueryLogEntry = {
       target: entry.target,
       endpoint: entry.endpoint,
       cacheStatus: entry.cacheStatus,
-      timestamp: new Date().toISOString(),
+      timestamp,
     };
     const isNew = !existsSync(this.filePath);
     await fs.appendFile(this.filePath, JSON.stringify(line) + '\n', { mode: 0o600 });
@@ -64,20 +67,19 @@ export class QueryLog {
   private async pruneNow(retentionDays: number, now: Date): Promise<void> {
     if (!existsSync(this.filePath)) return;
     const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
-    const entries = this.readAll();
-    const kept = entries.filter((e) => new Date(e.timestamp).getTime() >= cutoff);
-    if (kept.length === entries.length) {
-      // Nothing to remove, so no rewrite; still force the permission the
-      // rewrite below would have given the file.
-      await fs.chmod(this.filePath, 0o600);
-      return;
-    }
+    const kept = this.readAll().filter((e) => new Date(e.timestamp).getTime() >= cutoff);
+    const body = kept.map((e) => JSON.stringify(e) + '\n').join('');
+    // Nothing to remove or repair: no rewrite. Replacing the file also
+    // restores a missing final newline, 0600 and our ownership, and drops a
+    // symlink, so any of those still rewrites.
+    const stat = lstatSync(this.filePath);
+    const owned = !process.getuid || stat.uid === process.getuid();
+    if (stat.isFile() && owned && (stat.mode & 0o777) === 0o600 && readFileSync(this.filePath, 'utf8') === body) return;
     // Rewritten via temp-file-then-rename for the same atomic-replace
     // guarantee as EnrichmentCache.persist() (Task 2's atomicWriteJson) —
     // not reused verbatim because this file is NDJSON, one entry per line,
     // not a single JSON document.
     const tmpPath = `${this.filePath}.tmp-${randomBytes(6).toString('hex')}`;
-    const body = kept.map((e) => JSON.stringify(e)).join('\n') + (kept.length ? '\n' : '');
     await fs.writeFile(tmpPath, body, { mode: 0o600 });
     await fs.rename(tmpPath, this.filePath);
   }

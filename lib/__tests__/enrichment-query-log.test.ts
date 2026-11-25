@@ -1,6 +1,6 @@
 // lib/__tests__/enrichment-query-log.test.ts
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fs, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { promises as fs, chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QueryLog } from '../enrichment/query-log';
@@ -83,12 +83,55 @@ describe('QueryLog', () => {
     expect(readFileSync(filePath, 'utf8')).toContain('recent.example');
   });
 
-  it('prune() restores 0600 on a log it does not rewrite', async () => {
+  it('prune() restores 0600 on a log with nothing to remove', async () => {
     if (process.platform === 'win32') return;
     writeFileSync(filePath, row('recent.example'));
     chmodSync(filePath, 0o644);
     await new QueryLog(filePath).prune(30);
     expect(statSync(filePath).mode & 0o777).toBe(0o600);
+  });
+
+  it('prune() restores a missing final newline, so the next append stays readable', async () => {
+    writeFileSync(filePath, row('recent.example').trimEnd(), { mode: 0o600 });
+    const log = new QueryLog(filePath);
+    await log.prune(30);
+    await log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'miss' });
+    expect(log.readAll().map((e) => e.target)).toEqual(['recent.example', 'new.example']);
+  });
+
+  it('prune() replaces a symlink and leaves its target alone', async () => {
+    if (process.platform === 'win32') return;
+    const target = join(dir, 'elsewhere');
+    writeFileSync(target, row('recent.example'));
+    chmodSync(target, 0o644);
+    symlinkSync(target, filePath);
+    await new QueryLog(filePath).prune(30);
+    expect(lstatSync(filePath).isFile()).toBe(true);
+    expect(statSync(target).mode & 0o777).toBe(0o644);
+  });
+
+  it('prune() replaces a log owned by another user', async () => {
+    if (!process.getuid) return;
+    writeFileSync(filePath, row('recent.example'), { mode: 0o600 });
+    const before = statSync(filePath).ino;
+    const spy = vi.spyOn(process as Required<Pick<NodeJS.Process, 'getuid'>>, 'getuid').mockReturnValue(statSync(filePath).uid + 1);
+    try {
+      await new QueryLog(filePath).prune(30);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(statSync(filePath).ino).not.toBe(before);
+  });
+
+  it('stamps an entry when append() is called, not when its write runs', async () => {
+    writeFileSync(filePath, row('old.example', EXPIRED));
+    const log = new QueryLog(filePath);
+    let called = 0;
+    await duringPrune(log, () => {
+      called = Date.now();
+      return log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'miss' });
+    });
+    expect(Date.parse(log.readAll()[0].timestamp) - called).toBeLessThan(20);
   });
 
   // Holds prune() just before it replaces the file, so `during` runs at the
