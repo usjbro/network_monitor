@@ -1,3 +1,9 @@
+# KAN-316 malformed query-log lines (2026-11-25)
+
+James approved gate `kan-316__query-log-malformed` in chat (commit, push, PR; James merges). `prune()` drops and counts only lines without a readable date (James narrowed this in chat from the gate's full schema check); dated lines stay until they expire, and `EnrichmentClient` logs the count, or a failed prune's code or name. KAN-286 is Done (#352, #353). KAN-315 step one merged as `e643f73` (#354); its check is still open.
+
+---
+
 # KAN-315 IO graph timing test (2026-11-25)
 
 James approved gate `kan-315__io-graph-timing` in chat (commit, push, PR; James merges). The chart formats x coordinates once for all series, and `e2e/io-graph.spec.ts` logs a fixed reference workload. The 16.7 ms limit is unchanged; changing the check needs James's further yes, after CI logs show how the reference moves.
