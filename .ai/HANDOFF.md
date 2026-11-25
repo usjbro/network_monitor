@@ -1,3 +1,10 @@
+# KAN-318 cached lookup with an unwritable query log (2026-11-25)
+
+- Worktree `.worktrees/cached-lookup-log-failure`, branch `KAN-318-cached-lookup-log-failure`. Slack posts paused by James; no gate, started or review posts were made.
+- Not covered: a network lookup whose log write fails is still discarded and not cached; KAN-317, KAN-319, KAN-322.
+
+---
+
 # KAN-321 and KAN-320 query-log retention (2026-11-25)
 
 - Worktree `.worktrees/query-log-retention`, branch `KAN-321-query-log-retention`.

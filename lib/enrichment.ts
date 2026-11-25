@@ -19,6 +19,15 @@ const NEGATIVE_TTL_MS = 60 * 60 * 1000;
 const QUERY_LOG_RETENTION_DAYS = 30;
 const QUERY_LOG_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+// Code or name only: an error's message can quote an address, a hostname or
+// the log's path.
+function errorLabel(err: unknown): string {
+  if (!(err instanceof Error)) return typeof err;
+  const { code, name, cause } = err as NodeJS.ErrnoException;
+  const label = typeof code === 'string' ? code : name;
+  return cause instanceof Error ? `${label} (${errorLabel(cause)})` : label;
+}
+
 export const DISCLOSURE_TEXT =
   'Enabling ownership lookups sends the remote IP addresses this Mac talks to ' +
   'to public internet registries (ARIN, RIPE, APNIC, LACNIC, AFRINIC) over RDAP, ' +
@@ -53,6 +62,7 @@ export class EnrichmentClient extends EventEmitter {
   private cache: EnrichmentCache;
   private queryLog: QueryLog;
   private firstPrune: Promise<void> | null = null;
+  private cacheHitLogFailing = false;
   private queue: RequestQueue;
   private rdap: RdapClient;
   private fetchImpl: typeof fetch;
@@ -124,9 +134,7 @@ export class EnrichmentClient extends EventEmitter {
       const dropped = await this.queryLog.prune(QUERY_LOG_RETENTION_DAYS);
       if (dropped > 0) console.error(`[enrichment] dropped ${dropped} unreadable query-log line${dropped === 1 ? '' : 's'}`);
     } catch (err) {
-      // Code or name only: an error's message can quote the log or its path.
-      const { code, name } = err as NodeJS.ErrnoException;
-      console.error('[enrichment] query-log prune failed:', code ?? name);
+      console.error('[enrichment] query-log prune failed:', errorLabel(err));
     }
     setTimeout(() => void this.pruneAndReschedule(), QUERY_LOG_PRUNE_INTERVAL_MS).unref();
   }
@@ -175,13 +183,27 @@ export class EnrichmentClient extends EventEmitter {
     }
   }
 
+  // Never rejects: a cached lookup sends nothing off the machine, so its result
+  // is shown even when its log entry cannot be written. Reported once per
+  // outage, because background mode repeats on every connection update
+  // (KAN-318).
+  private async logCacheHit(remoteAddr: string): Promise<void> {
+    try {
+      await this.queryLog.append({ target: remoteAddr, endpoint: 'cache', cacheStatus: 'hit' });
+      this.cacheHitLogFailing = false;
+    } catch (err) {
+      if (!this.cacheHitLogFailing) console.error('[enrichment] query-log write failed for cached lookups:', errorLabel(err));
+      this.cacheHitLogFailing = true;
+    }
+  }
+
   private async lookup(connectionId: string, remoteAddr: string): Promise<void> {
     if (isPrivateOrReserved(remoteAddr)) return;
     const flightKey = remoteAddr;
 
     const cached = this.cache.getForIp(remoteAddr);
     if (cached && this.cache.isFresh(cached)) {
-      await this.queryLog.append({ target: remoteAddr, endpoint: 'cache', cacheStatus: 'hit' });
+      await this.logCacheHit(remoteAddr);
       if (cached.record) {
         this.emit('result', buildEnrichmentEvent(connectionId, remoteAddr, { ...cached.record, source: 'cache' }));
       }
@@ -263,7 +285,7 @@ export class EnrichmentClient extends EventEmitter {
           // Fail this one sub-step closed instead: leave registrant unset
           // (surfaces as "Unavailable" for that field only) and let the
           // core-tier result proceed to cache + emit normally below.
-          console.error('[enrichment] extended-tier registrant lookup failed for', remoteAddr, err);
+          console.error('[enrichment] extended-tier registrant lookup failed:', errorLabel(err));
         }
       }
 
@@ -289,7 +311,7 @@ export class EnrichmentClient extends EventEmitter {
       // branch above does instead: log for observability, and let the
       // affected connection(s) simply never receive a 'result' event — the
       // UI's own timeout resolves them to "Unavailable".
-      console.error('[enrichment] lookup failed for', remoteAddr, err);
+      console.error('[enrichment] lookup failed:', errorLabel(err));
     } finally {
       this.inFlightWaiters.delete(flightKey);
     }

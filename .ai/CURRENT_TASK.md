@@ -1,3 +1,9 @@
+# KAN-318 cached lookup with an unwritable query log (2026-11-25)
+
+James approved KAN-318 in chat ("approve KAN-318, commit and push"; James merges) while Slack posts were paused; the gate record was written by hand. A cached result is shown even when its query-log entry cannot be written, that failure is reported once per outage, and enrichment errors give a code or name, never the address. KAN-321 and KAN-320 merged as `7a644b3` (#356) and are Done.
+
+---
+
 # KAN-321 and KAN-320 query-log retention (2026-11-25)
 
 James approved gate `kan-321__query-log-retention` in chat (commit, push, PR; James merges). The query log is pruned when the server starts (`instrumentation.ts`) and six hours after each prune, in chunks; `append()` starts a new line after a cut-off one. KAN-316 merged as `214a2ef` (#355) and is Done.
