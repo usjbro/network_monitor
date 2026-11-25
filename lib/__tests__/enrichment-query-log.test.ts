@@ -1,6 +1,6 @@
 // lib/__tests__/enrichment-query-log.test.ts
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
+import { promises as fs, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { QueryLog } from '../enrichment/query-log';
@@ -62,5 +62,86 @@ describe('QueryLog', () => {
       const mode = statSync(filePath).mode & 0o777;
       expect(mode).toBe(0o600);
     }
+  });
+
+  // KAN-286: the client starts prune() without waiting for it, so a write
+  // here outlives its caller, and clear() or append() can overlap it.
+  const row = (target: string, timestamp = new Date().toISOString()) =>
+    JSON.stringify({ target, endpoint: 'e', cacheStatus: 'miss', timestamp }) + '\n';
+  const EXPIRED = '2020-01-01T00:00:00.000Z';
+
+  it('prune() writes nothing when there is no log', async () => {
+    await new QueryLog(filePath).prune(30);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it('prune() does not rewrite a log with nothing to remove', async () => {
+    writeFileSync(filePath, row('recent.example'), { mode: 0o600 });
+    const before = statSync(filePath).ino;
+    await new QueryLog(filePath).prune(30);
+    expect(statSync(filePath).ino).toBe(before);
+    expect(readFileSync(filePath, 'utf8')).toContain('recent.example');
+  });
+
+  it('prune() restores 0600 on a log it does not rewrite', async () => {
+    if (process.platform === 'win32') return;
+    writeFileSync(filePath, row('recent.example'));
+    chmodSync(filePath, 0o644);
+    await new QueryLog(filePath).prune(30);
+    expect(statSync(filePath).mode & 0o777).toBe(0o600);
+  });
+
+  // Holds prune() just before it replaces the file, so `during` runs at the
+  // point where an unserialized write would be lost.
+  const duringPrune = async (log: QueryLog, during: () => Promise<void>) => {
+    const rename = fs.rename;
+    let release = () => {};
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const spy = vi.spyOn(fs, 'rename').mockImplementationOnce(async (from, to) => {
+      await held;
+      await rename(from, to);
+    });
+    try {
+      const pruned = log.prune(30);
+      await vi.waitFor(() => expect(spy).toHaveBeenCalled());
+      const write = during();
+      await new Promise((r) => setTimeout(r, 30));
+      release();
+      await Promise.all([pruned, write]);
+    } finally {
+      release();
+      spy.mockRestore();
+    }
+  };
+
+  it('keeps an entry appended while prune() is running', async () => {
+    writeFileSync(filePath, row('old.example', EXPIRED) + row('recent.example'));
+    const log = new QueryLog(filePath);
+    await duringPrune(log, () => log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'miss' }));
+    expect(log.readAll().map((e) => e.target)).toEqual(['recent.example', 'new.example']);
+  });
+
+  it('clear() called while prune() is running leaves the log empty', async () => {
+    writeFileSync(filePath, row('old.example', EXPIRED) + row('recent.example'));
+    const log = new QueryLog(filePath);
+    await duringPrune(log, () => log.clear());
+    expect(readFileSync(filePath, 'utf8')).toBe('');
+  });
+
+  it('clear() called while append() is running leaves the log empty', async () => {
+    const log = new QueryLog(filePath);
+    const appended = log.append({ target: 'x', endpoint: 'e', cacheStatus: 'miss' });
+    await log.clear();
+    await appended;
+    expect(readFileSync(filePath, 'utf8')).toBe('');
+  });
+
+  it('a failed write rejects and does not block the next one', async () => {
+    mkdirSync(filePath);
+    const log = new QueryLog(filePath);
+    await expect(log.append({ target: 'x', endpoint: 'e', cacheStatus: 'miss' })).rejects.toThrow();
+    rmSync(filePath, { recursive: true });
+    await log.append({ target: 'y', endpoint: 'e', cacheStatus: 'miss' });
+    expect(log.readAll().map((e) => e.target)).toEqual(['y']);
   });
 });
