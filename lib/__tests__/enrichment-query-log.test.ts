@@ -208,10 +208,8 @@ describe('QueryLog', () => {
     ['an array', '[]\n'],
     ['a missing timestamp', entry({ timestamp: undefined })],
     ['an unreadable timestamp', entry({ timestamp: 'nope' })],
-    ['a numeric timestamp', entry({ timestamp: Date.now() })],
-    ['a missing target', entry({ target: undefined })],
-    ['a non-string endpoint', entry({ endpoint: 1 })],
-    ['an unknown cache status', entry({ cacheStatus: 'odd' })],
+    ['a null timestamp', entry({ timestamp: null })],
+    ['a boolean timestamp', entry({ timestamp: true })],
   ])('prune() drops %s, counts it, and still prunes and repairs the rest', async (_name, bad) => {
     writeFileSync(filePath, row('old.example', EXPIRED) + bad + row('recent.example'));
     chmodSync(filePath, 0o644);
@@ -222,12 +220,35 @@ describe('QueryLog', () => {
     if (process.platform !== 'win32') expect(statSync(filePath).mode & 0o777).toBe(0o600);
   });
 
+  // A line with a date can expire normally, so nothing else about it matters.
+  it.each([
+    ['a missing target', { target: undefined }],
+    ['a non-string endpoint', { endpoint: 1 }],
+    ['an unknown cache status', { cacheStatus: 'odd' }],
+    ['an extra field', { extra: 'kept' }],
+    ['a numeric timestamp', { timestamp: Date.now() }],
+  ])('prune() keeps a dated line with %s until it expires', async (_name, over) => {
+    writeFileSync(filePath, entry(over));
+    const log = new QueryLog(filePath);
+    expect(await log.prune(30)).toBe(0);
+    expect(readFileSync(filePath, 'utf8')).toBe(entry({ timestamp: JSON.parse(readFileSync(filePath, 'utf8')).timestamp, ...over }));
+    expect(await log.prune(30, new Date(Date.now() + 31 * 24 * 60 * 60 * 1000))).toBe(0);
+    expect(readFileSync(filePath, 'utf8')).toBe('');
+  });
+
   it('prune() drops a torn last line, so the next append stays readable', async () => {
     writeFileSync(filePath, row('recent.example') + '{"target":"odd.exa');
     const log = new QueryLog(filePath);
     expect(await log.prune(30)).toBe(1);
     await log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'hit' });
     expect(log.readAll().map((e) => e.target)).toEqual(['recent.example', 'new.example']);
+  });
+
+  it('prune() keeps a first entry behind a byte order mark', async () => {
+    writeFileSync(filePath, '\uFEFF' + row('recent.example'));
+    const log = new QueryLog(filePath);
+    expect(await log.prune(30)).toBe(0);
+    expect(readFileSync(filePath, 'utf8')).toMatch(/^\{"target":"recent\.example"/);
   });
 
   it('prune() counts only unreadable lines, not expired or blank ones', async () => {

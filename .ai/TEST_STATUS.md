@@ -1,6 +1,6 @@
 # KAN-316 malformed query-log lines — verification (2026-11-25)
 
-- 17 of the 18 new tests fail on the old code (the other pins that nothing is reported for a clean log). Full vitest, tsc, lint, production build and docs sync pass. Playwright and Rust not run locally.
+- 21 of the 22 new tests fail on the old code (the other pins that nothing is reported for a clean log); some fail there only because the old prune returns no count. Ten deliberate breaks are caught. Full vitest 1,779, tsc, lint, production build and docs sync pass. Playwright and Rust not run locally.
 
 ---
 
