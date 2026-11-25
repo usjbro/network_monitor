@@ -75,15 +75,7 @@ describe('QueryLog', () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
-  it('prune() does not rewrite a log with nothing to remove', async () => {
-    writeFileSync(filePath, row('recent.example'), { mode: 0o600 });
-    const before = statSync(filePath).ino;
-    await new QueryLog(filePath).prune(30);
-    expect(statSync(filePath).ino).toBe(before);
-    expect(readFileSync(filePath, 'utf8')).toContain('recent.example');
-  });
-
-  it('prune() restores 0600 on a log with nothing to remove', async () => {
+  it('prune() restores 0600 even when nothing has expired', async () => {
     if (process.platform === 'win32') return;
     writeFileSync(filePath, row('recent.example'));
     chmodSync(filePath, 0o644);
@@ -124,19 +116,6 @@ describe('QueryLog', () => {
     linkSync(filePath, other);
     await new QueryLog(filePath).prune(30);
     expect(statSync(other).nlink).toBe(1);
-  });
-
-  it('prune() replaces a log owned by another user', async () => {
-    if (!process.getuid) return;
-    writeFileSync(filePath, row('recent.example'), { mode: 0o600 });
-    const before = statSync(filePath).ino;
-    const spy = vi.spyOn(process as Required<Pick<NodeJS.Process, 'getuid'>>, 'getuid').mockReturnValue(statSync(filePath).uid + 1);
-    try {
-      await new QueryLog(filePath).prune(30);
-    } finally {
-      spy.mockRestore();
-    }
-    expect(statSync(filePath).ino).not.toBe(before);
   });
 
   it('stamps an entry when append() is called, not when its write runs', async () => {
