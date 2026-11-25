@@ -1,3 +1,9 @@
+# KAN-286 query log writes (2026-11-24)
+
+James approved gate `kan-286__query-log-writes` in chat (commit, push, PR; James merges). `QueryLog` append, prune and clear run one at a time, and prune writes nothing when there is nothing to remove. Follow-ups filed: KAN-315 (io-graph timing test), KAN-316 (malformed log line), KAN-317 (`enrich clear` leftovers), KAN-318 (unhandled append failure). KAN-309 merged as `481519a` (#351) and is Done.
+
+---
+
 # KAN-309 vite upgrade (2026-11-24)
 
 James approved gate `kan-309__vite-upgrade` in chat ("approve, commit and push"; James merges). Lockfile only: vite 8.3.5 to 8.3.8, which brings rolldown 1.2.16 to 1.2.19. The fix for AIKIDO-2026-137384 is in rolldown. Also moved: postcss 8.5.31 to 8.5.33 (the app's CSS build uses it), @rolldown/pluginutils 1.1.1, @napi-rs/wasm-runtime 1.2.6, and new optional WebAssembly packages including beta @emnapi 2.0.0-beta.2. KAN-131 merged as `8384bfd` (#350) and is Done.

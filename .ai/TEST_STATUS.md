@@ -1,3 +1,11 @@
+# KAN-286 query log writes — verification at fd9d466 (2026-11-24)
+
+- Deleting the data directory right after creating the client: ENOTEMPTY 465 of 3,000 before, 0 of 3,000 after.
+- Five of the eight new tests fail on the old code; eight of eight deliberate breaks of the fix are caught.
+- 20 of 20 consecutive full vitest runs passed (1,752 tests each), no ENOTEMPTY. tsc, lint, production build and docs sync pass. Playwright and Rust not run locally.
+
+---
+
 # KAN-309 vite upgrade — verification (2026-11-24)
 
 - Marker check from the lockfile installs: module IDs unescaped with vite 8.3.5 + rolldown 1.2.16, escaped with 8.3.8 + 1.2.19 (both virtual modules; plugin container only, no listening server).

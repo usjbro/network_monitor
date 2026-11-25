@@ -1,6 +1,6 @@
 // lib/__tests__/enrichment-client.test.ts
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentClient } from '../enrichment';
@@ -45,6 +45,12 @@ describe('EnrichmentClient', () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'enrichment-client-')); });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('writes nothing to a fresh data directory until something is looked up', async () => {
+    new EnrichmentClient({ dataDir: dir });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(readdirSync(dir)).toEqual([]);
+  });
 
   it('makes zero HTTP calls when disabled', async () => {
     const fetchImpl = vi.fn();
