@@ -1,3 +1,10 @@
+# KAN-321 and KAN-320 query-log retention (2026-11-25)
+
+- Worktree `.worktrees/query-log-retention`, branch `KAN-321-query-log-retention`.
+- Not covered: KAN-317 (except the temp file of a failed prune), KAN-318, KAN-319; far-future dates; the retention period itself. Two servers sharing one directory can lose each other's appends during a prune.
+
+---
+
 # KAN-316 malformed query-log lines (2026-11-25)
 
 - Worktree `.worktrees/query-log-malformed`, branch `KAN-316-query-log-malformed`.

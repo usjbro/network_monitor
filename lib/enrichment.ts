@@ -17,6 +17,7 @@ export type EnrichmentMode = 'off' | 'on-demand' | 'background';
 const CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const NEGATIVE_TTL_MS = 60 * 60 * 1000;
 const QUERY_LOG_RETENTION_DAYS = 30;
+const QUERY_LOG_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 export const DISCLOSURE_TEXT =
   'Enabling ownership lookups sends the remote IP addresses this Mac talks to ' +
@@ -51,6 +52,7 @@ export class EnrichmentClient extends EventEmitter {
   private mode: EnrichmentMode = 'off';
   private cache: EnrichmentCache;
   private queryLog: QueryLog;
+  private firstPrune: Promise<void> | null = null;
   private queue: RequestQueue;
   private rdap: RdapClient;
   private fetchImpl: typeof fetch;
@@ -103,15 +105,30 @@ export class EnrichmentClient extends EventEmitter {
     // single injected sequence makes the whole dispatch pipeline
     // deterministic for tests.
     this.queue = new RequestQueue({ random: this.random, ...opts.queueOptions });
-    // Code or name only: an error's message can quote the log or its path.
-    this.queryLog.prune(QUERY_LOG_RETENTION_DAYS).then(
-      (dropped) => {
-        if (dropped > 0) console.error(`[enrichment] dropped ${dropped} unreadable query-log line${dropped === 1 ? '' : 's'}`);
-      },
-      (err) => console.error('[enrichment] query-log prune failed:', err?.code ?? err?.name),
-    );
     this.bootstrapCachePath = join(opts.dataDir, 'bootstrap-ipv4.json');
     this.domainBootstrapCachePath = join(opts.dataDir, 'bootstrap-dns.json');
+  }
+
+  /**
+   * Prunes the query log now and then every six hours, for the life of the
+   * process; a repeat call starts nothing new. Resolves after the first prune
+   * and never rejects (KAN-321).
+   */
+  startPruning(): Promise<void> {
+    this.firstPrune ??= this.pruneAndReschedule();
+    return this.firstPrune;
+  }
+
+  private async pruneAndReschedule(): Promise<void> {
+    try {
+      const dropped = await this.queryLog.prune(QUERY_LOG_RETENTION_DAYS);
+      if (dropped > 0) console.error(`[enrichment] dropped ${dropped} unreadable query-log line${dropped === 1 ? '' : 's'}`);
+    } catch (err) {
+      // Code or name only: an error's message can quote the log or its path.
+      const { code, name } = err as NodeJS.ErrnoException;
+      console.error('[enrichment] query-log prune failed:', code ?? name);
+    }
+    setTimeout(() => void this.pruneAndReschedule(), QUERY_LOG_PRUNE_INTERVAL_MS).unref();
   }
 
   getMode(): EnrichmentMode {

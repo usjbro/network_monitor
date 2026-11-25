@@ -258,4 +258,107 @@ describe('QueryLog', () => {
     writeFileSync(filePath, row('old.example', EXPIRED) + '\n \n' + row('recent.example'));
     expect(await log.prune(30)).toBe(0);
   });
+
+  // KAN-320
+  it('append() after a cut-off line starts a new one', async () => {
+    writeFileSync(filePath, row('recent.example') + '{"target":"odd.exa');
+    const log = new QueryLog(filePath);
+    await log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'hit' });
+    await log.append({ target: 'next.example', endpoint: 'e', cacheStatus: 'hit' });
+    expect(readFileSync(filePath, 'utf8').split('\n')).toHaveLength(5);
+    expect(log.readAll().map((e) => e.target)).toEqual(['recent.example', 'new.example', 'next.example']);
+  });
+
+  it('append() adds no blank lines and reads at most the last byte', async () => {
+    writeFileSync(filePath, '');
+    const log = new QueryLog(filePath);
+    const open = fs.open;
+    const reads: number[] = [];
+    const spy = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      const read = handle.read.bind(handle);
+      handle.read = (async (...a: Parameters<typeof read>) => {
+        const result = await read(...a);
+        reads.push(result.bytesRead);
+        return result;
+      }) as typeof handle.read;
+      return handle;
+    });
+    try {
+      for (const target of ['a', 'b', 'c']) await log.append({ target, endpoint: 'e', cacheStatus: 'hit' });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(reads).toEqual([1, 1]);
+    expect(readFileSync(filePath, 'utf8')).not.toMatch(/^\n|\n\n/);
+  });
+
+  // KAN-321
+  it('prune() reads lines and characters split across chunks', async () => {
+    const lines = Array.from({ length: 4000 }, (_, i) =>
+      row(`${'é'.repeat(i % 7)} ${'漢'.repeat(i % 5)}${i}`, i % 3 ? undefined : EXPIRED));
+    const long = row('漢'.repeat(100_000));
+    writeFileSync(filePath, lines.join('') + long + 'bad\n' + lines[1].trimEnd());
+    const log = new QueryLog(filePath);
+    expect(await log.prune(30)).toBe(1);
+    expect(readFileSync(filePath, 'utf8')).toBe(lines.filter((_, i) => i % 3).join('') + long + lines[1]);
+  });
+
+  it('prune() never reads or writes the whole log at once', async () => {
+    writeFileSync(filePath, row('recent.example').repeat(20_000));
+    const turns = vi.fn();
+    const timer = setInterval(turns, 0);
+    const writeFile = vi.spyOn(fs, 'writeFile');
+    try {
+      await new QueryLog(filePath).prune(30);
+      expect(turns.mock.calls.length).toBeGreaterThan(3);
+      expect(writeFile).not.toHaveBeenCalled();
+    } finally {
+      clearInterval(timer);
+      writeFile.mockRestore();
+    }
+  });
+
+  it('prune() replaces a symlink that points to itself', async () => {
+    if (process.platform === 'win32') return;
+    symlinkSync(filePath, filePath);
+    await new QueryLog(filePath).prune(30);
+    expect(lstatSync(filePath).isFile()).toBe(true);
+  });
+
+  it('prune() flushes the new log to disk before replacing the old one', async () => {
+    writeFileSync(filePath, row('recent.example'));
+    const order: string[] = [];
+    const { open, rename } = fs;
+    const openSpy = vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => { await sync(); order.push('sync'); };
+      return handle;
+    });
+    const renameSpy = vi.spyOn(fs, 'rename').mockImplementation(async (...args) => {
+      order.push('rename');
+      await rename(...args);
+    });
+    try {
+      await new QueryLog(filePath).prune(30);
+    } finally {
+      openSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+    expect(order).toEqual(['sync', 'rename']);
+  });
+
+  it('a failed prune() removes its temp file and keeps the log', async () => {
+    const before = row('old.example', EXPIRED) + row('recent.example');
+    writeFileSync(filePath, before);
+    const spy = vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('rename failed'));
+    try {
+      await expect(new QueryLog(filePath).prune(30)).rejects.toThrow('rename failed');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(readdirSync(dir)).toEqual(['query-log.ndjson']);
+    expect(readFileSync(filePath, 'utf8')).toBe(before);
+  });
 });
