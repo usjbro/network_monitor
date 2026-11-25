@@ -1,3 +1,9 @@
+# KAN-315 IO graph timing test (2026-11-25)
+
+James approved gate `kan-315__io-graph-timing` in chat (commit, push, PR; James merges). The chart formats x coordinates once for all series, and `e2e/io-graph.spec.ts` logs a fixed reference workload. The 16.7 ms limit is unchanged; changing the check needs James's further yes, after CI logs show how the reference moves.
+
+---
+
 # KAN-286 query log writes (2026-11-24)
 
 James approved gate `kan-286__query-log-writes` in chat (commit, push, PR; James merges). `QueryLog` append, prune and clear run one at a time, and prune writes nothing when there is no log (an existing log is always rewritten: James chose this in chat over the skip #352 merged). Follow-ups filed: KAN-315 (io-graph timing test), KAN-316 (malformed log line), KAN-317 (`enrich clear` leftovers), KAN-318 (unhandled append failure). KAN-309 merged as `481519a` (#351) and is Done.

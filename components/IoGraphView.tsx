@@ -268,6 +268,9 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
       return out;
     });
     const x = (ms: number) => M.left + ((ms - windowStart) / span) * PLOT_W;
+    // Every series is queried over the same window, so point k has the same
+    // x in each: format it once, when first drawn (KAN-315).
+    const xs: string[] = [];
     const paths = perSeries.map((s, si) => {
       const axis = axisOf(s.id);
       if (axis >= MAX_AXES) return { id: s.id, d: '' }; // a third unit: refused
@@ -275,7 +278,6 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
       let d = '';
       let run = 0;
       for (let k = 0; k < s.points.length; k++) {
-        const p = s.points[k];
         const v = values[si][k];
         if (v === null) {
           // A lone point between gaps: a zero-length segment, drawn as a
@@ -284,8 +286,8 @@ export const IoGraphView: React.FC<IoGraphViewProps> = ({ history, version, stat
           run = 0;
           continue;
         }
-        const px = x(p.startMs + interval / 2).toFixed(1);
         const py = (M.top + PLOT_H - (v / top) * PLOT_H).toFixed(1);
+        const px = (xs[k] ??= x(s.points[k].startMs + interval / 2).toFixed(1));
         d += `${run > 0 ? 'L' : 'M'}${px},${py}`;
         run++;
       }

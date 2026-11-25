@@ -1,3 +1,10 @@
+# KAN-315 IO graph timing test (2026-11-25)
+
+- Worktree `.worktrees/io-graph-timing`, branch `KAN-315-io-graph-timing`. Open question: do slow CI runs have a slow reference? Compare "reference" with "key update" in CI logs before proposing a check.
+- Reusing the sum object in `query()` saved only about 0.1 ms; not kept.
+
+---
+
 # KAN-286 query log writes (2026-11-24)
 
 - Worktree `.worktrees/query-log-writes`, branch `KAN-286-query-log-repairs` (follow-up to #352, merged as `b2e81a7`). Independent code and security review: no Critical or Important findings.
