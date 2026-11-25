@@ -194,4 +194,46 @@ describe('QueryLog', () => {
     await log.append({ target: 'y', endpoint: 'e', cacheStatus: 'miss' });
     expect(log.readAll().map((e) => e.target)).toEqual(['y']);
   });
+
+  // KAN-316: an unreadable line has no usable timestamp, so keeping it would
+  // mean keeping it forever; prune() drops it and carries on.
+  const entry = (over: Record<string, unknown>) =>
+    JSON.stringify({ target: 'odd.example', endpoint: 'e', cacheStatus: 'miss', timestamp: new Date().toISOString(), ...over }) + '\n';
+  it.each([
+    ['a torn line', '{"target":"odd.example","endp\n'],
+    ['two joined entries', entry({}).trimEnd() + entry({})],
+    ['NUL bytes', '\u0000\u0000\n'],
+    ['a bare null', 'null\n'],
+    ['a bare number', '5\n'],
+    ['an array', '[]\n'],
+    ['a missing timestamp', entry({ timestamp: undefined })],
+    ['an unreadable timestamp', entry({ timestamp: 'nope' })],
+    ['a numeric timestamp', entry({ timestamp: Date.now() })],
+    ['a missing target', entry({ target: undefined })],
+    ['a non-string endpoint', entry({ endpoint: 1 })],
+    ['an unknown cache status', entry({ cacheStatus: 'odd' })],
+  ])('prune() drops %s, counts it, and still prunes and repairs the rest', async (_name, bad) => {
+    writeFileSync(filePath, row('old.example', EXPIRED) + bad + row('recent.example'));
+    chmodSync(filePath, 0o644);
+    const log = new QueryLog(filePath);
+    expect(log.readAll().map((e) => e.target)).toEqual(['old.example', 'recent.example']);
+    expect(await log.prune(30)).toBe(1);
+    expect(readFileSync(filePath, 'utf8').split('\n').map((l) => l && JSON.parse(l).target)).toEqual(['recent.example', '']);
+    if (process.platform !== 'win32') expect(statSync(filePath).mode & 0o777).toBe(0o600);
+  });
+
+  it('prune() drops a torn last line, so the next append stays readable', async () => {
+    writeFileSync(filePath, row('recent.example') + '{"target":"odd.exa');
+    const log = new QueryLog(filePath);
+    expect(await log.prune(30)).toBe(1);
+    await log.append({ target: 'new.example', endpoint: 'e', cacheStatus: 'hit' });
+    expect(log.readAll().map((e) => e.target)).toEqual(['recent.example', 'new.example']);
+  });
+
+  it('prune() counts only unreadable lines, not expired or blank ones', async () => {
+    const log = new QueryLog(filePath);
+    expect(await log.prune(30)).toBe(0);
+    writeFileSync(filePath, row('old.example', EXPIRED) + '\n \n' + row('recent.example'));
+    expect(await log.prune(30)).toBe(0);
+  });
 });

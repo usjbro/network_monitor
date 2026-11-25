@@ -1,6 +1,6 @@
 // lib/__tests__/enrichment-client.test.ts
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentClient } from '../enrichment';
@@ -56,6 +56,41 @@ describe('EnrichmentClient', () => {
       prune.mockRestore();
     }
     expect(readdirSync(dir)).toEqual([]);
+  });
+
+  // KAN-316: what startup pruning reports, which must never quote the log.
+  async function pruneReport(setup: () => void, failWith?: Error): Promise<unknown[][]> {
+    setup();
+    const prune = vi.spyOn(QueryLog.prototype, 'prune');
+    if (failWith) prune.mockRejectedValueOnce(failWith);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      new EnrichmentClient({ dataDir: dir });
+      await Promise.resolve(prune.mock.results[0].value).catch(() => {});
+      await new Promise((r) => setTimeout(r, 0));
+      return error.mock.calls;
+    } finally {
+      prune.mockRestore();
+      error.mockRestore();
+    }
+  }
+
+  it('reports how many unreadable query-log lines startup dropped, without their contents', async () => {
+    const calls = await pruneReport(() => writeFileSync(join(dir, 'query-log.ndjson'), '{"target":"198.51.100.7"\n"203.0.113.9\n'));
+    expect(calls).toEqual([['[enrichment] dropped 2 unreadable query-log lines']]);
+  });
+
+  it('reports nothing when startup drops no lines', async () => {
+    const row = { target: '198.51.100.7', endpoint: 'e', cacheStatus: 'hit', timestamp: new Date().toISOString() };
+    expect(await pruneReport(() => writeFileSync(join(dir, 'query-log.ndjson'), JSON.stringify(row) + '\n'))).toEqual([]);
+  });
+
+  it('reports a failed startup prune by error code, without the path', async () => {
+    expect(await pruneReport(() => mkdirSync(join(dir, 'query-log.ndjson')))).toEqual([['[enrichment] query-log prune failed:', 'EISDIR']]);
+  });
+
+  it('reports a failed startup prune by error name when it has no code, without the message', async () => {
+    expect(await pruneReport(() => {}, new SyntaxError('Unexpected token in 198.51.100.7'))).toEqual([['[enrichment] query-log prune failed:', 'SyntaxError']]);
   });
 
   it('makes zero HTTP calls when disabled', async () => {

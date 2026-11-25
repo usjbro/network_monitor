@@ -103,7 +103,13 @@ export class EnrichmentClient extends EventEmitter {
     // single injected sequence makes the whole dispatch pipeline
     // deterministic for tests.
     this.queue = new RequestQueue({ random: this.random, ...opts.queueOptions });
-    void this.queryLog.prune(QUERY_LOG_RETENTION_DAYS).catch(() => {});
+    // Code or name only: an error's message can quote the log or its path.
+    this.queryLog.prune(QUERY_LOG_RETENTION_DAYS).then(
+      (dropped) => {
+        if (dropped > 0) console.error(`[enrichment] dropped ${dropped} unreadable query-log line${dropped === 1 ? '' : 's'}`);
+      },
+      (err) => console.error('[enrichment] query-log prune failed:', err?.code ?? err?.name),
+    );
     this.bootstrapCachePath = join(opts.dataDir, 'bootstrap-ipv4.json');
     this.domainBootstrapCachePath = join(opts.dataDir, 'bootstrap-dns.json');
   }

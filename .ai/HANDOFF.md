@@ -1,3 +1,10 @@
+# KAN-316 malformed query-log lines (2026-11-25)
+
+- Worktree `.worktrees/query-log-malformed`, branch `KAN-316-query-log-malformed`.
+- Not covered: prune runs only at start, so a server that keeps running keeps entries past 30 days; far-future timestamps are kept; KAN-317, KAN-318, KAN-319.
+
+---
+
 # KAN-315 IO graph timing test (2026-11-25)
 
 - Worktree `.worktrees/io-graph-timing`, branch `KAN-315-io-graph-timing`. Open question: do slow CI runs have a slow reference? Compare "reference" with "key update" in CI logs before proposing a check.

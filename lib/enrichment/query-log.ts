@@ -11,6 +11,21 @@ import { QueryLogEntry } from './types';
 
 type QueryLogInput = Omit<QueryLogEntry, 'timestamp'>;
 
+// An entry, or null when the line is not one. Without a readable timestamp a
+// line could never expire.
+function parseEntry(line: string): QueryLogEntry | null {
+  let value: Partial<QueryLogEntry> | null;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof value?.target !== 'string' || typeof value.endpoint !== 'string') return null;
+  if (value.cacheStatus !== 'hit' && value.cacheStatus !== 'miss') return null;
+  if (typeof value.timestamp !== 'string' || Number.isNaN(Date.parse(value.timestamp))) return null;
+  return value as QueryLogEntry;
+}
+
 export class QueryLog {
   private tail: Promise<void> = Promise.resolve();
 
@@ -19,9 +34,9 @@ export class QueryLog {
   // Writes run one at a time, in call order: prune() replaces the whole file
   // with what it read, so an append() or clear() overlapping it would be
   // undone (KAN-286). A failed write rejects for its own caller only.
-  private serialize(write: () => Promise<void>): Promise<void> {
+  private serialize<T>(write: () => Promise<T>): Promise<T> {
     const result = this.tail.then(write);
-    this.tail = result.catch(() => {});
+    this.tail = result.then(() => {}, () => {});
     return result;
   }
 
@@ -30,7 +45,8 @@ export class QueryLog {
     return this.serialize(() => this.appendNow(entry, timestamp));
   }
 
-  prune(retentionDays: number, now: Date = new Date()): Promise<void> {
+  /** Resolves with how many unreadable lines it dropped (KAN-316). */
+  prune(retentionDays: number, now: Date = new Date()): Promise<number> {
     return this.serialize(() => this.pruneNow(retentionDays, now));
   }
 
@@ -55,22 +71,30 @@ export class QueryLog {
     if (isNew) await fs.chmod(this.filePath, 0o600);
   }
 
+  /** Every readable entry; unreadable lines are skipped. */
   readAll(): QueryLogEntry[] {
-    if (!existsSync(this.filePath)) return [];
-    const raw = readFileSync(this.filePath, 'utf8');
-    return raw
-      .split('\n')
-      .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as QueryLogEntry);
+    return this.read().entries;
   }
 
-  private async pruneNow(retentionDays: number, now: Date): Promise<void> {
+  private read(): { entries: QueryLogEntry[]; unreadable: number } {
+    if (!existsSync(this.filePath)) return { entries: [], unreadable: 0 };
+    const raw = readFileSync(this.filePath, 'utf8');
+    const parsed = raw
+      .split('\n')
+      .filter((l) => l.trim().length > 0)
+      .map(parseEntry);
+    const entries = parsed.filter((e) => e !== null);
+    return { entries, unreadable: parsed.length - entries.length };
+  }
+
+  private async pruneNow(retentionDays: number, now: Date): Promise<number> {
     // No log, nothing to write. A readable log is always rewritten, which
     // also restores its newline, 0600 and ownership and detaches links.
     // lstat, not existsSync: a symlink to nothing is still there to replace.
-    if (!lstatSync(this.filePath, { throwIfNoEntry: false })) return;
+    if (!lstatSync(this.filePath, { throwIfNoEntry: false })) return 0;
     const cutoff = now.getTime() - retentionDays * 24 * 60 * 60 * 1000;
-    const kept = this.readAll().filter((e) => new Date(e.timestamp).getTime() >= cutoff);
+    const { entries, unreadable } = this.read();
+    const kept = entries.filter((e) => new Date(e.timestamp).getTime() >= cutoff);
     const body = kept.map((e) => JSON.stringify(e) + '\n').join('');
     // Rewritten via temp-file-then-rename for the same atomic-replace
     // guarantee as EnrichmentCache.persist() (Task 2's atomicWriteJson) —
@@ -79,6 +103,7 @@ export class QueryLog {
     const tmpPath = `${this.filePath}.tmp-${randomBytes(6).toString('hex')}`;
     await fs.writeFile(tmpPath, body, { mode: 0o600 });
     await fs.rename(tmpPath, this.filePath);
+    return unreadable;
   }
 
   private async clearNow(): Promise<void> {

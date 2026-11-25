@@ -1,3 +1,9 @@
+# KAN-316 malformed query-log lines — verification (2026-11-25)
+
+- 17 of the 18 new tests fail on the old code (the other pins that nothing is reported for a clean log). Full vitest, tsc, lint, production build and docs sync pass. Playwright and Rust not run locally.
+
+---
+
 # KAN-315 IO graph timing — verification (2026-11-25)
 
 - Production Playwright, 10 runs each way on this Mac, same spec: median compute 3.05 ms before, 2.5 ms after; key update 3.75 and 3.2 ms. Drawn paths are pinned to the old code's output; three deliberate breaks are caught.
