@@ -1,3 +1,10 @@
+# KAN-322 cache shape (2026-11-26)
+
+- Worktree `.worktrees/cache-shape`, branch `KAN-322-cache-shape`.
+- Not covered: bootstrap cache files of the wrong shape (KAN-324). Next: KAN-319 with James's approved decisions.
+
+---
+
 # KAN-317 enrich clear (2026-11-26)
 
 - Worktree `.worktrees/enrich-clear-complete`, branch `KAN-317-enrich-clear-complete`. Slack posts resumed.

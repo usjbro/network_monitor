@@ -2,7 +2,7 @@
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { isPrivateOrReserved, ipToInt } from './enrichment/scope-filter';
-import { EnrichmentCache } from './enrichment/cache';
+import { EnrichmentCache, isEnrichmentRecord } from './enrichment/cache';
 import { QueryLog } from './enrichment/query-log';
 import { errorLabel } from './enrichment/error-label';
 import { RequestQueue, RequestQueueOptions, shuffle } from './enrichment/request-queue';
@@ -104,7 +104,11 @@ export class EnrichmentClient extends EventEmitter {
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.random = opts.random ?? Math.random;
     this.reverseDnsFn = opts.reverseDnsFn ?? reverseDnsLookup;
-    this.cache = new EnrichmentCache(join(opts.dataDir, 'cache.json'));
+    this.cache = new EnrichmentCache(join(opts.dataDir, 'cache.json'), {
+      label: 'enrichment',
+      isRecord: isEnrichmentRecord,
+      maxTtlMs: CACHE_TTL_MS,
+    });
     this.cache.load();
     this.queryLog = new QueryLog(join(opts.dataDir, 'query-log.ndjson'));
     this.rdap = new RdapClient(this.fetchImpl);

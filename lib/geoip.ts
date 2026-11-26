@@ -19,6 +19,14 @@ export interface GeoLocation {
 
 export type GeoIpMode = 'off' | 'on';
 
+// True for a stored location of the shape GeoLocation describes (KAN-322).
+function isGeoLocation(record: object): boolean {
+  const { city, country, lat, lon, source } = record as Record<string, unknown>;
+  const text = (v: unknown) => v === undefined || typeof v === 'string';
+  const coordinate = (v: unknown) => v === undefined || Number.isFinite(v);
+  return text(city) && text(country) && coordinate(lat) && coordinate(lon) && (source === 'geoip' || source === 'cache');
+}
+
 // 30 days — longer than sub-project 2's 14-day RDAP TTL by design (a
 // deliberate, named difference per the spec, not an oversight).
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -43,7 +51,11 @@ export class GeoIpClient extends EventEmitter {
   constructor(opts: GeoIpClientOptions = {}) {
     super();
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.cache = new EnrichmentCache(opts.cachePath ?? '.data/geoip/cache.json');
+    this.cache = new EnrichmentCache(opts.cachePath ?? '.data/geoip/cache.json', {
+      label: 'geoip',
+      isRecord: isGeoLocation,
+      maxTtlMs: CACHE_TTL_MS,
+    });
     this.cache.load();
     // Provider URL is intentionally injectable and not hardcoded to one
     // vendor here — the specific geoIP HTTP API is an implementation-time
