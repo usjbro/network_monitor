@@ -17,6 +17,7 @@ export interface RequestQueueOptions {
 
 interface QueuedTask {
   run: () => Promise<unknown>;
+  cancelled?: () => boolean;
   resolve: (v: unknown) => void;
   reject: (e: unknown) => void;
 }
@@ -27,7 +28,9 @@ export class RequestQueue {
   private random: () => number;
   private queue: QueuedTask[] = [];
   private running = false;
-  private hasDispatchedOnce = false;
+  // Set after a task that may have sent; the next task that will send waits
+  // the spacing delay first. A cancelled task neither waits nor uses it up.
+  private delayOwed = false;
 
   constructor(opts: RequestQueueOptions = {}) {
     this.minDelayMs = opts.minDelayMs ?? 3000;
@@ -39,9 +42,11 @@ export class RequestQueue {
     return this.queue.length;
   }
 
-  enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  // A task that is `cancelled` when its turn comes is run at once, without a
+  // spacing delay: it must send nothing, so it need not wait (KAN-317).
+  enqueue<T>(fn: () => Promise<T>, cancelled?: () => boolean): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.queue.push({ run: fn, resolve: resolve as (v: unknown) => void, reject });
+      this.queue.push({ run: fn, cancelled, resolve: resolve as (v: unknown) => void, reject });
       // drain routes task failures to each enqueue promise.
       void this.drain();
     });
@@ -51,12 +56,13 @@ export class RequestQueue {
     if (this.running) return;
     this.running = true;
     while (this.queue.length > 0) {
-      if (this.hasDispatchedOnce) {
+      if (this.delayOwed && !this.queue[0].cancelled?.()) {
         const delay = this.minDelayMs + this.random() * (this.maxDelayMs - this.minDelayMs);
         await new Promise((r) => setTimeout(r, delay));
+        this.delayOwed = false;
       }
-      this.hasDispatchedOnce = true;
       const task = this.queue.shift()!;
+      if (!task.cancelled?.()) this.delayOwed = true;
       try {
         task.resolve(await task.run());
       } catch (err) {

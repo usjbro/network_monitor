@@ -50,6 +50,27 @@ describe('POST /api/enrichment/control', () => {
     global.__enrichmentClient = undefined;
   });
 
+  // KAN-317
+  it('a failed clear returns 500 and logs no path or address', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    clear.mockRejectedValueOnce(Object.assign(new Error("EISDIR: open '/x/.data/enrichment/query-log.ndjson'"), { code: 'EISDIR' }));
+    const res = await POST(req({ action: 'clear' }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'clear failed' });
+    expect(error.mock.calls).toEqual([['[enrichment] clear failed:', 'EISDIR']]);
+    error.mockRestore();
+  });
+
+  it('reports every wipe that failed', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const failure = (code: string) => Object.assign(new Error(`${code}: /x/.data/enrichment`), { code });
+    clear.mockRejectedValueOnce(new AggregateError([failure('EACCES'), failure('EISDIR')], 'clear failed'));
+    const res = await POST(req({ action: 'clear' }));
+    expect(res.status).toBe(500);
+    expect(error.mock.calls).toEqual([['[enrichment] clear failed:', 'EACCES, EISDIR']]);
+    error.mockRestore();
+  });
+
   it('dispatches enable and spreads its disclosure text into the response', async () => {
     const res = await POST(req({ action: 'enable' }));
     const json = await res.json();

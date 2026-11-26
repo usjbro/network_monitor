@@ -6,8 +6,8 @@
 // the target, the endpoint queried, and hit/miss status.
 import { promises as fs, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
+import { removeTempFiles, SerialWrites, tempPathFor } from './fs-util';
 import { QueryLogEntry } from './types';
 
 type QueryLogInput = Omit<QueryLogEntry, 'timestamp'>;
@@ -29,17 +29,15 @@ function parseEntry(line: string): QueryLogEntry | null {
 }
 
 export class QueryLog {
-  private tail: Promise<void> = Promise.resolve();
+  private writes = new SerialWrites();
 
   constructor(private filePath: string) {}
 
   // Writes run one at a time, in call order: prune() replaces the whole file
   // with what it read, so an append() or clear() overlapping it would be
-  // undone (KAN-286). A failed write rejects for its own caller only.
+  // undone (KAN-286).
   private serialize<T>(write: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(write);
-    this.tail = result.then(() => {}, () => {});
-    return result;
+    return this.writes.run(write);
   }
 
   append(entry: QueryLogInput): Promise<void> {
@@ -131,7 +129,7 @@ export class QueryLog {
     // guarantee as EnrichmentCache.persist() (Task 2's atomicWriteJson) —
     // not reused verbatim because this file is NDJSON, one entry per line,
     // not a single JSON document.
-    const tmpPath = `${this.filePath}.tmp-${randomBytes(6).toString('hex')}`;
+    const tmpPath = tempPathFor(this.filePath);
     let unreadable = 0;
     try {
       const out = await fs.open(tmpPath, 'wx', 0o600);
@@ -162,5 +160,6 @@ export class QueryLog {
   private async clearNow(): Promise<void> {
     mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
     await fs.writeFile(this.filePath, '', { mode: 0o600 });
+    await removeTempFiles(this.filePath);
   }
 }

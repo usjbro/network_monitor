@@ -161,7 +161,8 @@ export class RdapClient {
   // A referral to any other host, including a loopback/private address, is
   // never dialed: the lookup falls back to the original registry response,
   // just marked as not having followed a referral.
-  async fetchWithReferral(url: string): Promise<RdapReferralResult> {
+  // `beforeReferral` may throw to stop the referral being sent (KAN-317).
+  async fetchWithReferral(url: string, beforeReferral: () => void = () => {}): Promise<RdapReferralResult> {
     const result = await this.fetch(url);
     if (!result.ok) return result;
 
@@ -169,6 +170,7 @@ export class RdapClient {
     const referralUrl = candidates.find((u) => isAllowedReferralHost(u));
     if (!referralUrl) return { ...result, referralFollowed: false };
 
+    beforeReferral();
     const referralResult = await this.fetch(referralUrl);
     if (referralResult.ok) return { ...referralResult, referralFollowed: true };
 

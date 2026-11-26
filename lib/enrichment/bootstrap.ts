@@ -1,6 +1,7 @@
 // lib/enrichment/bootstrap.ts
 import { cidrContains } from './scope-filter';
-import { atomicWriteJson, readJsonIfExists } from './cache';
+import { readJsonIfExists } from './cache';
+import { atomicWriteJson } from './fs-util';
 
 export interface BootstrapService {
   prefixes: string[];
