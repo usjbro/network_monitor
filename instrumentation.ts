@@ -4,6 +4,8 @@
 // retention does not wait for a first request (KAN-321). Nothing is looked up:
 // ownership enrichment itself stays off until it is turned on. `next build`
 // and the edge runtime also call this and must not touch the log.
+import { errorLabel } from './lib/enrichment/error-label';
+
 export async function register() {
   if (process.env.NEXT_RUNTIME === 'nodejs') {
     if (process.env.NEXT_PHASE === 'phase-production-build') return;
@@ -11,8 +13,7 @@ export async function register() {
       const { getEnrichmentClient } = await import('./lib/stream-response');
       getEnrichmentClient();
     } catch (err) {
-      const { code, name } = err as NodeJS.ErrnoException;
-      console.error('[enrichment] could not start query-log pruning:', code ?? name);
+      console.error('[enrichment] could not start query-log pruning:', errorLabel(err));
     }
   }
 }

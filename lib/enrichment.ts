@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { isPrivateOrReserved, ipToInt } from './enrichment/scope-filter';
 import { EnrichmentCache } from './enrichment/cache';
 import { QueryLog } from './enrichment/query-log';
+import { errorLabel } from './enrichment/error-label';
 import { RequestQueue, RequestQueueOptions, shuffle } from './enrichment/request-queue';
 import { loadIpBootstrap, resolveRdapBaseForIp, loadDomainBootstrap, resolveRdapBaseForDomain } from './enrichment/bootstrap';
 import { RdapClient } from './enrichment/rdap-client';
@@ -53,6 +54,7 @@ export class EnrichmentClient extends EventEmitter {
   private cache: EnrichmentCache;
   private queryLog: QueryLog;
   private firstPrune: Promise<void> | null = null;
+  private cacheHitLogFailing = false;
   private queue: RequestQueue;
   private rdap: RdapClient;
   private fetchImpl: typeof fetch;
@@ -124,9 +126,7 @@ export class EnrichmentClient extends EventEmitter {
       const dropped = await this.queryLog.prune(QUERY_LOG_RETENTION_DAYS);
       if (dropped > 0) console.error(`[enrichment] dropped ${dropped} unreadable query-log line${dropped === 1 ? '' : 's'}`);
     } catch (err) {
-      // Code or name only: an error's message can quote the log or its path.
-      const { code, name } = err as NodeJS.ErrnoException;
-      console.error('[enrichment] query-log prune failed:', code ?? name);
+      console.error('[enrichment] query-log prune failed:', errorLabel(err));
     }
     setTimeout(() => void this.pruneAndReschedule(), QUERY_LOG_PRUNE_INTERVAL_MS).unref();
   }
@@ -161,7 +161,7 @@ export class EnrichmentClient extends EventEmitter {
 
   requestLookup(connectionId: string, remoteAddr: string): void {
     if (this.mode === 'off') return;
-    void this.lookup(connectionId, remoteAddr);
+    this.startLookup(connectionId, remoteAddr);
   }
 
   notifyObservedConnections(conns: Array<{ id: string; remoteAddr: string }>): void {
@@ -171,8 +171,27 @@ export class EnrichmentClient extends EventEmitter {
     // (app/api/stream/route.ts, Task 9) to only pass connections not already
     // cached/in-flight, so this doesn't re-shuffle-and-requeue every tick.
     for (const conn of shuffle(conns, this.random)) {
-      void this.lookup(conn.id, conn.remoteAddr);
+      this.startLookup(conn.id, conn.remoteAddr);
     }
+  }
+
+  // Never rejects: a cached lookup sends nothing off the machine, so its result
+  // is shown even when its log entry cannot be written. Reported once per
+  // outage, because background mode repeats on every connection update
+  // (KAN-318).
+  private async logCacheHit(remoteAddr: string): Promise<void> {
+    try {
+      await this.queryLog.append({ target: remoteAddr, endpoint: 'cache', cacheStatus: 'hit' });
+      this.cacheHitLogFailing = false;
+    } catch (err) {
+      if (!this.cacheHitLogFailing) console.error('[enrichment] query-log write failed for cached lookups:', errorLabel(err));
+      this.cacheHitLogFailing = true;
+    }
+  }
+
+  // lookup() handles its own failures; this catches anything that escapes them.
+  private startLookup(connectionId: string, remoteAddr: string): void {
+    this.lookup(connectionId, remoteAddr).catch((err) => console.error('[enrichment] lookup failed outside its handler:', errorLabel(err)));
   }
 
   private async lookup(connectionId: string, remoteAddr: string): Promise<void> {
@@ -181,7 +200,7 @@ export class EnrichmentClient extends EventEmitter {
 
     const cached = this.cache.getForIp(remoteAddr);
     if (cached && this.cache.isFresh(cached)) {
-      await this.queryLog.append({ target: remoteAddr, endpoint: 'cache', cacheStatus: 'hit' });
+      await this.logCacheHit(remoteAddr);
       if (cached.record) {
         this.emit('result', buildEnrichmentEvent(connectionId, remoteAddr, { ...cached.record, source: 'cache' }));
       }
@@ -263,7 +282,7 @@ export class EnrichmentClient extends EventEmitter {
           // Fail this one sub-step closed instead: leave registrant unset
           // (surfaces as "Unavailable" for that field only) and let the
           // core-tier result proceed to cache + emit normally below.
-          console.error('[enrichment] extended-tier registrant lookup failed for', remoteAddr, err);
+          console.error('[enrichment] extended-tier registrant lookup failed:', errorLabel(err));
         }
       }
 
@@ -273,9 +292,9 @@ export class EnrichmentClient extends EventEmitter {
         this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record, resolvedHostname));
       }
     } catch (err) {
-      // lookup() is always invoked fire-and-forget (`void this.lookup(...)`)
-      // from requestLookup()/notifyObservedConnections() — there is no
-      // caller anywhere that awaits or attaches a rejection handler to it.
+      // lookup() is invoked fire-and-forget (via startLookup()) from
+      // requestLookup()/notifyObservedConnections(); startLookup()'s handler
+      // is only a last resort for errors outside this try.
       // An uncaught error here (e.g. a transient disk error from
       // queryLog.append/cache.setSuccess) would otherwise become an
       // unhandled promise rejection and, under Node's default policy, crash
@@ -289,7 +308,7 @@ export class EnrichmentClient extends EventEmitter {
       // branch above does instead: log for observability, and let the
       // affected connection(s) simply never receive a 'result' event — the
       // UI's own timeout resolves them to "Unavailable".
-      console.error('[enrichment] lookup failed for', remoteAddr, err);
+      console.error('[enrichment] lookup failed:', errorLabel(err));
     } finally {
       this.inFlightWaiters.delete(flightKey);
     }

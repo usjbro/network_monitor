@@ -161,6 +161,129 @@ describe('EnrichmentClient', () => {
     });
   });
 
+  // KAN-318
+  describe('when the query log cannot be written', () => {
+    const ADDR = '93.184.216.34';
+    let error: ReturnType<typeof vi.spyOn>;
+    const unhandled = vi.fn();
+    beforeEach(() => {
+      error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      unhandled.mockClear();
+      process.on('unhandledRejection', unhandled);
+    });
+    afterEach(() => {
+      process.off('unhandledRejection', unhandled);
+      vi.restoreAllMocks();
+    });
+
+    const cachedClient = (record: unknown = { org: 'CACHED-ORG', source: 'rdap', fetchedAt: '2026-11-25T00:00:00Z' }) => {
+      const entry = { key: '93.184.216.0/24', record, expiresAt: Date.now() + 60_000 };
+      writeFileSync(join(dir, 'cache.json'), JSON.stringify({ entries: [entry] }));
+      const client = new EnrichmentClient({ dataDir: dir, fetchImpl: fakeFetch() });
+      client.enableBackground();
+      const results: Array<{ enrichment: { org?: string; source?: string } }> = [];
+      client.on('result', (r) => results.push(r));
+      return { client, results };
+    };
+    const settle = () => new Promise((r) => setTimeout(r, 50));
+    const logPath = () => join(dir, 'query-log.ndjson');
+
+    it('still shows a cached result, with nothing unhandled', async () => {
+      mkdirSync(logPath());
+      const { client, results } = cachedClient();
+      client.requestLookup('conn-1', ADDR);
+      await settle();
+      expect(results).toHaveLength(1);
+      expect(results[0].enrichment).toMatchObject({ org: 'CACHED-ORG', source: 'cache' });
+      expect(unhandled).not.toHaveBeenCalled();
+    });
+
+    it('leaves nothing unhandled for a cached miss', async () => {
+      mkdirSync(logPath());
+      const { client, results } = cachedClient(null);
+      client.requestLookup('conn-1', ADDR);
+      await settle();
+      expect(results).toEqual([]);
+      expect(unhandled).not.toHaveBeenCalled();
+    });
+
+    it('reports an outage once, by code only, and reports the next one', async () => {
+      const report = ['[enrichment] query-log write failed for cached lookups:', 'EISDIR'];
+      mkdirSync(logPath());
+      const { client, results } = cachedClient();
+      for (let i = 0; i < 3; i++) {
+        client.notifyObservedConnections([{ id: `conn-${i}`, remoteAddr: ADDR }]);
+        await settle();
+      }
+      expect(error.mock.calls).toEqual([report]);
+
+      rmSync(logPath(), { recursive: true });
+      client.requestLookup('conn-4', ADDR);
+      await settle();
+      expect(readFileSync(logPath(), 'utf8').trim().split('\n')).toHaveLength(1);
+      expect(error.mock.calls).toEqual([report]);
+
+      rmSync(logPath());
+      mkdirSync(logPath());
+      client.requestLookup('conn-5', ADDR);
+      await settle();
+      expect(error.mock.calls).toEqual([report, report]);
+      expect(results).toHaveLength(5);
+    });
+  });
+
+  // KAN-318: an error can quote the address, the hostname or a path.
+  describe('what a failed lookup reports', () => {
+    const ADDR = '93.184.216.34';
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    it.each([
+      ['a code', Object.assign(new Error(`connect ${ADDR}`), { code: 'ECONNREFUSED' }), 'ECONNREFUSED'],
+      ['a name', new TypeError(`bad ${ADDR}`), 'TypeError'],
+      ['its cause', Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error(ADDR), { code: 'ENOTFOUND' }) }), 'TypeError (ENOTFOUND)'],
+      ['a name when its code is a number', new DOMException(ADDR, 'TimeoutError'), 'TimeoutError'],
+      ['its type when it is not an error', ADDR, 'string'],
+    ])('is %s and nothing else', async (_name, failure, expected) => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const fetchImpl = vi.fn(async () => { throw failure; }) as unknown as typeof fetch;
+      const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+      client.enable();
+      client.requestLookup('conn-1', ADDR);
+      await vi.waitFor(() => expect(error.mock.calls).toEqual([['[enrichment] lookup failed:', expected]]));
+    });
+
+    it('names no address or hostname for a failed registrant lookup', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const reverseDnsFn = async () => { throw Object.assign(new Error(`34.216.184.93.in-addr.arpa ${ADDR}`), { code: 'ESERVFAIL' }); };
+      const client = new EnrichmentClient({ dataDir: dir, fetchImpl: fakeFetch(), reverseDnsFn });
+      client.enable();
+      const result = new Promise((resolve) => client.once('result', resolve));
+      client.requestLookup('conn-1', ADDR);
+      await result;
+      expect(error.mock.calls).toEqual([['[enrichment] extended-tier registrant lookup failed:', 'ESERVFAIL']]);
+    });
+  });
+
+  it('a lookup that throws outside its own error handling leaves nothing unhandled', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      writeFileSync(join(dir, 'cache.json'), JSON.stringify({ entries: [{ key: 5, record: null, expiresAt: 0 }] }));
+      const client = new EnrichmentClient({ dataDir: dir });
+      client.enableBackground();
+      client.requestLookup('conn-1', '93.184.216.34');
+      client.notifyObservedConnections([{ id: 'conn-2', remoteAddr: '93.184.216.34' }]);
+      const escaped = ['[enrichment] lookup failed outside its handler:', 'TypeError'];
+      await vi.waitFor(() => expect(error.mock.calls).toEqual([escaped, escaped]));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      error.mockRestore();
+    }
+  });
+
   it('makes zero HTTP calls when disabled', async () => {
     const fetchImpl = vi.fn();
     const client = new EnrichmentClient({ dataDir: dir, fetchImpl: fetchImpl as unknown as typeof fetch });

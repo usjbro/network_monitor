@@ -44,11 +44,11 @@ describe('register', () => {
   });
 
   it('reports a failure by code or name only and lets the server start', async () => {
-    startPruning().mockImplementation(() => { throw new TypeError('198.51.100.7'); });
+    startPruning().mockImplementation(() => { throw new TypeError('198.51.100.7', { cause: Object.assign(new Error('x'), { code: 'EACCES' }) }); });
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.stubEnv('NEXT_RUNTIME', 'nodejs');
     await register();
-    expect(error.mock.calls).toEqual([['[enrichment] could not start query-log pruning:', 'TypeError']]);
+    expect(error.mock.calls).toEqual([['[enrichment] could not start query-log pruning:', 'TypeError (EACCES)']]);
   });
 
   it('a first request starts pruning when the startup hook did not', () => {

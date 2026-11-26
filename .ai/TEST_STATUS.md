@@ -1,3 +1,10 @@
+# KAN-318 cached lookup with an unwritable query log — verification (2026-11-25)
+
+- The 9 first new tests fail on the old code; two rounds of review fixes added 13 more (a bounded, never-throwing error label and a catch at the lookup call sites). 20 deliberate breaks are caught. Full vitest 1,821, tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run locally (no Rust change).
+- Reproduced at `7a644b3` on next start and next dev: the server kept running, Next.js logged an unhandledRejection with the log's path, and no cached result was sent. On this branch, the same setup sent all 3 cached results to the live stream and logged one line by code.
+
+---
+
 # KAN-321 and KAN-320 query-log retention — verification (2026-11-25)
 
 - 23 deliberate breaks are caught. Full vitest 1,799, tsc, lint, production build, docs sync and Playwright 7/7 pass (Playwright and the server runs below before the last review fixes). Rust not run locally (no Rust change).
