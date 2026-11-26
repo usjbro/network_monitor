@@ -1,8 +1,8 @@
 # KAN-317 enrich clear (2026-11-26)
 
 - Worktree `.worktrees/enrich-clear-complete`, branch `KAN-317-enrich-clear-complete`. Slack posts resumed.
-- Changed a JAM-258 UI decision: a clear the server reports as failed now shows enrichment off (the server has turned it off); a request that never arrived still keeps the mode.
-- Not covered: a second wipe failure is not reported separately; queued cache writes each rewrite the whole file; KAN-319, KAN-322. Not checked in a real browser (jsdom only for the UI path).
+- Changed a JAM-258 UI decision: a clear the server reports as `clear failed` (500) now shows enrichment off, since the server has turned it off; any other failure keeps the mode.
+- Not covered: ownership results already on screen stay after a clear (KAN-323); a failed cache wipe empties memory but leaves the file; queued cache writes each rewrite the whole file; KAN-319, KAN-322. Not checked in a real browser (jsdom only for the UI path).
 
 ---
 

@@ -51,6 +51,22 @@ describe('RequestQueue', () => {
     expect(ran).toEqual([['a', 0], ['dropped', 0], ['b', 3000]]);
   });
 
+  it('does not make the next task wait again for a task cancelled during its wait', async () => {
+    const queue = new RequestQueue({ minDelayMs: 3000, maxDelayMs: 3000 });
+    const ran: Array<[string, number]> = [];
+    const task = (name: string) => () => {
+      ran.push([name, Date.now()]);
+      return Promise.resolve();
+    };
+    let cancelled = false;
+    const results = [queue.enqueue(task('a')), queue.enqueue(task('dropped'), () => cancelled), queue.enqueue(task('b'))];
+    await vi.advanceTimersByTimeAsync(1000);
+    cancelled = true;
+    await vi.runAllTimersAsync();
+    await Promise.all(results);
+    expect(ran).toEqual([['a', 0], ['dropped', 3000], ['b', 3000]]);
+  });
+
   it('enforces the minimum spacing floor between dispatches', async () => {
     const queue = new RequestQueue({ minDelayMs: 3000, maxDelayMs: 3000 }); // fixed delay for a deterministic assertion
     const dispatchTimes: number[] = [];

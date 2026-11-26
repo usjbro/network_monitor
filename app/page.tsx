@@ -619,8 +619,12 @@ export default function TerminalApp() {
       if (!res.ok) {
         setControlError(`Enrichment control request failed (HTTP ${res.status}).`);
         // The server turns lookups off before it wipes, so a clear it
-        // reports as failed has still turned them off (KAN-317).
-        if (action === 'clear') resetAfterClear();
+        // reports as failed has still turned them off (KAN-317). Any other
+        // failure may not have reached it, so the mode is left as it was.
+        if (action === 'clear' && res.status === 500) {
+          const failure = await res.json().catch(() => null);
+          if (failure?.error === 'clear failed') resetAfterClear();
+        }
         return;
       }
       const body = await res.json();

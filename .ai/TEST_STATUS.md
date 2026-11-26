@@ -1,6 +1,6 @@
 # KAN-317 enrich clear — verification (2026-11-26)
 
-- 13 first new tests fail on `34e4e0f`; review fixes added 7 more, each shown failing first. 22 deliberate breaks are caught. Full vitest 1,840, tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run (no Rust change).
+- 13 first new tests fail on `34e4e0f`; two rounds of review fixes added 13 more, each shown failing first. 26 deliberate breaks are caught. Full vitest 1,846, tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run (no Rust change).
 - next start in a throwaway copy: clear returned 200 and removed both temp files; with the log path a directory it returned 500, logged `[enrichment] clear failed: EISDIR` with no path, and lookups stayed off. No lookups were sent.
 
 ---

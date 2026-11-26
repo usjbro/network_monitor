@@ -28,7 +28,9 @@ export class RequestQueue {
   private random: () => number;
   private queue: QueuedTask[] = [];
   private running = false;
-  private hasDispatchedOnce = false;
+  // Set after a task that may have sent; the next task that will send waits
+  // the spacing delay first. A cancelled task neither waits nor uses it up.
+  private delayOwed = false;
 
   constructor(opts: RequestQueueOptions = {}) {
     this.minDelayMs = opts.minDelayMs ?? 3000;
@@ -54,13 +56,13 @@ export class RequestQueue {
     if (this.running) return;
     this.running = true;
     while (this.queue.length > 0) {
-      const sends = !this.queue[0].cancelled?.();
-      if (sends && this.hasDispatchedOnce) {
+      if (this.delayOwed && !this.queue[0].cancelled?.()) {
         const delay = this.minDelayMs + this.random() * (this.maxDelayMs - this.minDelayMs);
         await new Promise((r) => setTimeout(r, delay));
+        this.delayOwed = false;
       }
-      if (sends) this.hasDispatchedOnce = true;
       const task = this.queue.shift()!;
+      if (!task.cancelled?.()) this.delayOwed = true;
       try {
         task.resolve(await task.run());
       } catch (err) {

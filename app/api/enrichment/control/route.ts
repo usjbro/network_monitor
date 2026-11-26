@@ -33,7 +33,8 @@ export async function POST(request: NextRequest) {
         await client.clear();
       } catch (err) {
         // Lookups are off even so; the path stays out of the log (KAN-317).
-        console.error('[enrichment] clear failed:', errorLabel(err));
+        const failures = err instanceof AggregateError ? err.errors : [err];
+        console.error('[enrichment] clear failed:', failures.map(errorLabel).join(', '));
         return NextResponse.json({ error: 'clear failed' }, { status: 500 });
       }
       return NextResponse.json({ ok: true });

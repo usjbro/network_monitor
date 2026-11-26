@@ -7,7 +7,7 @@
 import { promises as fs, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
-import { removeTempFiles, tempPathFor } from './cache';
+import { removeTempFiles, SerialWrites, tempPathFor } from './fs-util';
 import { QueryLogEntry } from './types';
 
 type QueryLogInput = Omit<QueryLogEntry, 'timestamp'>;
@@ -29,17 +29,15 @@ function parseEntry(line: string): QueryLogEntry | null {
 }
 
 export class QueryLog {
-  private tail: Promise<void> = Promise.resolve();
+  private writes = new SerialWrites();
 
   constructor(private filePath: string) {}
 
   // Writes run one at a time, in call order: prune() replaces the whole file
   // with what it read, so an append() or clear() overlapping it would be
-  // undone (KAN-286). A failed write rejects for its own caller only.
+  // undone (KAN-286).
   private serialize<T>(write: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(write);
-    this.tail = result.then(() => {}, () => {});
-    return result;
+    return this.writes.run(write);
   }
 
   append(entry: QueryLogInput): Promise<void> {

@@ -172,13 +172,32 @@ it('shows enrichment off and drops a pending lookup when the server fails to cle
   await runCommand('enrich on');
   fireEvent.click(screen.getByRole('button', { name: /Not yet looked up/ }));
   expect(screen.getByText('Looking up…')).toBeInTheDocument();
-  vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) } as Response);
+  vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ error: 'clear failed' }) } as Response);
   await runCommand('enrich clear');
   expect(screen.getByText('Enrichment control request failed (HTTP 500).')).toBeInTheDocument();
   expect(screen.getByText(/Enrichment disabled/)).toBeInTheDocument();
   expect(screen.queryByText('Looking up…')).not.toBeInTheDocument();
   await act(async () => { await vi.advanceTimersByTimeAsync(25_000); });
   expect(screen.queryByText(/Unavailable — no ownership data/)).not.toBeInTheDocument();
+});
+
+// Any other failure may never have reached clear() (a proxy error, a
+// rejected origin), so the server's mode is unknown and the UI keeps its own.
+it.each([
+  ['a proxy error', { ok: false, status: 502, json: async () => { throw new Error('not JSON'); } }],
+  ['a rejected origin', { ok: false, status: 403, json: async () => ({ error: 'cross-site request rejected' }) }],
+  ['another 500', { ok: false, status: 500, json: async () => ({}) }],
+])('keeps enrichment mode and the pending lookup when clear fails with %s', async (_name, response) => {
+  vi.useFakeTimers();
+  render(<TerminalApp />);
+  showConnection();
+  await runCommand('conn');
+  await runCommand('enrich on');
+  fireEvent.click(screen.getByRole('button', { name: /Not yet looked up/ }));
+  vi.mocked(fetch).mockResolvedValueOnce(response as unknown as Response);
+  await runCommand('enrich clear');
+  expect(screen.getByText('Looking up…')).toBeInTheDocument();
+  expect(screen.queryByText(/Enrichment disabled/)).not.toBeInTheDocument();
 });
 
 // A request that never reached the server changed nothing there.

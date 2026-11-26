@@ -160,13 +160,16 @@ export class EnrichmentClient extends EventEmitter {
   }
 
   // Turns lookups off before wiping, so none starts meanwhile, and drops the
-  // ones underway. Both wipes are attempted; the first failure is rethrown.
+  // ones underway. Both wipes are attempted; if both fail, both are thrown
+  // in an AggregateError.
   async clear(): Promise<void> {
     this.mode = 'off';
     this.generation += 1;
     this.inFlightWaiters.clear();
     const wipes = await Promise.allSettled([this.cache.clear(), this.queryLog.clear()]);
-    for (const wipe of wipes) if (wipe.status === 'rejected') throw wipe.reason;
+    const failures = wipes.flatMap((wipe) => (wipe.status === 'rejected' ? [wipe.reason] : []));
+    if (failures.length > 1) throw new AggregateError(failures, 'clear failed');
+    if (failures.length === 1) throw failures[0];
   }
 
   requestLookup(connectionId: string, remoteAddr: string): void {

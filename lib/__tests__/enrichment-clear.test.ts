@@ -8,7 +8,8 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentClient } from '../enrichment';
-import { EnrichmentCache, atomicWriteJson } from '../enrichment/cache';
+import { EnrichmentCache } from '../enrichment/cache';
+import { atomicWriteJson } from '../enrichment/fs-util';
 import { QueryLog } from '../enrichment/query-log';
 
 const ADDR = '93.184.216.34';
@@ -261,6 +262,16 @@ describe('enrich clear', () => {
     await expect(c.clear()).rejects.toMatchObject({ code: 'EISDIR' });
     expect(c.getMode()).toBe('off');
     expect(JSON.parse(readFileSync(join(dir, 'cache.json'), 'utf8'))).toEqual({ entries: [] });
+  });
+
+  it('a clear whose two wipes both fail reports both', async () => {
+    mkdirSync(join(dir, 'cache.json'), { recursive: true });
+    mkdirSync(join(dir, 'query-log.ndjson'));
+    const c = client();
+    const failed = await c.clear().catch((err: unknown) => err);
+    expect(failed).toBeInstanceOf(AggregateError);
+    expect((failed as AggregateError).errors).toHaveLength(2);
+    expect(c.getMode()).toBe('off');
   });
 });
 
