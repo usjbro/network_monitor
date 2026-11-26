@@ -191,7 +191,7 @@ export class EnrichmentClient extends EventEmitter {
 
   // lookup() handles its own failures; this catches anything that escapes them.
   private startLookup(connectionId: string, remoteAddr: string): void {
-    this.lookup(connectionId, remoteAddr).catch((err) => console.error('[enrichment] lookup failed:', errorLabel(err)));
+    this.lookup(connectionId, remoteAddr).catch((err) => console.error('[enrichment] lookup failed outside its handler:', errorLabel(err)));
   }
 
   private async lookup(connectionId: string, remoteAddr: string): Promise<void> {
@@ -292,9 +292,9 @@ export class EnrichmentClient extends EventEmitter {
         this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record, resolvedHostname));
       }
     } catch (err) {
-      // lookup() is always invoked fire-and-forget (via startLookup())
-      // from requestLookup()/notifyObservedConnections() — there is no
-      // caller anywhere that awaits or attaches a rejection handler to it.
+      // lookup() is invoked fire-and-forget (via startLookup()) from
+      // requestLookup()/notifyObservedConnections(); startLookup()'s handler
+      // is only a last resort for errors outside this try.
       // An uncaught error here (e.g. a transient disk error from
       // queryLog.append/cache.setSuccess) would otherwise become an
       // unhandled promise rejection and, under Node's default policy, crash

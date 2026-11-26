@@ -274,9 +274,10 @@ describe('EnrichmentClient', () => {
       client.enableBackground();
       client.requestLookup('conn-1', '93.184.216.34');
       client.notifyObservedConnections([{ id: 'conn-2', remoteAddr: '93.184.216.34' }]);
-      await new Promise((r) => setTimeout(r, 50));
+      const escaped = ['[enrichment] lookup failed outside its handler:', 'TypeError'];
+      await vi.waitFor(() => expect(error.mock.calls).toEqual([escaped, escaped]));
+      await new Promise((r) => setTimeout(r, 0));
       expect(unhandled).not.toHaveBeenCalled();
-      expect(error.mock.calls).toEqual([['[enrichment] lookup failed:', 'TypeError'], ['[enrichment] lookup failed:', 'TypeError']]);
     } finally {
       process.off('unhandledRejection', unhandled);
       error.mockRestore();

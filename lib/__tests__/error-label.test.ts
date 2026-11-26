@@ -7,12 +7,29 @@ describe('errorLabel', () => {
     ['a code', Object.assign(new Error('198.51.100.7'), { code: 'ECONNRESET' }), 'ECONNRESET'],
     ['a name', new RangeError('198.51.100.7'), 'RangeError'],
     ['a cause', new TypeError('x', { cause: Object.assign(new Error('y'), { code: 'ENOTFOUND' }) }), 'TypeError (ENOTFOUND)'],
-    ['an object with a code', { code: 'ECONNRESET', message: '198.51.100.7' }, 'ECONNRESET'],
-    ['an object with neither', { message: '198.51.100.7' }, 'object'],
+    ['an object that is not an error', { code: 'ECONNRESET', name: 'x' }, 'object'],
+    ['an error named like an address', Object.assign(new Error('x'), { name: '198.51.100.7' }), 'Error'],
+    ['an error with an IPv6 code', Object.assign(new Error('x'), { code: '2001:db8::1' }), 'Error'],
+    ['an error with a very long code', Object.assign(new Error('x'), { code: 'E'.repeat(100) }), 'Error'],
     ['a string', '198.51.100.7', 'string'],
     ['null', null, 'object'],
   ])('labels %s', (_name, err, expected) => {
     expect(errorLabel(err)).toBe(expected);
+  });
+
+  it('never throws', () => {
+    const hostile = new Error('x');
+    Object.defineProperty(hostile, 'code', { get() { throw new Error('198.51.100.7'); } });
+    expect(errorLabel(hostile)).toBe('unlabelled error');
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    expect(errorLabel(revoked.proxy)).toBe('unlabelled error');
+  });
+
+  it('takes one argument', () => {
+    expect(errorLabel.length).toBe(1);
+    const err = new Error('a', { cause: new Error('b', { cause: new Error('c') }) });
+    expect([err, err, err].map(errorLabel)).toEqual(Array(3).fill('Error (Error (Error))'));
   });
 
   it('stops on a cause chain that loops or runs deep', () => {
