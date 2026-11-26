@@ -158,7 +158,7 @@ describe('enrich clear', () => {
     c.on('result', (r) => results.push(r));
     c.enableBackground();
     c.requestLookup('conn-1', ADDR);
-    await vi.waitFor(() => expect(fetched.some((u) => u.includes('rdap.arin.net'))).toBe(true));
+    await vi.waitFor(() => expect(fetched.some((u) => new URL(u).hostname === 'rdap.arin.net')).toBe(true));
     for (let i = 1; i <= 5; i++) c.requestLookup(`queued-${i}`, `198.51.100.${i}`);
     await settle();
     await c.clear();
@@ -176,7 +176,7 @@ describe('enrich clear', () => {
     const release = hold('rdap.arin.net');
     const c = client();
     c.requestLookup('conn-1', ADDR);
-    await vi.waitFor(() => expect(fetched.some((u) => u.includes('rdap.arin.net'))).toBe(true));
+    await vi.waitFor(() => expect(fetched.some((u) => new URL(u).hostname === 'rdap.arin.net')).toBe(true));
     c.requestLookup('conn-2', '198.51.100.7');
     await settle();
     const atClear = fetched.length;
@@ -235,7 +235,7 @@ describe('enrich clear', () => {
     const release = hold('rdap.arin.net');
     const c = client();
     c.requestLookup('conn-1', ADDR);
-    await vi.waitFor(() => expect(fetched.some((u) => u.includes('rdap.arin.net'))).toBe(true));
+    await vi.waitFor(() => expect(fetched.some((u) => new URL(u).hostname === 'rdap.arin.net')).toBe(true));
     await c.clear();
     held.clear();
     c.enable();
