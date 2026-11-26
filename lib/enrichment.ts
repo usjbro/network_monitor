@@ -49,12 +49,18 @@ export const DISCLOSURE_TEXT_BACKGROUND =
   'one at a time. Results are still cached for up to 14 days. Use "enrich ' +
   'clear" at any time to wipe the local cache and query log and turn this off.';
 
+// Thrown inside a lookup that clear() has dropped; lookup() returns quietly.
+const DROPPED = Symbol('enrichment lookup dropped by clear');
+
 export class EnrichmentClient extends EventEmitter {
   private mode: EnrichmentMode = 'off';
   private cache: EnrichmentCache;
   private queryLog: QueryLog;
   private firstPrune: Promise<void> | null = null;
   private cacheHitLogFailing = false;
+  // Bumped by clear(): a lookup started under an earlier value sends,
+  // writes and shows nothing more (KAN-317).
+  private generation = 0;
   private queue: RequestQueue;
   private rdap: RdapClient;
   private fetchImpl: typeof fetch;
@@ -153,10 +159,14 @@ export class EnrichmentClient extends EventEmitter {
     if (this.mode === 'background') this.mode = 'on-demand';
   }
 
+  // Turns lookups off before wiping, so none starts meanwhile, and drops the
+  // ones underway. Both wipes are attempted; the first failure is rethrown.
   async clear(): Promise<void> {
-    await this.cache.clear();
-    await this.queryLog.clear();
     this.mode = 'off';
+    this.generation += 1;
+    this.inFlightWaiters.clear();
+    const wipes = await Promise.allSettled([this.cache.clear(), this.queryLog.clear()]);
+    for (const wipe of wipes) if (wipe.status === 'rejected') throw wipe.reason;
   }
 
   requestLookup(connectionId: string, remoteAddr: string): void {
@@ -194,14 +204,31 @@ export class EnrichmentClient extends EventEmitter {
     this.lookup(connectionId, remoteAddr).catch((err) => console.error('[enrichment] lookup failed outside its handler:', errorLabel(err)));
   }
 
+  // Throws DROPPED once clear() has run since `generation` was read.
+  private checkLive(generation: number): void {
+    if (generation !== this.generation) throw DROPPED;
+  }
+
+  // Queues a query that is skipped, not sent, if clear() runs while it waits.
+  private send<T>(generation: number, query: () => Promise<T>): Promise<T> {
+    return this.queue.enqueue(
+      () => {
+        this.checkLive(generation);
+        return query();
+      },
+      () => generation !== this.generation,
+    );
+  }
+
   private async lookup(connectionId: string, remoteAddr: string): Promise<void> {
     if (isPrivateOrReserved(remoteAddr)) return;
     const flightKey = remoteAddr;
+    const generation = this.generation;
 
     const cached = this.cache.getForIp(remoteAddr);
     if (cached && this.cache.isFresh(cached)) {
       await this.logCacheHit(remoteAddr);
-      if (cached.record) {
+      if (cached.record && generation === this.generation) {
         this.emit('result', buildEnrichmentEvent(connectionId, remoteAddr, { ...cached.record, source: 'cache' }));
       }
       return;
@@ -231,15 +258,19 @@ export class EnrichmentClient extends EventEmitter {
         });
       }
       const services = await this.bootstrapPromise;
+      this.checkLive(generation);
       const base = resolveRdapBaseForIp(remoteAddr, services);
       if (!base) {
         await this.queryLog.append({ target: remoteAddr, endpoint: 'bootstrap', cacheStatus: 'miss' });
+        this.checkLive(generation);
         await this.cache.setNegative(cidrKeyFor(remoteAddr), NEGATIVE_TTL_MS);
         return;
       }
       const url = `${base.replace(/\/$/, '')}/ip/${remoteAddr}`;
-      const result = await this.queue.enqueue(() => this.rdap.fetch(url));
+      const result = await this.send(generation, () => this.rdap.fetch(url));
+      this.checkLive(generation);
       await this.queryLog.append({ target: remoteAddr, endpoint: new URL(url).host, cacheStatus: 'miss' });
+      this.checkLive(generation);
 
       if (!result.ok) {
         // Stale-on-failure: leave any existing (expired) cache entry alone —
@@ -264,11 +295,13 @@ export class EnrichmentClient extends EventEmitter {
       if (record.org && !record.registrant) {
         try {
           const remoteHostname = await this.reverseDnsFn(remoteAddr);
+          this.checkLive(generation);
           if (remoteHostname) {
             resolvedHostname = remoteHostname;
-            await this.resolveRegistrant(remoteHostname, record);
+            await this.resolveRegistrant(remoteHostname, record, generation);
           }
         } catch (err) {
+          this.checkLive(generation); // dropped by clear(): nothing to report
           // Isolated on purpose: resolveRegistrant's own doc comment
           // promises it "never throws," but its await on
           // domainBootstrapPromise can still reject (network failure,
@@ -287,11 +320,14 @@ export class EnrichmentClient extends EventEmitter {
       }
 
       const key = cidrKeyFromRdap(result.json) ?? cidrKeyFor(remoteAddr);
+      this.checkLive(generation);
       await this.cache.setSuccess(key, record, CACHE_TTL_MS);
+      this.checkLive(generation);
       for (const cid of waiters) {
         this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record, resolvedHostname));
       }
     } catch (err) {
+      if (generation !== this.generation) return; // dropped by clear(): nothing to report
       // lookup() is invoked fire-and-forget (via startLookup()) from
       // requestLookup()/notifyObservedConnections(); startLookup()'s handler
       // is only a last resort for errors outside this try.
@@ -310,7 +346,8 @@ export class EnrichmentClient extends EventEmitter {
       // UI's own timeout resolves them to "Unavailable".
       console.error('[enrichment] lookup failed:', errorLabel(err));
     } finally {
-      this.inFlightWaiters.delete(flightKey);
+      // Only its own entry: after clear(), a new lookup may hold this key.
+      if (this.inFlightWaiters.get(flightKey) === waiters) this.inFlightWaiters.delete(flightKey);
     }
   }
 
@@ -322,7 +359,7 @@ export class EnrichmentClient extends EventEmitter {
   // something is found; leaves it unset (surfaced as "Unavailable" in the UI,
   // Step 4) on any failure — never throws, mirroring the core-tier RDAP leg's
   // stale-on-failure posture just below in `lookup()`.
-  private async resolveRegistrant(hostname: string, record: EnrichmentRecord): Promise<void> {
+  private async resolveRegistrant(hostname: string, record: EnrichmentRecord, generation: number): Promise<void> {
     const domainCached = this.cache.getForDomain(hostname);
     if (domainCached && this.cache.isFresh(domainCached)) {
       if (domainCached.record) record.registrant = domainCached.record.registrant;
@@ -339,12 +376,15 @@ export class EnrichmentClient extends EventEmitter {
       });
     }
     const domainServices = await this.domainBootstrapPromise;
+    this.checkLive(generation);
     const domainBase = resolveRdapBaseForDomain(hostname, domainServices);
 
     if (domainBase) {
       const domainUrl = `${domainBase.replace(/\/$/, '')}/domain/${hostname}`;
-      const domainResult = await this.queue.enqueue(() => this.rdap.fetchWithReferral(domainUrl));
+      const domainResult = await this.send(generation, () => this.rdap.fetchWithReferral(domainUrl, () => this.checkLive(generation)));
+      this.checkLive(generation);
       await this.queryLog.append({ target: hostname, endpoint: new URL(domainUrl).host, cacheStatus: 'miss' });
+      this.checkLive(generation);
       if (domainResult.ok) {
         const domainExtracted = extractDomainRdap(domainResult.json);
         record.registrant = domainExtracted.registrant;
@@ -364,8 +404,10 @@ export class EnrichmentClient extends EventEmitter {
       await this.cache.setNegative(hostname, NEGATIVE_TTL_MS);
       return;
     }
-    const whoisText = await this.queue.enqueue(() => queryWhois(whoisEntry, hostname));
+    const whoisText = await this.send(generation, () => queryWhois(whoisEntry, hostname));
+    this.checkLive(generation);
     await this.queryLog.append({ target: hostname, endpoint: whoisEntry.host, cacheStatus: 'miss' });
+    this.checkLive(generation);
     if (whoisText) {
       const whoisExtracted = extractWhois(whoisText, whoisEntry);
       record.registrant = whoisExtracted.registrant ?? whoisExtracted.org;

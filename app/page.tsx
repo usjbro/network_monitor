@@ -596,6 +596,18 @@ export default function TerminalApp() {
   // Toggles ownership enrichment mode via /api/enrichment/control (Task 9's
   // route, backed by Task 8's EnrichmentClient). Re-shows the disclosure
   // banner on every enable (on-demand or background), per spec §1.
+  // Wipe any in-flight/unavailable bookkeeping along with the server-side
+  // cache+log clear — a stale "Looking up…" or "Unavailable" badge left over
+  // from before the clear would be misleading once enrichment is off and the
+  // cache is gone.
+  const resetAfterClear = () => {
+    setEnrichmentMode('off');
+    for (const timer of lookupTimers.current.values()) clearTimeout(timer);
+    lookupTimers.current.clear();
+    setLookingUpIds(new Set());
+    setUnavailableIds(new Set());
+  };
+
   const enrichmentControl = async (action: string) => {
     setControlError(null);
     try {
@@ -606,6 +618,9 @@ export default function TerminalApp() {
       });
       if (!res.ok) {
         setControlError(`Enrichment control request failed (HTTP ${res.status}).`);
+        // The server turns lookups off before it wipes, so a clear it
+        // reports as failed has still turned them off (KAN-317).
+        if (action === 'clear') resetAfterClear();
         return;
       }
       const body = await res.json();
@@ -614,17 +629,7 @@ export default function TerminalApp() {
       if (action === 'enable_background') setEnrichmentMode('background');
       if (action === 'disable') setEnrichmentMode('off');
       if (action === 'disable_background') setEnrichmentMode('on-demand');
-      if (action === 'clear') {
-        setEnrichmentMode('off');
-        // Wipe any in-flight/unavailable bookkeeping along with the
-        // server-side cache+log clear — a stale "Looking up…" or
-        // "Unavailable" badge left over from before the clear would be
-        // misleading once enrichment is off and the cache is gone.
-        for (const timer of lookupTimers.current.values()) clearTimeout(timer);
-        lookupTimers.current.clear();
-        setLookingUpIds(new Set());
-        setUnavailableIds(new Set());
-      }
+      if (action === 'clear') resetAfterClear();
     } catch {
       setControlError('Enrichment control request failed.');
     }

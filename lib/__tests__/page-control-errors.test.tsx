@@ -162,7 +162,9 @@ it('keeps enrichment disabled when enabling fails', async () => {
   expect(document.body).not.toHaveTextContent('PRIVATE_RESPONSE_BODY');
 });
 
-it('keeps enrichment mode, pending lookup and its timer when clear fails', async () => {
+// The server turns lookups off before it wipes, so a clear it reports as
+// failed still leaves enrichment off and drops pending lookups (KAN-317).
+it('shows enrichment off and drops a pending lookup when the server fails to clear', async () => {
   vi.useFakeTimers();
   render(<TerminalApp />);
   showConnection();
@@ -170,23 +172,27 @@ it('keeps enrichment mode, pending lookup and its timer when clear fails', async
   await runCommand('enrich on');
   fireEvent.click(screen.getByRole('button', { name: /Not yet looked up/ }));
   expect(screen.getByText('Looking up…')).toBeInTheDocument();
-  vi.mocked(fetch).mockResolvedValueOnce({ ok: false, json: async () => ({}) } as Response);
+  vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}) } as Response);
   await runCommand('enrich clear');
-  expect(screen.getByText('Looking up…')).toBeInTheDocument();
+  expect(screen.getByText('Enrichment control request failed (HTTP 500).')).toBeInTheDocument();
+  expect(screen.getByText(/Enrichment disabled/)).toBeInTheDocument();
+  expect(screen.queryByText('Looking up…')).not.toBeInTheDocument();
   await act(async () => { await vi.advanceTimersByTimeAsync(25_000); });
-  expect(screen.getByText(/Unavailable — no ownership data/)).toBeInTheDocument();
+  expect(screen.queryByText(/Unavailable — no ownership data/)).not.toBeInTheDocument();
 });
 
-it('keeps unavailable lookup bookkeeping when clear fails', async () => {
+// A request that never reached the server changed nothing there.
+it('keeps enrichment mode, pending lookup and its timer when the clear request is not delivered', async () => {
   vi.useFakeTimers();
   render(<TerminalApp />);
   showConnection();
   await runCommand('conn');
   await runCommand('enrich on');
   fireEvent.click(screen.getByRole('button', { name: /Not yet looked up/ }));
-  await act(async () => { await vi.advanceTimersByTimeAsync(25_000); });
-  vi.mocked(fetch).mockResolvedValueOnce({ ok: false, json: async () => ({}) } as Response);
+  vi.mocked(fetch).mockRejectedValueOnce(new Error('request failed'));
   await runCommand('enrich clear');
+  expect(screen.getByText('Looking up…')).toBeInTheDocument();
+  await act(async () => { await vi.advanceTimersByTimeAsync(25_000); });
   expect(screen.getByText(/Unavailable — no ownership data/)).toBeInTheDocument();
 });
 

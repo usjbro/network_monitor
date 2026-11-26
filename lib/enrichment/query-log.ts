@@ -6,8 +6,8 @@
 // the target, the endpoint queried, and hit/miss status.
 import { promises as fs, existsSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { StringDecoder } from 'node:string_decoder';
+import { removeTempFiles, tempPathFor } from './cache';
 import { QueryLogEntry } from './types';
 
 type QueryLogInput = Omit<QueryLogEntry, 'timestamp'>;
@@ -131,7 +131,7 @@ export class QueryLog {
     // guarantee as EnrichmentCache.persist() (Task 2's atomicWriteJson) —
     // not reused verbatim because this file is NDJSON, one entry per line,
     // not a single JSON document.
-    const tmpPath = `${this.filePath}.tmp-${randomBytes(6).toString('hex')}`;
+    const tmpPath = tempPathFor(this.filePath);
     let unreadable = 0;
     try {
       const out = await fs.open(tmpPath, 'wx', 0o600);
@@ -162,5 +162,6 @@ export class QueryLog {
   private async clearNow(): Promise<void> {
     mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 });
     await fs.writeFile(this.filePath, '', { mode: 0o600 });
+    await removeTempFiles(this.filePath);
   }
 }

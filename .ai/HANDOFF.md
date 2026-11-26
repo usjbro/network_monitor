@@ -1,3 +1,11 @@
+# KAN-317 enrich clear (2026-11-26)
+
+- Worktree `.worktrees/enrich-clear-complete`, branch `KAN-317-enrich-clear-complete`. Slack posts resumed.
+- Changed a JAM-258 UI decision: a clear the server reports as failed now shows enrichment off (the server has turned it off); a request that never arrived still keeps the mode.
+- Not covered: a second wipe failure is not reported separately; queued cache writes each rewrite the whole file; KAN-319, KAN-322. Not checked in a real browser (jsdom only for the UI path).
+
+---
+
 # KAN-318 cached lookup with an unwritable query log (2026-11-25)
 
 - Worktree `.worktrees/cached-lookup-log-failure`, branch `KAN-318-cached-lookup-log-failure`. Slack posts paused by James; no gate, started or review posts were made.

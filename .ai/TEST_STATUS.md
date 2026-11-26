@@ -1,3 +1,10 @@
+# KAN-317 enrich clear — verification (2026-11-26)
+
+- 13 first new tests fail on `34e4e0f`; review fixes added 7 more, each shown failing first. 22 deliberate breaks are caught. Full vitest 1,840, tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run (no Rust change).
+- next start in a throwaway copy: clear returned 200 and removed both temp files; with the log path a directory it returned 500, logged `[enrichment] clear failed: EISDIR` with no path, and lookups stayed off. No lookups were sent.
+
+---
+
 # KAN-318 cached lookup with an unwritable query log — verification (2026-11-25)
 
 - The 9 first new tests fail on the old code; two rounds of review fixes added 13 more (a bounded, never-throwing error label and a catch at the lookup call sites). 20 deliberate breaks are caught. Full vitest 1,821, tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run locally (no Rust change).

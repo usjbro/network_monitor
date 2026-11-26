@@ -1,3 +1,9 @@
+# KAN-317 enrich clear leaves nothing behind (2026-11-26)
+
+Approved under James's standing backlog instruction in chat (2026-11-26: his merge of the previous PR approves the next issue end to end; KAN-318 merged as `34e4e0f`). Gate `kan-317__enrich-clear-complete`. `enrich clear` turns lookups off first, drops lookups already underway (nothing more sent, recorded or shown, including queued queries and registrar referrals), serializes cache writes, removes leftover temp files, and a failed clear returns 500, logs a code only and still leaves lookups off in the server and the UI. KAN-318 is Done.
+
+---
+
 # KAN-318 cached lookup with an unwritable query log (2026-11-25)
 
 James approved KAN-318 in chat ("approve KAN-318, commit and push"; James merges) while Slack posts were paused; the gate record was written by hand. A cached result is shown even when its query-log entry cannot be written, that failure is reported once per outage, and enrichment errors give a code or name, never the address. KAN-321 and KAN-320 merged as `7a644b3` (#356) and are Done.

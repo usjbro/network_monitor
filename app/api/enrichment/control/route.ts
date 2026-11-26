@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getEnrichmentClient } from '@/lib/stream-response';
 import { rejectIfCrossSite } from '@/lib/same-origin';
+import { errorLabel } from '@/lib/enrichment/error-label';
 
 const VALID_ACTIONS = ['enable', 'enable_background', 'disable', 'disable_background', 'clear'] as const;
 
@@ -28,7 +29,13 @@ export async function POST(request: NextRequest) {
       client.disableBackground();
       return NextResponse.json({ ok: true });
     case 'clear':
-      await client.clear();
+      try {
+        await client.clear();
+      } catch (err) {
+        // Lookups are off even so; the path stays out of the log (KAN-317).
+        console.error('[enrichment] clear failed:', errorLabel(err));
+        return NextResponse.json({ error: 'clear failed' }, { status: 500 });
+      }
       return NextResponse.json({ ok: true });
   }
 }
