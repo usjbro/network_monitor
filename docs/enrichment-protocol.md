@@ -63,6 +63,8 @@ Field notes:
 { "action": "clear" }          // wipes cache + query log, disables
 ```
 
+`clear` turns lookups off before it wipes, so both of its failures leave them off: a wipe that failed returns 500 `{"error":"clear failed"}`, and a wipe held up for 10 s by a stalled disk write returns 500 `{"error":"clear timed out"}`. A timed-out wipe stays queued and runs once the write finishes; the relay logs its outcome, and a repeat `clear` reports it.
+
 ## On-demand trigger: `POST /api/enrichment/lookup`
 
 ```json
