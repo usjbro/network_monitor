@@ -204,6 +204,11 @@ export class EnrichmentClient extends EventEmitter {
     }
   }
 
+  /** Resolves once no query-log write is queued. */
+  idle(): Promise<void> {
+    return this.queryLog.drained();
+  }
+
   getMode(): EnrichmentMode {
     return this.mode;
   }
@@ -523,9 +528,19 @@ export class EnrichmentClient extends EventEmitter {
 
     if (domainBase) {
       const domainUrl = `${domainBase.replace(/\/$/, '')}/domain/${hostname}`;
-      const domainResult = await this.send(generation, () => this.rdap.fetchWithReferral(domainUrl, () => this.checkSendable(generation)));
+      const entry = { target: hostname, endpoint: new URL(domainUrl).host, cacheStatus: 'miss' } as const;
+      let registrySent = false;
+      const domainResult = await this.send(generation, () => {
+        registrySent = true;
+        return this.rdap.fetchWithReferral(domainUrl, () => this.checkSendable(generation));
+      }).catch(async (err: unknown) => {
+        // The registry query went out before the referral was refused, so
+        // it is still logged.
+        if (registrySent && err === LOG_BACKLOGGED) await this.queryLog.append(entry);
+        throw err;
+      });
       this.checkLive(generation);
-      await this.queryLog.append({ target: hostname, endpoint: new URL(domainUrl).host, cacheStatus: 'miss' });
+      await this.queryLog.append(entry);
       this.checkLive(generation);
       if (domainResult.ok) {
         const domainExtracted = extractDomainRdap(domainResult.json);
