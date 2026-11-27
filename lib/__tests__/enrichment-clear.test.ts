@@ -14,6 +14,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const CACHE_OPTS = { label: 'test', isRecord: () => true, ttlMs: 14 * DAY_MS, negativeTtlMs: 14 * DAY_MS };
 import { atomicWriteJson } from '../enrichment/fs-util';
 import { QueryLog } from '../enrichment/query-log';
+import { enrichmentClients, FAST_QUEUE } from './helpers/enrichment-clients';
 
 const ADDR = '93.184.216.34';
 const IP_BOOTSTRAP = { services: [[['93.184.216.0/24', '198.51.100.0/24'], ['https://rdap.arin.net/registry/']]] };
@@ -48,10 +49,15 @@ describe('enrich clear', () => {
     process.on('unhandledRejection', unhandled);
     error = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
-  afterEach(() => {
-    process.off('unhandledRejection', unhandled);
-    vi.restoreAllMocks();
-    rmSync(dir, { recursive: true, force: true });
+  const clients = enrichmentClients();
+  afterEach(async () => {
+    try {
+      await clients.drain();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+      vi.restoreAllMocks();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   const fetchImpl = vi.fn(async (url: string) => {
@@ -76,7 +82,7 @@ describe('enrich clear', () => {
   };
 
   const client = (reverseDnsFn: (ip: string) => Promise<string | null> = async () => null) => {
-    const c = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn, queueOptions: { minDelayMs: 1, maxDelayMs: 2 } });
+    const c = clients.track(new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn, queueOptions: FAST_QUEUE }));
     c.on('result', (r) => results.push(r));
     c.enableBackground();
     return c;
@@ -158,7 +164,7 @@ describe('enrich clear', () => {
 
   it('does not hold new lookups behind queries it dropped', async () => {
     const release = hold('rdap.arin.net');
-    const c = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: async () => null, queueOptions: { minDelayMs: 300, maxDelayMs: 300 } });
+    const c = clients.track(new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: async () => null, queueOptions: { minDelayMs: 300, maxDelayMs: 300 } }));
     c.on('result', (r) => results.push(r));
     c.enableBackground();
     c.requestLookup('conn-1', ADDR);

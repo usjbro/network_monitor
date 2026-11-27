@@ -1,12 +1,13 @@
 // lib/__tests__/enrichment-client.test.ts
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, promises as fsp, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentClient } from '../enrichment';
 import { EnrichmentCache } from '../enrichment/cache';
 import { QueryLog } from '../enrichment/query-log';
 import { shuffle } from '../enrichment/request-queue';
+import { enrichmentClients, FAST_QUEUE } from './helpers/enrichment-clients';
 
 // Fixture shaped like IANA's real ipv4.json (RFC 7484 bootstrap format),
 // covering every address this test file queries — mirrors the fixture in
@@ -42,16 +43,28 @@ function fakeFetch(status = 200, body: unknown = { objectClassName: 'ip network'
 // falling through to the real dns.promises.reverse() default and making a
 // live DNS query from an automated test.
 const NO_PTR = async () => null;
-// For tests that send more than one query: production spacing is 3-10 s.
-const FAST_QUEUE = { minDelayMs: 1, maxDelayMs: 2 };
+
+const clients = enrichmentClients();
+class TrackedClient extends EnrichmentClient {
+  constructor(...args: ConstructorParameters<typeof EnrichmentClient>) {
+    super(...args);
+    clients.track(this);
+  }
+}
 
 describe('EnrichmentClient', () => {
   let dir: string;
   beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'enrichment-client-')); });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(async () => {
+    try {
+      await clients.drain();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('startup pruning writes nothing to a fresh data directory', async () => {
-    await new EnrichmentClient({ dataDir: dir }).startPruning();
+    await new TrackedClient({ dataDir: dir }).startPruning();
     expect(readdirSync(dir)).toEqual([]);
   });
 
@@ -62,7 +75,7 @@ describe('EnrichmentClient', () => {
     if (failWith) prune.mockRejectedValueOnce(failWith);
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      await new TrackedClient({ dataDir: dir }).startPruning();
       return error.mock.calls;
     } finally {
       prune.mockRestore();
@@ -99,14 +112,14 @@ describe('EnrichmentClient', () => {
 
     it('constructing a client prunes nothing', () => {
       const prune = vi.spyOn(QueryLog.prototype, 'prune').mockResolvedValue(0);
-      new EnrichmentClient({ dataDir: dir });
+      new TrackedClient({ dataDir: dir });
       expect(prune).not.toHaveBeenCalled();
       expect(vi.getTimerCount()).toBe(0);
     });
 
     it('prunes at once and then six hours after each prune', async () => {
       const prune = vi.spyOn(QueryLog.prototype, 'prune').mockResolvedValue(0);
-      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      await new TrackedClient({ dataDir: dir }).startPruning();
       expect(prune.mock.calls).toEqual([[30]]);
       await vi.advanceTimersByTimeAsync(SIX_HOURS - 1);
       expect(prune).toHaveBeenCalledTimes(1);
@@ -120,7 +133,7 @@ describe('EnrichmentClient', () => {
       const file = join(dir, 'query-log.ndjson');
       const timestamp = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000 + 60_000).toISOString();
       writeFileSync(file, JSON.stringify({ target: 't', endpoint: 'e', cacheStatus: 'hit', timestamp }) + '\n');
-      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      await new TrackedClient({ dataDir: dir }).startPruning();
       expect(readFileSync(file, 'utf8')).not.toBe('');
       await vi.advanceTimersByTimeAsync(SIX_HOURS);
       vi.useRealTimers();
@@ -130,7 +143,7 @@ describe('EnrichmentClient', () => {
     it('does not start another prune while one is running', async () => {
       let finish = (_: number) => {};
       const prune = vi.spyOn(QueryLog.prototype, 'prune').mockReturnValue(new Promise((r) => { finish = r; }));
-      const started = new EnrichmentClient({ dataDir: dir }).startPruning();
+      const started = new TrackedClient({ dataDir: dir }).startPruning();
       await vi.advanceTimersByTimeAsync(SIX_HOURS * 3);
       expect(prune).toHaveBeenCalledTimes(1);
       finish(0);
@@ -144,7 +157,7 @@ describe('EnrichmentClient', () => {
 
     it('a repeat call starts nothing new', async () => {
       const prune = vi.spyOn(QueryLog.prototype, 'prune').mockResolvedValue(0);
-      const client = new EnrichmentClient({ dataDir: dir });
+      const client = new TrackedClient({ dataDir: dir });
       await Promise.all([client.startPruning(), client.startPruning()]);
       await client.startPruning();
       expect(prune).toHaveBeenCalledTimes(1);
@@ -154,7 +167,7 @@ describe('EnrichmentClient', () => {
     it('tries again after a failed prune', async () => {
       vi.spyOn(console, 'error').mockImplementation(() => {});
       const prune = vi.spyOn(QueryLog.prototype, 'prune').mockRejectedValueOnce(new Error('x')).mockResolvedValue(0);
-      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      await new TrackedClient({ dataDir: dir }).startPruning();
       await vi.advanceTimersByTimeAsync(SIX_HOURS);
       expect(prune).toHaveBeenCalledTimes(2);
     });
@@ -162,7 +175,7 @@ describe('EnrichmentClient', () => {
     it('does not keep the process alive', async () => {
       vi.spyOn(QueryLog.prototype, 'prune').mockResolvedValue(0);
       const timer = vi.spyOn(globalThis, 'setTimeout');
-      await new EnrichmentClient({ dataDir: dir }).startPruning();
+      await new TrackedClient({ dataDir: dir }).startPruning();
       expect((timer.mock.results[0].value as NodeJS.Timeout).hasRef()).toBe(false);
     });
   });
@@ -177,15 +190,19 @@ describe('EnrichmentClient', () => {
       unhandled.mockClear();
       process.on('unhandledRejection', unhandled);
     });
-    afterEach(() => {
-      process.off('unhandledRejection', unhandled);
-      vi.restoreAllMocks();
+    afterEach(async () => {
+      try {
+        await clients.drain();
+      } finally {
+        process.off('unhandledRejection', unhandled);
+        vi.restoreAllMocks();
+      }
     });
 
     const cachedClient = (record: unknown = { org: 'CACHED-ORG', source: 'rdap', fetchedAt: '2026-11-25T00:00:00Z' }) => {
       const entry = { key: '93.184.216.0/24', record, expiresAt: Date.now() + 60_000 };
       writeFileSync(join(dir, 'cache.json'), JSON.stringify({ entries: [entry] }));
-      const client = new EnrichmentClient({ dataDir: dir, fetchImpl: fakeFetch() });
+      const client = new TrackedClient({ dataDir: dir, fetchImpl: fakeFetch() });
       client.enableBackground();
       const results: Array<{ enrichment: { org?: string; source?: string } }> = [];
       client.on('result', (r) => results.push(r));
@@ -241,7 +258,13 @@ describe('EnrichmentClient', () => {
   // KAN-318: an error can quote the address, the hostname or a path.
   describe('what a failed lookup reports', () => {
     const ADDR = '93.184.216.34';
-    afterEach(() => { vi.restoreAllMocks(); });
+    afterEach(async () => {
+      try {
+        await clients.drain();
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
 
     it.each([
       ['a code', Object.assign(new Error(`connect ${ADDR}`), { code: 'ECONNREFUSED' }), 'ECONNREFUSED'],
@@ -252,7 +275,7 @@ describe('EnrichmentClient', () => {
     ])('is %s and nothing else', async (_name, failure, expected) => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {});
       const fetchImpl = vi.fn(async () => { throw failure; }) as unknown as typeof fetch;
-      const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+      const client = new TrackedClient({ dataDir: dir, fetchImpl });
       client.enable();
       client.requestLookup('conn-1', ADDR);
       await vi.waitFor(() => expect(error.mock.calls).toEqual([['[enrichment] lookup failed:', expected]]));
@@ -261,7 +284,7 @@ describe('EnrichmentClient', () => {
     it('names no address or hostname for a failed registrant lookup', async () => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {});
       const reverseDnsFn = async () => { throw Object.assign(new Error(`34.216.184.93.in-addr.arpa ${ADDR}`), { code: 'ESERVFAIL' }); };
-      const client = new EnrichmentClient({ dataDir: dir, fetchImpl: fakeFetch(), reverseDnsFn });
+      const client = new TrackedClient({ dataDir: dir, fetchImpl: fakeFetch(), reverseDnsFn });
       client.enable();
       const result = new Promise((resolve) => client.once('result', resolve));
       client.requestLookup('conn-1', ADDR);
@@ -279,7 +302,7 @@ describe('EnrichmentClient', () => {
       vi.spyOn(EnrichmentCache.prototype, 'getForIp').mockImplementation(() => {
         throw new TypeError('cache read failed');
       });
-      const client = new EnrichmentClient({ dataDir: dir });
+      const client = new TrackedClient({ dataDir: dir });
       client.enableBackground();
       client.requestLookup('conn-1', '93.184.216.34');
       client.notifyObservedConnections([{ id: 'conn-2', remoteAddr: '93.184.216.34' }]);
@@ -295,25 +318,25 @@ describe('EnrichmentClient', () => {
 
   it('makes zero HTTP calls when disabled', async () => {
     const fetchImpl = vi.fn();
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl: fetchImpl as unknown as typeof fetch });
     client.requestLookup('conn-1', '93.184.216.34');
     await new Promise((r) => setTimeout(r, 50));
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it('starts in "off" mode on every fresh instance — opt-in never survives a simulated restart', () => {
-    const client = new EnrichmentClient({ dataDir: dir });
+    const client = new TrackedClient({ dataDir: dir });
     expect(client.getMode()).toBe('off');
     client.enable();
     expect(client.getMode()).toBe('on-demand');
 
     // Simulate a relay restart: a brand new instance, same data directory.
-    const restarted = new EnrichmentClient({ dataDir: dir });
+    const restarted = new TrackedClient({ dataDir: dir });
     expect(restarted.getMode()).toBe('off');
   });
 
   it('returns non-empty disclosure text on every activation, not only the first', () => {
-    const client = new EnrichmentClient({ dataDir: dir });
+    const client = new TrackedClient({ dataDir: dir });
     const first = client.enable();
     client.disable();
     const second = client.enable();
@@ -322,7 +345,7 @@ describe('EnrichmentClient', () => {
   });
 
   it('background mode gets its own, separately-worded disclosure text, not a reuse of the on-demand text', () => {
-    const client = new EnrichmentClient({ dataDir: dir });
+    const client = new TrackedClient({ dataDir: dir });
     const onDemand = client.enable();
     client.disable();
     const background = client.enableBackground();
@@ -332,7 +355,7 @@ describe('EnrichmentClient', () => {
 
   it('never queries a private/reserved IP', async () => {
     const fetchImpl = fakeFetch();
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl });
     client.enable();
     client.requestLookup('conn-1', '192.168.1.50');
     await new Promise((r) => setTimeout(r, 50));
@@ -341,7 +364,7 @@ describe('EnrichmentClient', () => {
 
   it('on-demand lookup emits a "result" event with mapped org data on success', async () => {
     const fetchImpl = fakeFetch();
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const resultPromise = new Promise((resolve) => client.once('result', resolve));
@@ -362,7 +385,7 @@ describe('EnrichmentClient', () => {
       await new Promise((r) => setTimeout(r, 20));
       return new Response(JSON.stringify({ name: 'X' }), { status: 200 });
     }) as unknown as typeof fetch;
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     client.requestLookup('conn-1', '93.184.216.34');
@@ -378,7 +401,7 @@ describe('EnrichmentClient', () => {
       startAddress: '93.184.216.0',
       endAddress: '93.184.216.255',
     });
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
@@ -407,7 +430,7 @@ describe('EnrichmentClient', () => {
       endAddress: '198.51.100.10',
       cidr0_cidrs: [{ v4prefix: '198.51.100.0', length: 24 }],
     });
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
@@ -430,7 +453,7 @@ describe('EnrichmentClient', () => {
     const fetchImpl = fakeFetch(200, { objectClassName: 'ip network', name: 'NO-RANGE-ORG' });
     // Two queries: the real 3-10 s spacing between them is not what this
     // tests, and up to 10 s of it ran close to the 15 s limit (KAN-173).
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR, queueOptions: FAST_QUEUE });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR, queueOptions: FAST_QUEUE });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
@@ -451,7 +474,7 @@ describe('EnrichmentClient', () => {
     const secondResult = (await second) as { enrichment: { source?: string } };
     expect(secondResult.enrichment.source).toBe('rdap');
     expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterFirst + 1);
-  }, 15_000);
+  });
 
   it('falls back to a /32 key (not a poisoned wide block) when a malformed/malicious RDAP response claims a whole-internet range', async () => {
     // A response claiming startAddress 0.0.0.0 / endAddress 255.255.255.255
@@ -467,7 +490,7 @@ describe('EnrichmentClient', () => {
     });
     // Two queries: the real 3-10 s spacing between them is not what this
     // tests, and up to 10 s of it ran close to the 15 s limit (KAN-173).
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR, queueOptions: FAST_QUEUE });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR, queueOptions: FAST_QUEUE });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
@@ -484,7 +507,7 @@ describe('EnrichmentClient', () => {
     const secondResult = (await second) as { enrichment: { source?: string; org?: string } };
     expect(secondResult.enrichment.source).toBe('rdap');
     expect((fetchImpl as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterFirst + 1);
-  }, 15_000);
+  });
 
   it('retries the IANA bootstrap fetch on a later lookup after a transient failure, instead of permanently wedging on the first rejection', async () => {
     let ianaCalls = 0;
@@ -496,7 +519,7 @@ describe('EnrichmentClient', () => {
       }
       return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'RETRY-ORG' }), { status: 200 });
     }) as unknown as typeof fetch;
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     // First lookup: the bootstrap fetch itself fails. lookup() must fail
@@ -517,6 +540,52 @@ describe('EnrichmentClient', () => {
     expect(ianaCalls).toBe(2);
   }, 15_000);
 
+  it('is idle only once a started lookup and its cache write are done', async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    const base = fakeFetch();
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (!url.includes('data.iana.org')) await held;
+      return (base as unknown as (u: string) => Promise<Response>)(url);
+    }) as unknown as typeof fetch;
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    client.enable();
+    client.requestLookup('conn-1', '93.184.216.34');
+    let idle = false;
+    void client.idle().then(() => { idle = true; });
+    try {
+      await new Promise((r) => setTimeout(r, 30));
+      expect(idle).toBe(false);
+    } finally {
+      release();
+    }
+    await vi.waitFor(() => expect(idle).toBe(true));
+    expect(JSON.parse(readFileSync(join(dir, 'cache.json'), 'utf8')).entries).toHaveLength(1);
+  });
+
+  it('is idle only once a cache write is done', async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    const rename = fsp.rename.bind(fsp);
+    vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith('cache.json')) await held;
+      return rename(from, to);
+    });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl: fakeFetch(), reverseDnsFn: NO_PTR });
+    const cleared = client.clear();
+    let idle = false;
+    void client.idle().then(() => { idle = true; });
+    try {
+      await new Promise((r) => setTimeout(r, 30));
+      expect(idle).toBe(false);
+    } finally {
+      release();
+      vi.restoreAllMocks();
+    }
+    await cleared;
+    await vi.waitFor(() => expect(idle).toBe(true));
+  });
+
   it('single-flight fanout: two different connections requesting the same in-flight address both eventually receive a result', async () => {
     let rdapCalls = 0;
     const fetchImpl = vi.fn(async (url: string) => {
@@ -527,7 +596,7 @@ describe('EnrichmentClient', () => {
       await new Promise((r) => setTimeout(r, 30));
       return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'SHARED-ORG' }), { status: 200 });
     }) as unknown as typeof fetch;
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
     client.enable();
 
     const results: Array<{ connectionId: string }> = [];
@@ -569,13 +638,13 @@ describe('EnrichmentClient', () => {
     const fixedSequence = [0.9, 0.1, 0.5, 0.2, 0.8];
     const random = () => fixedSequence[i++ % fixedSequence.length];
 
-    const client = new EnrichmentClient({
+    const client = new TrackedClient({
       dataDir: dir,
       fetchImpl,
       random,
       // Tiny, deterministic-from-`random` delay window so this test doesn't
       // have to wait out the real 3-10s production inter-dispatch spacing.
-      queueOptions: { minDelayMs: 1, maxDelayMs: 2 },
+      queueOptions: FAST_QUEUE,
       reverseDnsFn: NO_PTR,
     });
     client.enableBackground();
@@ -638,14 +707,14 @@ describe('EnrichmentClient', () => {
     };
     const fetchImpl = extendedTierFetch(domainRdapResponse);
     const reverseDnsFn = vi.fn(async () => 'example.com');
-    const client = new EnrichmentClient({
+    const client = new TrackedClient({
       dataDir: dir,
       fetchImpl,
       reverseDnsFn,
       // Tiny jitter window — this lookup issues two queued fetches (IP RDAP,
       // then domain RDAP) and the default 3-10s inter-dispatch spacing would
       // make this test needlessly slow without adding any real coverage.
-      queueOptions: { minDelayMs: 1, maxDelayMs: 2 },
+      queueOptions: FAST_QUEUE,
     });
     client.enable();
 
@@ -669,7 +738,7 @@ describe('EnrichmentClient', () => {
       return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'EXAMPLE-NET', country: 'US' }), { status: 200 });
     }) as unknown as typeof fetch;
     const reverseDnsFn = vi.fn(async () => null);
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn });
     client.enable();
 
     const resultPromise = new Promise((resolve) => client.once('result', resolve));
@@ -696,7 +765,7 @@ describe('EnrichmentClient', () => {
       return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'EXAMPLE-NET', country: 'US' }), { status: 200 });
     }) as unknown as typeof fetch;
     const reverseDnsFn = vi.fn(async () => 'example.com');
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn });
+    const client = new TrackedClient({ dataDir: dir, fetchImpl, reverseDnsFn });
     client.enable();
 
     const resultPromise = new Promise((resolve) => client.once('result', resolve));
@@ -741,11 +810,11 @@ describe('EnrichmentClient', () => {
       return new Response(JSON.stringify({ objectClassName: 'ip network', name: 'EXAMPLE-NET' }), { status: 200 });
     }) as unknown as typeof fetch;
     const reverseDnsFn = vi.fn(async () => 'example.com');
-    const client = new EnrichmentClient({
+    const client = new TrackedClient({
       dataDir: dir,
       fetchImpl,
       reverseDnsFn,
-      queueOptions: { minDelayMs: 1, maxDelayMs: 2 },
+      queueOptions: FAST_QUEUE,
     });
     client.enable();
 

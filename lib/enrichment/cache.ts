@@ -115,6 +115,11 @@ export class EnrichmentCache {
 
   constructor(private filePath: string, private opts: CacheOptions) {}
 
+  /** Resolves once no cache-file write is queued. */
+  drained(): Promise<void> {
+    return this.writes.drained();
+  }
+
   // A file or entry that can't be read or has the wrong shape is a cache
   // miss, not a crash, and is reported by count only (KAN-322).
   load(): CacheLoadReport {

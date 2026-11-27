@@ -1,3 +1,9 @@
+# KAN-173 flaky enrichment-client tests (2026-11-27)
+
+Approved under James's standing backlog instruction (KAN-319 merged as `2c11940`). Gate `kan-173__enrichment-client-flake`. Two causes, both in tests: the two /32-fallback tests waited up to 10 s of their 15 s limit for the production 3-10 s queue spacing, and test cleanup removed the data folder while a lookup or write was still running (a cached result goes out before its log entry, KAN-319), which recreated the folder or failed with ENOTEMPTY. `EnrichmentClient.idle()` now waits for running lookups and both write queues; a shared test helper drains every client before the folder is removed.
+
+---
+
 # KAN-319 a stalled query-log write (2026-11-26)
 
 Approved under James's standing backlog instruction (KAN-322 merged as `73993b8`) and his chat answer "319: yes" to the three decisions recorded on the issue. Gate `kan-319__query-log-stall`. A cached result no longer waits for its log entry; at most 1,000 log writes are queued, beyond which cached-lookup entries are dropped and counted (entries for queries sent off the machine never are); `enrich clear` times out after 10 s with lookups off and its wipe still queued behind the stall; a stalled prune is logged and the skipped one runs once it finishes.

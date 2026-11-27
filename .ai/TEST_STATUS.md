@@ -1,3 +1,10 @@
+# KAN-173 flaky enrichment-client tests — verification (2026-11-27)
+
+- Before: 1 of 20 full-suite runs on `2c11940` plus the spacing fix failed with ENOTEMPTY (cidr0 test). With cache-hit log writes slowed by 50 ms, the enrichment tests left 6 data folders behind; after, none. The two new idle() tests fail without the fix; 2 of 3 deliberate breaks fail a test, the third hangs the run.
+- After both review rounds: 20 of 20 full-suite runs pass (1,912 tests), no ENOTEMPTY or timeouts; the only leftover temp files are geoip.test.ts's (KAN-356). tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run (no Rust change).
+
+---
+
 # KAN-319 query-log stall — verification (2026-11-26)
 
 - New tests with held writes: 7 of the first 9 failed on `73993b8` (the other two guard behaviour that must not change). after both review rounds, 33 deliberate breaks caught. Full vitest 1,906, tsc, lint, production build, docs sync, bind check and Playwright 7/7 pass. Rust not run (no Rust change).
