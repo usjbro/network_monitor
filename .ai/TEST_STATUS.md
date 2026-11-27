@@ -1,6 +1,6 @@
 # KAN-319 query-log stall — verification (2026-11-26)
 
-- New tests with held writes: 7 of the first 9 failed on `73993b8` (the other two guard behaviour that must not change). 28 deliberate breaks caught. Full vitest 1,902, tsc, lint, production build, docs sync, bind check and Playwright 7/7 pass. Rust not run (no Rust change).
+- New tests with held writes: 7 of the first 9 failed on `73993b8` (the other two guard behaviour that must not change). after both review rounds, 33 deliberate breaks caught. Full vitest 1,906, tsc, lint, production build, docs sync, bind check and Playwright 7/7 pass. Rust not run (no Rust change).
 - next start in a throwaway copy with the query log replaced by a named pipe (a real blocking open): clear returned 500 `clear timed out` after 10 s, enable worked at once, and after the pipe was opened for writing the relay logged `clear finished after timing out` and both files were empty. This first run found that `instanceof ClearTimeoutError` fails across Next bundles; the route now matches the error's name.
 
 ---

@@ -1,7 +1,7 @@
 # KAN-319 query-log stall (2026-11-26)
 
 - Worktree `.worktrees/query-log-stall`, branch `KAN-319-query-log-stall`.
-- Not done: repeated clears during a stall each queue their own wipe (merging would skip writes queued since); a shared timeout helper (reverse DNS leaks its timer) is a separate issue.
+- Not done: repeated clears during a stall each queue their own wipe (merging would skip writes queued since); unlogged outbound queries (referral, bootstrap, PTR; logged after send) are KAN-336; the reverse-DNS timer leak is KAN-337.
 
 ---
 

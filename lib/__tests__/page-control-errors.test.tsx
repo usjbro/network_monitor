@@ -191,7 +191,7 @@ it('shows enrichment off and says the clear is still waiting when the server tim
   fireEvent.click(screen.getByRole('button', { name: /Not yet looked up/ }));
   vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ error: 'clear timed out' }) } as Response);
   await runCommand('enrich clear');
-  expect(screen.getByText('Enrichment clear is waiting for the disk. Lookups are off, and the clear finishes once the disk responds; run enrich clear again to confirm.')).toBeInTheDocument();
+  expect(screen.getByText('Enrichment clear is waiting for the disk. Lookups are off; run enrich clear again later to confirm it finished.')).toBeInTheDocument();
   expect(screen.getByText(/Enrichment disabled/)).toBeInTheDocument();
   expect(screen.queryByText('Looking up…')).not.toBeInTheDocument();
 });

@@ -22,6 +22,13 @@ const QUERY_LOG_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 /** How long `enrich clear` waits for its wipes before reporting a timeout. */
 export const CLEAR_TIMEOUT_MS = 10_000;
 
+/** A backlog not yet over is reported after this long. */
+const BACKLOG_REPORT_MS = 60_000;
+
+// Thrown in place of a query while the query log is backlogged: a query
+// that could not be logged is not sent (KAN-319).
+const LOG_BACKLOGGED = Symbol('query log backlogged');
+
 /** clear() gave up waiting; lookups are off and the wipes still run. */
 export class ClearTimeoutError extends Error {
   constructor() {
@@ -34,6 +41,11 @@ export class ClearTimeoutError extends Error {
  *  of this module, which instanceof would miss. */
 export function isClearTimeout(err: unknown): boolean {
   return err instanceof Error && err.name === 'ClearTimeoutError';
+}
+
+function throwFailures(failures: unknown[]): void {
+  if (failures.length > 1) throw new AggregateError(failures, 'clear failed');
+  if (failures.length === 1) throw failures[0];
 }
 
 /** One label per failed wipe, never a path. */
@@ -79,7 +91,8 @@ export class EnrichmentClient extends EventEmitter {
   private queryLog: QueryLog;
   private firstPrune: Promise<void> | null = null;
   private cacheHitLogFailing = false;
-  private droppedCacheHits = 0;
+  private backlog: { entries: number; queries: number } | null = null;
+  private backlogReportMs: number;
   private pruning = false;
   private pruneOwed = false;
   private clearTimeoutMs: number;
@@ -124,11 +137,13 @@ export class EnrichmentClient extends EventEmitter {
     // this otherwise-fully-mocked suite never attempts a live DNS query —
     // same reasoning as `fetchImpl` already gets for RDAP HTTP calls.
     reverseDnsFn?: typeof reverseDnsLookup;
-    // Test-only override of CLEAR_TIMEOUT_MS.
+    // Test-only overrides of CLEAR_TIMEOUT_MS and BACKLOG_REPORT_MS.
     clearTimeoutMs?: number;
+    backlogReportMs?: number;
   }) {
     super();
     this.clearTimeoutMs = opts.clearTimeoutMs ?? CLEAR_TIMEOUT_MS;
+    this.backlogReportMs = opts.backlogReportMs ?? BACKLOG_REPORT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.random = opts.random ?? Math.random;
     this.reverseDnsFn = opts.reverseDnsFn ?? reverseDnsLookup;
@@ -189,6 +204,11 @@ export class EnrichmentClient extends EventEmitter {
     }
   }
 
+  /** Resolves once no query-log write is queued. */
+  idle(): Promise<void> {
+    return this.queryLog.drained();
+  }
+
   getMode(): EnrichmentMode {
     return this.mode;
   }
@@ -214,18 +234,17 @@ export class EnrichmentClient extends EventEmitter {
   // Turns lookups off before wiping, so none starts meanwhile, and drops the
   // ones underway. Both wipes are attempted; if both fail, both are thrown
   // in an AggregateError. A wipe held up by a stalled write throws
-  // ClearTimeoutError after clearTimeoutMs but stays queued behind that
-  // write, so it still runs after it and a late write cannot undo it; its
-  // outcome is then logged (KAN-319).
+  // ClearTimeoutError after clearTimeoutMs, unless the other wipe has
+  // already failed, which is thrown instead. A held wipe stays queued behind
+  // the stalled write, so it still runs after it and a late write cannot
+  // undo it; its outcome is then logged (KAN-319).
   async clear(): Promise<void> {
     this.mode = 'off';
     this.generation += 1;
     this.inFlightWaiters.clear();
-    const wiped = Promise.allSettled([this.cache.clear(), this.queryLog.clear()]).then((wipes) => {
-      const failures = wipes.flatMap((wipe) => (wipe.status === 'rejected' ? [wipe.reason] : []));
-      if (failures.length > 1) throw new AggregateError(failures, 'clear failed');
-      if (failures.length === 1) throw failures[0];
-    });
+    const failures: unknown[] = [];
+    const wipes = [this.cache.clear(), this.queryLog.clear()].map((wipe) => wipe.catch((err: unknown) => void failures.push(err)));
+    const wiped = Promise.all(wipes).then(() => throwFailures([...failures]));
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<'timed out'>((resolve) => {
       timer = setTimeout(() => resolve('timed out'), this.clearTimeoutMs).unref();
@@ -239,6 +258,7 @@ export class EnrichmentClient extends EventEmitter {
       () => console.error('[enrichment] clear finished after timing out'),
       (err) => console.error('[enrichment] clear failed after timing out:', clearFailureLabels(err)),
     );
+    throwFailures(failures);
     throw new ClearTimeoutError();
   }
 
@@ -261,17 +281,12 @@ export class EnrichmentClient extends EventEmitter {
   // A cached lookup sends nothing off the machine, so its result is shown
   // without waiting for its log entry, and is shown even when the entry
   // cannot be written. A failure is reported once per outage, because
-  // background mode repeats on every connection update (KAN-318). Behind a
-  // stalled write, entries past MAX_QUEUED_WRITES are dropped: reported when
-  // that starts, and counted once the log catches up (KAN-319).
+  // background mode repeats on every connection update (KAN-318). While the
+  // log is backlogged the entry is dropped (KAN-319).
   private logCacheHit(remoteAddr: string): void {
     const write = this.queryLog.appendUnlessBacklogged({ target: remoteAddr, endpoint: 'cache', cacheStatus: 'hit' });
     if (!write) {
-      this.droppedCacheHits += 1;
-      if (this.droppedCacheHits === 1) {
-        console.error(`[enrichment] the query log is backed up (${MAX_QUEUED_WRITES} writes queued); cached lookups are not being logged`);
-        void this.queryLog.drained().then(() => this.reportDroppedCacheHits());
-      }
+      this.noteBacklog('entries');
       return;
     }
     write.then(
@@ -285,10 +300,33 @@ export class EnrichmentClient extends EventEmitter {
     );
   }
 
-  private reportDroppedCacheHits(): void {
-    const n = this.droppedCacheHits;
-    this.droppedCacheHits = 0;
-    console.error(`[enrichment] the query log was backed up: ${n} cached-lookup ${n === 1 ? 'entry was' : 'entries were'} not written`);
+  // Reported when a backlog starts, and counted once the queue empties or,
+  // if it has not, after backlogReportMs; a backlog that goes on is then
+  // reported again as a new one.
+  private noteBacklog(kind: 'entries' | 'queries'): void {
+    if (!this.backlog) {
+      this.backlog = { entries: 0, queries: 0 };
+      console.error(
+        `[enrichment] the query log is backed up (${MAX_QUEUED_WRITES} writes queued): cached lookups are not logged, and lookups that need a query fail without sending it`,
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, this.backlogReportMs).unref();
+      });
+      void Promise.race([this.queryLog.drained(), late]).then(() => {
+        clearTimeout(timer);
+        this.reportBacklog();
+      });
+    }
+    this.backlog[kind] += 1;
+  }
+
+  private reportBacklog(): void {
+    const { entries, queries } = this.backlog!;
+    this.backlog = null;
+    console.error(
+      `[enrichment] while the query log was backed up, ${entries} cached-lookup ${entries === 1 ? 'entry was' : 'entries were'} not written and ${queries} ${queries === 1 ? 'lookup' : 'lookups'} failed without sending a query`,
+    );
   }
 
   // lookup() handles its own failures; this catches anything that escapes them.
@@ -301,14 +339,22 @@ export class EnrichmentClient extends EventEmitter {
     if (generation !== this.generation) throw DROPPED;
   }
 
-  // Queues a query that is skipped, not sent, if clear() runs while it waits.
+  // Run just before a query leaves the machine, including a referral.
+  private checkSendable(generation: number): void {
+    this.checkLive(generation);
+    if (this.queryLog.backlogged()) throw LOG_BACKLOGGED;
+  }
+
+  // Queues a query that is skipped, not sent, if clear() runs while it waits,
+  // or if the query log is backlogged when its turn comes; a skipped query
+  // uses up no rate-limit delay.
   private send<T>(generation: number, query: () => Promise<T>): Promise<T> {
     return this.queue.enqueue(
       () => {
-        this.checkLive(generation);
+        this.checkSendable(generation);
         return query();
       },
-      () => generation !== this.generation,
+      () => generation !== this.generation || this.queryLog.backlogged(),
     );
   }
 
@@ -319,6 +365,8 @@ export class EnrichmentClient extends EventEmitter {
 
     const cached = this.cache.getForIp(remoteAddr);
     if (cached && this.cache.isFresh(cached)) {
+      // Nothing is awaited before the emit, so clear() cannot run in between
+      // and no generation check is needed; adding an await here needs one.
       this.logCacheHit(remoteAddr);
       if (cached.record) {
         this.emit('result', buildEnrichmentEvent(connectionId, remoteAddr, { ...cached.record, source: 'cache' }));
@@ -384,6 +432,9 @@ export class EnrichmentClient extends EventEmitter {
       // only makes sense to spend a reverse-DNS query once we know RDAP
       // actually found an organization worth attributing a domain to.
       let resolvedHostname: string | undefined;
+      // A registrant query refused while the log is backlogged is a local
+      // condition, so the result is cached only briefly and tried again.
+      let registrantRefused = false;
       if (record.org && !record.registrant) {
         try {
           const remoteHostname = await this.reverseDnsFn(remoteAddr);
@@ -407,19 +458,23 @@ export class EnrichmentClient extends EventEmitter {
           // Fail this one sub-step closed instead: leave registrant unset
           // (surfaces as "Unavailable" for that field only) and let the
           // core-tier result proceed to cache + emit normally below.
-          console.error('[enrichment] extended-tier registrant lookup failed:', errorLabel(err));
+          if (err === LOG_BACKLOGGED) {
+            this.noteBacklog('queries');
+            registrantRefused = true;
+          } else console.error('[enrichment] extended-tier registrant lookup failed:', errorLabel(err));
         }
       }
 
       const key = cidrKeyFromRdap(result.json) ?? cidrKeyFor(remoteAddr);
       this.checkLive(generation);
-      await this.cache.setSuccess(key, record, CACHE_TTL_MS);
+      await this.cache.setSuccess(key, record, registrantRefused ? NEGATIVE_TTL_MS : CACHE_TTL_MS);
       this.checkLive(generation);
       for (const cid of waiters) {
         this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record, resolvedHostname));
       }
     } catch (err) {
       if (generation !== this.generation) return; // dropped by clear(): nothing to report
+      if (err === LOG_BACKLOGGED) return this.noteBacklog('queries');
       // lookup() is invoked fire-and-forget (via startLookup()) from
       // requestLookup()/notifyObservedConnections(); startLookup()'s handler
       // is only a last resort for errors outside this try.
@@ -473,9 +528,19 @@ export class EnrichmentClient extends EventEmitter {
 
     if (domainBase) {
       const domainUrl = `${domainBase.replace(/\/$/, '')}/domain/${hostname}`;
-      const domainResult = await this.send(generation, () => this.rdap.fetchWithReferral(domainUrl, () => this.checkLive(generation)));
+      const entry = { target: hostname, endpoint: new URL(domainUrl).host, cacheStatus: 'miss' } as const;
+      let registrySent = false;
+      const domainResult = await this.send(generation, () => {
+        registrySent = true;
+        return this.rdap.fetchWithReferral(domainUrl, () => this.checkSendable(generation));
+      }).catch(async (err: unknown) => {
+        // The registry query went out before the referral was refused, so
+        // it is still logged.
+        if (registrySent && err === LOG_BACKLOGGED) await this.queryLog.append(entry);
+        throw err;
+      });
       this.checkLive(generation);
-      await this.queryLog.append({ target: hostname, endpoint: new URL(domainUrl).host, cacheStatus: 'miss' });
+      await this.queryLog.append(entry);
       this.checkLive(generation);
       if (domainResult.ok) {
         const domainExtracted = extractDomainRdap(domainResult.json);
