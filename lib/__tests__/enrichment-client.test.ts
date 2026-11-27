@@ -573,6 +573,10 @@ describe('EnrichmentClient', () => {
       reverseDnsFn: NO_PTR,
     });
     client.enableBackground();
+    // A result is emitted only after its log and cache writes, so waiting
+    // for all five keeps afterEach from deleting the folder mid-write.
+    let results = 0;
+    client.on('result', () => { results += 1; });
 
     const conns = [
       { id: 'a', remoteAddr: '93.184.216.1' },
@@ -591,7 +595,7 @@ describe('EnrichmentClient', () => {
     // Wait for all five (rate-limited, concurrency-1) lookups to complete.
     await new Promise((resolve) => {
       const check = setInterval(() => {
-        if (seen.length >= 5) {
+        if (results >= 5) {
           clearInterval(check);
           resolve(undefined);
         }
