@@ -12,6 +12,18 @@ export function ipToInt(ip: string): number | null {
   return n >>> 0;
 }
 
+// Floor on how wide a single RDAP response is ever allowed to poison the
+// cache for. Real-world RIR delegations are essentially never wider than a
+// /8 (that's already an entire legacy Class-A block); a response claiming
+// anything wider than that is a malformed or malicious registry, not a
+// legitimate allocation, and must not be trusted to key the cache — since
+// EnrichmentCache.getForIp matches any IP falling inside the cached CIDR
+// (cidrContains treats bits===0 as "matches everything"), an unbounded
+// prefix here would let one bad response silently poison ownership data for
+// every future connection for up to CACHE_TTL_MS. The cache applies the same
+// floor to keys it loads (KAN-322).
+export const MIN_CIDR_PREFIX_LEN = 8;
+
 export function cidrContains(cidr: string, ip: string): boolean {
   const [base, bitsStr] = cidr.split('/');
   const bits = Number(bitsStr);

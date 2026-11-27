@@ -1,6 +1,6 @@
 # KAN-322 cache shape — verification (2026-11-26)
 
-- New tests fail on `ea27c77` (two shapes, a number and null, already loaded as misses); 20 deliberate breaks are caught. Full vitest 1,875, tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run (no Rust change).
+- New tests fail on `ea27c77` (two shapes, a number and null, already loaded as misses); after PR review fixes, 25 deliberate breaks are caught. Full vitest 1,888, tsc, lint, production build, docs sync and Playwright 7/7 pass. Rust not run (no Rust change).
 - next start in a throwaway copy with broken ownership and GeoIP caches: both clients started, both controls returned 200, and the log held only `[enrichment] ignored the unreadable cache file` and `[geoip] ignored 2 unreadable cache entries`.
 
 ---

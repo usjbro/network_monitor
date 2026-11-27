@@ -1,7 +1,7 @@
 // lib/enrichment.ts
 import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
-import { isPrivateOrReserved, ipToInt } from './enrichment/scope-filter';
+import { isPrivateOrReserved, ipToInt, MIN_CIDR_PREFIX_LEN } from './enrichment/scope-filter';
 import { EnrichmentCache, isEnrichmentRecord } from './enrichment/cache';
 import { QueryLog } from './enrichment/query-log';
 import { errorLabel } from './enrichment/error-label';
@@ -107,7 +107,8 @@ export class EnrichmentClient extends EventEmitter {
     this.cache = new EnrichmentCache(join(opts.dataDir, 'cache.json'), {
       label: 'enrichment',
       isRecord: isEnrichmentRecord,
-      maxTtlMs: CACHE_TTL_MS,
+      ttlMs: CACHE_TTL_MS,
+      negativeTtlMs: NEGATIVE_TTL_MS,
     });
     this.cache.load();
     this.queryLog = new QueryLog(join(opts.dataDir, 'query-log.ndjson'));
@@ -446,16 +447,8 @@ function intToIp(n: number): string {
 // null — and lets the caller fall back to cidrKeyFor's per-address /32 key —
 // only when the response doesn't carry a block we can derive exactly; it
 // never guesses at a wider block than the data actually supports.
-// Floor on how wide a single RDAP response is ever allowed to poison the
-// cache for. Real-world RIR delegations are essentially never wider than a
-// /8 (that's already an entire legacy Class-A block); a response claiming
-// anything wider than that is a malformed or malicious registry, not a
-// legitimate allocation, and must not be trusted to key the cache — since
-// EnrichmentCache.getForIp matches any IP falling inside the cached CIDR
-// (cidrContains treats bits===0 as "matches everything"), an unbounded
-// prefix here would let one bad response silently poison ownership data for
-// every future connection for up to CACHE_TTL_MS.
-const MIN_CIDR_PREFIX_LEN = 8;
+// MIN_CIDR_PREFIX_LEN (lib/enrichment/scope-filter.ts) floors how wide a
+// block one RDAP response may key.
 
 function cidrKeyFromRdap(json: unknown): string | null {
   const obj = json as {
