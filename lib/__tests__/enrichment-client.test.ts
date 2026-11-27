@@ -42,6 +42,8 @@ function fakeFetch(status = 200, body: unknown = { objectClassName: 'ip network'
 // falling through to the real dns.promises.reverse() default and making a
 // live DNS query from an automated test.
 const NO_PTR = async () => null;
+// For tests that send more than one query: production spacing is 3-10 s.
+const FAST_QUEUE = { minDelayMs: 1, maxDelayMs: 2 };
 
 describe('EnrichmentClient', () => {
   let dir: string;
@@ -426,7 +428,9 @@ describe('EnrichmentClient', () => {
 
   it('falls back to a /32 cache key when the RDAP response has no derivable CIDR block', async () => {
     const fetchImpl = fakeFetch(200, { objectClassName: 'ip network', name: 'NO-RANGE-ORG' });
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    // Two queries: the real 3-10 s spacing between them is not what this
+    // tests, and up to 10 s of it ran close to the 15 s limit (KAN-173).
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR, queueOptions: FAST_QUEUE });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
@@ -461,7 +465,9 @@ describe('EnrichmentClient', () => {
       startAddress: '0.0.0.0',
       endAddress: '255.255.255.255',
     });
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR });
+    // Two queries: the real 3-10 s spacing between them is not what this
+    // tests, and up to 10 s of it ran close to the 15 s limit (KAN-173).
+    const client = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: NO_PTR, queueOptions: FAST_QUEUE });
     client.enable();
 
     const first = new Promise((resolve) => client.once('result', resolve));
