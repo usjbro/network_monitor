@@ -5,6 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentCache } from '../enrichment/cache';
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+const CACHE_OPTS = { label: 'test', isRecord: () => true, ttlMs: 14 * DAY_MS, negativeTtlMs: 14 * DAY_MS };
+
 describe('EnrichmentCache', () => {
   let dir: string;
   let filePath: string;
@@ -16,7 +19,7 @@ describe('EnrichmentCache', () => {
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it('CIDR-aware: a lookup for an IP within an already-cached block hits without a new request', async () => {
-    const cache = new EnrichmentCache(filePath);
+    const cache = new EnrichmentCache(filePath, CACHE_OPTS);
     cache.load();
     await cache.setSuccess('93.184.216.0/24', {
       org: 'EXAMPLE-ORG', source: 'rdap', fetchedAt: new Date().toISOString(),
@@ -29,7 +32,7 @@ describe('EnrichmentCache', () => {
   });
 
   it('domain-keyed cache hit (extended tier)', async () => {
-    const cache = new EnrichmentCache(filePath);
+    const cache = new EnrichmentCache(filePath, CACHE_OPTS);
     cache.load();
     await cache.setSuccess('example.com', {
       registrant: 'Example Inc', source: 'rdap', fetchedAt: new Date().toISOString(),
@@ -40,7 +43,7 @@ describe('EnrichmentCache', () => {
   });
 
   it('TTL expiry: an entry past its TTL is no longer fresh', async () => {
-    const cache = new EnrichmentCache(filePath);
+    const cache = new EnrichmentCache(filePath, CACHE_OPTS);
     cache.load();
     await cache.setSuccess('93.184.216.0/24', {
       org: 'X', source: 'rdap', fetchedAt: new Date().toISOString(),
@@ -50,7 +53,7 @@ describe('EnrichmentCache', () => {
   });
 
   it('stale-on-failure: an expired entry is still returned, not deleted, so a failed refresh can serve it', async () => {
-    const cache = new EnrichmentCache(filePath);
+    const cache = new EnrichmentCache(filePath, CACHE_OPTS);
     cache.load();
     await cache.setSuccess('93.184.216.0/24', {
       org: 'X', source: 'rdap', fetchedAt: new Date().toISOString(),
@@ -62,7 +65,7 @@ describe('EnrichmentCache', () => {
   });
 
   it('negative caching: a never-succeeded lookup is cached with its own short TTL', async () => {
-    const cache = new EnrichmentCache(filePath);
+    const cache = new EnrichmentCache(filePath, CACHE_OPTS);
     cache.load();
     // `now` is captured BEFORE setNegative, and freshness is asserted
     // against it explicitly rather than against the wall clock — same
@@ -106,13 +109,13 @@ describe('EnrichmentCache', () => {
     // of which fs API the implementation uses.)
     void fsRenameMock; void originalRename; void called;
 
-    const cache = new EnrichmentCache(filePath);
+    const cache = new EnrichmentCache(filePath, CACHE_OPTS);
     cache.load();
     expect(readFileSync(filePath, 'utf8')).toBe(before);
   });
 
   it('clear() empties the cache file', async () => {
-    const cache = new EnrichmentCache(filePath);
+    const cache = new EnrichmentCache(filePath, CACHE_OPTS);
     cache.load();
     await cache.setSuccess('93.184.216.0/24', { org: 'X', source: 'rdap', fetchedAt: '2026-01-01' }, 1000);
     await cache.clear();

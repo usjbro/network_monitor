@@ -1,3 +1,9 @@
+# KAN-322 wrong-shaped cache files (2026-11-26)
+
+Approved under James's standing backlog instruction in chat (2026-11-26; KAN-317 merged as `ea27c77`). Gate `kan-322__cache-shape`. KAN-319 is next: James approved its three decisions in chat ("319: yes"), recorded on the issue. An ownership or GeoIP cache file that can't be read, can't be parsed or has the wrong shape, and any entry whose fields have the wrong types, is now a cache miss reported by count; no loaded entry stays fresh beyond its cache's TTL.
+
+---
+
 # KAN-317 enrich clear leaves nothing behind (2026-11-26)
 
 Approved under James's standing backlog instruction in chat (2026-11-26: his merge of the previous PR approves the next issue end to end; KAN-318 merged as `34e4e0f`). Gate `kan-317__enrich-clear-complete`. `enrich clear` turns lookups off first, drops lookups already underway (nothing more sent, recorded or shown, including queued queries and registrar referrals), serializes cache writes, removes leftover temp files, and a failed clear returns 500, logs a code only and still leaves lookups off in the server and the UI. KAN-318 is Done.

@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentClient } from '../enrichment';
+import { EnrichmentCache } from '../enrichment/cache';
 import { QueryLog } from '../enrichment/query-log';
 import { shuffle } from '../enrichment/request-queue';
 
@@ -269,7 +270,10 @@ describe('EnrichmentClient', () => {
     const unhandled = vi.fn();
     process.on('unhandledRejection', unhandled);
     try {
-      writeFileSync(join(dir, 'cache.json'), JSON.stringify({ entries: [{ key: 5, record: null, expiresAt: 0 }] }));
+      // The cache read sits outside lookup()'s own try.
+      vi.spyOn(EnrichmentCache.prototype, 'getForIp').mockImplementation(() => {
+        throw new TypeError('cache read failed');
+      });
       const client = new EnrichmentClient({ dataDir: dir });
       client.enableBackground();
       client.requestLookup('conn-1', '93.184.216.34');
@@ -280,7 +284,7 @@ describe('EnrichmentClient', () => {
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
       process.off('unhandledRejection', unhandled);
-      error.mockRestore();
+      vi.restoreAllMocks();
     }
   });
 

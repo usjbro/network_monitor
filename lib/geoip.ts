@@ -7,7 +7,7 @@
 // docs/superpowers/specs/2026-09-01-path-visualization-design.md.
 import { EventEmitter } from 'node:events';
 import { isPrivateOrReserved } from './enrichment/scope-filter';
-import { EnrichmentCache } from './enrichment/cache';
+import { EnrichmentCache, hasOnlyFields, isOptionalText } from './enrichment/cache';
 
 export interface GeoLocation {
   city?: string;
@@ -18,6 +18,20 @@ export interface GeoLocation {
 }
 
 export type GeoIpMode = 'off' | 'on';
+
+// True for a stored location of the shape GeoLocation describes (KAN-322).
+function isGeoLocation(record: object): boolean {
+  const { city, country, lat, lon, source } = record as Record<string, unknown>;
+  const coordinate = (v: unknown) => v === undefined || Number.isFinite(v);
+  return (
+    hasOnlyFields(record, ['city', 'country', 'lat', 'lon', 'source']) &&
+    isOptionalText(city) &&
+    isOptionalText(country) &&
+    coordinate(lat) &&
+    coordinate(lon) &&
+    (source === 'geoip' || source === 'cache')
+  );
+}
 
 // 30 days — longer than sub-project 2's 14-day RDAP TTL by design (a
 // deliberate, named difference per the spec, not an oversight).
@@ -43,7 +57,11 @@ export class GeoIpClient extends EventEmitter {
   constructor(opts: GeoIpClientOptions = {}) {
     super();
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.cache = new EnrichmentCache(opts.cachePath ?? '.data/geoip/cache.json');
+    this.cache = new EnrichmentCache(opts.cachePath ?? '.data/geoip/cache.json', {
+      label: 'geoip',
+      isRecord: isGeoLocation,
+      ttlMs: CACHE_TTL_MS,
+    });
     this.cache.load();
     // Provider URL is intentionally injectable and not hardcoded to one
     // vendor here — the specific geoIP HTTP API is an implementation-time
@@ -87,11 +105,15 @@ export class GeoIpClient extends EventEmitter {
         return;
       }
       const body = await res.json();
+      // Only well-typed fields are kept, so the saved entry passes
+      // isGeoLocation when the cache next loads (KAN-322).
+      const text = (v: unknown) => (typeof v === 'string' && isOptionalText(v) ? v : undefined);
+      const coordinate = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
       const location: GeoLocation = {
-        city: body.city,
-        country: body.country,
-        lat: body.lat,
-        lon: body.lon,
+        city: text(body?.city),
+        country: text(body?.country),
+        lat: coordinate(body?.lat),
+        lon: coordinate(body?.lon),
         source: 'geoip',
       };
       await this.cache.setSuccess(`${ip}/32`, location as any, CACHE_TTL_MS);

@@ -9,6 +9,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EnrichmentClient } from '../enrichment';
 import { EnrichmentCache } from '../enrichment/cache';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const CACHE_OPTS = { label: 'test', isRecord: () => true, ttlMs: 14 * DAY_MS, negativeTtlMs: 14 * DAY_MS };
 import { atomicWriteJson } from '../enrichment/fs-util';
 import { QueryLog } from '../enrichment/query-log';
 
@@ -291,7 +294,7 @@ describe('EnrichmentCache writes', () => {
 
   it('a write that began before clear() cannot land after it', async () => {
     const file = join(dir, 'cache.json');
-    const cache = new EnrichmentCache(file);
+    const cache = new EnrichmentCache(file, CACHE_OPTS);
     const rename = fs.rename;
     const gate = deferred();
     vi.spyOn(fs, 'rename').mockImplementationOnce(async (from, to) => {

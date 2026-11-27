@@ -33,6 +33,24 @@ describe('GeoIpClient', () => {
     expect((result as any).location.city).toBe('Ashburn');
   });
 
+  // KAN-322: the cache rejects wrong field types when it loads, so a
+  // provider's nulls must not be saved, or every restart looks it up again.
+  it('saves a provider result with null or wrongly typed fields so that it reloads', async () => {
+    const cachePath = tmpCachePath();
+    const fetchImpl = fakeFetch({ city: null, country: 'US', lat: '39.04', lon: -77.48 });
+    const client = new GeoIpClient({ fetchImpl, cachePath });
+    client.enable();
+    const result = await new Promise((resolve) => { client.on('result', resolve); client.lookup('93.184.216.34'); });
+    expect((result as any).location).toEqual({ country: 'US', lon: -77.48, source: 'geoip' });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const restarted = new GeoIpClient({ fetchImpl, cachePath });
+    restarted.enable();
+    await new Promise((resolve) => { restarted.on('result', resolve); restarted.lookup('93.184.216.34'); });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+
   it('caches a result and does not re-fetch the same IP within the TTL', async () => {
     const fetchImpl = fakeFetch({ city: 'Ashburn', country: 'US' });
     const client = new GeoIpClient({ fetchImpl, cachePath: tmpCachePath() });
