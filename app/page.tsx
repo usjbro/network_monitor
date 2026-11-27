@@ -626,7 +626,7 @@ export default function TerminalApp() {
           const failure = await res.json().catch(() => null);
           if (failure?.error === 'clear failed' || failure?.error === 'clear timed out') resetAfterClear();
           if (failure?.error === 'clear timed out') {
-            setControlError('Enrichment clear is waiting for the disk. Lookups are off, and the clear finishes once the disk responds; run enrich clear again to confirm.');
+            setControlError('Enrichment clear is waiting for the disk. Lookups are off; run enrich clear again later to confirm it finished.');
           }
         }
         return;

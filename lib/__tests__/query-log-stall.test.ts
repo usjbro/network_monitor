@@ -46,7 +46,13 @@ describe('a stalled query-log write', () => {
   const logFile = () => join(dir, 'query-log.ndjson');
   const logLines = () => readFileSync(logFile(), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
-  const fetchImpl = vi.fn(async (url: string) => Response.json(url.includes('ipv4.json') ? IP_BOOTSTRAP : IP_RDAP)) as unknown as typeof fetch;
+  let rdapGate: Promise<void> = Promise.resolve();
+  const fetchImpl = vi.fn(async (url: string) => {
+    if (url.includes('ipv4.json')) return Response.json(IP_BOOTSTRAP);
+    if (url.includes('dns.json')) return Response.json({ services: [[['com'], ['https://rdap.verisign.com/com/v1/']]] });
+    await rdapGate;
+    return Response.json(IP_RDAP);
+  }) as unknown as typeof fetch;
 
   const client = (opts: { clearTimeoutMs?: number } = {}) => {
     const c = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: async () => null, queueOptions: { minDelayMs: 1, maxDelayMs: 2 }, ...opts });
@@ -59,6 +65,8 @@ describe('a stalled query-log write', () => {
     dir = mkdtempSync(join(tmpdir(), 'query-log-stall-'));
     writeFileSync(join(dir, 'cache.json'), JSON.stringify({ entries: [{ ...CACHED, expiresAt: Date.now() + 60_000 }] }));
     results = [];
+    vi.mocked(fetchImpl).mockClear();
+    rdapGate = Promise.resolve();
     error = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
   afterEach(() => {
@@ -82,10 +90,10 @@ describe('a stalled query-log write', () => {
     const c = client();
     for (let i = 0; i < MAX_QUEUED_WRITES + 5; i++) c.requestLookup(`conn-${i}`, ADDR);
     await vi.waitFor(() => expect(results).toHaveLength(MAX_QUEUED_WRITES + 5));
-    expect(error.mock.calls).toEqual([[`[enrichment] the query log is backed up (${MAX_QUEUED_WRITES} writes queued); cached lookups are not being logged`]]);
+    expect(error.mock.calls).toEqual([[`[enrichment] the query log is backed up (${MAX_QUEUED_WRITES} writes queued): cached lookups are not logged, and lookups that need a query fail without sending it`]]);
     release();
     await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
-    expect(error.mock.calls[1]).toEqual(['[enrichment] the query log was backed up: 5 cached-lookup entries were not written']);
+    expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 5 cached-lookup entries were not written and 0 lookups failed without sending a query']);
     expect(logLines()).toHaveLength(MAX_QUEUED_WRITES);
   });
 
@@ -96,7 +104,7 @@ describe('a stalled query-log write', () => {
     await vi.waitFor(() => expect(results).toHaveLength(MAX_QUEUED_WRITES + 1));
     release();
     await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
-    expect(error.mock.calls[1]).toEqual(['[enrichment] the query log was backed up: 1 cached-lookup entry was not written']);
+    expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 1 cached-lookup entry was not written and 0 lookups failed without sending a query']);
   });
 
   it('logs cached lookups again once a backlog clears, and counts each backlog on its own', async () => {
@@ -113,21 +121,81 @@ describe('a stalled query-log write', () => {
     for (let i = 0; i < MAX_QUEUED_WRITES + 2; i++) c.requestLookup(`b-${i}`, ADDR);
     release();
     await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
-    expect(error.mock.calls[1]).toEqual(['[enrichment] the query log was backed up: 2 cached-lookup entries were not written']);
+    expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 2 cached-lookup entries were not written and 0 lookups failed without sending a query']);
   });
 
-  it('never drops the entry for a query that went off the machine', async () => {
+  const sentTo = (addr: string) => vi.mocked(fetchImpl).mock.calls.some(([u]) => String(u).includes(`/ip/${addr}`));
+
+  it('never drops the entry for a query already sent when the backlog builds', async () => {
+    const answer = deferred();
+    rdapGate = answer.promise;
     const release = holdWrites('appendNow');
     const c = client();
-    for (let i = 0; i < MAX_QUEUED_WRITES; i++) c.requestLookup(`conn-${i}`, ADDR);
     c.requestLookup('conn-off', UNCACHED);
-    await vi.waitFor(() => expect(vi.mocked(fetchImpl).mock.calls.some(([u]) => String(u).includes(`/ip/${UNCACHED}`))).toBe(true));
+    await vi.waitFor(() => expect(sentTo(UNCACHED)).toBe(true));
+    // The backlog fills while the query is out; its answer then comes back.
+    for (let i = 0; i < MAX_QUEUED_WRITES + 1; i++) c.requestLookup(`conn-${i}`, ADDR);
+    answer.resolve();
     // The lookup waits for its entry rather than showing a result without one.
     await new Promise((r) => setTimeout(r, 50));
     expect(results).not.toContainEqual(expect.objectContaining({ connectionId: 'conn-off' }));
     release();
     await vi.waitFor(() => expect(results).toContainEqual(expect.objectContaining({ connectionId: 'conn-off' })));
     expect(logLines()).toContainEqual(expect.objectContaining({ target: UNCACHED, endpoint: 'rdap.arin.net', cacheStatus: 'miss' }));
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
+    expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 1 cached-lookup entry was not written and 0 lookups failed without sending a query']);
+  });
+
+  it('sends no query while the log is backed up, and counts the lookup that failed', async () => {
+    const release = holdWrites('appendNow');
+    const c = client();
+    for (let i = 0; i < MAX_QUEUED_WRITES; i++) c.requestLookup(`conn-${i}`, ADDR);
+    c.requestLookup('conn-off', UNCACHED);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    expect(error.mock.calls[0]).toEqual([`[enrichment] the query log is backed up (${MAX_QUEUED_WRITES} writes queued): cached lookups are not logged, and lookups that need a query fail without sending it`]);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(sentTo(UNCACHED)).toBe(false);
+    release();
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
+    expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 0 cached-lookup entries were not written and 1 lookup failed without sending a query']);
+    expect(results).not.toContainEqual(expect.objectContaining({ connectionId: 'conn-off' }));
+  });
+
+  it('counts a registrant query refused during a backlog, and still shows the ownership result', async () => {
+    const ptr = deferred();
+    const release = holdWrites('appendNow');
+    const c = new EnrichmentClient({ dataDir: dir, fetchImpl, queueOptions: { minDelayMs: 1, maxDelayMs: 2 }, reverseDnsFn: async () => (await ptr.promise, 'host.example.com') });
+    c.on('result', (r) => results.push(r));
+    c.enableBackground();
+    c.requestLookup('conn-off', UNCACHED);
+    await vi.waitFor(() => expect(sentTo(UNCACHED)).toBe(true));
+    release(); // the RDAP query's entry is written; the lookup reaches reverse DNS
+    await vi.waitFor(() => expect(logLines()).toHaveLength(1));
+    // A second spy on a spied method is the same spy; restore it first.
+    vi.mocked((QueryLog.prototype as unknown as Writes).appendNow).mockRestore();
+    const hold = holdWrites('appendNow');
+    for (let i = 0; i < MAX_QUEUED_WRITES; i++) c.requestLookup(`conn-${i}`, ADDR);
+    ptr.resolve();
+    await vi.waitFor(() => expect(results).toContainEqual(expect.objectContaining({ connectionId: 'conn-off' })));
+    expect(vi.mocked(fetchImpl).mock.calls.some(([u]) => String(u).includes('verisign.com/com/v1/domain'))).toBe(false);
+    hold();
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
+    expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 0 cached-lookup entries were not written and 1 lookup failed without sending a query']);
+  });
+
+  it('reports a backlog that has not ended after a while, and then reports the rest as a new one', async () => {
+    const release = holdWrites('appendNow');
+    const c = new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: async () => null, backlogReportMs: 50 });
+    c.on('result', (r) => results.push(r));
+    c.enableBackground();
+    for (let i = 0; i < MAX_QUEUED_WRITES + 2; i++) c.requestLookup(`a-${i}`, ADDR);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
+    expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 2 cached-lookup entries were not written and 0 lookups failed without sending a query']);
+    c.requestLookup('b', ADDR);
+    expect(error).toHaveBeenCalledTimes(3);
+    release();
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(4));
+    expect(error.mock.calls[3]).toEqual(['[enrichment] while the query log was backed up, 1 cached-lookup entry was not written and 0 lookups failed without sending a query']);
   });
 
   it(`a clear held up by it reports a timeout after ${CLEAR_TIMEOUT_MS / 1000} s, with lookups off, and still wipes afterwards`, async () => {
@@ -153,6 +221,18 @@ describe('a stalled query-log write', () => {
     c.requestLookup('conn-1', ADDR);
     vi.spyOn(QueryLog.prototype as unknown as Writes, 'clearNow').mockRejectedValueOnce(Object.assign(new Error(`EACCES: open '${logFile()}'`), { code: 'EACCES' }));
     await expect(c.clear()).rejects.toBeInstanceOf(ClearTimeoutError);
+    release();
+    await vi.waitFor(() => expect(error.mock.calls).toEqual([['[enrichment] clear failed after timing out:', 'EACCES']]));
+  });
+
+  it('a wipe that has already failed is reported as failed, not as timed out', async () => {
+    const release = holdWrites('appendNow');
+    const c = client({ clearTimeoutMs: 50 });
+    c.requestLookup('conn-1', ADDR);
+    const { EnrichmentCache } = await import('../enrichment/cache');
+    vi.spyOn(EnrichmentCache.prototype, 'clear').mockRejectedValueOnce(Object.assign(new Error('EACCES: x'), { code: 'EACCES' }));
+    await expect(c.clear()).rejects.toMatchObject({ code: 'EACCES' });
+    expect(c.getMode()).toBe('off');
     release();
     await vi.waitFor(() => expect(error.mock.calls).toEqual([['[enrichment] clear failed after timing out:', 'EACCES']]));
   });
