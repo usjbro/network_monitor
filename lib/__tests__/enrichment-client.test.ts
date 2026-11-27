@@ -133,8 +133,11 @@ describe('EnrichmentClient', () => {
       expect(prune).toHaveBeenCalledTimes(1);
       finish(0);
       await started;
-      await vi.advanceTimersByTimeAsync(SIX_HOURS);
+      // The skipped prunes run once, as soon as this one finishes (KAN-319).
+      await vi.advanceTimersByTimeAsync(0);
       expect(prune).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(SIX_HOURS);
+      expect(prune).toHaveBeenCalledTimes(3);
     });
 
     it('a repeat call starts nothing new', async () => {

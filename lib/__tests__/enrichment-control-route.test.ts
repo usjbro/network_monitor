@@ -4,7 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NextRequest } from 'next/server';
 import { POST as postHandler } from '@/app/api/enrichment/control/route';
-import type { EnrichmentClient } from '@/lib/enrichment';
+import { ClearTimeoutError, type EnrichmentClient } from '@/lib/enrichment';
 
 function req(body: unknown, headers: Record<string, string> = { 'sec-fetch-site': 'same-origin' }): NextRequest {
   return {
@@ -68,6 +68,27 @@ describe('POST /api/enrichment/control', () => {
     const res = await POST(req({ action: 'clear' }));
     expect(res.status).toBe(500);
     expect(error.mock.calls).toEqual([['[enrichment] clear failed:', 'EACCES, EISDIR']]);
+    error.mockRestore();
+  });
+
+  // KAN-319
+  it('a clear held up by a stalled write returns 500 saying it timed out', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    clear.mockRejectedValueOnce(new ClearTimeoutError());
+    const res = await POST(req({ action: 'clear' }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'clear timed out' });
+    expect(error.mock.calls).toEqual([['[enrichment] clear timed out: lookups are off, and the wipe runs once the stalled write finishes']]);
+    error.mockRestore();
+  });
+
+  // The route and the shared client can come from different bundles, each
+  // with its own copy of the class, so the error is known by its name.
+  it('knows a timed-out clear thrown by another copy of the client module', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    clear.mockRejectedValueOnce(Object.assign(new Error('clear timed out'), { name: 'ClearTimeoutError' }));
+    const res = await POST(req({ action: 'clear' }));
+    expect(await res.json()).toEqual({ error: 'clear timed out' });
     error.mockRestore();
   });
 

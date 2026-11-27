@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getEnrichmentClient } from '@/lib/stream-response';
+import { clearFailureLabels, isClearTimeout } from '@/lib/enrichment';
 import { rejectIfCrossSite } from '@/lib/same-origin';
-import { errorLabel } from '@/lib/enrichment/error-label';
 
 const VALID_ACTIONS = ['enable', 'enable_background', 'disable', 'disable_background', 'clear'] as const;
 
@@ -32,9 +32,13 @@ export async function POST(request: NextRequest) {
       try {
         await client.clear();
       } catch (err) {
+        if (isClearTimeout(err)) {
+          // The wipe is still queued and logs its outcome (KAN-319).
+          console.error('[enrichment] clear timed out: lookups are off, and the wipe runs once the stalled write finishes');
+          return NextResponse.json({ error: 'clear timed out' }, { status: 500 });
+        }
         // Lookups are off even so; the path stays out of the log (KAN-317).
-        const failures = err instanceof AggregateError ? err.errors : [err];
-        console.error('[enrichment] clear failed:', failures.map(errorLabel).join(', '));
+        console.error('[enrichment] clear failed:', clearFailureLabels(err));
         return NextResponse.json({ error: 'clear failed' }, { status: 500 });
       }
       return NextResponse.json({ ok: true });
