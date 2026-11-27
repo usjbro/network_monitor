@@ -14,6 +14,10 @@ type QueryLogInput = Omit<QueryLogEntry, 'timestamp'>;
 
 const READ_CHUNK_BYTES = 64 * 1024;
 
+/** At most this many writes wait behind a stalled one before
+ *  appendUnlessBacklogged() drops its entry (KAN-319). */
+export const MAX_QUEUED_WRITES = 1000;
+
 // Null when the line has no readable date and so could never expire. Nothing
 // else is checked: a dated line is kept until it expires, whatever it holds.
 function parseEntry(line: string): QueryLogEntry | null {
@@ -30,6 +34,8 @@ function parseEntry(line: string): QueryLogEntry | null {
 
 export class QueryLog {
   private writes = new SerialWrites();
+  private queued = 0;
+  private idle: Array<() => void> = [];
 
   constructor(private filePath: string) {}
 
@@ -37,12 +43,32 @@ export class QueryLog {
   // with what it read, so an append() or clear() overlapping it would be
   // undone (KAN-286).
   private serialize<T>(write: () => Promise<T>): Promise<T> {
-    return this.writes.run(write);
+    this.queued += 1;
+    const result = this.writes.run(write);
+    const done = () => {
+      this.queued -= 1;
+      if (this.queued === 0) for (const resolve of this.idle.splice(0)) resolve();
+    };
+    result.then(done, done);
+    return result;
   }
 
   append(entry: QueryLogInput): Promise<void> {
     const timestamp = new Date().toISOString();
     return this.serialize(() => this.appendNow(entry, timestamp));
+  }
+
+  /** Like append(), but null, with nothing queued, when MAX_QUEUED_WRITES
+   *  writes are already waiting. Only for entries that may be lost. */
+  appendUnlessBacklogged(entry: QueryLogInput): Promise<void> | null {
+    return this.queued >= MAX_QUEUED_WRITES ? null : this.append(entry);
+  }
+
+  /** Resolves once no write is queued, so a backlog that refills before
+   *  emptying counts as one. */
+  drained(): Promise<void> {
+    if (this.queued === 0) return Promise.resolve();
+    return new Promise((resolve) => this.idle.push(resolve));
   }
 
   /** Resolves with how many unreadable lines it dropped (KAN-316). */

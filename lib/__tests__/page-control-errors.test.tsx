@@ -181,6 +181,21 @@ it('shows enrichment off and drops a pending lookup when the server fails to cle
   expect(screen.queryByText(/Unavailable — no ownership data/)).not.toBeInTheDocument();
 });
 
+// A clear held up by a stalled write has also turned lookups off (KAN-319).
+it('shows enrichment off and says the clear is still waiting when the server times it out', async () => {
+  vi.useFakeTimers();
+  render(<TerminalApp />);
+  showConnection();
+  await runCommand('conn');
+  await runCommand('enrich on');
+  fireEvent.click(screen.getByRole('button', { name: /Not yet looked up/ }));
+  vi.mocked(fetch).mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({ error: 'clear timed out' }) } as Response);
+  await runCommand('enrich clear');
+  expect(screen.getByText('Enrichment clear is waiting for the disk. Lookups are off, and the clear finishes once the disk responds; run enrich clear again to confirm.')).toBeInTheDocument();
+  expect(screen.getByText(/Enrichment disabled/)).toBeInTheDocument();
+  expect(screen.queryByText('Looking up…')).not.toBeInTheDocument();
+});
+
 // Any other failure may never have reached clear() (a proxy error, a
 // rejected origin), so the server's mode is unknown and the UI keeps its own.
 it.each([

@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { isPrivateOrReserved, ipToInt, MIN_CIDR_PREFIX_LEN } from './enrichment/scope-filter';
 import { EnrichmentCache, isEnrichmentRecord } from './enrichment/cache';
-import { QueryLog } from './enrichment/query-log';
+import { MAX_QUEUED_WRITES, QueryLog } from './enrichment/query-log';
 import { errorLabel } from './enrichment/error-label';
 import { RequestQueue, RequestQueueOptions, shuffle } from './enrichment/request-queue';
 import { loadIpBootstrap, resolveRdapBaseForIp, loadDomainBootstrap, resolveRdapBaseForDomain } from './enrichment/bootstrap';
@@ -19,6 +19,27 @@ const CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 const NEGATIVE_TTL_MS = 60 * 60 * 1000;
 const QUERY_LOG_RETENTION_DAYS = 30;
 const QUERY_LOG_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** How long `enrich clear` waits for its wipes before reporting a timeout. */
+export const CLEAR_TIMEOUT_MS = 10_000;
+
+/** clear() gave up waiting; lookups are off and the wipes still run. */
+export class ClearTimeoutError extends Error {
+  constructor() {
+    super('clear timed out');
+    this.name = 'ClearTimeoutError';
+  }
+}
+
+/** True for a ClearTimeoutError, including one from another bundle's copy
+ *  of this module, which instanceof would miss. */
+export function isClearTimeout(err: unknown): boolean {
+  return err instanceof Error && err.name === 'ClearTimeoutError';
+}
+
+/** One label per failed wipe, never a path. */
+export function clearFailureLabels(err: unknown): string {
+  return (err instanceof AggregateError ? err.errors : [err]).map(errorLabel).join(', ');
+}
 
 export const DISCLOSURE_TEXT =
   'Enabling ownership lookups sends the remote IP addresses this Mac talks to ' +
@@ -58,6 +79,10 @@ export class EnrichmentClient extends EventEmitter {
   private queryLog: QueryLog;
   private firstPrune: Promise<void> | null = null;
   private cacheHitLogFailing = false;
+  private droppedCacheHits = 0;
+  private pruning = false;
+  private pruneOwed = false;
+  private clearTimeoutMs: number;
   // Bumped by clear(): a lookup started under an earlier value sends,
   // writes and shows nothing more (KAN-317).
   private generation = 0;
@@ -99,8 +124,11 @@ export class EnrichmentClient extends EventEmitter {
     // this otherwise-fully-mocked suite never attempts a live DNS query —
     // same reasoning as `fetchImpl` already gets for RDAP HTTP calls.
     reverseDnsFn?: typeof reverseDnsLookup;
+    // Test-only override of CLEAR_TIMEOUT_MS.
+    clearTimeoutMs?: number;
   }) {
     super();
+    this.clearTimeoutMs = opts.clearTimeoutMs ?? CLEAR_TIMEOUT_MS;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.random = opts.random ?? Math.random;
     this.reverseDnsFn = opts.reverseDnsFn ?? reverseDnsLookup;
@@ -132,14 +160,33 @@ export class EnrichmentClient extends EventEmitter {
     return this.firstPrune;
   }
 
+  // The next prune is scheduled as this one starts, so a prune that never
+  // finishes is reported when the next is due and stops none after it; the
+  // skipped prune runs as soon as the stalled one finishes (KAN-319).
   private async pruneAndReschedule(): Promise<void> {
+    setTimeout(() => void this.pruneAndReschedule(), QUERY_LOG_PRUNE_INTERVAL_MS).unref();
+    await this.pruneOnce();
+  }
+
+  private async pruneOnce(): Promise<void> {
+    if (this.pruning) {
+      if (!this.pruneOwed) console.error('[enrichment] query-log prune skipped: the last one has not finished');
+      this.pruneOwed = true;
+      return;
+    }
+    this.pruning = true;
     try {
       const dropped = await this.queryLog.prune(QUERY_LOG_RETENTION_DAYS);
       if (dropped > 0) console.error(`[enrichment] dropped ${dropped} unreadable query-log line${dropped === 1 ? '' : 's'}`);
     } catch (err) {
       console.error('[enrichment] query-log prune failed:', errorLabel(err));
+    } finally {
+      this.pruning = false;
     }
-    setTimeout(() => void this.pruneAndReschedule(), QUERY_LOG_PRUNE_INTERVAL_MS).unref();
+    if (this.pruneOwed) {
+      this.pruneOwed = false;
+      void this.pruneOnce();
+    }
   }
 
   getMode(): EnrichmentMode {
@@ -166,15 +213,33 @@ export class EnrichmentClient extends EventEmitter {
 
   // Turns lookups off before wiping, so none starts meanwhile, and drops the
   // ones underway. Both wipes are attempted; if both fail, both are thrown
-  // in an AggregateError.
+  // in an AggregateError. A wipe held up by a stalled write throws
+  // ClearTimeoutError after clearTimeoutMs but stays queued behind that
+  // write, so it still runs after it and a late write cannot undo it; its
+  // outcome is then logged (KAN-319).
   async clear(): Promise<void> {
     this.mode = 'off';
     this.generation += 1;
     this.inFlightWaiters.clear();
-    const wipes = await Promise.allSettled([this.cache.clear(), this.queryLog.clear()]);
-    const failures = wipes.flatMap((wipe) => (wipe.status === 'rejected' ? [wipe.reason] : []));
-    if (failures.length > 1) throw new AggregateError(failures, 'clear failed');
-    if (failures.length === 1) throw failures[0];
+    const wiped = Promise.allSettled([this.cache.clear(), this.queryLog.clear()]).then((wipes) => {
+      const failures = wipes.flatMap((wipe) => (wipe.status === 'rejected' ? [wipe.reason] : []));
+      if (failures.length > 1) throw new AggregateError(failures, 'clear failed');
+      if (failures.length === 1) throw failures[0];
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<'timed out'>((resolve) => {
+      timer = setTimeout(() => resolve('timed out'), this.clearTimeoutMs).unref();
+    });
+    try {
+      if ((await Promise.race([wiped, timedOut])) !== 'timed out') return;
+    } finally {
+      clearTimeout(timer);
+    }
+    wiped.then(
+      () => console.error('[enrichment] clear finished after timing out'),
+      (err) => console.error('[enrichment] clear failed after timing out:', clearFailureLabels(err)),
+    );
+    throw new ClearTimeoutError();
   }
 
   requestLookup(connectionId: string, remoteAddr: string): void {
@@ -193,18 +258,37 @@ export class EnrichmentClient extends EventEmitter {
     }
   }
 
-  // Never rejects: a cached lookup sends nothing off the machine, so its result
-  // is shown even when its log entry cannot be written. Reported once per
-  // outage, because background mode repeats on every connection update
-  // (KAN-318).
-  private async logCacheHit(remoteAddr: string): Promise<void> {
-    try {
-      await this.queryLog.append({ target: remoteAddr, endpoint: 'cache', cacheStatus: 'hit' });
-      this.cacheHitLogFailing = false;
-    } catch (err) {
-      if (!this.cacheHitLogFailing) console.error('[enrichment] query-log write failed for cached lookups:', errorLabel(err));
-      this.cacheHitLogFailing = true;
+  // A cached lookup sends nothing off the machine, so its result is shown
+  // without waiting for its log entry, and is shown even when the entry
+  // cannot be written. A failure is reported once per outage, because
+  // background mode repeats on every connection update (KAN-318). Behind a
+  // stalled write, entries past MAX_QUEUED_WRITES are dropped: reported when
+  // that starts, and counted once the log catches up (KAN-319).
+  private logCacheHit(remoteAddr: string): void {
+    const write = this.queryLog.appendUnlessBacklogged({ target: remoteAddr, endpoint: 'cache', cacheStatus: 'hit' });
+    if (!write) {
+      this.droppedCacheHits += 1;
+      if (this.droppedCacheHits === 1) {
+        console.error(`[enrichment] the query log is backed up (${MAX_QUEUED_WRITES} writes queued); cached lookups are not being logged`);
+        void this.queryLog.drained().then(() => this.reportDroppedCacheHits());
+      }
+      return;
     }
+    write.then(
+      () => {
+        this.cacheHitLogFailing = false;
+      },
+      (err) => {
+        if (!this.cacheHitLogFailing) console.error('[enrichment] query-log write failed for cached lookups:', errorLabel(err));
+        this.cacheHitLogFailing = true;
+      },
+    );
+  }
+
+  private reportDroppedCacheHits(): void {
+    const n = this.droppedCacheHits;
+    this.droppedCacheHits = 0;
+    console.error(`[enrichment] the query log was backed up: ${n} cached-lookup ${n === 1 ? 'entry was' : 'entries were'} not written`);
   }
 
   // lookup() handles its own failures; this catches anything that escapes them.
@@ -235,8 +319,8 @@ export class EnrichmentClient extends EventEmitter {
 
     const cached = this.cache.getForIp(remoteAddr);
     if (cached && this.cache.isFresh(cached)) {
-      await this.logCacheHit(remoteAddr);
-      if (cached.record && generation === this.generation) {
+      this.logCacheHit(remoteAddr);
+      if (cached.record) {
         this.emit('result', buildEnrichmentEvent(connectionId, remoteAddr, { ...cached.record, source: 'cache' }));
       }
       return;

@@ -216,7 +216,9 @@ describe('enrich clear', () => {
     await expectNothingLeft(atClear);
   });
 
-  it('drops a cached result whose log entry is still being written', async () => {
+  // A cached result is shown without waiting for its log entry (KAN-319),
+  // but an entry still being written when clear runs is wiped with the rest.
+  it('wipes a cached lookup\'s log entry that is still being written', async () => {
     writeFileSync(join(dir, 'cache.json'), JSON.stringify({ entries: [{ key: '93.184.216.0/24', record: { org: 'X', source: 'rdap', fetchedAt: '2026-01-01' }, expiresAt: Date.now() + 60_000 }] }));
     // Held inside the log's write queue, as a slow disk would hold it.
     const write = deferred();
@@ -229,9 +231,11 @@ describe('enrich clear', () => {
     });
     const c = client();
     c.requestLookup('conn-1', ADDR);
+    expect(results).toHaveLength(1);
     const cleared = c.clear();
     write.resolve();
     await cleared;
+    results = [];
     await expectNothingLeft(0);
   });
 

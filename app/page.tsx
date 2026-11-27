@@ -619,11 +619,15 @@ export default function TerminalApp() {
       if (!res.ok) {
         setControlError(`Enrichment control request failed (HTTP ${res.status}).`);
         // The server turns lookups off before it wipes, so a clear it
-        // reports as failed has still turned them off (KAN-317). Any other
-        // failure may not have reached it, so the mode is left as it was.
+        // reports as failed or timed out has still turned them off (KAN-317,
+        // KAN-319). Any other failure may not have reached it, so the mode
+        // is left as it was.
         if (action === 'clear' && res.status === 500) {
           const failure = await res.json().catch(() => null);
-          if (failure?.error === 'clear failed') resetAfterClear();
+          if (failure?.error === 'clear failed' || failure?.error === 'clear timed out') resetAfterClear();
+          if (failure?.error === 'clear timed out') {
+            setControlError('Enrichment clear is waiting for the disk. Lookups are off, and the clear finishes once the disk responds; run enrich clear again to confirm.');
+          }
         }
         return;
       }
