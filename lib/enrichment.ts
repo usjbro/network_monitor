@@ -334,16 +334,22 @@ export class EnrichmentClient extends EventEmitter {
     if (generation !== this.generation) throw DROPPED;
   }
 
+  // Run just before a query leaves the machine, including a referral.
+  private checkSendable(generation: number): void {
+    this.checkLive(generation);
+    if (this.queryLog.backlogged()) throw LOG_BACKLOGGED;
+  }
+
   // Queues a query that is skipped, not sent, if clear() runs while it waits,
-  // or if the query log is backlogged when its turn comes.
+  // or if the query log is backlogged when its turn comes; a skipped query
+  // uses up no rate-limit delay.
   private send<T>(generation: number, query: () => Promise<T>): Promise<T> {
     return this.queue.enqueue(
       () => {
-        this.checkLive(generation);
-        if (this.queryLog.backlogged()) throw LOG_BACKLOGGED;
+        this.checkSendable(generation);
         return query();
       },
-      () => generation !== this.generation,
+      () => generation !== this.generation || this.queryLog.backlogged(),
     );
   }
 
@@ -421,6 +427,9 @@ export class EnrichmentClient extends EventEmitter {
       // only makes sense to spend a reverse-DNS query once we know RDAP
       // actually found an organization worth attributing a domain to.
       let resolvedHostname: string | undefined;
+      // A registrant query refused while the log is backlogged is a local
+      // condition, so the result is cached only briefly and tried again.
+      let registrantRefused = false;
       if (record.org && !record.registrant) {
         try {
           const remoteHostname = await this.reverseDnsFn(remoteAddr);
@@ -444,14 +453,16 @@ export class EnrichmentClient extends EventEmitter {
           // Fail this one sub-step closed instead: leave registrant unset
           // (surfaces as "Unavailable" for that field only) and let the
           // core-tier result proceed to cache + emit normally below.
-          if (err === LOG_BACKLOGGED) this.noteBacklog('queries');
-          else console.error('[enrichment] extended-tier registrant lookup failed:', errorLabel(err));
+          if (err === LOG_BACKLOGGED) {
+            this.noteBacklog('queries');
+            registrantRefused = true;
+          } else console.error('[enrichment] extended-tier registrant lookup failed:', errorLabel(err));
         }
       }
 
       const key = cidrKeyFromRdap(result.json) ?? cidrKeyFor(remoteAddr);
       this.checkLive(generation);
-      await this.cache.setSuccess(key, record, CACHE_TTL_MS);
+      await this.cache.setSuccess(key, record, registrantRefused ? NEGATIVE_TTL_MS : CACHE_TTL_MS);
       this.checkLive(generation);
       for (const cid of waiters) {
         this.emit('result', buildEnrichmentEvent(cid, remoteAddr, record, resolvedHostname));
@@ -512,7 +523,7 @@ export class EnrichmentClient extends EventEmitter {
 
     if (domainBase) {
       const domainUrl = `${domainBase.replace(/\/$/, '')}/domain/${hostname}`;
-      const domainResult = await this.send(generation, () => this.rdap.fetchWithReferral(domainUrl, () => this.checkLive(generation)));
+      const domainResult = await this.send(generation, () => this.rdap.fetchWithReferral(domainUrl, () => this.checkSendable(generation)));
       this.checkLive(generation);
       await this.queryLog.append({ target: hostname, endpoint: new URL(domainUrl).host, cacheStatus: 'miss' });
       this.checkLive(generation);

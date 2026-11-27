@@ -47,7 +47,7 @@ export async function removeTempFiles(filePath: string): Promise<void> {
 export class SerialWrites {
   private tail: Promise<void> = Promise.resolve();
   private pending = 0;
-  private idle: Array<() => void> = [];
+  private idle: { promise: Promise<void>; resolve: () => void } | null = null;
 
   /** Writes queued or running, the current one included. */
   get size(): number {
@@ -59,7 +59,10 @@ export class SerialWrites {
     const result = this.tail.then(write);
     const done = () => {
       this.pending -= 1;
-      if (this.pending === 0) for (const resolve of this.idle.splice(0)) resolve();
+      if (this.pending === 0 && this.idle) {
+        this.idle.resolve();
+        this.idle = null;
+      }
     };
     this.tail = result.then(done, done);
     return result;
@@ -69,6 +72,13 @@ export class SerialWrites {
    *  emptying counts as one backlog. */
   drained(): Promise<void> {
     if (this.pending === 0) return Promise.resolve();
-    return new Promise((resolve) => this.idle.push(resolve));
+    if (!this.idle) {
+      let resolve = () => {};
+      const promise = new Promise<void>((r) => {
+        resolve = r;
+      });
+      this.idle = { promise, resolve };
+    }
+    return this.idle.promise;
   }
 }

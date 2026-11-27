@@ -11,11 +11,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CLEAR_TIMEOUT_MS, ClearTimeoutError, EnrichmentClient } from '../enrichment';
 import { MAX_QUEUED_WRITES, QueryLog } from '../enrichment/query-log';
+import { SerialWrites } from '../enrichment/fs-util';
 
 const ADDR = '93.184.216.34';
 const UNCACHED = '198.51.100.7';
 const IP_BOOTSTRAP = { services: [[['93.184.216.0/24', '198.51.100.0/24'], ['https://rdap.arin.net/registry/']]] };
 const IP_RDAP = { objectClassName: 'ip network', name: 'EXAMPLE-NET', startAddress: '198.51.100.0', endAddress: '198.51.100.255' };
+// The registry refers to the registrar, so a lookup sends a second query.
+const REFERRING_REGISTRY = { objectClassName: 'domain', links: [{ rel: 'related', href: 'https://rdap.publicinterestregistry.org/rdap/domain/example.com' }] };
 const CACHED = { key: '93.184.216.0/24', record: { org: 'X', source: 'rdap', fetchedAt: '2026-01-01' } };
 
 function deferred() {
@@ -47,9 +50,14 @@ describe('a stalled query-log write', () => {
   const logLines = () => readFileSync(logFile(), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
   let rdapGate: Promise<void> = Promise.resolve();
+  let registryGate: Promise<void> = Promise.resolve();
   const fetchImpl = vi.fn(async (url: string) => {
     if (url.includes('ipv4.json')) return Response.json(IP_BOOTSTRAP);
     if (url.includes('dns.json')) return Response.json({ services: [[['com'], ['https://rdap.verisign.com/com/v1/']]] });
+    if (url.includes('verisign.com')) {
+      await registryGate;
+      return Response.json(REFERRING_REGISTRY);
+    }
     await rdapGate;
     return Response.json(IP_RDAP);
   }) as unknown as typeof fetch;
@@ -67,6 +75,7 @@ describe('a stalled query-log write', () => {
     results = [];
     vi.mocked(fetchImpl).mockClear();
     rdapGate = Promise.resolve();
+    registryGate = Promise.resolve();
     error = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
   afterEach(() => {
@@ -181,6 +190,41 @@ describe('a stalled query-log write', () => {
     hold();
     await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
     expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 0 cached-lookup entries were not written and 1 lookup failed without sending a query']);
+    // Cached for an hour, not 14 days, so the registrant is looked up again.
+    await vi.waitFor(() => expect(JSON.parse(readFileSync(join(dir, 'cache.json'), 'utf8')).entries).toHaveLength(2));
+    const entry = JSON.parse(readFileSync(join(dir, 'cache.json'), 'utf8')).entries.find((e: { key: string }) => e.key.startsWith('198.51.100'));
+    expect(entry.expiresAt).toBeLessThanOrEqual(Date.now() + 60 * 60 * 1000);
+  });
+
+  it('sends no registrar referral once the log backs up while the registry query is out', async () => {
+    const registry = deferred();
+    registryGate = registry.promise;
+    const c = new EnrichmentClient({ dataDir: dir, fetchImpl, queueOptions: { minDelayMs: 1, maxDelayMs: 2 }, reverseDnsFn: async () => 'host.example.com' });
+    c.on('result', (r) => results.push(r));
+    c.enableBackground();
+    c.requestLookup('conn-off', UNCACHED);
+    await vi.waitFor(() => expect(vi.mocked(fetchImpl).mock.calls.some(([u]) => String(u).includes('verisign.com/com/v1/domain'))).toBe(true));
+    const release = holdWrites('appendNow');
+    for (let i = 0; i < MAX_QUEUED_WRITES; i++) c.requestLookup(`conn-${i}`, ADDR);
+    registry.resolve();
+    await vi.waitFor(() => expect(results).toContainEqual(expect.objectContaining({ connectionId: 'conn-off' })));
+    expect(vi.mocked(fetchImpl).mock.calls.some(([u]) => String(u).includes('publicinterestregistry'))).toBe(false);
+    release();
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2));
+  });
+
+  it('a lookup refused during a backlog uses up no rate-limit delay', async () => {
+    const release = holdWrites('appendNow');
+    const c = new EnrichmentClient({ dataDir: dir, fetchImpl, queueOptions: { minDelayMs: 1_000, maxDelayMs: 1_000 }, reverseDnsFn: async () => null });
+    c.enableBackground();
+    for (let i = 0; i < MAX_QUEUED_WRITES; i++) c.requestLookup(`conn-${i}`, ADDR);
+    const started = Date.now();
+    for (const n of [1, 2, 3]) c.requestLookup(`off-${n}`, `198.51.100.${n}`);
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(1));
+    release();
+    await vi.waitFor(() => expect(error).toHaveBeenCalledTimes(2), { timeout: 3_000 });
+    expect(error.mock.calls[1]).toEqual(['[enrichment] while the query log was backed up, 0 cached-lookup entries were not written and 3 lookups failed without sending a query']);
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 
   it('reports a backlog that has not ended after a while, and then reports the rest as a new one', async () => {
@@ -304,5 +348,26 @@ describe('a stalled prune', () => {
     expect(prune).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(SIX_HOURS);
     expect(prune).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('SerialWrites', () => {
+  it('reports its size, and is drained after each backlog', async () => {
+    const writes = new SerialWrites();
+    expect(writes.size).toBe(0);
+    for (const round of [1, 2]) {
+      const gate = deferred();
+      const held = writes.run(() => gate.promise);
+      void writes.run(async () => {});
+      expect(writes.size).toBe(2);
+      let drained = false;
+      void writes.drained().then(() => { drained = true; });
+      await new Promise((r) => setTimeout(r, 10));
+      expect({ round, drained }).toEqual({ round, drained: false });
+      gate.resolve();
+      await held;
+      await vi.waitFor(() => expect({ round, drained }).toEqual({ round, drained: true }));
+      expect(writes.size).toBe(0);
+    }
   });
 });
