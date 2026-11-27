@@ -10,6 +10,7 @@ import { EnrichmentCache, isEnrichmentRecord } from '../enrichment/cache';
 import { EnrichmentClient } from '../enrichment';
 import { QueryLog } from '../enrichment/query-log';
 import { GeoIpClient } from '../geoip';
+import { enrichmentClients } from './helpers/enrichment-clients';
 
 const ADDR = '93.184.216.34';
 const GOOD = { key: '93.184.216.0/24', record: { org: 'EXAMPLE-ORG', source: 'rdap', fetchedAt: '2026-01-01' }, expiresAt: Date.now() + 60_000 };
@@ -40,9 +41,14 @@ describe('cache files of the wrong shape', () => {
     file = join(dir, 'cache.json');
     error = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
-  afterEach(() => {
-    vi.restoreAllMocks();
-    rmSync(dir, { recursive: true, force: true });
+  const clients = enrichmentClients();
+  afterEach(async () => {
+    try {
+      await clients.drain();
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   const write = (value: unknown) => writeFileSync(file, JSON.stringify(value));
@@ -122,10 +128,10 @@ describe('cache files of the wrong shape', () => {
   it('the enrichment client keeps a fresh negative entry and does not look it up again', async () => {
     write({ entries: [{ key: '93.184.216.0/24', record: null, expiresAt: Date.now() + 60_000 }] });
     const fetchImpl = vi.fn();
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const client = clients.track(new EnrichmentClient({ dataDir: dir, fetchImpl: fetchImpl as unknown as typeof fetch }));
     client.enable();
     client.requestLookup('conn-1', ADDR);
-    await new Promise((r) => setTimeout(r, 50));
+    await client.idle();
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(error).not.toHaveBeenCalled();
   });
@@ -170,7 +176,7 @@ describe('cache files of the wrong shape', () => {
   it('the enrichment client starts and prunes the query log with a bad cache, and logs a count only', async () => {
     write({ entries: [null, { key: ADDR, record: 'secret' }, GOOD] });
     const prune = vi.spyOn(QueryLog.prototype, 'prune');
-    const client = new EnrichmentClient({ dataDir: dir, fetchImpl: vi.fn() as unknown as typeof fetch });
+    const client = clients.track(new EnrichmentClient({ dataDir: dir, fetchImpl: vi.fn() as unknown as typeof fetch }));
     await client.startPruning();
     expect(prune).toHaveBeenCalledTimes(1);
     expect(error.mock.calls).toEqual([['[enrichment] ignored 2 unreadable cache entries']]);
@@ -178,7 +184,7 @@ describe('cache files of the wrong shape', () => {
 
   it('the enrichment client treats a record with a wrong field as unreadable', () => {
     write({ entries: [{ ...GOOD, record: { org: { x: 1 }, source: 'rdap', fetchedAt: '2026-01-01' } }] });
-    new EnrichmentClient({ dataDir: dir, fetchImpl: vi.fn() as unknown as typeof fetch });
+    clients.track(new EnrichmentClient({ dataDir: dir, fetchImpl: vi.fn() as unknown as typeof fetch }));
     expect(error.mock.calls).toEqual([['[enrichment] ignored 1 unreadable cache entry']]);
   });
 

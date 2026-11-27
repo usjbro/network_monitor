@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { CLEAR_TIMEOUT_MS, ClearTimeoutError, EnrichmentClient } from '../enrichment';
 import { MAX_QUEUED_WRITES, QueryLog } from '../enrichment/query-log';
 import { SerialWrites } from '../enrichment/fs-util';
+import { enrichmentClients, FAST_QUEUE } from './helpers/enrichment-clients';
 
 const ADDR = '93.184.216.34';
 const UNCACHED = '198.51.100.7';
@@ -68,7 +69,7 @@ describe('a stalled query-log write', () => {
   }) as unknown as typeof fetch;
 
   const client = (opts: { clearTimeoutMs?: number } = {}) => {
-    const c = track(new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: async () => null, queueOptions: { minDelayMs: 1, maxDelayMs: 2 }, ...opts }));
+    const c = track(new EnrichmentClient({ dataDir: dir, fetchImpl, reverseDnsFn: async () => null, queueOptions: FAST_QUEUE, ...opts }));
     c.on('result', (r) => results.push(r));
     c.enableBackground();
     return c;
@@ -83,18 +84,15 @@ describe('a stalled query-log write', () => {
     registryGate = Promise.resolve();
     error = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
-  // A cached lookup's log entry is written after its result, so each test's
-  // writes are waited for before its folder is removed.
-  let clients: EnrichmentClient[] = [];
-  const track = (c: EnrichmentClient) => {
-    clients.push(c);
-    return c;
-  };
+  const clients = enrichmentClients();
+  const track = clients.track;
   afterEach(async () => {
-    await Promise.all(clients.map((c) => c.idle()));
-    clients = [];
-    vi.restoreAllMocks();
-    rmSync(dir, { recursive: true, force: true });
+    try {
+      await clients.drain();
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('is idle only once its log writes are done', async () => {
@@ -200,7 +198,7 @@ describe('a stalled query-log write', () => {
   it('counts a registrant query refused during a backlog, and still shows the ownership result', async () => {
     const ptr = deferred();
     const release = holdWrites('appendNow');
-    const c = track(new EnrichmentClient({ dataDir: dir, fetchImpl, queueOptions: { minDelayMs: 1, maxDelayMs: 2 }, reverseDnsFn: async () => (await ptr.promise, 'host.example.com') }));
+    const c = track(new EnrichmentClient({ dataDir: dir, fetchImpl, queueOptions: FAST_QUEUE, reverseDnsFn: async () => (await ptr.promise, 'host.example.com') }));
     c.on('result', (r) => results.push(r));
     c.enableBackground();
     c.requestLookup('conn-off', UNCACHED);
@@ -226,7 +224,7 @@ describe('a stalled query-log write', () => {
   it('sends no registrar referral once the log backs up while the registry query is out', async () => {
     const registry = deferred();
     registryGate = registry.promise;
-    const c = track(new EnrichmentClient({ dataDir: dir, fetchImpl, queueOptions: { minDelayMs: 1, maxDelayMs: 2 }, reverseDnsFn: async () => 'host.example.com' }));
+    const c = track(new EnrichmentClient({ dataDir: dir, fetchImpl, queueOptions: FAST_QUEUE, reverseDnsFn: async () => 'host.example.com' }));
     c.on('result', (r) => results.push(r));
     c.enableBackground();
     c.requestLookup('conn-off', UNCACHED);

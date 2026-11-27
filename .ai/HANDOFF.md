@@ -1,3 +1,10 @@
+# KAN-173 flaky enrichment-client tests (2026-11-27)
+
+- Worktree `.worktrees/enrichment-client-flake`, branch `KAN-173-enrichment-client-flake`.
+- Not done: the four enrichment test files each carry the same drain-then-remove afterEach (could move into the helper); two older tests still sleep 50 ms to show nothing starts; geoip.test.ts leaks temp files (KAN-356). The issue's planning note credits KAN-286 for the ENOTEMPTY fix; it was the test-cleanup race fixed in #361 and here.
+
+---
+
 # KAN-319 query-log stall (2026-11-26)
 
 - Worktree `.worktrees/query-log-stall`, branch `KAN-319-query-log-stall`.

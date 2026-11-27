@@ -112,6 +112,7 @@ export class EnrichmentClient extends EventEmitter {
   // must still resolve, not hang forever just because it wasn't the first
   // asker.
   private inFlightWaiters = new Map<string, Set<string>>();
+  private runningLookups = new Set<Promise<void>>();
   private bootstrapPromise: ReturnType<typeof loadIpBootstrap> | null = null;
   private random: () => number;
   private bootstrapCachePath: string;
@@ -204,9 +205,14 @@ export class EnrichmentClient extends EventEmitter {
     }
   }
 
-  /** Resolves once no query-log write is queued. */
-  idle(): Promise<void> {
-    return this.queryLog.drained();
+  /** Resolves once no lookup is running, including one still waiting its
+   *  turn in the queue, and no cache or query-log write is queued. Tests use
+   *  it before removing the data folder. */
+  async idle(): Promise<void> {
+    do {
+      await Promise.all(this.runningLookups);
+      await Promise.all([this.queryLog.drained(), this.cache.drained()]);
+    } while (this.runningLookups.size > 0);
   }
 
   getMode(): EnrichmentMode {
@@ -331,7 +337,10 @@ export class EnrichmentClient extends EventEmitter {
 
   // lookup() handles its own failures; this catches anything that escapes them.
   private startLookup(connectionId: string, remoteAddr: string): void {
-    this.lookup(connectionId, remoteAddr).catch((err) => console.error('[enrichment] lookup failed outside its handler:', errorLabel(err)));
+    const run = this.lookup(connectionId, remoteAddr)
+      .catch((err) => console.error('[enrichment] lookup failed outside its handler:', errorLabel(err)))
+      .finally(() => this.runningLookups.delete(run));
+    this.runningLookups.add(run);
   }
 
   // Throws DROPPED once clear() has run since `generation` was read.
